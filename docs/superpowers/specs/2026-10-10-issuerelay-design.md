@@ -170,7 +170,7 @@ issuerelay/
 - 输出逐行读取：原样写进日志文件，同时解析出面板显示用的时间线（AI 消息、工具调用、命令、错误）。
 - 结果：Claude 取 `type` 为 `result` 的事件的 `result` 字段；Codex 取最后一个 `item.type` 为 `agent_message` 的 `item.completed` 事件的 `item.text`。两者末行都是结果 JSON。
 - 命令行参数里不放提示词、路径或任何来自 Linear 的文本。
-- 以上写法已在 M0 实测通过（macOS，2026-10-10，Claude Code 2.1.285、codex-cli 0.159.2，见 `docs/gates/2026-10-11-m0-verification.md`）；Windows 待实机。
+- 「完全放开」档的写法已在 M0 实测通过（macOS，2026-10-10，Claude Code 2.1.285、codex-cli 0.159.2，见 `docs/gates/2026-10-11-m0-verification.md`）；「自动审查」「按个人设置」两档的参数只据帮助信息，留到 M1 验收实测；Windows 待实机。
 
 ### 6.2 超时与结束
 
@@ -344,17 +344,17 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 - 社区文件：`CONTRIBUTING.md`（开发环境、提交前检查、分支与 PR、AI 辅助、公开仓库红线、许可证）、`CODE_OF_CONDUCT.md`、`SECURITY.md`（私密漏洞报告）、`MAINTAINERS.md`（角色、如何成为维护者、决策与合并、分支保护、发布）。正文中文，开头附英文摘要。
 - GitHub 模板：issue 表单（问题报告、功能建议，都带「已脱敏」必选确认）、PR 模板（风险等级、验证、实机结论、自查）、`CODEOWNERS`（高风险路径逐条列出）、Dependabot（cargo 与 GitHub Actions 每周检查）。
 - 仓库设置（用户 2026-10-10 同意）：`main` 规则集——禁止删除与强推，必须经 PR、至少 1 人批准、评审对话全部解决、只允许 squash，必需检查为 macOS、Windows 两个测试任务和密钥扫描；仓库管理员可以绕过，只用于 M0–M1 期间发起人直接提交，M1 收尾时改为全部走 PR。仓库只允许 squash 合并并自动删除分支；开启私密漏洞报告、Dependabot 安全更新、密钥扫描与推送拦截。
-- 合并：作者以外的一名维护者批准；高风险范围在维护者达到两名后需要两名批准。
+- 合并：作者以外的一名维护者批准；高风险范围在维护者达到两名后需要两名批准。只有一名维护者期间，管理员自己的 PR 在 CI 全绿后经绕过合并，并在 PR 里写明。squash 合并时提交标题就是 PR 标题（英文 Conventional Commits），正文精简成英文摘要。
 - 许可证：贡献按 Apache-2.0 授权（第 5 条），不需要 CLA，不要求 DCO。
 
 ## 17. 里程碑
 
 | 里程碑 | 内容 | 完成标志 |
 |---|---|---|
-| M0 验证 | 不写正式代码，实测：① Claude Code、Codex 按 6.1 的参数无人值守跑完一条测试需求（读 Linear、改测试仓库、改状态），macOS 和 Windows 各一次；② Rust（rmcp）经 OAuth 连上 Linear MCP 并查到需求 | `docs/gates/` 下的验收报告；6.1 的参数表按实测更新 |
+| M0 验证 | 不写正式代码，实测：① Claude Code、Codex 按 6.1 的参数无人值守跑完一条测试需求（读 Linear、改测试仓库、改状态），macOS 和 Windows 各一次（Windows 因没有机器跳过，见第 18 节）；② Rust（rmcp）经 OAuth 连上 Linear MCP 并查到需求 | `docs/gates/` 下的验收报告；6.1 的参数表按实测更新 |
 | M1 引擎与命令行 | `core` 全部模块、命令行与 MCP 服务、通信协议、单元与集成测试；先用一个只供开发调试的无界面宿主运行引擎（不随安装包发布） | 测试全部通过；本机用测试项目跑通完整流程 |
 | M2 桌面应用 | Tauri 外壳、托盘、全部面板页面、首次引导、多语言、通知、开机自启、图标 | 页面截图经用户确认；两个平台实机验收 |
-| M3 安装与发布 | GitHub Actions 打包、Releases、安装说明；仓库公开后启用自动更新 | 同事按说明用安装包装好并跑通 |
+| M3 安装与发布 | GitHub Actions 打包、Releases、安装说明、自动更新 | 同事按说明用安装包装好并跑通 |
 
 ## 18. 待定问题
 
