@@ -69,7 +69,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<用户>-<哈希>` | 只限当前用户 |
 
-`<配置目录>`、`<数据目录>` 取自 `dirs::config_dir()` / `dirs::data_dir()`：macOS 都是 `~/Library/Application Support`，Windows 是 `%APPDATA%`。这些都只在用户本机，不进仓库。
+`<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 
 ## 7. 外部接口变更规则
 

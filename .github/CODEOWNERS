@@ -6,6 +6,7 @@
 /scripts/check-secrets.sh          @sunkailun1992
 /.github/                          @sunkailun1992
 /crates/core/src/prompt.rs         @sunkailun1992
+/crates/core/src/config.rs         @sunkailun1992
 /crates/core/src/engine.rs         @sunkailun1992
 /crates/core/src/executor/         @sunkailun1992
 /crates/core/src/runner.rs         @sunkailun1992

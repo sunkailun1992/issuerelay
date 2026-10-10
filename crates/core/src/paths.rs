@@ -21,9 +21,11 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
+    /// Config may roam with the user's profile; runtime data (database, logs) stays on this
+    /// machine: Windows' local app data, the same Application Support folder on macOS.
     pub fn system() -> Result<Self> {
         let config = dirs::config_dir().context("this system has no config directory")?;
-        let data = dirs::data_dir().context("this system has no data directory")?;
+        let data = dirs::data_local_dir().context("this system has no local data directory")?;
         Ok(Self {
             config_dir: config.join(APP_ID),
             data_dir: data.join(APP_ID),
@@ -49,6 +51,7 @@ impl AppPaths {
         self.data_dir.join("logs")
     }
 
+    /// The Unix socket (macOS) or named pipe (Windows) the CLI uses to reach the running host.
     pub fn ipc_endpoint(&self) -> IpcEndpoint {
         let user = sanitize(
             &std::env::var("USER")
@@ -137,5 +140,12 @@ mod tests {
             IpcEndpoint::Pipe(name) => assert!(name.starts_with(r"\\.\pipe\issuerelay-")),
             other => panic!("expected a named pipe, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn system_paths_end_with_the_app_id() {
+        let paths = AppPaths::system().unwrap();
+        assert!(paths.config_dir.ends_with(APP_ID));
+        assert!(paths.data_dir.ends_with(APP_ID));
     }
 }

@@ -1,6 +1,8 @@
 //! User settings and Linear-project bindings, stored as TOML.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,7 @@ impl ExecutorKind {
         self.as_str()
     }
 
+    /// Case-insensitive and ignores surrounding whitespace; `None` for anything else.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "claude" => Some(ExecutorKind::Claude),
@@ -45,6 +48,7 @@ pub enum PermissionProfile {
 }
 
 impl PermissionProfile {
+    /// Case-insensitive and ignores surrounding whitespace; `None` for anything else.
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "full" => Some(PermissionProfile::Full),
@@ -82,9 +86,13 @@ impl Default for TriggerNames {
 pub struct Settings {
     /// "system" or a BCP 47 tag such as "zh-CN".
     pub language: String,
+    /// Seconds between Linear checks (at least 5).
     pub poll_interval_secs: u64,
+    /// Runs at the same time across all bindings (at least 1).
     pub max_concurrent: usize,
+    /// Minutes before a run is stopped (at least 1).
     pub run_timeout_mins: u64,
+    /// Minutes without output before a run counts as stuck (at least 1).
     pub stall_timeout_mins: u64,
     pub default_executor: ExecutorKind,
     pub default_permission: PermissionProfile,
@@ -114,6 +122,28 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Rejects values that would stall or spin the engine.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.poll_interval_secs >= 5,
+            "poll_interval_secs must be at least 5, got {}",
+            self.poll_interval_secs
+        );
+        anyhow::ensure!(
+            self.max_concurrent >= 1,
+            "max_concurrent must be at least 1"
+        );
+        anyhow::ensure!(
+            self.run_timeout_mins >= 1,
+            "run_timeout_mins must be at least 1"
+        );
+        anyhow::ensure!(
+            self.stall_timeout_mins >= 1,
+            "stall_timeout_mins must be at least 1"
+        );
+        Ok(())
+    }
+
     pub fn resolved_language(&self) -> String {
         if self.language == "system" {
             sys_locale::get_locale().unwrap_or_else(|| "en-US".into())
@@ -134,6 +164,8 @@ impl Settings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     pub id: String,
+    /// The Linear project's `uuid` (what issues carry as `projectId`), not its `P-<TEAM>-N`
+    /// identifier.
     pub project_id: String,
     pub project_name: String,
     pub directory: PathBuf,
@@ -155,27 +187,47 @@ pub struct Config {
 }
 
 impl Config {
+    /// A missing file gives the defaults; an unreadable or unparsable file, or invalid values,
+    /// give an error naming the file.
     pub fn load(path: &Path) -> Result<Config> {
-        match std::fs::read_to_string(path) {
+        let config: Config = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)
-                .with_context(|| format!("invalid config file {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-        }
+                .with_context(|| format!("invalid config file {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        config
+            .settings
+            .validate()
+            .with_context(|| format!("invalid config file {}", path.display()))?;
+        Ok(config)
     }
 
-    /// Writes to a temporary file first, then renames it over the old one.
+    /// Writes atomically: the text goes to a temporary file in the same directory (unique per
+    /// call), is flushed to disk, then renamed over the target. Callers still serialize writes
+    /// (the engine saves under its config lock); the unique name only keeps overlapping
+    /// writers from clobbering each other's temporary files.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
         }
         let text = toml::to_string_pretty(self)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("cannot replace {}", path.display()))?;
-        Ok(())
+        let tmp = temp_path(path);
+        let written = std::fs::File::create(&tmp)
+            .and_then(|mut file| {
+                file.write_all(text.as_bytes())?;
+                file.sync_all()
+            })
+            .with_context(|| format!("cannot write {}", tmp.display()))
+            .and_then(|()| {
+                std::fs::rename(&tmp, path)
+                    .with_context(|| format!("cannot replace {}", path.display()))
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
 
     pub fn binding_for_project(&self, project_id: &str) -> Option<&Binding> {
@@ -191,6 +243,15 @@ impl Config {
             .permission
             .unwrap_or(self.settings.default_permission)
     }
+}
+
+/// `<path>.<pid>.<n>.tmp` next to `path`, different for every call in this process.
+fn temp_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{n}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -314,5 +375,71 @@ mod tests {
             PermissionProfile::parse("personal"),
             Some(PermissionProfile::Personal)
         );
+    }
+
+    #[test]
+    fn temp_paths_are_unique_and_saves_leave_no_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        let (a, b) = (temp_path(&p), temp_path(&p));
+        assert_ne!(a, b);
+        for tmp in [&a, &b] {
+            assert_eq!(tmp.extension().and_then(|e| e.to_str()), Some("tmp"));
+            assert_eq!(tmp.parent(), p.parent());
+        }
+        for _ in 0..3 {
+            Config::default().save(&p).unwrap();
+        }
+        let names: Vec<std::ffi::OsString> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn invalid_values_are_rejected_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (line, field) in [
+            ("poll_interval_secs = 1", "poll_interval_secs"),
+            ("max_concurrent = 0", "max_concurrent"),
+            ("run_timeout_mins = 0", "run_timeout_mins"),
+            ("stall_timeout_mins = 0", "stall_timeout_mins"),
+        ] {
+            std::fs::write(&path, format!("[settings]\n{line}\n")).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            assert!(format!("{err:#}").contains(field), "{field}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn unknown_executor_in_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[settings]\ndefault_executor = \"gpt\"\n").unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn empty_file_gives_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(Config::load(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn loading_a_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn save_fails_when_the_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert!(Config::default().save(&file.join("config.toml")).is_err());
     }
 }
