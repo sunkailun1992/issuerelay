@@ -114,8 +114,8 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<String> {
     }
 }
 
-/// Any request to /callback is the redirect, including an OAuth error response; rmcp
-/// reports a missing `code` or a server error itself instead of the probe waiting forever.
+/// Any request to /callback is the redirect, including an OAuth error response; rmcp then
+/// fails on the missing `code` (it does not read `error`) instead of the probe waiting forever.
 fn callback_url(request_line: &str, port: u16) -> Option<String> {
     let target = request_line.split_whitespace().nth(1)?;
     let url = url::Url::parse(&format!("http://127.0.0.1:{port}{target}")).ok()?;
@@ -155,30 +155,31 @@ fn save(dir: &Path, name: &str, text: &str) -> Result<()> {
 }
 
 async fn dump() -> Result<()> {
-    let dir = Path::new("samples-raw");
-    std::fs::create_dir_all(dir)?;
+    // Raw output stays inside the probe directory (git-ignored) wherever cargo runs from.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples-raw");
+    std::fs::create_dir_all(&dir)?;
     let client = connect().await?;
     let tools = client.list_all_tools().await?;
     std::fs::write(dir.join("tools.json"), serde_json::to_string_pretty(&tools)?)?;
-    save(dir, "get_user_me", &call(&client, "get_user", json!({"query": "me"})).await?)?;
+    save(&dir, "get_user_me", &call(&client, "get_user", json!({"query": "me"})).await?)?;
     let page1 = call(&client, "list_issues", json!({"assignee": "me", "label": "ai-ready", "limit": 1, "fields": FIELDS})).await?;
-    save(dir, "list_issues_page1", &page1)?;
+    save(&dir, "list_issues_page1", &page1)?;
     let v: Value = serde_json::from_str(&page1).unwrap_or(Value::Null);
     if let Some(cursor) = ["cursor", "nextCursor", "endCursor"].iter().find_map(|k| v.get(*k).and_then(Value::as_str)) {
         let page2 = call(&client, "list_issues", json!({"assignee": "me", "label": "ai-ready", "limit": 1, "cursor": cursor, "fields": FIELDS})).await?;
-        save(dir, "list_issues_page2", &page2)?;
+        save(&dir, "list_issues_page2", &page2)?;
     }
     if let Some(id) = v["issues"][0]["id"].as_str() {
-        save(dir, "get_issue", &call(&client, "get_issue", json!({"id": id, "fields": FIELDS})).await?)?;
+        save(&dir, "get_issue", &call(&client, "get_issue", json!({"id": id, "fields": FIELDS})).await?)?;
     }
-    save(dir, "get_issue_missing", &call(&client, "get_issue", json!({"id": "ZZZ-999999"})).await?)?;
-    save(dir, "list_projects", &call(&client, "list_projects", json!({"limit": 50})).await?)?;
-    save(dir, "list_issue_labels", &call(&client, "list_issue_labels", json!({"limit": 100})).await?)?;
+    save(&dir, "get_issue_missing", &call(&client, "get_issue", json!({"id": "ZZZ-999999"})).await?)?;
+    save(&dir, "list_projects", &call(&client, "list_projects", json!({"limit": 50})).await?)?;
+    save(&dir, "list_issue_labels", &call(&client, "list_issue_labels", json!({"limit": 100})).await?)?;
     let teams = call(&client, "list_teams", json!({})).await?;
-    save(dir, "list_teams", &teams)?;
+    save(&dir, "list_teams", &teams)?;
     let tv: Value = serde_json::from_str(&teams).unwrap_or(Value::Null);
     if let Some(team) = tv["teams"][0]["id"].as_str() {
-        save(dir, "list_issue_statuses", &call(&client, "list_issue_statuses", json!({"team": team})).await?)?;
+        save(&dir, "list_issue_statuses", &call(&client, "list_issue_statuses", json!({"team": team})).await?)?;
     }
     client.cancel().await?;
     Ok(())
