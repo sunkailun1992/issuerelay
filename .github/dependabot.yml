@@ -4,6 +4,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Delay version updates by 7 days as a supply-chain safeguard; security updates are not delayed.
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
@@ -17,6 +18,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Delay version updates by 7 days as a supply-chain safeguard; security updates are not delayed.
     cooldown:
       default-days: 7
     commit-message:

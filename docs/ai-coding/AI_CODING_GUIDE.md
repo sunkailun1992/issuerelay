@@ -96,5 +96,5 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 ## 11. 分支与提交
 
 - 一个任务一个提交；提交前跑第 2 节的检查和 `bash scripts/check-secrets.sh --strict`。
-- 提交信息用英文 Conventional Commits：`feat|fix|docs|test|chore|refactor(<crate 或模块>): <做了什么>`；AI 参与时结尾加 `Co-Authored-By` 行。
+- 提交信息用英文 Conventional Commits：`feat|fix|docs|test|chore|refactor|ci(<crate 或模块>): <做了什么>`；AI 参与时结尾加 `Co-Authored-By` 行。
 - 开工、提交前、推送前各 `git fetch`；远端已前进就 rebase 后重跑检查；禁止强推。

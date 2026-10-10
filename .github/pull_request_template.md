@@ -4,7 +4,7 @@
 
 ## 关联 issue / Related issue
 
-<!-- 例如 Closes #12；没有就写「无」 -->
+<!-- 例如 Closes #<编号>；没有就写「无」 -->
 
 ## 风险等级 / Risk level
 

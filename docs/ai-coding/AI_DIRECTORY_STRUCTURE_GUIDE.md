@@ -55,7 +55,7 @@
 - `.github/copilot-instructions.md`：只转发到 `AGENTS.md`。
 - `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。
 - `.github/pull_request_template.md`、`.github/ISSUE_TEMPLATE/`：PR 与 issue 模板，带「已脱敏」确认项。
-- `.github/dependabot.yml`：每周检查 cargo 与 GitHub Actions 依赖更新。
+- `.github/dependabot.yml`：每周检查 cargo 与 GitHub Actions 依赖更新；版本更新延迟 7 天（`cooldown`，供应链防护），安全更新不延迟。
 - 仓库设置（规则集、合并方式、安全功能）不在仓库文件里，现状记在 `MAINTAINERS.md` 的「分支保护」一节；改设置时同步改那一节。
 
 ## 7. 目录变更检查

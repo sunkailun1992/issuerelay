@@ -1,0 +1,26 @@
+name: 提问 / Question
+description: 关于使用或开发的疑问 / Ask how something works
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓库公开。提交前请删除令牌、凭据、公司信息、内网地址、真实 Linear 需求内容和本机路径。安全漏洞请走 Security 页面的私密报告，不要在这里提交。
+        This repository is public. Remove tokens, credentials, company information, internal addresses, real Linear content and local paths. Report security issues privately from the Security tab instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题 / Question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景 / Context
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 确认 / Confirmation
+      options:
+        - label: 内容里没有公司信息、令牌或真实 Linear 需求内容 / No company information, tokens or real Linear content
+          required: true
