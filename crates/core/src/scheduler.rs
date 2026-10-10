@@ -6,11 +6,16 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
+/// A queued job the scheduler may start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
+    /// Store id of the job; the lowest id breaks the final tie.
     pub job_id: i64,
+    /// The bound directory; at most one run per directory at a time.
     pub directory: PathBuf,
+    /// Linear priority: 1 urgent … 4 low, 0 none (sorted last).
     pub priority: u8,
+    /// When the issue was created in Linear; older goes first.
     pub issue_created_at: DateTime<Utc>,
 }
 
@@ -113,5 +118,11 @@ mod tests {
     #[test]
     fn more_running_than_the_cap_starts_nothing() {
         assert!(pick(&[c(1, "a", 0, 0)], &HashSet::new(), 3, 2).is_empty());
+    }
+
+    #[test]
+    fn no_priority_goes_after_low_priority() {
+        let queued = [c(1, "a", 0, 0), c(2, "b", 4, 5)];
+        assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![2, 1]);
     }
 }
