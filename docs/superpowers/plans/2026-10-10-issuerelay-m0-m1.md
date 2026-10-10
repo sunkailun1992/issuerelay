@@ -14,7 +14,7 @@
 
 - 工具链：rustc 1.99.0 stable，由 `rust-toolchain.toml` 固定；所有 crate 用 edition 2024。
 - 依赖版本（2026-10-10 在本机探针工程里编译并实测过这些用法）：rmcp 3.5.1、tokio 1.53、process-wrap 10.0.1（特性 `tokio1`）、keyring 4.2（默认特性 `v1`，已含 macOS 钥匙串与 Windows 凭据管理器）、rusqlite 0.40（特性 `bundled`）、reqwest 0.13、dirs 7、chrono 0.4（特性 `serde`）、toml 1.1、which 8、tokio-util 0.7、clap 4.6（特性 `derive`）、sys-locale 0.3、url 2、open 5、thiserror 2、async-trait 0.1、schemars 1.2、tracing 0.1、tracing-subscriber 0.3（特性 `env-filter`）、tempfile 3（仅测试）。
-- 应用标识 `com.sunkailun.issuerelay`。配置文件 `dirs::config_dir()/com.sunkailun.issuerelay/config.toml`；数据目录 `dirs::data_dir()/com.sunkailun.issuerelay/`，内含 `state.db` 与 `logs/`。这与 M2 中 Tauri 的 `app_config_dir()` / `app_data_dir()` 一致。
+- 应用标识 `com.sunkailun.issuerelay`。配置文件 `dirs::config_dir()/com.sunkailun.issuerelay/config.toml`；数据目录 `dirs::data_local_dir()/com.sunkailun.issuerelay/`（Windows 为本地、不随账户漫游的应用数据目录；macOS 与 `data_dir()` 相同），内含 `state.db` 与 `logs/`。这与 M2 中 Tauri 的 `app_config_dir()` / `app_local_data_dir()` 一致。
 - Linear MCP 端点 `https://mcp.linear.app/mcp`。钥匙串服务名 `com.sunkailun.issuerelay`，账户名 `linear-oauth` 与 `linear-api-key`。
 - Linear MCP 实测口径（M0 验收报告）：需求的 `projectId` 是项目的 `uuid`，项目的 `id` 是 `P-<团队>-N` 编号，绑定一律存项目 `uuid`；翻页看 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误，文字为 `Could not find referenced Issue.`；授权服务器要求 RFC 9207 的 `iss` 参数，回调时把完整回调地址交给 rmcp 的 `OAuthState::handle_callback_url`。
 - 触发默认值：标签 `ai-ready`；状态 `Todo` / `In Progress` / `In Testing` / `Done`；名称比较时忽略首尾空白和 ASCII 大小写。
@@ -2181,7 +2181,7 @@ pub struct AppPaths {
 impl AppPaths {
     pub fn system() -> Result<Self> {
         let config = dirs::config_dir().context("this system has no config directory")?;
-        let data = dirs::data_dir().context("this system has no data directory")?;
+        let data = dirs::data_local_dir().context("this system has no local data directory")?;
         Ok(Self { config_dir: config.join(APP_ID), data_dir: data.join(APP_ID) })
     }
 
