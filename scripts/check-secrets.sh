@@ -8,22 +8,19 @@
 # Usage: bash scripts/check-secrets.sh [--strict]
 # Exit codes: 0 = no hits, or hits without --strict
 #             1 = hits with --strict
-#             2 = bad arguments, or the scan itself failed (for example outside
-#                 a git checkout or with an invalid pattern); it never fails open
+#             2 = bad arguments, or the scan itself failed: git grep exited
+#                 above 1 or reported any error (outside a git checkout, an
+#                 invalid pattern, an unreadable file); it never fails open
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() { echo "usage: bash scripts/check-secrets.sh [--strict]"; }
 
 STRICT=0
-if [[ $# -gt 1 ]]; then
-  usage >&2
-  exit 2
-fi
-case "${1:-}" in
-  "") ;;
-  --strict) STRICT=1 ;;
-  -h | --help)
+case "$#:${1-}" in
+  0:) ;;
+  1:--strict) STRICT=1 ;;
+  1:-h | 1:--help)
     usage
     exit 0
     ;;
@@ -36,9 +33,10 @@ esac
 PATTERNS=(
   'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
   'lin_(api|oauth)_[A-Za-z0-9]{16,}'
-  # Anthropic (sk-ant-...) and OpenAI (sk-..., sk-proj-...) keys; the left
-  # boundary keeps words such as "task-..." from matching.
-  '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'
+  # Anthropic (sk-ant-...) and OpenAI (sk-..., sk-proj-...) keys. The left
+  # boundary keeps words such as "task-..." from matching; an escaped \n, \r
+  # or \t also counts as a boundary so keys inside JSON strings are caught.
+  '(^|[^A-Za-z0-9_-]|\\[nrt])sk-[A-Za-z0-9_-]{20,}'
   'gh[pousr]_[A-Za-z0-9]{30,}'
   'github_pat_[A-Za-z0-9_]{30,}'
   'AKIA[0-9A-Z]{16}'
@@ -52,16 +50,22 @@ PATTERNS=(
 )
 EXCLUDES=(':!scripts/check-secrets.sh' ':!Cargo.lock' ':!LICENSE')
 
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+
 hits=0
 for p in "${PATTERNS[@]}"; do
   code=0
-  out=$(git grep -n -I -E -e "$p" -- . "${EXCLUDES[@]}") || code=$?
-  if [[ $code -eq 1 ]]; then
-    continue # git grep exits 1 when nothing matched
-  elif [[ $code -ne 0 ]]; then
+  out=$(git grep -n -I -E -e "$p" -- . "${EXCLUDES[@]}" 2>"$err") || code=$?
+  # git grep exits 1 when nothing matched; anything above 1, or any message
+  # on stderr (it reports unreadable files there but still exits 0 or 1),
+  # means the scan did not cover everything.
+  if [[ $code -gt 1 || -s "$err" ]]; then
     echo "check-secrets: scan failed (git grep exit $code) for pattern: $p" >&2
+    sed 's/^/check-secrets: /' "$err" >&2
     exit 2
   fi
+  [[ $code -eq 1 ]] && continue
   while IFS= read -r loc; do
     echo "check-secrets: $loc"
     hits=$((hits + 1))
