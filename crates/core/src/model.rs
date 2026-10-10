@@ -17,6 +17,7 @@ pub struct Issue {
     /// Status name, e.g. `Todo`.
     pub state: String,
     pub labels: Vec<String>,
+    /// Linear project `uuid`, matching `Binding.project_id`; not the `P-<TEAM>-N` identifier.
     pub project_id: Option<String>,
     pub project_name: Option<String>,
     pub assignee_id: Option<String>,
@@ -28,6 +29,7 @@ pub struct Issue {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Local life cycle of one issue's run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -42,6 +44,7 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// Every state, in display order.
     pub const ALL: [JobState; 8] = [
         JobState::WaitingBinding,
         JobState::Queued,
@@ -53,6 +56,7 @@ impl JobState {
         JobState::Canceled,
     ];
 
+    /// The stored name, shared by the database and IPC.
     pub fn as_str(self) -> &'static str {
         match self {
             JobState::WaitingBinding => "waiting_binding",
@@ -66,11 +70,12 @@ impl JobState {
         }
     }
 
+    /// Parses a stored name (exact match); `None` for anything else.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|state| state.as_str() == text)
     }
 
-    /// Waiting, queued or running: the issue is still being tracked.
+    /// Waiting, queued or running: the issue is still being handled.
     pub fn is_active(self) -> bool {
         matches!(
             self,
@@ -79,6 +84,7 @@ impl JobState {
     }
 }
 
+/// One run of one issue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: i64,
@@ -92,10 +98,17 @@ pub struct Job {
     pub reason: Option<String>,
     pub priority: u8,
     pub issue_created_at: DateTime<Utc>,
+    /// Linear's own `updatedAt` when the issue was discovered. The requeue rule compares
+    /// only Linear's clocks, never this machine's.
     pub discovered_updated_at: DateTime<Utc>,
+    /// Linear's own `updatedAt` recorded when the run was verified. When set, it replaces
+    /// `discovered_updated_at` in the requeue rule.
     pub verified_updated_at: Option<DateTime<Utc>>,
+    /// This machine's clock, for display only.
     pub created_at: DateTime<Utc>,
+    /// This machine's clock, for display only.
     pub started_at: Option<DateTime<Utc>>,
+    /// This machine's clock, for display only.
     pub finished_at: Option<DateTime<Utc>>,
     pub log_path: Option<PathBuf>,
     pub summary: Option<String>,
@@ -127,5 +140,54 @@ mod tests {
                 JobState::Running
             ]
         );
+    }
+
+    #[test]
+    fn job_state_names_are_fixed() {
+        let names: Vec<&str> = JobState::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "waiting_binding",
+                "queued",
+                "running",
+                "awaiting_acceptance",
+                "needs_info",
+                "done",
+                "failed",
+                "canceled"
+            ]
+        );
+    }
+
+    #[test]
+    fn serde_names_match_as_str() {
+        #[derive(serde::Serialize)]
+        struct Wrap {
+            state: JobState,
+        }
+        for state in JobState::ALL {
+            let text = toml::to_string(&Wrap { state }).unwrap();
+            assert_eq!(text.trim(), format!("state = \"{}\"", state.as_str()));
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_once() {
+        // Adding a variant breaks this match until ALL is updated as well.
+        for state in JobState::ALL {
+            match state {
+                JobState::WaitingBinding
+                | JobState::Queued
+                | JobState::Running
+                | JobState::AwaitingAcceptance
+                | JobState::NeedsInfo
+                | JobState::Done
+                | JobState::Failed
+                | JobState::Canceled => {}
+            }
+        }
+        let unique: std::collections::HashSet<JobState> = JobState::ALL.into_iter().collect();
+        assert_eq!(unique.len(), JobState::ALL.len());
     }
 }

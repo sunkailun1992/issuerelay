@@ -10,7 +10,7 @@
 | 模式 | 在哪里 | 怎么用 |
 |---|---|---|
 | 接口 + 假实现 | `LinearApi`、`JobRunner`、`ReadinessProbe`、`CommandRunner` | 生产代码依赖 trait；测试用 `FakeLinear`、`FakeLinearServer`、`ScriptedRunner`、`FakeRunner` |
-| 纯函数决策 | `trigger::evaluate`、`trigger::should_enqueue`、`scheduler::pick`、`engine::decide`、`prompt::render`、`executor::build` | 不做 IO，单元测试覆盖每个分支 |
+| 纯函数决策 | `trigger::evaluate`、`trigger::should_enqueue`、`scheduler::pick`、`engine::decide`、`prompt::render`、`executor::build` | 不做 IO（`trigger::evaluate` 只额外检查绑定目录是否存在），单元测试覆盖每个分支 |
 | 单一编排者 | `Engine` | 运行状态只在 `Engine` 里；命令行、MCP、面板都是它的客户端 |
 | 记录先行 | `store::mark_started` 在启动子进程之前 | 先写 SQLite，再做外部动作；重启后能恢复 |
 | 薄 IPC | `ipc::server` 的分发函数 | 只做参数解析和分发，业务规则留在 `Engine` |

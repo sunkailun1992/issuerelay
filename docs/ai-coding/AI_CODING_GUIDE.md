@@ -29,7 +29,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 通信 | `core::ipc` | 本机 JSON-RPC，薄层 | `engine` |
 | 入口 | `crates/cli`、`crates/devhost`、（M2）`app/` | 用户与 AI 的入口 | `core` |
 
-规则：纯逻辑层不读文件、不看系统时间、不发请求；运行状态只在 `engine`；命令行只经 IPC 访问引擎。
+规则：纯逻辑层不读文件、不看系统时间、不发请求（例外：`trigger::evaluate` 检查绑定目录是否存在）；运行状态只在 `engine`；命令行只经 IPC 访问引擎。
 
 ## 4. 关键数据流
 

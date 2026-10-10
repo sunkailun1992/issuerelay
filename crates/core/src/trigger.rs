@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::model::{Issue, Job};
 
+/// Why an issue that looks eligible has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitReason {
     ProjectNotBound,
@@ -14,6 +15,7 @@ pub enum WaitReason {
 }
 
 impl WaitReason {
+    /// The text stored as the job's reason.
     pub fn describe(&self) -> String {
         match self {
             WaitReason::ProjectNotBound => "project is not bound to a local directory".into(),
@@ -27,6 +29,7 @@ impl WaitReason {
     }
 }
 
+/// The outcome of `evaluate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eligibility {
     NotCandidate,
@@ -39,6 +42,7 @@ pub fn same_name(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 
+/// Assigned to `me`, carries the trigger label, and is in the Todo state.
 pub fn is_candidate(issue: &Issue, names: &TriggerNames, me: &str) -> bool {
     issue.assignee_id.as_deref() == Some(me)
         && issue
@@ -48,6 +52,8 @@ pub fn is_candidate(issue: &Issue, names: &TriggerNames, me: &str) -> bool {
         && same_name(&issue.state, &names.todo)
 }
 
+/// Checks the binding, that its directory exists (the only filesystem access in this
+/// module) and that the executor is ready.
 pub fn evaluate(
     issue: &Issue,
     cfg: &Config,
@@ -91,7 +97,7 @@ pub fn should_enqueue(latest: Option<&Job>, issue: &Issue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Binding, Config, ExecutorKind};
+    use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
     use crate::model::{Issue, Job, JobState};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use std::collections::HashSet;
@@ -200,11 +206,13 @@ mod tests {
 
     #[test]
     fn missing_directory_waits() {
-        let cfg = config_with("proj-1", Path::new("/definitely/not/here"), None);
-        assert!(matches!(
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        let cfg = config_with("proj-1", &missing, None);
+        assert_eq!(
             evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready()),
-            Eligibility::Waiting(WaitReason::DirectoryMissing(_))
-        ));
+            Eligibility::Waiting(WaitReason::DirectoryMissing(missing))
+        );
     }
 
     #[test]
@@ -278,5 +286,91 @@ mod tests {
         let mut touched = issue(None);
         touched.updated_at = t0() + Duration::seconds(5);
         assert!(should_enqueue(Some(&canceled), &touched));
+    }
+
+    #[test]
+    fn active_jobs_never_requeue_even_after_linear_edits() {
+        let mut edited = issue(None);
+        edited.updated_at = t0() + Duration::hours(1);
+        for state in JobState::ALL.into_iter().filter(|s| s.is_active()) {
+            assert!(
+                !should_enqueue(Some(&job(state, Some(t0()))), &edited),
+                "{state:?}"
+            );
+            assert!(
+                !should_enqueue(Some(&job(state, None)), &edited),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_finished_state_requeues_only_after_a_strictly_later_update() {
+        for state in JobState::ALL.into_iter().filter(|s| !s.is_active()) {
+            assert!(
+                !should_enqueue(Some(&job(state, Some(t0()))), &issue(None)),
+                "{state:?}"
+            );
+            let mut later = issue(None);
+            later.updated_at = t0() + Duration::milliseconds(1);
+            assert!(
+                should_enqueue(Some(&job(state, Some(t0()))), &later),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verified_time_wins_over_discovered_time() {
+        // The run's own Linear writes moved updatedAt to t0 + 10s; that alone must not requeue.
+        let finished = job(
+            JobState::AwaitingAcceptance,
+            Some(t0() + Duration::seconds(10)),
+        );
+        let mut at_verify = issue(None);
+        at_verify.updated_at = t0() + Duration::seconds(10);
+        assert!(!should_enqueue(Some(&finished), &at_verify));
+        let mut edited_after = issue(None);
+        edited_after.updated_at = t0() + Duration::seconds(11);
+        assert!(should_enqueue(Some(&finished), &edited_after));
+    }
+
+    #[test]
+    fn candidate_with_several_labels_none_or_no_assignee() {
+        let names = TriggerNames::default();
+        let mut several = issue(None);
+        several.labels = vec!["bug".into(), "ai-ready".into()];
+        assert!(is_candidate(&several, &names, "me"));
+        let mut none = issue(None);
+        none.labels.clear();
+        assert!(!is_candidate(&none, &names, "me"));
+        let mut unassigned = issue(None);
+        unassigned.assignee_id = None;
+        assert!(!is_candidate(&unassigned, &names, "me"));
+    }
+
+    #[test]
+    fn same_name_trims_both_sides_and_folds_ascii_case_only() {
+        assert!(same_name("  AI-Ready ", "ai-ready"));
+        assert!(same_name("ai-ready", "  AI-READY\t"));
+        assert!(same_name("In Testing", " in testing "));
+        assert!(!same_name("É", "é"));
+        assert!(!same_name("ai-ready", "ai ready"));
+    }
+
+    #[test]
+    fn wait_reasons_describe_themselves() {
+        assert_eq!(
+            WaitReason::ProjectNotBound.describe(),
+            "project is not bound to a local directory"
+        );
+        assert_eq!(
+            WaitReason::DirectoryMissing(std::path::PathBuf::from("missing-dir")).describe(),
+            "bound directory does not exist: missing-dir"
+        );
+        assert_eq!(
+            WaitReason::ExecutorNotReady(ExecutorKind::Codex).describe(),
+            "executor codex is not ready"
+        );
     }
 }
