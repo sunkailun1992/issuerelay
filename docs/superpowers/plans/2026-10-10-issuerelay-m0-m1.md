@@ -16,16 +16,17 @@
 - 依赖版本（2026-10-10 在本机探针工程里编译并实测过这些用法）：rmcp 3.5.1、tokio 1.53、process-wrap 10.0.1（特性 `tokio1`）、keyring 4.2（默认特性 `v1`，已含 macOS 钥匙串与 Windows 凭据管理器）、rusqlite 0.40（特性 `bundled`）、reqwest 0.13、dirs 7、chrono 0.4（特性 `serde`）、toml 1.1、which 8、tokio-util 0.7、clap 4.6（特性 `derive`）、sys-locale 0.3、url 2、open 5、thiserror 2、async-trait 0.1、schemars 1.2、tracing 0.1、tracing-subscriber 0.3（特性 `env-filter`）、tempfile 3（仅测试）。
 - 应用标识 `com.sunkailun.issuerelay`。配置文件 `dirs::config_dir()/com.sunkailun.issuerelay/config.toml`；数据目录 `dirs::data_dir()/com.sunkailun.issuerelay/`，内含 `state.db` 与 `logs/`。这与 M2 中 Tauri 的 `app_config_dir()` / `app_data_dir()` 一致。
 - Linear MCP 端点 `https://mcp.linear.app/mcp`。钥匙串服务名 `com.sunkailun.issuerelay`，账户名 `linear-oauth` 与 `linear-api-key`。
+- Linear MCP 实测口径（M0 验收报告）：需求的 `projectId` 是项目的 `uuid`，项目的 `id` 是 `P-<团队>-N` 编号，绑定一律存项目 `uuid`；翻页看 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误，文字为 `Could not find referenced Issue.`；授权服务器要求 RFC 9207 的 `iss` 参数，回调时把完整回调地址交给 rmcp 的 `OAuthState::handle_callback_url`。
 - 触发默认值：标签 `ai-ready`；状态 `Todo` / `In Progress` / `In Testing` / `Done`；名称比较时忽略首尾空白和 ASCII 大小写。
 - 默认设置：每 30 秒检查一次，同时运行总上限 2 条，单次运行上限 60 分钟，连续 15 分钟无输出算卡住，执行者 Claude，权限档位「完全放开」。
 - AI 评论前缀 `🤖 IssueRelay`；AI 最后一行输出 `{"result":"in_testing|needs_info|failed","summary":"…"}`。
-- 执行者参数（设计 6.1）：Claude `-p --output-format stream-json --verbose --permission-prompts none --permission-mode <bypassPermissions|auto|dontAsk>`；Codex `exec --json [--dangerously-bypass-approvals-and-sandbox|--approve-for-me] [--skip-git-repo-check] -`。提示词一律经标准输入传入，工作目录用子进程的 current_dir 设置，命令行参数里不放任何提示词或路径。M0 实测结果与此不同时，以 M0 验收报告为准，先改本计划 Task 12 再继续。
+- 执行者参数（设计 6.1）：Claude `-p --output-format stream-json --verbose --permission-prompts none --permission-mode <bypassPermissions|auto|dontAsk>`；Codex `exec --json [--dangerously-bypass-approvals-and-sandbox|--approve-for-me] [--skip-git-repo-check] -`。提示词一律经标准输入传入，工作目录用子进程的 current_dir 设置，命令行参数里不放任何提示词或路径。M0 已在 macOS 上实测通过（2026-10-10，Claude Code 2.1.285、codex-cli 0.159.2，见 `docs/gates/2026-10-11-m0-verification.md`），Task 12 照此实现；Windows 待实机。
 - 「标记完成」只由 M2 面板在进程内调用 `Engine::mark_done`；IPC、命令行、MCP 控制服务都不得提供。
 - 代码和测试必须在 macOS 与 Windows 上都能编译、通过；每个 `#[cfg(unix)]` 分支都要有对应的 `#[cfg(windows)]` 实现。
 - 仓库里不得出现任何公司名、内网地址、真实 Linear 工作区或需求内容、本机绝对路径。测试夹具一律用虚构数据（`DEMO-1`、`Demo Project`、`Jane Doe`）。
-- 文档用中文；提交信息用英文 Conventional Commits，结尾加 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。
+- 文档用中文；提交信息用英文 Conventional Commits，结尾加 `Co-Authored-By: Claude <实际写这个提交的模型> <noreply@anthropic.com>`（台账 Ruling R6）。
 - 计划里的代码按 rustc 1.99 与同版 clippy 写成，关键接口已在探针工程里编译实测。执行时如果 clippy 给出不改变行为的机械性建议（例如去掉多余的 `&`、合并嵌套的 `if`），照建议改即可；涉及行为的改动要回到计划和设计核对。
-- 每次提交前跑：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`bash scripts/check-secrets.sh`（新文件要先 `git add` 才会被扫描）。推送前 `git fetch origin`；远端已前进就 rebase 到最新远端并重跑验证，不强推。
+- 每次提交前跑：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`bash scripts/check-secrets.sh --strict`（必须无输出；新文件要先 `git add` 才会被扫描）。推送前 `git fetch origin`；远端已前进就 rebase 到最新远端并重跑验证，不强推。
 
 ## Review Focus
 
@@ -47,6 +48,7 @@
 | | 4 | macOS 上 Claude Code / Codex 无人值守实测与样本 | 登录 Claude 命令行；为 Claude Code、Codex 授权 Linear |
 | | 5 | Windows 上同样实测 | 提供 Windows 机器（没有就跳过） |
 | | 6 | M0 验收报告；按实测修正设计与计划 | 审阅报告 |
+| | 6b | 贡献与共同维护：贡献指南、行为准则、安全政策、维护者与治理、issue / PR 模板、CODEOWNERS、Dependabot | 无 |
 | M1 引擎与命令行 | 7–13 | 配置、数据模型、触发与防重复、SQLite、调度、提示词、执行者命令、结果解析 | 无 |
 | | 14–15 | 测试用假执行者；子进程运行器（超时、卡住、结束进程树） | 无 |
 | | 16–18 | Linear 接口与授权；环境检查 | 无 |
@@ -54,7 +56,7 @@
 | | 21–22 | `issuerelay` 命令行与 MCP 控制服务；开发宿主 | 无 |
 | | 23 | M1 实机验收报告 | 在浏览器里授权；在沙箱里建测试需求 |
 
-**依赖关系**：Task 1 → M0（2 → 3 → 4 → 5 → 6）→ M1（7 → 8 → … → 23）。Task 13、16、18 会用到 M0 的真实样本；M0 结论与本计划不一致时，先按 Task 6 改计划，再继续往下做。
+**依赖关系**：Task 1 → M0（2 → 3 → 4 → 5 → 6 → 6b）→ M1（7 → 8 → … → 23）。Task 13、16、18 会用到 M0 的真实样本；M0 结论与本计划不一致时，先按 Task 6 改计划，再继续往下做。
 
 ## 文件结构
 
@@ -68,6 +70,7 @@
 | `.github/workflows/ci.yml` | macOS + Windows 上 fmt / clippy / test；Ubuntu 上 check-secrets |
 | `spikes/linear-mcp-probe/` | M0 探针（独立 cargo 工程，不进工作区，保留作参考） |
 | `docs/gates/` | 验收报告与脱敏样本 |
+| `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`、`MAINTAINERS.md`、`.github/` 下的模板、`CODEOWNERS`、`dependabot.yml` | 贡献与共同维护（Task 6b） |
 | `crates/core/src/paths.rs` | 配置、数据、日志、IPC 端点位置 |
 | `crates/core/src/config.rs` | 设置与绑定，TOML 读写 |
 | `crates/core/src/model.rs` | `Issue`、`Job`、`JobState` |
@@ -93,6 +96,8 @@
 ---
 
 ### Task 1: 仓库骨架、AI 编码规范与 CI
+
+> 执行记录（2026-10-11）：已完成。评审中按台账 Ruling R2、R7、R11 修订了 `ci.yml`、`scripts/check-secrets.sh`、`.gitignore`，新增 `.gitattributes`，文档里的密钥扫描命令统一为 `--strict`。下文是原计划文本，以仓库现状为准。
 
 **Files:**
 - Create: `Cargo.toml`、`rust-toolchain.toml`、`.gitignore`、`LICENSE`、`README.md`、`AGENTS.md`、`CLAUDE.md`、`.github/copilot-instructions.md`、`.github/workflows/ci.yml`、`scripts/check-secrets.sh`、`docs/gates/README.md`、`crates/core/Cargo.toml`、`crates/core/src/lib.rs`
@@ -1083,6 +1088,8 @@ Expected: 最后一条输出 `main` 与 `test` 两个分支。
 
 ### Task 3: M0 Linear MCP 探针
 
+> 执行记录（2026-10-11）：已完成。实测发现 Linear 要求回调带 RFC 9207 的 `iss`（M0 发现 F5），下方探针代码已改为把完整回调地址交给 `handle_callback_url`；Step 1 补了 `cargo add` 之前的占位 `src/main.rs`。
+
 **Files:**
 - Create: `spikes/linear-mcp-probe/Cargo.toml`、`spikes/linear-mcp-probe/src/main.rs`、`spikes/README.md`
 - Create（运行后，脱敏）：`docs/gates/samples/m0/linear/*.json`
@@ -1105,6 +1112,7 @@ publish = false
 
 [workspace]
 EOF
+printf 'fn main() {}\n' > src/main.rs   # cargo add 需要已有构建目标；Step 2 会整体替换
 cargo add -q anyhow async-trait keyring open serde_json url
 cargo add -q reqwest@0.13
 cargo add -q tokio --features full
@@ -1127,7 +1135,7 @@ cd ../..
 ```rust
 //! M0 probe: authorize against Linear's MCP server with OAuth (loopback redirect),
 //! store the token in the system keychain, and dump raw tool output for the parser.
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use rmcp::{
@@ -1215,37 +1223,38 @@ async fn login() -> Result<()> {
     let url = state.get_authorization_url().await?;
     println!("Open this URL to authorize:\n{url}");
     let _ = open::that_detached(&url);
-    let (code, csrf) = wait_for_callback(&listener).await?;
-    state.handle_callback(&code, &csrf).await?;
+    let callback = wait_for_callback(&listener).await?;
+    state.handle_callback_url(&callback).await?;
     let scopes = KeyringStore.load().await?.map(|c| c.granted_scopes).unwrap_or_default();
     println!("authorized; granted scopes: {scopes:?}");
     Ok(())
 }
 
-async fn wait_for_callback(listener: &TcpListener) -> Result<(String, String)> {
+/// Waits for the browser redirect and returns the full callback URL, so rmcp can
+/// validate `code`, `state` and the RFC 9207 `iss` parameter itself.
+async fn wait_for_callback(listener: &TcpListener) -> Result<String> {
+    let port = listener.local_addr()?.port();
     loop {
         let (mut socket, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
         let n = socket.read(&mut buf).await?;
         let request = String::from_utf8_lossy(&buf[..n]);
-        if let Some(pair) = parse_callback(request.lines().next().unwrap_or_default()) {
+        if let Some(url) = callback_url(request.lines().next().unwrap_or_default(), port) {
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>Authorized. You can close this tab.</h1>")
                 .await?;
-            return Ok(pair);
+            return Ok(url);
         }
         socket.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n").await?;
     }
 }
 
-fn parse_callback(request_line: &str) -> Option<(String, String)> {
+/// Any request to /callback is the redirect, including an OAuth error response; rmcp
+/// reports a missing `code` or a server error itself instead of the probe waiting forever.
+fn callback_url(request_line: &str, port: u16) -> Option<String> {
     let target = request_line.split_whitespace().nth(1)?;
-    let url = url::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-    if url.path() != "/callback" {
-        return None;
-    }
-    let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
-    Some((query.get("code")?.clone(), query.get("state")?.clone()))
+    let url = url::Url::parse(&format!("http://127.0.0.1:{port}{target}")).ok()?;
+    (url.path() == "/callback").then(|| url.to_string())
 }
 
 async fn connect() -> Result<Client> {
@@ -1542,6 +1551,383 @@ git commit -m "docs(m0): record verification results and align spec
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git fetch origin && git push origin main
 ```
+
+---
+
+### Task 6b: 贡献与共同维护
+
+用户 2026-10-10 要求：仓库要能接受别人贡献代码，开发者可以一起维护。依据设计第 16.1 节。GitHub 仓库设置已由控制器在用户同意后配置好（台账 Ruling R10），本任务只写仓库里的文件，文件内容必须与这些设置一致：
+
+- 规则集 `main`（作用于默认分支）：禁止删除、禁止强推；合并必须走 PR，至少 1 人批准，批准后再有推送需重新批准，评审对话必须全部解决，只允许 squash；必需检查 `test (macos-latest)`、`test (windows-latest)`、`secrets`（GitHub Actions）；仓库管理员可以绕过。
+- 仓库只允许 squash 合并，提交标题取 PR 标题、正文取 PR 描述，合并后自动删除分支。
+- 已开启：私密漏洞报告、Dependabot 安全更新、密钥扫描与推送拦截。未开启 Discussions。
+
+**Files:**
+- Create: `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`、`MAINTAINERS.md`
+- Create: `.github/CODEOWNERS`、`.github/pull_request_template.md`、`.github/ISSUE_TEMPLATE/bug_report.yml`、`.github/ISSUE_TEMPLATE/feature_request.yml`、`.github/ISSUE_TEMPLATE/config.yml`、`.github/dependabot.yml`
+- Modify: `README.md`（加「参与贡献」一节）、`AGENTS.md`（加「贡献流程」一节）、`docs/ai-coding/AI_AUTOMATION_WORKFLOW.md`（加「七、外部贡献」）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 2、6 节登记新文件）
+
+**Interfaces:**
+- Consumes: Task 1 的 `AGENTS.md`、`docs/ai-coding/`、`ci.yml` 的三个任务名、`scripts/check-secrets.sh --strict`
+- Produces: 外部贡献者与共同维护者的入口文档；后续任务新增高风险文件时同步更新 `.github/CODEOWNERS`
+
+**写作要求（四份说明文档）**：
+- 正文用中文，开头放一段英文摘要（3–8 行，标题 `## English summary`），方便不读中文的贡献者。
+- 硬规则只在 `AGENTS.md` 写一份，其他文档链接过去，不逐条复述；需要点名时只列名称。
+- 语句短、先写结论；每节回答一个问题；命令放进代码块；不写空话。
+- 不写任何公司名、个人邮箱、手机号或本机路径。联系渠道只用 GitHub（私密漏洞报告、issue、@维护者）。
+
+- [ ] **Step 1: 写 `CONTRIBUTING.md`**
+
+按顺序包含以下各节，每节内容至少覆盖所列要点：
+
+1. `# 参与贡献` 与 `## English summary`：欢迎 issue 和 PR；先读 `AGENTS.md`（AI 规则对人同样适用）；提交前跑四条检查；提交信息用英文 Conventional Commits；不贴令牌、公司信息、真实 Linear 内容；安全问题走私密漏洞报告；贡献按 Apache-2.0 授权。
+2. `## 可以贡献什么`：问题报告、文档、测试、修 bug、新功能（先开 issue 讨论）；M2 起的界面翻译（每种语言一个翻译文件，详见 M2 文档）。标签 `good first issue`、`help wanted` 适合新人。
+3. `## 开始之前`：大改动和新功能先开 issue 说明要解决的问题和方案，维护者确认后再写代码；改动涉及高风险范围时必须先在 issue 里写方案，高风险范围按 `docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md` 的「极高风险」列表，点名为：执行者参数与权限档位、提示词固定规则、进程树结束、凭据存储与授权、IPC 方法表、标记完成。
+4. `## 开发环境`：macOS 或 Windows；Rust 由 `rust-toolchain.toml` 自动选用 1.99.0（装好 rustup 即可）；克隆后 `cargo build --workspace`；单元与集成测试用假执行者和假 Linear MCP，不需要 Linear 账号，也不需要安装 Claude Code 或 Codex；实机验收需要自己的 Linear 测试项目、Claude Code 或 Codex，步骤见 `docs/gates/` 和 `docs/ai-coding/TESTING_SPEC.md`。
+5. `## 提交前检查`：代码块列出四条命令，与 `AGENTS.md` 的「验证命令」完全一致：
+   ```bash
+   cargo fmt --all --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace
+   bash scripts/check-secrets.sh --strict
+   ```
+   写明：密钥扫描必须无输出、退出码 0；CI 会在 macOS、Windows 上跑前三条，在 Ubuntu 上跑密钥扫描，三项都通过才能合并。
+6. `## 分支、提交与 PR`：fork 后从最新 `main` 切分支（建议 `feat/<主题>`、`fix/<主题>`）；一个 PR 只做一件事；提交信息与 PR 标题用英文 Conventional Commits（`feat`、`fix`、`docs`、`test`、`refactor`、`chore`、`ci`，可带范围，如 `fix(runner): ...`）；squash 合并时 PR 标题就是 `main` 上的提交标题，所以 PR 标题要按格式写；PR 描述按模板填；草稿 PR 可以提前开；合并条件：CI 三项全绿、至少一名维护者批准、评审对话全部解决；维护者负责 squash 合并；不要对别人已评审的分支强推，需要更新时追加提交或 rebase 到最新 `main` 后说明。
+7. `## 代码与文档规范`：先读 `AGENTS.md` 和 `docs/ai-coding/README.md`；两个平台同等对待；新行为要有测试，修 bug 先写能复现的测试（`docs/ai-coding/TESTING_SPEC.md`）；测试通过不等于实机验收，涉及真实 Linear、Claude Code 或 Codex 行为的改动要在 PR 里写实机结果或「待实机」；设计、计划、验收报告用中文，`README.md` 中英双语；改了行为同步改文档。
+8. `## 使用 AI 辅助`：欢迎；Codex 直接读 `AGENTS.md`，Claude Code 经 `CLAUDE.md` 导入，GitHub Copilot 读 `.github/copilot-instructions.md`；提交者对 AI 生成的每一行负责，提交前自己审一遍；PR 模板里勾选是否含 AI 生成内容。
+9. `## 公开仓库红线`：本仓库公开，issue、PR 描述、评论、截图、日志、测试夹具里都不能出现令牌或凭据、公司名、内网地址、真实 Linear 工作区或需求内容、本机绝对路径；贴日志前先脱敏（规则见 `docs/gates/README.md`）；`scripts/check-secrets.sh` 只能兜底；万一泄露了令牌，先去对应服务吊销，再联系维护者清理。
+10. `## 许可证`：贡献按 Apache-2.0 授权（许可证第 5 条：提交即按同一许可证授权），不需要签 CLA，也不要求 DCO 签名。
+11. `## 行为准则与安全问题`：链接 `CODE_OF_CONDUCT.md`、`SECURITY.md`、`MAINTAINERS.md`。
+
+- [ ] **Step 2: 写 `CODE_OF_CONDUCT.md`**
+
+用自己的话写，不照抄任何现成文本；末尾注明「参考 Contributor Covenant 2.1（https://www.contributor-covenant.org/version/2/1/code_of_conduct/）」。各节：
+
+1. `# 行为准则` 与 `## English summary`。
+2. `## 我们的承诺`：不论经验、性别、年龄、国籍、民族、宗教、残障、外貌等，所有参与者都受到尊重。
+3. `## 期望的行为`：就事论事、给出可执行的意见、接受批评、承认错误、照顾新人。
+4. `## 不可接受的行为`：骚扰、人身攻击、歧视性言论、公开他人的私人信息、未经允许公开任何公司或客户的信息、持续打断讨论。
+5. `## 适用范围`：本仓库的 issue、PR、评审、提交信息，以及代表本项目发言的场合。
+6. `## 举报`：给 `MAINTAINERS.md` 里的维护者发 GitHub 消息不可行时，开一个只写「请求私下联系」、不含细节的 issue 并 @ 维护者，由维护者提供私下沟通方式；涉及安全漏洞走 `SECURITY.md`。维护者对举报人身份保密。
+7. `## 处理方式`：按情节依次为提醒、书面警告、临时禁止参与、永久禁止参与；由维护者决定，管理员有最终决定权。
+
+- [ ] **Step 3: 写 `SECURITY.md`**
+
+1. `# 安全政策` 与 `## English summary`。
+2. `## 支持的版本`：发布第一版前只支持 `main`；发布后支持最新版本和 `main`。
+3. `## 如何报告`：在仓库的 Security 页面点「Report a vulnerability」私下提交（已开启私密漏洞报告）；不要开公开 issue；写清影响的版本或提交、复现步骤、影响范围；报告里不要放真实令牌，已经泄露的令牌先去对应服务吊销。
+4. `## 关注范围`：令牌或凭据被写进日志、文件或进程参数；「标记完成」可以经 IPC、命令行或 MCP 触发；本机 IPC 能被其他用户访问；Linear 文本被拼进子进程参数或经 shell 执行；结束运行后留下子进程；提示词三条固定规则被程序本身删改或绕过；`scripts/check-secrets.sh` 可被绕过导致泄露。
+5. `## 不在范围内`：用户自己选择「完全放开」档位后，AI 在用户绑定的仓库里按需求内容执行命令（这是文档写明的风险模型，见 `README.md` 的安全须知）；Claude Code、Codex、Linear 自身的漏洞请报给对应厂商。
+6. `## 响应`：这是志愿维护的项目，尽力在 7 天内确认收到；修复后发布安全公告，报告人愿意的话在公告里致谢。
+
+- [ ] **Step 4: 写 `MAINTAINERS.md`**
+
+1. `# 维护者与治理` 与 `## English summary`。
+2. `## 当前维护者`：表格，列「GitHub 账号 / 角色 / 负责范围」，一行：`@sunkailun1992` / 管理员（项目发起人） / 全部。
+3. `## 角色`：贡献者（提过 issue 或 PR 的任何人）；维护者（GitHub write 或 maintain 权限：评审与合并 PR、分诊 issue）；管理员（admin 权限：仓库设置、规则集、密钥与发布）。
+4. `## 维护者职责`：评审 PR、分诊 issue（加标签、关闭重复）、守住 `AGENTS.md` 的硬规则与公开仓库红线、保持 CI 可用、M3 起负责发布。
+5. `## 如何成为维护者`：持续贡献（例如合并过 5 个以上有分量的 PR，或长期参与评审与分诊）；现有维护者提名，管理员同意；在本文件加一行，并在 GitHub 授予 write 权限（之后可升为 maintain）。
+6. `## 决策与合并`：日常改动由作者以外的一名维护者批准即可合并；高风险范围（同 `CONTRIBUTING.md` 第 3 节）在维护者达到两名后需要两名维护者批准，只有一名维护者时由管理员评审并在 PR 里写明理由；设计变更先改 `docs/superpowers/specs/` 并在 PR 里讨论；意见分歧时由管理员最终决定。
+7. `## 分支保护`：如实写出本任务开头列出的规则集配置；说明「仓库管理员可以绕过」只用于 M0–M1 期间项目发起人直接提交开发进度，M1 收尾时改为所有改动都走 PR（届时更新本节）。
+8. `## 发布`：M3 起由维护者推送 `vX.Y.Z` 标签触发 GitHub Actions 打包发布；更新包签名私钥只放在 GitHub Actions secrets，只有管理员能改。
+9. `## 离任`：连续 6 个月不活跃的维护者转为荣誉维护者，收回写权限，随时可以回来。
+
+- [ ] **Step 5: 写 `.github/` 下的文件（内容逐字照抄）**
+
+`.github/CODEOWNERS`：
+
+```text
+# Code owners are requested for review automatically. High-risk paths are
+# listed explicitly so they stay covered when more maintainers join; add new
+# high-risk files here when they are created.
+*                                  @sunkailun1992
+/AGENTS.md                         @sunkailun1992
+/scripts/check-secrets.sh          @sunkailun1992
+/.github/                          @sunkailun1992
+/crates/core/src/prompt.rs         @sunkailun1992
+/crates/core/src/executor/         @sunkailun1992
+/crates/core/src/runner.rs         @sunkailun1992
+/crates/core/src/linear/auth.rs    @sunkailun1992
+/crates/core/src/ipc/protocol.rs   @sunkailun1992
+```
+
+`.github/pull_request_template.md`：
+
+```markdown
+## 改动说明 / Summary
+
+<!-- 做了什么、为什么。PR 标题请用英文 Conventional Commits，例如 `fix(runner): kill the whole process tree on timeout`。 -->
+
+## 关联 issue / Related issue
+
+<!-- 例如 Closes #12；没有就写「无」 -->
+
+## 风险等级 / Risk level
+
+<!-- 见 docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md；勾一个 -->
+- [ ] 低 / Low
+- [ ] 中 / Medium
+- [ ] 高 / High
+- [ ] 极高 / Critical（执行者参数与权限档位、提示词固定规则、进程树结束、凭据存储与授权、IPC 方法表、标记完成）
+
+## 验证 / Verification
+
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] `bash scripts/check-secrets.sh --strict`（无输出）
+- 本机测试过的平台 / Platforms tested locally: macOS / Windows / 仅 CI
+
+## 实机验收 / Real-machine check
+
+<!-- 涉及真实 Linear、Claude Code 或 Codex 行为时：写结果（并更新 docs/gates/），或写「待实机」及原因；不涉及就写「不涉及」 -->
+
+## 自查 / Checklist
+
+- [ ] 描述、截图、日志、夹具里没有令牌或凭据、公司名、内网地址、真实 Linear 内容、本机绝对路径
+- [ ] 行为变化已同步文档
+- [ ] 含 AI 生成的内容，我已逐行审过 / Contains AI-generated changes, reviewed line by line（不含就不勾）
+```
+
+`.github/ISSUE_TEMPLATE/bug_report.yml`：
+
+```yaml
+name: 问题报告 / Bug report
+description: IssueRelay 的行为与预期不符 / Something does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓库公开。提交前请删除令牌、凭据、公司信息、内网地址、真实 Linear 需求内容和本机路径。安全漏洞请走 Security 页面的私密报告，不要在这里提交。
+        This repository is public. Remove tokens, credentials, company information, internal addresses, real Linear content and local paths. Report security issues privately from the Security tab instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么 / What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的行为 / Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: IssueRelay 版本或提交 / Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / Operating system
+      options:
+        - macOS
+        - Windows
+        - 其他 / Other
+    validations:
+      required: true
+  - type: dropdown
+    id: executor
+    attributes:
+      label: 执行者 / Executor
+      options:
+        - Claude Code
+        - Codex
+        - 两者 / Both
+        - 不涉及 / Not related
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（已脱敏）/ Logs (redacted)
+      render: text
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 确认 / Confirmation
+      options:
+        - label: 我已删除令牌、凭据、公司信息、内网地址、真实 Linear 需求内容和本机路径 / I removed tokens, credentials, company information, internal addresses, real Linear content and local paths
+          required: true
+```
+
+`.github/ISSUE_TEMPLATE/feature_request.yml`：
+
+```yaml
+name: 功能建议 / Feature request
+description: 提出新功能或改进 / Suggest a new feature or an improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        大改动请先在这里讨论，维护者确认后再写代码。本仓库公开，请不要贴公司信息或真实 Linear 需求内容。
+        Please discuss larger changes here before writing code. This repository is public: do not paste company information or real Linear content.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题 / Problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的方案 / Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的其他方案 / Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围 / Area
+      options:
+        - 引擎 / Engine
+        - 命令行与 MCP / CLI and MCP
+        - 面板与托盘 / Panel and tray
+        - 安装与发布 / Packaging and release
+        - 文档 / Docs
+        - 其他 / Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 确认 / Confirmation
+      options:
+        - label: 内容里没有公司信息、令牌或真实 Linear 需求内容 / No company information, tokens or real Linear content
+          required: true
+```
+
+`.github/ISSUE_TEMPLATE/config.yml`：
+
+```yaml
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 / Security vulnerability
+    url: https://github.com/sunkailun1992/issuerelay/security/advisories/new
+    about: 请私下报告，不要开公开 issue / Report privately, never in a public issue
+```
+
+`.github/dependabot.yml`：
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]
+```
+
+- [ ] **Step 6: 改四份已有文档**
+
+`README.md`：在「## 文档」一节之前插入：
+
+```markdown
+## 参与贡献 / Contributing
+
+欢迎 issue 和 PR。动手前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)：开发环境、提交前检查、PR 流程 / setup, checks, pull requests
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)：行为准则 / code of conduct
+- [SECURITY.md](SECURITY.md)：私下报告安全问题 / report vulnerabilities privately
+- [MAINTAINERS.md](MAINTAINERS.md)：维护者、评审与合并规则 / maintainers and merge rules
+```
+
+`AGENTS.md`：在「## 多智能体协作」一节之前插入：
+
+```markdown
+## 贡献流程
+
+- 外部贡献走 fork + PR：AI 只推送贡献者自己 fork 里的分支，不直接推本仓库的 `main`；PR 按 `.github/pull_request_template.md` 填写。
+- 合并条件、评审人数与分支保护见 `MAINTAINERS.md`；开发环境与提交规范见 `CONTRIBUTING.md`。
+- 新增或移动高风险文件（执行者参数、提示词、进程运行、凭据、IPC 协议）时，同步更新 `.github/CODEOWNERS`。
+```
+
+`docs/ai-coding/AI_AUTOMATION_WORKFLOW.md`：在文件末尾追加：
+
+```markdown
+## 七、外部贡献
+
+1. 先确认 issue 已获维护者认可（大改动、高风险范围必须如此）。
+2. 在贡献者自己的 fork 里从最新 `main` 切分支，按第一节的标准流程开发。
+3. PR 标题用英文 Conventional Commits；描述按 PR 模板填写风险等级、验证结果和实机结论。
+4. CI 三项（macOS、Windows、密钥扫描）全绿，评审对话全部解决，维护者批准后由维护者 squash 合并。
+5. 合并后如果改了高风险文件的位置，检查 `.github/CODEOWNERS` 是否仍然覆盖。
+```
+
+`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`：
+- 第 2 节表格中，把 `README.md`、`LICENSE` 一行改为：`` | `README.md`、`LICENSE` | 说明与许可证 | ``（不变），并在它后面加一行：`` | `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`、`MAINTAINERS.md` | 贡献指南、行为准则、安全政策、维护者与治理 | ``
+- 第 6 节列表末尾加四行：
+  - `` `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。 ``
+  - `` `.github/pull_request_template.md`、`.github/ISSUE_TEMPLATE/`：PR 与 issue 模板，带「已脱敏」确认项。 ``
+  - `` `.github/dependabot.yml`：每周检查 cargo 与 GitHub Actions 依赖更新。 ``
+  - `` 仓库设置（规则集、合并方式、安全功能）不在仓库文件里，现状记在 `MAINTAINERS.md` 的「分支保护」一节；改设置时同步改那一节。 ``
+
+- [ ] **Step 7: 检查**
+
+```bash
+bash scripts/check-secrets.sh --strict; echo "exit=$?"
+ruby -e 'require "yaml"; %w[.github/dependabot.yml .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml .github/ISSUE_TEMPLATE/config.yml .github/workflows/ci.yml].each { |f| YAML.load_file(f) }; puts "yaml ok"'
+python3 -I - <<'PY'
+import re, pathlib
+bad = []
+for md in ["README.md", "AGENTS.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md", "MAINTAINERS.md",
+           "docs/ai-coding/AI_AUTOMATION_WORKFLOW.md", "docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md"]:
+    base = pathlib.Path(md).parent
+    for target in re.findall(r"\]\(([^)#\s]+)", pathlib.Path(md).read_text(encoding="utf-8")):
+        if not target.startswith("http") and not (base / target).exists():
+            bad.append(f"{md} -> {target}")
+print("links ok" if not bad else "\n".join(bad))
+PY
+```
+
+Expected：密钥扫描无输出、`exit=0`；`yaml ok`；`links ok`。另外人工核对：四份说明文档都有 `## English summary`；`CONTRIBUTING.md` 的四条检查命令与 `AGENTS.md` 完全一致；`MAINTAINERS.md` 的分支保护描述与本任务开头的设置逐项一致；全文没有公司名、个人邮箱或本机路径。
+
+- [ ] **Step 8: 提交**
+
+```bash
+git add CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md MAINTAINERS.md README.md AGENTS.md \
+  .github/CODEOWNERS .github/pull_request_template.md .github/ISSUE_TEMPLATE .github/dependabot.yml \
+  docs/ai-coding/AI_AUTOMATION_WORKFLOW.md docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md
+bash scripts/check-secrets.sh --strict
+git commit -m "docs: add contribution, conduct, security and maintainer guides
+
+Co-Authored-By: Claude <实际模型名> <noreply@anthropic.com>"
+```
+
+推送由控制器在评审通过后进行；推送后控制器用 `gh api repos/sunkailun1992/issuerelay/codeowners/errors` 确认 CODEOWNERS 没有语法错误。
 
 ---
 
@@ -4274,6 +4660,7 @@ mod tests {
         assert_eq!(parse_viewer(r#"{"id":"user-1","name":"Jane Doe"}"#).unwrap().id, "user-1");
         assert_eq!(parse_viewer(r#"{"user":{"id":"user-2","displayName":"jd"}}"#).unwrap().name, "jd");
         assert_eq!(parse_projects(r#"{"projects":[{"id":"proj-1","name":"Demo Project"}]}"#).unwrap().items[0].name, "Demo Project");
+        assert_eq!(parse_projects(r#"{"projects":[{"id":"P-DEMO-1","uuid":"proj-uuid","name":"Demo Project"}]}"#).unwrap().items[0].id, "proj-uuid");
         assert_eq!(parse_labels(r#"{"labels":[{"name":"ai-ready"},{"name":"Bug"}]}"#).unwrap().items, ["ai-ready", "Bug"]);
         assert_eq!(parse_teams(r#"{"teams":[{"id":"team-1","name":"Demo"}]}"#).unwrap().items[0].id, "team-1");
         assert_eq!(parse_statuses(r#"[{"name":"Todo"},{"name":"In Testing"}]"#).unwrap(), ["Todo", "In Testing"]);
@@ -4291,6 +4678,12 @@ mod tests {
     fn m0_samples_parse() {
         let page = parse_issue_page(include_str!("../../../../docs/gates/samples/m0/linear/list_issues_page1.json")).unwrap();
         assert!(!page.items.is_empty(), "sample page has no parsable issues");
+        let projects = parse_projects(include_str!("../../../../docs/gates/samples/m0/linear/list_projects.json")).unwrap();
+        assert_eq!(
+            page.items[0].project_id.as_deref(),
+            Some(projects.items[0].id.as_str()),
+            "an issue's projectId must match the project uuid (M0 finding F1)"
+        );
         assert!(!parse_viewer(include_str!("../../../../docs/gates/samples/m0/linear/get_user_me.json")).unwrap().id.is_empty());
         assert!(!parse_teams(include_str!("../../../../docs/gates/samples/m0/linear/list_teams.json")).unwrap().items.is_empty());
         assert!(!parse_statuses(include_str!("../../../../docs/gates/samples/m0/linear/list_issue_statuses.json")).unwrap().is_empty());
@@ -4478,7 +4871,10 @@ pub fn parse_viewer(raw: &str) -> Result<Viewer> {
 }
 
 pub fn parse_projects(raw: &str) -> Result<Page<Project>> {
-    list(raw, "projects", |p| Some(Project { id: text(p, "id")?, name: text(p, "name").unwrap_or_default() }))
+    // Issues reference a project by its uuid; the project's `id` is its P-<KEY>-N identifier (M0 finding F1).
+    list(raw, "projects", |p| {
+        Some(Project { id: text(p, "uuid").or_else(|| text(p, "id"))?, name: text(p, "name").unwrap_or_default() })
+    })
 }
 
 pub fn parse_labels(raw: &str) -> Result<Page<String>> {
@@ -4629,7 +5025,8 @@ impl FakeLinearServer {
         if args.id == "DEMO-1" || args.id.ends_with("0001") {
             Ok(issue_json(1).to_string())
         } else {
-            Err(format!("Entity not found: Issue {}", args.id))
+            // Linear's real reply for an unknown issue (M0 sample get_issue_missing.json).
+            Err(r#"{"error":"invalid_request","message":"Could not find referenced Issue.","status":400}"#.to_string())
         }
     }
 
@@ -4648,7 +5045,7 @@ impl FakeLinearServer {
     #[rmcp::tool(description = "List projects")]
     async fn list_projects(&self, Parameters(args): Parameters<PageArgs>) -> String {
         self.record("list_projects", &args);
-        json!({"projects": [{"id": "proj-1", "name": "Demo Project"}], "hasNextPage": false}).to_string()
+        json!({"projects": [{"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project"}], "hasNextPage": false}).to_string()
     }
 
     #[rmcp::tool(description = "List labels")]
@@ -4946,10 +5343,14 @@ pub struct McpLinear {
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<LinearError>(),
-        Some(LinearError::ToolFailed { message, .. }) if message.to_lowercase().contains("not found")
-    )
+    // Linear answers an unknown issue with "Could not find referenced Issue." (M0 sample).
+    match error.downcast_ref::<LinearError>() {
+        Some(LinearError::ToolFailed { message, .. }) => {
+            let message = message.to_lowercase();
+            message.contains("could not find") || message.contains("not found")
+        }
+        _ => false,
+    }
 }
 
 impl McpLinear {
@@ -5072,7 +5473,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 3 验证过的 OAuth 写法；Task 7 的 `paths::APP_ID`；Task 16 的 `LinearClient`
-- Produces: `auth::LINEAR_MCP_URL`、`auth::OAUTH_ACCOUNT`、`auth::API_KEY_ACCOUNT`；`auth::KeyringStore`（实现 rmcp 的 `CredentialStore`）；`auth::connect_stored(url) -> Result<Option<LinearClient>>`；`auth::connect_api_key(url, key) -> Result<LinearClient>`；`auth::login(url, open_url: impl Fn(&str)) -> Result<LinearClient>`；`auth::save_api_key(&str)`、`auth::load_api_key() -> Result<Option<String>>`、`auth::clear_credentials()`；`auth::parse_callback(&str) -> Option<(String, String)>`
+- Produces: `auth::LINEAR_MCP_URL`、`auth::OAUTH_ACCOUNT`、`auth::API_KEY_ACCOUNT`；`auth::KeyringStore`（实现 rmcp 的 `CredentialStore`）；`auth::connect_stored(url) -> Result<Option<LinearClient>>`；`auth::connect_api_key(url, key) -> Result<LinearClient>`；`auth::login(url, open_url: impl Fn(&str)) -> Result<LinearClient>`；`auth::save_api_key(&str)`、`auth::load_api_key() -> Result<Option<String>>`、`auth::clear_credentials()`；`auth::callback_url(request_line: &str, port: u16) -> Option<String>`
 
 - [ ] **Step 1: 加依赖**
 
@@ -5101,20 +5502,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_callback_request_line() {
+    fn callback_url_keeps_the_whole_redirect_query() {
         assert_eq!(
-            parse_callback("GET /callback?code=abc%20def&state=xyz HTTP/1.1"),
-            Some(("abc def".into(), "xyz".into()))
+            callback_url("GET /callback?code=abc%20def&state=xyz&iss=https%3A%2F%2Fmcp.linear.app HTTP/1.1", 4321).as_deref(),
+            Some("http://127.0.0.1:4321/callback?code=abc%20def&state=xyz&iss=https%3A%2F%2Fmcp.linear.app")
         );
-        assert_eq!(parse_callback("GET /callback?state=xyz&code=c HTTP/1.1"), Some(("c".into(), "xyz".into())));
+        // An OAuth error response is still the redirect: rmcp reports it instead of login waiting forever.
+        assert_eq!(
+            callback_url("GET /callback?error=access_denied&state=xyz HTTP/1.1", 4321).as_deref(),
+            Some("http://127.0.0.1:4321/callback?error=access_denied&state=xyz")
+        );
     }
 
     #[test]
-    fn rejects_other_paths_and_incomplete_queries() {
-        assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1"), None);
-        assert_eq!(parse_callback("GET /callback?code=only HTTP/1.1"), None);
-        assert_eq!(parse_callback("garbage"), None);
-        assert_eq!(parse_callback(""), None);
+    fn ignores_other_paths_and_garbage() {
+        assert_eq!(callback_url("GET /favicon.ico HTTP/1.1", 4321), None);
+        assert_eq!(callback_url("garbage", 4321), None);
+        assert_eq!(callback_url("", 4321), None);
     }
 
     /// Touches the real system keychain, so it only runs on request:
@@ -5131,14 +5535,14 @@ mod tests {
 ```
 
 Run: `cargo test -p issuerelay-core linear::auth`
-Expected: 编译失败，报 `parse_callback` 等未定义
+Expected: 编译失败，报 `callback_url` 等未定义
 
 - [ ] **Step 3: 实现**
 
 在 `crates/core/src/linear/auth.rs` 的测试模块之前加入：
 
 ```rust
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rmcp::{
@@ -5247,10 +5651,11 @@ pub async fn login(url: &str, open_url: impl Fn(&str)) -> Result<LinearClient> {
         .start_authorization(AuthorizationRequest::new(redirect.as_str()).with_client_name("IssueRelay"))
         .await?;
     open_url(&state.get_authorization_url().await?);
-    let (code, csrf) = tokio::time::timeout(LOGIN_TIMEOUT, wait_for_callback(&listener))
+    let callback = tokio::time::timeout(LOGIN_TIMEOUT, wait_for_callback(&listener))
         .await
         .context("timed out waiting for the browser authorization")??;
-    state.handle_callback(&code, &csrf).await?;
+    // rmcp parses code, state and the RFC 9207 `iss` itself; Linear requires `iss` (M0 finding F5).
+    state.handle_callback_url(&callback).await?;
     let manager = state.into_authorization_manager().context("authorization did not complete")?;
     connect_with(manager, url).await
 }
@@ -5278,31 +5683,29 @@ pub fn clear_credentials() -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_callback(listener: &TcpListener) -> Result<(String, String)> {
+async fn wait_for_callback(listener: &TcpListener) -> Result<String> {
+    let port = listener.local_addr()?.port();
     loop {
         let (mut socket, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
         let n = socket.read(&mut buf).await?;
         let request = String::from_utf8_lossy(&buf[..n]);
-        if let Some(pair) = parse_callback(request.lines().next().unwrap_or_default()) {
+        if let Some(url) = callback_url(request.lines().next().unwrap_or_default(), port) {
             socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>IssueRelay is authorized. You can close this tab.</h1>")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>IssueRelay received the authorization. You can close this tab.</h1>")
                 .await?;
-            return Ok(pair);
+            return Ok(url);
         }
         socket.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n").await?;
     }
 }
 
-/// Extracts `(code, state)` from the first line of the redirect request.
-pub fn parse_callback(request_line: &str) -> Option<(String, String)> {
+/// The full redirect URL (code, state, `iss`, or an OAuth error) for rmcp to validate.
+/// Any request to /callback counts as the redirect, so an error response fails fast instead of hanging.
+pub fn callback_url(request_line: &str, port: u16) -> Option<String> {
     let target = request_line.split_whitespace().nth(1)?;
-    let url = url::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-    if url.path() != "/callback" {
-        return None;
-    }
-    let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
-    Some((query.get("code")?.clone(), query.get("state")?.clone()))
+    let url = url::Url::parse(&format!("http://127.0.0.1:{port}{target}")).ok()?;
+    (url.path() == "/callback").then(|| url.to_string())
 }
 ```
 
@@ -5461,6 +5864,8 @@ mod tests {
         assert!(parse_claude_auth(r#"{"loggedIn": true}"#));
         assert!(!parse_claude_auth("not json"));
         assert!(parse_codex_login(Some(0), "Logged in using ChatGPT", ""));
+        // Real codex-cli 0.159.2 writes the status to stderr (M0 finding F4).
+        assert!(parse_codex_login(Some(0), "", "Logged in using ChatGPT"));
         assert!(!parse_codex_login(Some(1), "Not logged in", ""));
         assert!(!parse_codex_login(Some(0), "Not logged in", ""));
     }
@@ -8220,5 +8625,8 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 6.2 | 退出托盘程序时询问「等待完成 / 立即停止」 | M2 |
 | 11 | 日志按保留天数与总大小清理（默认 30 天、1 GB） | M2 |
 | 10.3 | 在设置里一键把 MCP 控制服务注册到 Claude Code / Codex | M2 |
+| 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 发现 F2） | M2 |
+| 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
+| 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 

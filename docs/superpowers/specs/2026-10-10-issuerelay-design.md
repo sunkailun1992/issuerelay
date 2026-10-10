@@ -159,8 +159,8 @@ issuerelay/
 
 | | Claude Code | Codex |
 |---|---|---|
-| 基本命令 | `claude -p <提示词> --output-format stream-json --verbose --permission-prompts none` | `codex exec <提示词> --json -C <目录> -o <结果文件>` |
-| 工作目录 | 绑定目录 | 绑定目录（`-C`）；目录本身不是 git 仓库时加 `--skip-git-repo-check` |
+| 基本命令 | `claude -p --output-format stream-json --verbose --permission-prompts none`，提示词经标准输入传入 | `codex exec --json -`，提示词经标准输入传入（`-` 表示从标准输入读） |
+| 工作目录 | 绑定目录，用子进程的工作目录设置 | 同左；目录本身不是 git 仓库时加 `--skip-git-repo-check` |
 | 完全放开（默认） | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
 | 自动审查 | `--permission-mode auto` | `--approve-for-me` |
 | 按个人设置 | `--permission-mode dontAsk` | 不加权限参数，沿用 `~/.codex/config.toml` |
@@ -168,7 +168,9 @@ issuerelay/
 - `--permission-prompts none`：任何需要人确认的操作都自动拒绝，保证无人值守时不会卡在等待确认上。
 - 模型默认沿用用户自己的配置，绑定里可以单独指定。
 - 输出逐行读取：原样写进日志文件，同时解析出面板显示用的时间线（AI 消息、工具调用、命令、错误）。
-- 以上参数来自 2026-10-10 本机 Claude Code 2.1.285 与 codex-cli 0.159.2 的帮助信息。实施第一步（M0）会实测，结果和本表不一致时以实测为准，并更新本表。
+- 结果：Claude 取 `type` 为 `result` 的事件的 `result` 字段；Codex 取最后一个 `item.type` 为 `agent_message` 的 `item.completed` 事件的 `item.text`。两者末行都是结果 JSON。
+- 命令行参数里不放提示词、路径或任何来自 Linear 的文本。
+- 以上写法已在 M0 实测通过（macOS，2026-10-10，Claude Code 2.1.285、codex-cli 0.159.2，见 `docs/gates/2026-10-11-m0-verification.md`）；Windows 待实机。
 
 ### 6.2 超时与结束
 
@@ -197,7 +199,7 @@ issuerelay/
 ### 6.4 执行者就绪条件
 
 - 命令行已安装且能运行（`claude --version`、`codex --version`）；
-- 已登录（`claude auth status`、`codex login status`）；
+- 已登录（`claude auth status`、`codex login status`；后者把结果写在标准错误，检查时两路输出都读）；
 - 已配置并授权 Linear MCP（在 `claude mcp list`、`codex mcp list` 中能看到 Linear 并且连通）。
 
 任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）。
@@ -205,10 +207,10 @@ issuerelay/
 ## 7. Linear 连接
 
 - 端点：`https://mcp.linear.app/mcp`（Streamable HTTP）。
-- 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。
+- 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。Linear 的授权服务器要求回调带 RFC 9207 的 `iss` 参数，所以回调时把完整回调地址交给 rmcp 校验（M0 实测）。
 - 令牌：存 macOS 钥匙串 / Windows 凭据管理器（`keyring` 库），不以明文写盘，自动续期。
 - 备用方式：高级设置里可以改用个人 API key（同样通过 `Authorization: Bearer` 连接 MCP）。
-- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。2026-10-10 经 Linear 连接器看到的工具名是 `list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，以实测 `tools/list` 为准。
+- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。
 - 每次建立连接时先调用 `tools/list`，检查上述工具和参数是否存在；缺失时面板报「Linear 接口已变化」并暂停派活，不做猜测性调用。
 - 第一版只连接一个 Linear 工作区。
 
@@ -219,9 +221,11 @@ issuerelay/
 1. 选择界面语言。
 2. 连接 Linear（浏览器授权），显示授权人。
 3. 检查工作区：有没有 `ai-ready` 标签，以及 In Progress、In Testing、Done 这几个状态。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
-4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。
+4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。
 5. 绑定第一个项目：选 Linear 项目 → 选本地目录 → 选执行者 → 选权限档位。首次选「完全放开」时明确提示风险（见第 14 节）。
 6. 使用说明：明确写出「需求要被自动处理，必须指派给自己、加 `ai-ready` 标签、状态为 Todo、所属项目已绑定」，并附示例。面板的「需求」页会为不满足条件的需求标出原因。
+
+macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不到装在 Homebrew 或 npm 全局目录里的 `claude`、`codex`（M0 发现）。托盘程序启动时经登录 shell 读取 PATH，用它查找执行者并传给子进程；读取失败时在「环境检查」页提示。
 
 ## 9. 面板与托盘
 
@@ -258,6 +262,12 @@ issuerelay/
 
 「开始运行」「进入待验收」「需要补充信息」「失败」四种系统通知，可以分别关闭。
 
+### 9.6 图标
+
+- 应用图标：用于安装包、程序坞 / 任务栏、面板窗口和关于页；macOS 按系统规范出图标集，Windows 出多尺寸 `.ico`。
+- 托盘图标：macOS 用单色模板图（随菜单栏深浅自动反色），Windows 用彩色小图；空闲、运行中、已暂停、出错四种状态各一张。
+- M2 先出两到三套方案给用户选定，再出全部尺寸；源文件（SVG）放在仓库里，各平台尺寸由脚本生成。
+
 ## 10. 命令行与 MCP 服务
 
 ### 10.1 命令行
@@ -285,7 +295,7 @@ issuerelay/
 
 - Tauri 打包：macOS 出 `.dmg`（Apple 芯片与 Intel 各一个，或一个通用包），Windows 出 `.msi` 和 NSIS `.exe`。命令行小程序作为附带程序一起安装；设置里提供「把命令行加入 PATH」。
 - GitHub Actions：推送版本标签时，在 macOS 和 Windows 上分别构建、测试、打包，发布到 GitHub Releases。
-- 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只放在 GitHub Actions secrets），从 GitHub Releases 拉取。仓库为私有时，客户端无法匿名下载更新，所以自动更新在仓库公开后启用。
+- 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只放在 GitHub Actions secrets），从 GitHub Releases 拉取；仓库已公开，M3 起即可启用。
 - 代码签名：见第 18 节。未签名时，README 写清 macOS「右键 → 打开」和 Windows「更多信息 → 仍要运行」的放行步骤。
 - 版本号：语义化版本，标签为 `vX.Y.Z`；推送前按 `origin/main` 上的最新版本顺延。
 
@@ -307,6 +317,7 @@ issuerelay/
 - 默认完全放开意味着 AI 可以在本机执行任意命令、使用用户的全部凭据，约束只有提示词里的固定规则和仓库的 `AGENTS.md`。首次选择「完全放开」时明确提示这一点；用户可以在全局或单个绑定上调低档位。
 - 程序自身不保存 Git、CI、测试环境的凭据；Linear 令牌只放在系统钥匙串 / 凭据管理器。
 - 「标记完成」只在面板上提供。
+- 无人值守运行会加载用户本机 Claude Code / Codex 的全部配置：用户级指令文件、插件、hooks 和 MCP 服务器（M0 发现）。README 的安全须知写明这一点；是否提供只加载 Linear MCP 的精简运行方式见第 18 节。
 - 仓库开源：代码、文档、示例、测试和提交历史中不得出现任何公司名、内网地址、内部仓库名或需求内容。`scripts/check-secrets.sh` 扫描疑似密钥、内网地址和本机绝对路径，CI 中运行。
 
 ## 15. 测试策略
@@ -324,7 +335,17 @@ issuerelay/
 - 许可证：Apache-2.0。
 - `AGENTS.md` 是 AI 编码规则的唯一来源，`CLAUDE.md` 只写一行 `@AGENTS.md`。
 - `README.md` 中英双语；设计文档和验收报告用中文。
-- 验证命令：`cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo test`、前端 `pnpm lint` 与 `pnpm test`、`bash scripts/check-secrets.sh`。
+- 验证命令：`cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo test`、前端 `pnpm lint` 与 `pnpm test`、`bash scripts/check-secrets.sh --strict`（必须无输出）。
+
+### 16.1 贡献与共同维护
+
+用户 2026-10-10 要求仓库能接受外部贡献、开发者可以共同维护。
+
+- 社区文件：`CONTRIBUTING.md`（开发环境、提交前检查、分支与 PR、AI 辅助、公开仓库红线、许可证）、`CODE_OF_CONDUCT.md`、`SECURITY.md`（私密漏洞报告）、`MAINTAINERS.md`（角色、如何成为维护者、决策与合并、分支保护、发布）。正文中文，开头附英文摘要。
+- GitHub 模板：issue 表单（问题报告、功能建议，都带「已脱敏」必选确认）、PR 模板（风险等级、验证、实机结论、自查）、`CODEOWNERS`（高风险路径逐条列出）、Dependabot（cargo 与 GitHub Actions 每周检查）。
+- 仓库设置（用户 2026-10-10 同意）：`main` 规则集——禁止删除与强推，必须经 PR、至少 1 人批准、评审对话全部解决、只允许 squash，必需检查为 macOS、Windows 两个测试任务和密钥扫描；仓库管理员可以绕过，只用于 M0–M1 期间发起人直接提交，M1 收尾时改为全部走 PR。仓库只允许 squash 合并并自动删除分支；开启私密漏洞报告、Dependabot 安全更新、密钥扫描与推送拦截。
+- 合并：作者以外的一名维护者批准；高风险范围在维护者达到两名后需要两名批准。
+- 许可证：贡献按 Apache-2.0 授权（第 5 条），不需要 CLA，不要求 DCO。
 
 ## 17. 里程碑
 
@@ -332,13 +353,14 @@ issuerelay/
 |---|---|---|
 | M0 验证 | 不写正式代码，实测：① Claude Code、Codex 按 6.1 的参数无人值守跑完一条测试需求（读 Linear、改测试仓库、改状态），macOS 和 Windows 各一次；② Rust（rmcp）经 OAuth 连上 Linear MCP 并查到需求 | `docs/gates/` 下的验收报告；6.1 的参数表按实测更新 |
 | M1 引擎与命令行 | `core` 全部模块、命令行与 MCP 服务、通信协议、单元与集成测试；先用一个只供开发调试的无界面宿主运行引擎（不随安装包发布） | 测试全部通过；本机用测试项目跑通完整流程 |
-| M2 桌面应用 | Tauri 外壳、托盘、全部面板页面、首次引导、多语言、通知、开机自启 | 页面截图经用户确认；两个平台实机验收 |
+| M2 桌面应用 | Tauri 外壳、托盘、全部面板页面、首次引导、多语言、通知、开机自启、图标 | 页面截图经用户确认；两个平台实机验收 |
 | M3 安装与发布 | GitHub Actions 打包、Releases、安装说明；仓库公开后启用自动更新 | 同事按说明用安装包装好并跑通 |
 
 ## 18. 待定问题
 
-1. **产品名**：已定为 IssueRelay（名称不含「Linear」，避开商标问题）；图标待定。
+1. **产品名与图标**：产品名 IssueRelay（不含「Linear」，避开商标问题）。图标在 M2 出两到三套方案由用户选定（见 9.6）。
 2. **代码签名**：是否购买 Apple Developer ID（用于公证）和 Windows 代码签名证书；没有的话先发未签名包。
-3. **仓库何时公开**：先建私有仓库；公开前由用户确认劳动合同里的知识产权条款，并完成开源检查。
-4. **Windows 验证环境**：M0、M2、M3 需要一台 Windows 实机或虚拟机。
+3. **仓库公开**：已于 2026-10-10 按用户要求公开，并开启密钥扫描、推送拦截、私密漏洞报告与 `main` 分支保护（见 16.1）。
+4. **Windows 验证环境**：用户暂无 Windows 机器（2026-10-10）。M0 的 Windows 实测已跳过，Windows 先只靠 CI 覆盖；M2、M3 的 Windows 实机验收待有机器后补做。
 5. **第一版语言清单**（9.4）是否合适。
+6. **精简运行**：是否按绑定提供只加载 Linear MCP 的运行方式，避免用户的其他 MCP、插件和 hooks 影响无人值守运行（M0 发现）；M2 评估。
