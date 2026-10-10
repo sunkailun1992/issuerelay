@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter, types::Type};
+use rusqlite::{
+    Connection, OptionalExtension, Row, params, params_from_iter,
+    types::{Type, Value},
+};
 
 use crate::config::{Binding, ExecutorKind};
 use crate::model::{Issue, Job, JobState};
@@ -40,6 +43,8 @@ const COLUMNS: &str = "id, issue_uuid, issue_identifier, title, binding_id, dire
     state, reason, priority, issue_created_at, discovered_updated_at, verified_updated_at, \
     created_at, started_at, finished_at, log_path, summary";
 
+/// A run about to be recorded. `binding` and `executor` are `None` while it
+/// waits for a binding.
 pub struct NewJob<'a> {
     pub issue: &'a Issue,
     pub binding: Option<&'a Binding>,
@@ -48,10 +53,13 @@ pub struct NewJob<'a> {
     pub reason: Option<String>,
 }
 
+/// The run records in SQLite. One connection: callers serialize access.
 pub struct Store {
     conn: Connection,
 }
 
+/// Variable width (AutoSi keeps Linear's precision), so never compare or
+/// ORDER BY these TEXT columns as strings; ordering uses `id`.
 fn fmt(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
@@ -113,6 +121,7 @@ impl Store {
         Self::init(conn).with_context(|| format!("cannot initialize {}", path.display()))
     }
 
+    /// An in-memory store, for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -127,6 +136,7 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Records a run and returns the stored row.
     pub fn insert(&self, new: NewJob<'_>) -> Result<Job> {
         let issue = new.issue;
         self.conn.execute(
@@ -152,6 +162,7 @@ impl Store {
         self.get(id)?.context("inserted job disappeared")
     }
 
+    /// The run with this id, or `None` when there is none.
     pub fn get(&self, id: i64) -> Result<Option<Job>> {
         let sql = format!("SELECT {COLUMNS} FROM jobs WHERE id = ?1");
         Ok(self
@@ -196,6 +207,8 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Sets state, binding, directory, executor and reason together. Each `None` clears
+    /// its column, and a `None` binding clears the directory too.
     pub fn assign(
         &self,
         id: i64,
@@ -218,12 +231,43 @@ impl Store {
         Ok(())
     }
 
+    /// Sets the state and reason without checking the current state. Use `set_state_if`
+    /// when the change must apply only from known states.
     pub fn set_state(&self, id: i64, state: JobState, reason: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE jobs SET state = ?2, reason = ?3 WHERE id = ?1",
             params![id, state.as_str(), reason],
         )?;
         Ok(())
+    }
+
+    /// Changes the state only while the job is in one of `expected`, and returns whether it
+    /// did. The engine stops a queued job this way, so it cannot relabel a run that started
+    /// a moment earlier.
+    pub fn set_state_if(
+        &self,
+        id: i64,
+        expected: &[JobState],
+        state: JobState,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
+        }
+        let placeholders = (4..4 + expected.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE jobs SET state = ?2, reason = ?3 WHERE id = ?1 AND state IN ({placeholders})"
+        );
+        let mut values = vec![
+            Value::Integer(id),
+            Value::Text(state.as_str().into()),
+            reason.map_or(Value::Null, |r| Value::Text(r.into())),
+        ];
+        values.extend(expected.iter().map(|s| Value::Text(s.as_str().into())));
+        Ok(self.conn.execute(&sql, params_from_iter(values))? == 1)
     }
 
     /// Moves a queued job to `running` and records its log file. Returns `false`, changing
@@ -350,6 +394,9 @@ mod tests {
         assert_eq!(loaded.priority, 2);
         assert_eq!(loaded.discovered_updated_at, issue("1").updated_at);
         assert!(store.get(999).unwrap().is_none());
+        assert_eq!(loaded.binding_id.as_deref(), Some("proj-1"));
+        assert_eq!(loaded.directory, Some(PathBuf::from("demo dir")));
+        assert_eq!(loaded.executor, Some(ExecutorKind::Claude));
     }
 
     #[test]
@@ -741,5 +788,133 @@ mod tests {
             })
             .unwrap();
         assert_eq!(job.discovered_updated_at, i.updated_at);
+    }
+
+    #[test]
+    fn assign_stores_a_reason() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        store
+            .assign(
+                job.id,
+                JobState::WaitingBinding,
+                None,
+                None,
+                Some("project is not bound to a local directory"),
+            )
+            .unwrap();
+        let waiting = store.get(job.id).unwrap().unwrap();
+        assert_eq!(waiting.state, JobState::WaitingBinding);
+        assert_eq!(
+            waiting.reason.as_deref(),
+            Some("project is not bound to a local directory")
+        );
+        assert_eq!(waiting.binding_id, None);
+        assert_eq!(waiting.directory, None);
+    }
+
+    #[test]
+    fn a_new_verified_value_replaces_the_old_one() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let first = Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap();
+        let second = first + Duration::minutes(5);
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(job.id, JobState::Failed, None, None, Some(first))
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(
+                job.id,
+                JobState::AwaitingAcceptance,
+                None,
+                None,
+                Some(second),
+            )
+            .unwrap();
+        assert_eq!(
+            store.get(job.id).unwrap().unwrap().verified_updated_at,
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn an_existing_schema_version_is_kept() {
+        let (_dir, path, store) = file_store();
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 7)
+            .unwrap();
+        let _reopened = Store::open(&path).unwrap();
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn mark_started_refuses_a_job_that_is_already_running() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        let started = store.get(job.id).unwrap().unwrap().started_at;
+        assert!(
+            !store
+                .mark_started(job.id, Path::new("again.jsonl"))
+                .unwrap()
+        );
+        let still = store.get(job.id).unwrap().unwrap();
+        assert_eq!(still.state, JobState::Running);
+        assert_eq!(still.started_at, started);
+        assert_eq!(still.log_path, Some(PathBuf::from("1.jsonl")));
+    }
+
+    #[test]
+    fn set_state_if_changes_only_expected_states() {
+        let store = Store::open_in_memory().unwrap();
+        let waiting = [JobState::Queued, JobState::WaitingBinding];
+        let running = queued(&store, "1");
+        assert!(
+            store
+                .mark_started(running.id, Path::new("1.jsonl"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_state_if(
+                    running.id,
+                    &waiting,
+                    JobState::Canceled,
+                    Some("stopped by the user")
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store.get(running.id).unwrap().unwrap().state,
+            JobState::Running
+        );
+        let queued_job = queued(&store, "2");
+        assert!(
+            store
+                .set_state_if(
+                    queued_job.id,
+                    &waiting,
+                    JobState::Canceled,
+                    Some("stopped by the user")
+                )
+                .unwrap()
+        );
+        let canceled = store.get(queued_job.id).unwrap().unwrap();
+        assert_eq!(canceled.state, JobState::Canceled);
+        assert_eq!(canceled.reason.as_deref(), Some("stopped by the user"));
+        assert!(
+            !store
+                .set_state_if(queued_job.id, &[], JobState::Queued, None)
+                .unwrap()
+        );
     }
 }
