@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
 dirs = "7.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 sys-locale = "0.3.2"
