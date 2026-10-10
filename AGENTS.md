@@ -38,7 +38,7 @@
 
 - 本地会话：可以做实机验收、打版本标签、发布安装包。
 - 云端会话：只读代码、改代码、编译、测试、看 CI，只推会话指定的分支；不做实机验收、不打标签、不发布，需要实机的结论写「待本地实机」。
-- 两边都要做：开工、提交前、推送前各 `git fetch` 一次；远端已前进就在最新远端上 rebase 并重跑验证；版本号推送前按 `origin/main` 最新顺延；禁止强推（含 `--force-with-lease`）。
+- 两边都要做：开工、提交前、推送前各 `git fetch` 一次；远端已前进就在最新远端上 rebase 并重跑验证；需要升版本号时（维护者发布），推送前按 `origin/main` 最新顺延，外部贡献者不改版本号；禁止强推（含 `--force-with-lease`）。
 
 ## AI 工程门禁
 
@@ -46,7 +46,7 @@
 
 ## 贡献流程
 
-- 外部贡献者走 fork + PR：替外部贡献者工作的 AI 只推送贡献者自己 fork 里的分支，不直接推本仓库的 `main`；PR 按 `.github/pull_request_template.md` 填写。维护者在 M1 收尾前直接提交的做法见 `MAINTAINERS.md`。
+- 外部贡献者走 fork + PR：替外部贡献者工作的 AI 只推送贡献者自己 fork 里的分支，不直接推本仓库的 `main`；PR 按 `.github/pull_request_template.md` 填写。项目发起人在 M1 收尾前直接提交的做法见 `MAINTAINERS.md`。
 - 合并条件、评审人数与分支保护见 `MAINTAINERS.md`；开发环境与提交规范见 `CONTRIBUTING.md`。
 - 新增或移动极高风险文件（执行者参数、提示词、进程运行、凭据、IPC 协议）时，同步更新 `.github/CODEOWNERS`。
 
