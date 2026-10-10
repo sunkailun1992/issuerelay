@@ -56,7 +56,7 @@
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-bash scripts/check-secrets.sh
+bash scripts/check-secrets.sh --strict
 ```
 
 ## 禁止事项

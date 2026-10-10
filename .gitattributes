@@ -1,0 +1,5 @@
+# Check out text files with LF on every platform so scripts and test fixtures
+# behave the same on macOS and Windows; Windows batch files need CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

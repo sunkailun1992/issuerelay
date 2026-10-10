@@ -38,7 +38,7 @@
 ## 7. 开源卫生
 
 - 仓库是公开的。代码、测试、夹具、文档、提交信息里不得出现令牌、API key、公司名、内网地址、真实 Linear 工作区或需求内容、本机绝对路径。
-- 每次提交前跑 `bash scripts/check-secrets.sh`，CI 里用 `--strict`；GitHub 已开启密钥扫描与推送拦截。
+- 每次提交前跑 `bash scripts/check-secrets.sh --strict`，必须无输出、退出码为 0（CI 同样用 `--strict`；退出码 2 表示扫描本身出错，要先修好）；GitHub 已开启密钥扫描与推送拦截。
 - 来自真实运行的样本先脱敏再提交（见 `TESTING_SPEC.md`）。
 - 发现疑似泄露只报告文件和行号；是否改写历史由用户决定。
 
