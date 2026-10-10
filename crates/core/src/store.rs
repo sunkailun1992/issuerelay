@@ -34,6 +34,8 @@ CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
+const SCHEMA_VERSION: i64 = 1;
+
 const COLUMNS: &str = "id, issue_uuid, issue_identifier, title, binding_id, directory, executor, \
     state, reason, priority, issue_created_at, discovered_updated_at, verified_updated_at, \
     created_at, started_at, finished_at, log_path, summary";
@@ -51,7 +53,7 @@ pub struct Store {
 }
 
 fn fmt(time: DateTime<Utc>) -> String {
-    time.to_rfc3339_opts(SecondsFormat::Millis, true)
+    time.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
 fn conversion(column: usize, message: String) -> rusqlite::Error {
@@ -79,6 +81,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
         title: row.get(3)?,
         binding_id: row.get(4)?,
         directory: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
+        // An executor this build does not know reads as None, so rows from newer releases still list.
         executor: executor.as_deref().and_then(ExecutorKind::parse),
         state: JobState::parse(&state)
             .ok_or_else(|| conversion(7, format!("unknown state {state}")))?,
@@ -96,6 +99,8 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
 }
 
 impl Store {
+    /// Opens or creates the database at `path`, creating parent directories, enabling WAL and
+    /// recording the schema version.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -103,8 +108,9 @@ impl Store {
         }
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn)
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| format!("cannot open {} as a database", path.display()))?;
+        Self::init(conn).with_context(|| format!("cannot initialize {}", path.display()))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -113,6 +119,11 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        // Records the layout above so later releases can migrate; 0 means a fresh database.
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == 0 {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Self { conn })
     }
 
@@ -149,6 +160,7 @@ impl Store {
             .optional()?)
     }
 
+    /// The newest run of the issue (highest id), or `None` when it has none.
     pub fn latest_for_issue(&self, uuid: &str) -> Result<Option<Job>> {
         let sql =
             format!("SELECT {COLUMNS} FROM jobs WHERE issue_uuid = ?1 ORDER BY id DESC LIMIT 1");
@@ -158,6 +170,7 @@ impl Store {
             .optional()?)
     }
 
+    /// Runs in the given states, oldest first (by id).
     pub fn list_by_state(&self, states: &[JobState]) -> Result<Vec<Job>> {
         if states.is_empty() {
             return Ok(Vec::new());
@@ -175,6 +188,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The newest runs first, at most `limit` rows.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Job>> {
         let sql = format!("SELECT {COLUMNS} FROM jobs ORDER BY id DESC LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -212,19 +226,27 @@ impl Store {
         Ok(())
     }
 
-    pub fn mark_started(&self, id: i64, log_path: &Path) -> Result<()> {
-        self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, log_path = ?4 WHERE id = ?1",
+    /// Moves a queued job to `running` and records its log file. Returns `false`, changing
+    /// nothing, when the job is no longer queued (for example the user stopped it while the
+    /// issue was being re-read); the engine then does not start the run.
+    pub fn mark_started(&self, id: i64, log_path: &Path) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, log_path = ?4 \
+             WHERE id = ?1 AND state = ?5",
             params![
                 id,
                 JobState::Running.as_str(),
                 fmt(Utc::now()),
                 log_path.to_string_lossy().into_owned(),
+                JobState::Queued.as_str(),
             ],
         )?;
-        Ok(())
+        Ok(changed == 1)
     }
 
+    /// Records how a run ended. `verified_updated_at` is Linear's `updatedAt` read when the
+    /// result was verified (Linear's clock, the value the requeue rule compares); `None` keeps
+    /// whatever value the row already has.
     pub fn mark_finished(
         &self,
         id: i64,
@@ -234,12 +256,15 @@ impl Store {
         verified_updated_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = ?3, summary = ?4, verified_updated_at = ?5, finished_at = ?6 WHERE id = ?1",
+            "UPDATE jobs SET state = ?2, reason = ?3, summary = ?4, verified_updated_at = COALESCE(?5, verified_updated_at), finished_at = ?6 WHERE id = ?1",
             params![id, state.as_str(), reason, summary, verified_updated_at.map(fmt), fmt(Utc::now())],
         )?;
         Ok(())
     }
 
+    /// Queues a finished run again for the manual re-run. Keeps the previous run's
+    /// `verified_updated_at`, the most recent Linear time known for the issue; automatic
+    /// re-enqueueing inserts a new row instead.
     pub fn requeue(&self, id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE jobs SET state = ?2, reason = NULL, summary = NULL, started_at = NULL, finished_at = NULL WHERE id = ?1",
@@ -248,7 +273,9 @@ impl Store {
         Ok(())
     }
 
-    /// Runs left in `running` belong to a previous process that stopped; they are not retried.
+    /// Only the single running host may call this, at startup, before any run starts: a second
+    /// instance would mark the first one's runs as failed. Interrupted runs keep their verified
+    /// value and are not retried.
     pub fn recover_interrupted(&self) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE jobs SET state = ?2, reason = 'interrupted: IssueRelay stopped while the run was in progress', finished_at = ?1 WHERE state = ?3",
@@ -450,5 +477,269 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.get(id).unwrap().unwrap().state, JobState::Queued);
         assert_eq!(store.list_recent(10).unwrap().len(), 1);
+    }
+
+    fn file_store() -> (tempfile::TempDir, PathBuf, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        (dir, path, store)
+    }
+
+    #[test]
+    fn insert_and_assign_store_every_column() {
+        let store = Store::open_in_memory().unwrap();
+        let i = issue("7");
+        let job = store
+            .insert(NewJob {
+                issue: &i,
+                binding: None,
+                executor: None,
+                state: JobState::WaitingBinding,
+                reason: Some("unbound".into()),
+            })
+            .unwrap();
+        assert_eq!(job.issue_uuid, "7");
+        assert_eq!(job.issue_identifier, "DEMO-7");
+        assert_eq!(job.title, "Demo 需求");
+        assert_eq!(job.binding_id, None);
+        assert_eq!(job.directory, None);
+        assert_eq!(job.executor, None);
+        assert_eq!(job.state, JobState::WaitingBinding);
+        assert_eq!(job.reason.as_deref(), Some("unbound"));
+        assert_eq!(job.priority, 2);
+        assert_eq!(job.issue_created_at, i.created_at);
+        assert_eq!(job.discovered_updated_at, i.updated_at);
+        assert_eq!(job.verified_updated_at, None);
+
+        let b = binding();
+        store
+            .assign(
+                job.id,
+                JobState::Queued,
+                Some(&b),
+                Some(ExecutorKind::Codex),
+                None,
+            )
+            .unwrap();
+        let assigned = store.get(job.id).unwrap().unwrap();
+        assert_eq!(assigned.state, JobState::Queued);
+        assert_eq!(assigned.binding_id.as_deref(), Some("proj-1"));
+        assert_eq!(assigned.directory, Some(PathBuf::from("demo dir")));
+        assert_eq!(assigned.executor, Some(ExecutorKind::Codex));
+        assert_eq!(assigned.reason, None);
+    }
+
+    #[test]
+    fn set_state_and_mark_finished_store_the_reason() {
+        let store = Store::open_in_memory().unwrap();
+        let first = queued(&store, "1");
+        store
+            .set_state(first.id, JobState::Canceled, Some("stopped by the user"))
+            .unwrap();
+        assert_eq!(
+            store.get(first.id).unwrap().unwrap().reason.as_deref(),
+            Some("stopped by the user")
+        );
+        let second = queued(&store, "2");
+        assert!(store.mark_started(second.id, Path::new("2.jsonl")).unwrap());
+        store
+            .mark_finished(
+                second.id,
+                JobState::Failed,
+                Some("run exceeded the time limit"),
+                None,
+                None,
+            )
+            .unwrap();
+        let ended = store.get(second.id).unwrap().unwrap();
+        assert_eq!(ended.state, JobState::Failed);
+        assert_eq!(ended.reason.as_deref(), Some("run exceeded the time limit"));
+        assert!(ended.finished_at.is_some());
+    }
+
+    #[test]
+    fn requeue_keeps_the_previous_verified_value_and_clears_the_reason() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let verified = Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(job.id, JobState::Failed, Some("boom"), None, Some(verified))
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        let again = store.get(job.id).unwrap().unwrap();
+        assert_eq!(again.state, JobState::Queued);
+        assert_eq!(again.verified_updated_at, Some(verified));
+        assert_eq!(again.reason, None);
+        assert_eq!(again.started_at, None);
+        assert_eq!(again.finished_at, None);
+    }
+
+    #[test]
+    fn mark_finished_without_a_verified_value_keeps_the_previous_one() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let verified = Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(job.id, JobState::Failed, None, None, Some(verified))
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(
+                job.id,
+                JobState::Failed,
+                Some("could not verify"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            store.get(job.id).unwrap().unwrap().verified_updated_at,
+            Some(verified)
+        );
+    }
+
+    #[test]
+    fn mark_started_only_moves_queued_jobs() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        store
+            .set_state(job.id, JobState::Canceled, Some("stopped by the user"))
+            .unwrap();
+        assert!(!store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        let still = store.get(job.id).unwrap().unwrap();
+        assert_eq!(still.state, JobState::Canceled);
+        assert_eq!(still.started_at, None);
+        assert!(!store.mark_started(999, Path::new("x.jsonl")).unwrap());
+    }
+
+    #[test]
+    fn recover_interrupted_keeps_verified_and_sets_finished_at() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let verified = Utc.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .mark_finished(job.id, JobState::Failed, None, None, Some(verified))
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        let untouched = queued(&store, "2");
+        assert_eq!(store.recover_interrupted().unwrap(), 1);
+        let recovered = store.get(job.id).unwrap().unwrap();
+        assert_eq!(recovered.state, JobState::Failed);
+        assert!(
+            recovered
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("interrupted")
+        );
+        assert!(recovered.finished_at.is_some());
+        assert_eq!(recovered.verified_updated_at, Some(verified));
+        assert_eq!(
+            store.get(untouched.id).unwrap().unwrap().state,
+            JobState::Queued
+        );
+    }
+
+    #[test]
+    fn list_recent_is_newest_first_and_honors_the_limit() {
+        let store = Store::open_in_memory().unwrap();
+        let ids: Vec<i64> = ["1", "2", "3"]
+            .iter()
+            .map(|u| queued(&store, u).id)
+            .collect();
+        let recent: Vec<i64> = store.list_recent(2).unwrap().iter().map(|j| j.id).collect();
+        assert_eq!(recent, vec![ids[2], ids[1]]);
+        assert!(store.list_recent(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_by_state_is_oldest_first() {
+        let store = Store::open_in_memory().unwrap();
+        let a = queued(&store, "1");
+        let b = queued(&store, "2");
+        let c = queued(&store, "3");
+        store
+            .set_state(b.id, JobState::WaitingBinding, None)
+            .unwrap();
+        let listed: Vec<i64> = store
+            .list_by_state(&[JobState::Queued, JobState::WaitingBinding])
+            .unwrap()
+            .iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(listed, vec![a.id, b.id, c.id]);
+    }
+
+    #[test]
+    fn unknown_state_in_the_database_is_an_error() {
+        let (_dir, path, store) = file_store();
+        let job = queued(&store, "1");
+        let other = queued(&store, "2");
+        let raw = Connection::open(&path).unwrap();
+        raw.execute(
+            "UPDATE jobs SET state = 'paused' WHERE id = ?1",
+            params![job.id],
+        )
+        .unwrap();
+        let err = store.get(job.id).unwrap_err();
+        assert!(format!("{err:#}").contains("paused"), "{err:#}");
+        let queued_ids: Vec<i64> = store
+            .list_by_state(&[JobState::Queued])
+            .unwrap()
+            .iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(queued_ids, vec![other.id]);
+    }
+
+    #[test]
+    fn malformed_timestamp_is_an_error() {
+        let (_dir, path, store) = file_store();
+        let job = queued(&store, "1");
+        let raw = Connection::open(&path).unwrap();
+        raw.execute(
+            "UPDATE jobs SET created_at = 'yesterday' WHERE id = ?1",
+            params![job.id],
+        )
+        .unwrap();
+        assert!(store.get(job.id).is_err());
+    }
+
+    #[test]
+    fn file_store_uses_wal_and_records_its_schema_version() {
+        let (_dir, path, _store) = file_store();
+        let raw = Connection::open(&path).unwrap();
+        let mode: String = raw
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let version: i64 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn sub_millisecond_linear_times_survive() {
+        let store = Store::open_in_memory().unwrap();
+        let mut i = issue("1");
+        i.updated_at =
+            Utc.with_ymd_and_hms(2026, 10, 1, 8, 0, 1).unwrap() + Duration::microseconds(234_567);
+        let job = store
+            .insert(NewJob {
+                issue: &i,
+                binding: None,
+                executor: None,
+                state: JobState::Queued,
+                reason: None,
+            })
+            .unwrap();
+        assert_eq!(job.discovered_updated_at, i.updated_at);
     }
 }
