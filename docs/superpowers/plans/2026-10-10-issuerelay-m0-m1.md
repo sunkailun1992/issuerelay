@@ -2901,6 +2901,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 9: core SQLite 运行记录
 
+> 执行记录（2026-10-11）：已完成。评审中修订了 `mark_started`（只动排队中的记录，返回是否改了）、`mark_finished`（`None` 保留原核对值）、时间精度（AutoSi）、数据库版本号，新增 `set_state_if`，并补齐测试；下文实现块是原计划文本，以仓库为准。
+
 **Files:**
 - Create: `crates/core/src/store.rs`
 - Modify: `crates/core/src/lib.rs`、`crates/core/Cargo.toml`
@@ -2909,7 +2911,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: Task 7 的 `Binding`、`ExecutorKind`；Task 8 的 `Issue`、`Job`、`JobState`
 - Produces:
   - `store::NewJob<'a> { issue: &'a Issue, binding: Option<&'a Binding>, executor: Option<ExecutorKind>, state: JobState, reason: Option<String> }`
-  - `store::Store`：`open(&Path)`、`open_in_memory()`、`insert(NewJob) -> Result<Job>`、`get(i64) -> Result<Option<Job>>`、`latest_for_issue(&str) -> Result<Option<Job>>`、`list_by_state(&[JobState]) -> Result<Vec<Job>>`、`list_recent(usize) -> Result<Vec<Job>>`、`assign(id, state, Option<&Binding>, Option<ExecutorKind>, Option<&str>)`、`set_state(id, state, Option<&str>)`、`mark_started(id, &Path) -> Result<bool>`（只把排队中的记录改为运行中，返回是否改了）、`mark_finished(id, state, reason: Option<&str>, summary: Option<&str>, verified_updated_at: Option<DateTime<Utc>>)`（`None` 保留原有核对值）、`requeue(id)`、`recover_interrupted() -> Result<usize>`
+  - `store::Store`：`open(&Path)`、`open_in_memory()`、`insert(NewJob) -> Result<Job>`、`get(i64) -> Result<Option<Job>>`、`latest_for_issue(&str) -> Result<Option<Job>>`、`list_by_state(&[JobState]) -> Result<Vec<Job>>`、`list_recent(usize) -> Result<Vec<Job>>`、`assign(id, state, Option<&Binding>, Option<ExecutorKind>, Option<&str>)`、`set_state(id, state, Option<&str>)`、`mark_started(id, &Path) -> Result<bool>`（只把排队中的记录改为运行中，返回是否改了）、`mark_finished(id, state, reason: Option<&str>, summary: Option<&str>, verified_updated_at: Option<DateTime<Utc>>)`（`None` 保留原有核对值）、`set_state_if(id, expected: &[JobState], state, reason) -> Result<bool>`（只在当前状态属于 `expected` 时改，返回是否改了）、`requeue(id)`、`recover_interrupted() -> Result<usize>`
 
 - [ ] **Step 1: 加依赖**
 
@@ -7306,16 +7308,19 @@ impl Engine {
         });
         let spec = executor::build(kind, program, cfg.permission_for(&binding), binding.model.as_deref(), &binding.directory, prompt_text);
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
-        if !self.store().mark_started(job.id, &log_path)? {
-            // The user stopped it while the issue was being re-read.
-            return Ok(false);
-        }
+        // Register the run before marking it started, so a stop request in between finds the token.
         let cancel = CancellationToken::new();
         self.inner
             .running
             .lock()
             .expect("running lock")
             .insert(job.id, RunningJob { directory: binding.directory.clone(), cancel: cancel.clone() });
+        let started = self.store().mark_started(job.id, &log_path);
+        if !matches!(started, Ok(true)) {
+            // The user stopped it while the issue was being re-read, or the store failed.
+            self.inner.running.lock().expect("running lock").remove(&job.id);
+            return started.map(|_| false);
+        }
         let limits = RunLimits {
             total: Duration::from_secs(cfg.settings.run_timeout_mins.saturating_mul(60)),
             stall: Duration::from_secs(cfg.settings.stall_timeout_mins.saturating_mul(60)),
@@ -7376,7 +7381,19 @@ impl Engine {
         if !matches!(job.state, JobState::Queued | JobState::WaitingBinding) {
             bail!("job {job_id} is {} and cannot be stopped", job.state.as_str());
         }
-        self.store().set_state(job_id, JobState::Canceled, Some("stopped by the user"))
+        let waiting = [JobState::Queued, JobState::WaitingBinding];
+        if self.store().set_state_if(job_id, &waiting, JobState::Canceled, Some("stopped by the user"))? {
+            return Ok(());
+        }
+        // It started between the two reads: stop the run itself.
+        let running = self.inner.running.lock().expect("running lock").get(&job_id).map(|r| r.cancel.clone());
+        match running {
+            Some(token) => {
+                token.cancel();
+                Ok(())
+            }
+            None => bail!("job {job_id} changed state while being stopped; try again"),
+        }
     }
 
     pub fn retry_job(&self, job_id: i64) -> Result<()> {
