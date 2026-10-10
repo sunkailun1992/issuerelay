@@ -13,12 +13,13 @@
 | `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 工作区、锁定的依赖、工具链 |
 | `AGENTS.md`、`CLAUDE.md` | AI 入口（`CLAUDE.md` 只导入 `AGENTS.md`） |
 | `README.md`、`LICENSE` | 说明与许可证 |
+| `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`、`MAINTAINERS.md` | 贡献指南、行为准则、安全政策、维护者与治理 |
 | `crates/` | Rust crate |
 | `app/` | （M2）Tauri 外壳与面板前端 |
 | `docs/` | 规范、设计、计划、验收报告 |
 | `scripts/` | 仓库脚本 |
 | `spikes/` | 一次性验证工程（独立 cargo 工程，不进工作区） |
-| `.github/` | CI 与工具入口 |
+| `.github/` | CI、贡献模板与工具入口 |
 
 ## 3. crates/
 
@@ -52,6 +53,10 @@
 - `scripts/check-secrets.sh`：扫描密钥和本机信息。新脚本的文件头写清用途、用法、退出码。
 - `.github/workflows/ci.yml`：在 macOS 与 Windows 上跑格式、静态检查、测试，并扫描密钥。
 - `.github/copilot-instructions.md`：只转发到 `AGENTS.md`。
+- `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。
+- `.github/pull_request_template.md`、`.github/ISSUE_TEMPLATE/`：PR 与 issue 模板，带「已脱敏」确认项。
+- `.github/dependabot.yml`：每周检查 cargo 与 GitHub Actions 依赖更新。
+- 仓库设置（规则集、合并方式、安全功能）不在仓库文件里，现状记在 `MAINTAINERS.md` 的「分支保护」一节；改设置时同步改那一节。
 
 ## 7. 目录变更检查
 

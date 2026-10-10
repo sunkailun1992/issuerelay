@@ -1,0 +1,15 @@
+# Code owners are requested for review automatically. High-risk paths are
+# listed explicitly so they stay covered when more maintainers join; add new
+# high-risk files here when they are created.
+*                                  @sunkailun1992
+/AGENTS.md                         @sunkailun1992
+/scripts/check-secrets.sh          @sunkailun1992
+/.github/                          @sunkailun1992
+/crates/core/src/prompt.rs         @sunkailun1992
+/crates/core/src/engine.rs         @sunkailun1992
+/crates/core/src/executor/         @sunkailun1992
+/crates/core/src/runner.rs         @sunkailun1992
+/crates/core/src/linear/auth.rs    @sunkailun1992
+/crates/core/src/ipc/protocol.rs   @sunkailun1992
+/crates/cli/src/mcp.rs             @sunkailun1992
+/crates/cli/tests/mcp_tools.rs     @sunkailun1992

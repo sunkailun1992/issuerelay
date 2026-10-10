@@ -44,6 +44,12 @@
 
 改动前按 `docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md` 判风险。执行者参数与权限档位、提示词固定规则、进程树结束、凭据存储与授权、IPC 方法表、标记完成属于极高风险。
 
+## 贡献流程
+
+- 外部贡献者走 fork + PR：替外部贡献者工作的 AI 只推送贡献者自己 fork 里的分支，不直接推本仓库的 `main`；PR 按 `.github/pull_request_template.md` 填写。维护者在 M1 收尾前直接提交的做法见 `MAINTAINERS.md`。
+- 合并条件、评审人数与分支保护见 `MAINTAINERS.md`；开发环境与提交规范见 `CONTRIBUTING.md`。
+- 新增或移动高风险文件（执行者参数、提示词、进程运行、凭据、IPC 协议）时，同步更新 `.github/CODEOWNERS`。
+
 ## 多智能体协作
 
 - 子智能体可以并行读代码、查文档、补测试、做 Review。

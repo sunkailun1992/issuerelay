@@ -47,3 +47,11 @@
 ## 六、交付说明
 
 使用 `AI_ENGINEERING_GUARDRAILS.md` 第 8 节的模板。
+
+## 七、外部贡献
+
+1. 先确认 issue 已获维护者认可（大改动、高风险范围必须如此）。
+2. 在贡献者自己的 fork 里从最新 `main` 切分支，按第一节的标准流程开发。
+3. PR 标题用英文 Conventional Commits；描述按 PR 模板填写风险等级、验证结果和实机结论。
+4. CI 三项（macOS、Windows、密钥扫描）全绿，评审对话全部解决，维护者批准后由维护者 squash 合并。
+5. 合并后如果改了高风险文件的位置，检查 `.github/CODEOWNERS` 是否仍然覆盖。

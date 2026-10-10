@@ -48,6 +48,16 @@ cargo run -p issuerelay-cli -- --help       # 命令行
 
 提交前的检查、代码规范与开发流程见 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding](docs/ai-coding/README.md)。
 
+## 参与贡献 / Contributing
+
+欢迎 issue 和 PR。动手前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)：开发环境、提交前检查、PR 流程 / setup, checks, pull requests
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)：行为准则 / code of conduct
+- [SECURITY.md](SECURITY.md)：私下报告安全问题 / report vulnerabilities privately
+- [MAINTAINERS.md](MAINTAINERS.md)：维护者、评审与合并规则 / maintainers and merge rules
+
 ## 文档
 
 | 文档 | 内容 |

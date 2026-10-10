@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 / Security vulnerability
+    url: https://github.com/sunkailun1992/issuerelay/security/advisories/new
+    about: 请私下报告，不要开公开 issue / Report privately, never in a public issue
+  - name: 行为准则举报 / Code of conduct report
+    url: https://github.com/sunkailun1992/issuerelay/security/advisories/new
+    about: 私下提交，标题写 CoC report / Report privately with the title "CoC report"

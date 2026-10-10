@@ -1,0 +1,67 @@
+name: 问题报告 / Bug report
+description: IssueRelay 的行为与预期不符 / Something does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓库公开。提交前请删除令牌、凭据、公司信息、内网地址、真实 Linear 需求内容和本机路径。安全漏洞请走 Security 页面的私密报告，不要在这里提交。
+        This repository is public. Remove tokens, credentials, company information, internal addresses, real Linear content and local paths. Report security issues privately from the Security tab instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么 / What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望的行为 / Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: IssueRelay 版本或提交 / Version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / Operating system
+      options:
+        - macOS
+        - Windows
+        - 其他 / Other
+    validations:
+      required: true
+  - type: dropdown
+    id: executor
+    attributes:
+      label: 执行者 / Executor
+      options:
+        - Claude Code
+        - Codex
+        - 两者 / Both
+        - 不涉及 / Not related
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（已脱敏）/ Logs (redacted)
+      render: text
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 确认 / Confirmation
+      options:
+        - label: 我已删除令牌、凭据、公司信息、内网地址、真实 Linear 需求内容和本机路径 / I removed tokens, credentials, company information, internal addresses, real Linear content and local paths
+          required: true
