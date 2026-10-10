@@ -1,14 +1,14 @@
-# linear-autodev 设计文档
+# IssueRelay 设计文档
 
 - 日期：2026-10-10
-- 状态：待评审（设计阶段，尚无代码）
-- 工作名：linear-autodev（正式产品名待定，见第 18 节）
+- 状态：已批准（用户 2026-10-10），按里程碑实施
+- 名称：IssueRelay（用户 2026-10-10 定；仓库、命令行与程序标识用小写 `issuerelay`）
 
 ## 1. 背景与目标
 
 团队把需求写在 Linear。此前已在一次手动试跑中验证过「需求 → AI 改代码 → 推测试分支 → 测试环境自动部署 → 读回验收 → 回写 Linear 状态」这条链（由 Claude Code 在对话里完成），缺的是自动发现新需求这一环。
 
-linear-autodev 是装在每个开发者电脑上的托盘程序：实时监听 Linear 上指派给当前用户、带指定标签的需求，自动交给本机的 Claude Code 或 Codex 去完成。读需求、改代码、git、推送、改 Linear 状态、写评论，全部由 Claude Code / Codex 在用户自己的环境里完成；本程序只负责发现需求、派活、核对结果、留记录，并在面板上让用户点最后一步「标记完成」。
+IssueRelay 是装在每个开发者电脑上的托盘程序：实时监听 Linear 上指派给当前用户、带指定标签的需求，自动交给本机的 Claude Code 或 Codex 去完成。读需求、改代码、git、推送、改 Linear 状态、写评论，全部由 Claude Code / Codex 在用户自己的环境里完成；本程序只负责发现需求、派活、核对结果、留记录，并在面板上让用户点最后一步「标记完成」。
 
 ### 1.1 使用者
 
@@ -77,14 +77,14 @@ linear-autodev 是装在每个开发者电脑上的托盘程序：实时监听 L
 
 ### 4.1 进程
 
-- **托盘程序**（Tauri 2，单实例）：内含监听引擎、面板和托盘菜单。关闭窗口不退出；从托盘退出即停止监控（有任务在跑时先询问）。
-- **命令行小程序** `linear-autodev`（控制台程序）：自己不执行任务，只经本机通信通道向托盘程序发请求；托盘程序没在运行时给出提示，并可代为启动。Windows 上带窗口的程序无法向终端输出，所以分成两个程序，装在同一个安装包里。
+- **托盘程序** IssueRelay（Tauri 2，单实例）：内含监听引擎、面板和托盘菜单。关闭窗口不退出；从托盘退出即停止监控（有任务在跑时先询问）。
+- **命令行小程序** `issuerelay`（控制台程序）：自己不执行任务，只经本机通信通道向托盘程序发请求；托盘程序没在运行时给出提示，并可代为启动。Windows 上带窗口的程序无法向终端输出，所以分成两个程序，装在同一个安装包里。
 - **执行者进程**：引擎启动的 `claude` / `codex` 子进程，工作目录为绑定目录。
 
 ### 4.2 代码结构（Rust 工作区）
 
 ```
-linear-autodev/
+issuerelay/
 ├── crates/core        监听引擎（库）：Linear 连接、轮询、调度、执行者适配、记录、环境检查、通信协议
 ├── crates/cli         命令行小程序与 MCP 服务
 ├── app/src-tauri      Tauri 外壳：托盘、窗口、通知、开机自启、更新、通信服务端，内嵌 core
@@ -175,7 +175,7 @@ linear-autodev/
 - 只处理本需求 `<编号>`；先用 Linear 工具读取需求、父需求和评论。
 - 开工时把状态改为 In Progress；推完测试分支并验收后改为 In Testing。
 - **绝不**把状态改为 Done，**绝不**推送 main / master 等主分支，**绝不**发布正式环境。
-- 写的每条评论都以 `🤖 linear-autodev` 开头，表明是 AI 代写。
+- 写的每条评论都以 `🤖 IssueRelay` 开头，表明是 AI 代写。
 - 遵守工作目录及目标仓库里的 `AGENTS.md` / `CLAUDE.md`。
 - 需求写得不清楚时，在需求下评论提问、改回 Todo、去掉 `ai-ready`，然后结束。
 - 失败时撤回自己推送的改动，评论失败原因，改回 Todo，去掉 `ai-ready`。
@@ -252,7 +252,7 @@ linear-autodev/
 
 ### 10.1 命令行
 
-`linear-autodev status | pause | resume | poll | doctor | bind list|add|remove | jobs | logs <任务>`。默认输出给人看的格式，加 `--json` 输出机器可读格式。
+`issuerelay status | pause | resume | poll | doctor | bind list|add|remove | jobs | logs <任务>`。默认输出给人看的格式，加 `--json` 输出机器可读格式。
 
 ### 10.2 本机通信协议
 
@@ -262,7 +262,7 @@ linear-autodev/
 
 ### 10.3 MCP 服务
 
-`linear-autodev mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除。
+`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除。
 
 ## 11. 配置与数据位置
 
@@ -327,7 +327,7 @@ linear-autodev/
 
 ## 18. 待定问题
 
-1. **产品名**：工作名 linear-autodev；正式名称和图标待定。名称里带「Linear」可能涉及商标，发布前确认。
+1. **产品名**：已定为 IssueRelay（名称不含「Linear」，避开商标问题）；图标待定。
 2. **代码签名**：是否购买 Apple Developer ID（用于公证）和 Windows 代码签名证书；没有的话先发未签名包。
 3. **仓库何时公开**：先建私有仓库；公开前由用户确认劳动合同里的知识产权条款，并完成开源检查。
 4. **Windows 验证环境**：M0、M2、M3 需要一台 Windows 实机或虚拟机。
