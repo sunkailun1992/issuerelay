@@ -1,6 +1,6 @@
 //! M0 probe: authorize against Linear's MCP server with OAuth (loopback redirect),
 //! store the token in the system keychain, and dump raw tool output for the parser.
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use rmcp::{
@@ -88,37 +88,38 @@ async fn login() -> Result<()> {
     let url = state.get_authorization_url().await?;
     println!("Open this URL to authorize:\n{url}");
     let _ = open::that_detached(&url);
-    let (code, csrf) = wait_for_callback(&listener).await?;
-    state.handle_callback(&code, &csrf).await?;
+    let callback = wait_for_callback(&listener).await?;
+    state.handle_callback_url(&callback).await?;
     let scopes = KeyringStore.load().await?.map(|c| c.granted_scopes).unwrap_or_default();
     println!("authorized; granted scopes: {scopes:?}");
     Ok(())
 }
 
-async fn wait_for_callback(listener: &TcpListener) -> Result<(String, String)> {
+/// Waits for the browser redirect and returns the full callback URL, so rmcp can
+/// validate `code`, `state` and the RFC 9207 `iss` parameter itself.
+async fn wait_for_callback(listener: &TcpListener) -> Result<String> {
+    let port = listener.local_addr()?.port();
     loop {
         let (mut socket, _) = listener.accept().await?;
         let mut buf = vec![0u8; 8192];
         let n = socket.read(&mut buf).await?;
         let request = String::from_utf8_lossy(&buf[..n]);
-        if let Some(pair) = parse_callback(request.lines().next().unwrap_or_default()) {
+        if let Some(url) = callback_url(request.lines().next().unwrap_or_default(), port) {
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>Authorized. You can close this tab.</h1>")
                 .await?;
-            return Ok(pair);
+            return Ok(url);
         }
         socket.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n").await?;
     }
 }
 
-fn parse_callback(request_line: &str) -> Option<(String, String)> {
+/// Any request to /callback is the redirect, including an OAuth error response; rmcp
+/// reports a missing `code` or a server error itself instead of the probe waiting forever.
+fn callback_url(request_line: &str, port: u16) -> Option<String> {
     let target = request_line.split_whitespace().nth(1)?;
-    let url = url::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-    if url.path() != "/callback" {
-        return None;
-    }
-    let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
-    Some((query.get("code")?.clone(), query.get("state")?.clone()))
+    let url = url::Url::parse(&format!("http://127.0.0.1:{port}{target}")).ok()?;
+    (url.path() == "/callback").then(|| url.to_string())
 }
 
 async fn connect() -> Result<Client> {
