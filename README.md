@@ -38,7 +38,7 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 开发
 
-需要 Rust 1.99（`rust-toolchain.toml` 会自动选用）。
+需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。
 
 ```bash
 cargo test --workspace

@@ -5424,23 +5424,10 @@ impl McpLinear {
     }
 }
 
-/// The cursor to request next. M0 never observed Linear's last page, so besides a missing
-/// cursor, an empty page or a cursor that did not advance also ends the walk.
+/// The cursor to request next. M0 never observed the last page of `list_issues`, so besides a
+/// missing cursor, an empty page or a cursor that did not advance also ends the walk.
 fn follow(page_was_empty: bool, next: Option<String>, last: Option<&str>) -> Option<String> {
     next.filter(|cursor| !page_was_empty && Some(cursor.as_str()) != last)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::follow;
-
-    #[test]
-    fn paging_stops_on_empty_pages_and_repeated_cursors() {
-        assert_eq!(follow(false, Some("c2".into()), None).as_deref(), Some("c2"));
-        assert_eq!(follow(false, None, Some("c1")), None);
-        assert_eq!(follow(true, Some("c3".into()), Some("c2")), None);
-        assert_eq!(follow(false, Some("c2".into()), Some("c2")), None);
-    }
 }
 
 #[async_trait::async_trait]
@@ -5480,6 +5467,19 @@ impl LinearApi for McpLinear {
 
     async fn statuses(&self, team_id: &str) -> Result<Vec<String>> {
         parse::parse_statuses(&self.call("list_issue_statuses", json!({"team": team_id})).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::follow;
+
+    #[test]
+    fn paging_stops_on_empty_pages_and_repeated_cursors() {
+        assert_eq!(follow(false, Some("c2".into()), None).as_deref(), Some("c2"));
+        assert_eq!(follow(false, None, Some("c1")), None);
+        assert_eq!(follow(true, Some("c3".into()), Some("c2")), None);
+        assert_eq!(follow(false, Some("c2".into()), Some("c2")), None);
     }
 }
 ```
@@ -5638,7 +5638,8 @@ pub const LINEAR_MCP_URL: &str = "https://mcp.linear.app/mcp";
 pub const OAUTH_ACCOUNT: &str = "linear-oauth";
 pub const API_KEY_ACCOUNT: &str = "linear-api-key";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
-/// A browser may open idle connections to the loopback port; none may block the real redirect.
+/// A browser may open idle connections to the loopback port; each gets at most this long, so
+/// one cannot hold up the real redirect for long.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Keeps rmcp's OAuth credentials (token, refresh token, client id) in the system keychain.
@@ -5789,7 +5790,7 @@ async fn wait_for_callback(listener: &TcpListener) -> Result<String> {
         let request = String::from_utf8_lossy(&buf[..n]);
         if let Some(url) = callback_url(request.lines().next().unwrap_or_default(), port) {
             socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>IssueRelay received the authorization. You can close this tab.</h1>")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<h1>IssueRelay received the browser's reply. You can close this tab and return to IssueRelay.</h1>")
                 .await?;
             return Ok(url);
         }
@@ -8726,9 +8727,9 @@ claude mcp add issuerelay -- "$(pwd)/target/debug/issuerelay" mcp
 
 1. 失败：建一条做不到的需求（例如要求修改沙箱里不存在的 `ghost/` 目录下的文件，并写明找不到就按失败处理）。期望：AI 评论失败原因、改回 Todo、去掉 `ai-ready`；本地记为 `failed`；`test` 分支没有新提交。
 2. 超时：把配置文件（`dirs::config_dir()/com.sunkailun.issuerelay/config.toml`）`[settings]` 里的 `run_timeout_mins` 临时改为 2，重启宿主，建一条明显超过 2 分钟的需求。期望：到时整个进程树被结束（`pgrep -fl claude` 与 `pgrep -fl codex` 没有本次运行留下的进程），本地记为 `failed` 且原因是超时；验完改回 60。
-3. 其他权限档位：用 `bind remove` 和 `bind add ... --permission auto` 把绑定改成「自动审查」，Claude、Codex 各跑一条简单需求；再用 `--permission personal`（「按个人设置」）各跑一条。记录是否卡在确认、是否完成；跑不通的档位在报告和设计 6.1 里写明「不可用」及原因。
+3. 其他权限档位：对同一项目再执行一次 `bind add ... --permission auto`（会替换原绑定），把它改成「自动审查」，Claude、Codex 各跑一条简单需求；再用 `--permission personal`（「按个人设置」）各跑一条。记录是否卡在确认、是否完成；跑不通的档位在报告和设计 6.1 里写明「不可用」及原因。
 4. 子需求：在沙箱建一条父需求和一条带 `ai-ready` 的子需求，记录 `list_issues` 返回的 `parentId` 形态（编号还是 UUID），与 Task 16 的 `parse_issue` 核对。
-5. 翻页末页：沙箱里带 `ai-ready` 的需求超过一页时，记录 `hasNextPage` 为假的那一页的形态（只记形态，不存内容）。
+5. 翻页末页：用任一 Linear MCP 客户端（例如 Claude Code 的 Linear 工具）以 `limit` 1 沿 `cursor` 翻 `list_issues` 到最后一页，记录 `hasNextPage` 为假的那一页的形态（只记形态，不存内容）。
 6. 令牌续期：宿主连续运行超过访问令牌有效期后，确认仍能查询（续期成功）；时间不够就写「待观察」。
 
 - [ ] **Step 6: 写验收报告并提交**
@@ -8760,7 +8761,7 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 6.2 | 退出托盘程序时询问「等待完成 / 立即停止」 | M2 |
 | 11 | 日志按保留天数与总大小清理（默认 30 天、1 GB） | M2 |
 | 10.3 | 在设置里一键把 MCP 控制服务注册到 Claude Code / Codex | M2 |
-| 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 发现 F2） | M2 |
+| 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 推断 F2，M2 实机验证） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |

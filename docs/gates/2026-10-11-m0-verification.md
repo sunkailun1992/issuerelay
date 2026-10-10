@@ -4,8 +4,8 @@
 
 - macOS 上，Claude Code 与 Codex 都能按设计 6.1 的「完全放开」档参数无人值守完成一条测试需求：读 Linear、改测试仓库、推测试分支、改状态、写评论，全程没有卡在确认上。
 - Rust（rmcp 3.5.1）经 OAuth 连上了 Linear MCP，8 个必需工具都在，返回形态已记录。
-- 发现 6 处与设计或计划不一致（F1–F6），已改设计与计划。
-- 未验证：Windows（暂无机器）；「自动审查」「按个人设置」两档权限；失败、超时等结果。这些已排进计划 Task 23。
+- 发现 6 处与设计或计划不一致（F1–F6），另有 2 处设计写法更新（G1–G2），都已改设计与计划。
+- 未验证：Windows（暂无机器，待有机器后补做）；「自动审查」「按个人设置」两档权限；失败、超时等结果。后两类已排进计划 Task 23。
 
 ## 环境
 
@@ -23,7 +23,7 @@
 | 授权在哪里完成 | 回调地址是本机 `127.0.0.1`，授权必须在运行程序的这台机器上完成。第 2、3 次用户在自己的浏览器里点了授权，但回调没有到达本机的监听端口（原因未确认）；第 4 次改在本机的应用内浏览器里完成 |
 | 授予的 scope | `read`、`write` |
 | 8 个必需工具都在 | 是（原始输出共 68 个工具，样本只留 8 个）。`list_issues` 接受 `assignee`、`label`、`state`、`limit`、`cursor`、`fields`，另有 `project`、`orderBy`、`updatedAt` |
-| 翻页 | 字段是 `cursor`，配合 `hasNextPage`。第二页仍报 `hasNextPage` 为真，因为工作区里还有沙箱以外带 `ai-ready` 的需求（用第三页确认过，未存样本）。末页（`hasNextPage` 为假）的形态没有观察到，计划让翻页在空页或游标不前进时也停止 |
+| 翻页 | 字段是 `cursor`，配合 `hasNextPage`。第二页仍报 `hasNextPage` 为真，因为工作区里还有沙箱以外带 `ai-ready` 的需求（另查过第三页确认，未存样本）。`list_issues` 的末页没有观察到；`list_projects`、`list_issue_labels`、`list_teams` 的样本里能看到末页形态（`hasNextPage` 为假、没有 `cursor`）。计划让翻页在空页或游标不前进时也停止 |
 | 需求字段形态 | `id` 是编号（如 `DEMO-1`）；有 `uuid`；`status` 是状态名字符串；`labels` 是名称数组；`priority` 是 `{value, name}`；`project` 是项目名；`projectId` 是项目的 `uuid`，与 `list_projects` 返回的项目 `id`（`P-<团队>-N` 编号）**不是**同一种 ID（F1） |
 | 查不到需求时 | 工具错误（`isError` 为真），文字为 `{"error":"invalid_request","message":"Could not find referenced Issue.","status":400,...}`，里面没有 `not found`（F6）。样本文件开头的 `ERROR: ` 是探针按 `isError` 加的标记，不是服务端文本 |
 | 当前用户 | `get_user` 传 `{"query":"me"}`；ID 字段是 `id`，与需求的 `assigneeId` 一致 |
@@ -63,8 +63,8 @@
 | F4 | `codex login status` 把结果写到标准错误 | 计划 Task 18 的 `parse_codex_login` 已同时读取标准输出和标准错误；测试补上「只有标准错误有内容」的用例 |
 | F5 | Linear 的授权服务器要求回调带 RFC 9207 的 `iss`；只把 `code`、`state` 交给 rmcp 会被拒绝 | 探针已改为 `handle_callback_url`；计划 Task 17 同样返回完整回调地址并调用 `handle_callback_url`，先读出 OAuth 的 `error` 参数再交给 rmcp（rmcp 不读它），任何 `/callback` 请求都结束等待；设计第 7 节写明 |
 | F6 | 查不到需求时的错误文字是 `Could not find referenced Issue.` | 计划 Task 16 的 `is_not_found` 同时认 `could not find` 与 `not found`，假服务端改用真实文字 |
-| D1 | 设计 6.1 原表把提示词和目录写进参数（`claude -p <提示词>`，`codex exec <提示词> -C <目录> -o <结果文件>`）；计划早已改为标准输入加子进程工作目录，M0 按计划写法跑通 | 设计 6.1 改成实测写法，另外两档权限标为待实机 |
-| D2 | `claude mcp add` 默认只对当前目录生效，而 IssueRelay 会在多个绑定目录启动 Claude | M0 用 `--scope user` 注册；设计第 8 节与计划 Task 4 同步改为 `--scope user` |
+| G1 | 设计 6.1 原表把提示词和目录写进参数（`claude -p <提示词>`，`codex exec <提示词> -C <目录> -o <结果文件>`）；计划早已改为标准输入加子进程工作目录，M0 按计划写法跑通 | 设计 6.1 改成实测写法，另外两档权限标为待实机 |
+| G2 | `claude mcp add` 默认只对当前目录生效，而 IssueRelay 会在多个绑定目录启动 Claude | M0 用 `--scope user` 注册；设计第 8 节与计划 Task 4 同步改为 `--scope user` |
 
 ## 用户决定带来的设计更新
 
