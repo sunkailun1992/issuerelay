@@ -2909,7 +2909,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: Task 7 的 `Binding`、`ExecutorKind`；Task 8 的 `Issue`、`Job`、`JobState`
 - Produces:
   - `store::NewJob<'a> { issue: &'a Issue, binding: Option<&'a Binding>, executor: Option<ExecutorKind>, state: JobState, reason: Option<String> }`
-  - `store::Store`：`open(&Path)`、`open_in_memory()`、`insert(NewJob) -> Result<Job>`、`get(i64) -> Result<Option<Job>>`、`latest_for_issue(&str) -> Result<Option<Job>>`、`list_by_state(&[JobState]) -> Result<Vec<Job>>`、`list_recent(usize) -> Result<Vec<Job>>`、`assign(id, state, Option<&Binding>, Option<ExecutorKind>, Option<&str>)`、`set_state(id, state, Option<&str>)`、`mark_started(id, &Path)`、`mark_finished(id, state, reason: Option<&str>, summary: Option<&str>, verified_updated_at: Option<DateTime<Utc>>)`、`requeue(id)`、`recover_interrupted() -> Result<usize>`
+  - `store::Store`：`open(&Path)`、`open_in_memory()`、`insert(NewJob) -> Result<Job>`、`get(i64) -> Result<Option<Job>>`、`latest_for_issue(&str) -> Result<Option<Job>>`、`list_by_state(&[JobState]) -> Result<Vec<Job>>`、`list_recent(usize) -> Result<Vec<Job>>`、`assign(id, state, Option<&Binding>, Option<ExecutorKind>, Option<&str>)`、`set_state(id, state, Option<&str>)`、`mark_started(id, &Path) -> Result<bool>`（只把排队中的记录改为运行中，返回是否改了）、`mark_finished(id, state, reason: Option<&str>, summary: Option<&str>, verified_updated_at: Option<DateTime<Utc>>)`（`None` 保留原有核对值）、`requeue(id)`、`recover_interrupted() -> Result<usize>`
 
 - [ ] **Step 1: 加依赖**
 
@@ -6762,6 +6762,26 @@ async fn retry_requeues_failed_job() {
 }
 
 #[tokio::test]
+async fn retry_rejects_an_older_run() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::exit_code(1));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let first = h.latest("1");
+    // Someone edits the issue in Linear, so it comes back as a new run, which fails too.
+    h.linear.update("1", |i| i.title.push_str(" (edited)"));
+    h.runner.script("DEMO-1", Script::exit_code(1));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let second = h.latest("1");
+    assert_ne!(second.id, first.id);
+    assert!(h.engine.retry_job(first.id).is_err());
+    h.engine.retry_job(second.id).unwrap();
+}
+
+#[tokio::test]
 async fn paused_engine_does_nothing_and_pause_is_saved() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");
@@ -7056,6 +7076,7 @@ impl Engine {
         let mut current = self.inner.config.write().expect("config lock");
         let mut next = current.clone();
         change(&mut next);
+        next.settings.validate()?;
         next.save(&self.inner.config_path)?;
         *current = next;
         Ok(())
@@ -7285,7 +7306,10 @@ impl Engine {
         });
         let spec = executor::build(kind, program, cfg.permission_for(&binding), binding.model.as_deref(), &binding.directory, prompt_text);
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
-        self.store().mark_started(job.id, &log_path)?;
+        if !self.store().mark_started(job.id, &log_path)? {
+            // The user stopped it while the issue was being re-read.
+            return Ok(false);
+        }
         let cancel = CancellationToken::new();
         self.inner
             .running
@@ -7293,8 +7317,8 @@ impl Engine {
             .expect("running lock")
             .insert(job.id, RunningJob { directory: binding.directory.clone(), cancel: cancel.clone() });
         let limits = RunLimits {
-            total: Duration::from_secs(cfg.settings.run_timeout_mins * 60),
-            stall: Duration::from_secs(cfg.settings.stall_timeout_mins * 60),
+            total: Duration::from_secs(cfg.settings.run_timeout_mins.saturating_mul(60)),
+            stall: Duration::from_secs(cfg.settings.stall_timeout_mins.saturating_mul(60)),
         };
         let engine = self.clone();
         let job_id = job.id;
@@ -7360,6 +7384,11 @@ impl Engine {
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
         if !matches!(job.state, JobState::Failed | JobState::Canceled | JobState::NeedsInfo) {
             bail!("job {job_id} is {}; only failed, stopped or needs-info runs can be retried", job.state.as_str());
+        }
+        // Re-running an older row while a newer run of the issue exists would make two active rows.
+        let latest = self.store().latest_for_issue(&job.issue_uuid)?;
+        if latest.map(|j| j.id) != Some(job_id) {
+            bail!("job {job_id} is not the latest run of {}; retry that one instead", job.issue_identifier);
         }
         self.store().requeue(job_id)?;
         self.poll_now();
@@ -7448,7 +7477,7 @@ mod tests {
 - [ ] **Step 5: 运行测试，确认通过**
 
 Run: `cargo test -p issuerelay-core --test engine && cargo test -p issuerelay-core engine::tests`
-Expected: PASS（集成 15 个、单元 1 个）
+Expected: PASS（集成 16 个、单元 1 个）
 
 - [ ] **Step 6: 提交**
 
