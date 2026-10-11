@@ -1,0 +1,8 @@
+Checking MCP server health…
+
+claude.ai Slack: https://mcp.slack.com/mcp - ! Needs authentication
+plugin:context7:context7: https://mcp.context7.com/mcp?client=claude-code-plugin (HTTP) - ✔ Connected
+plugin:playwright:playwright: npx @playwright/mcp@latest - ✔ Connected
+plugin:github:github: https://api.githubcopilot.com/mcp/ (HTTP) - ✘ Failed to connect — HTTP 400: Error POSTing to endpoint: bad request: Authorization header is badly formatted
+plugin:productivity:gmail:  (HTTP) - - Not configured
+linear-server: https://mcp.linear.app/mcp (HTTP) - ✔ Connected
