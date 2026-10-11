@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod engine_kit;
 pub mod fake_linear;
 pub mod fake_server;
 
