@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn args_never_contain_prompt_or_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let tricky_dir = dir.path().join("目录 with \"quotes\"");
+        let tricky_dir = dir.path().join("目录 with 'quotes' & spaces");
         std::fs::create_dir(&tricky_dir).unwrap();
         let prompt = "line1\n\"quoted\" & | ^ % 中文 'x'".to_string();
         for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
@@ -223,11 +223,12 @@ mod tests {
             );
             assert_eq!(spec.stdin, prompt);
             assert_eq!(spec.cwd, tricky_dir);
-            assert!(
-                spec.args
-                    .iter()
-                    .all(|a| !a.contains("中文") && !a.contains("目录") && !a.contains('"'))
-            );
+            assert!(spec.args.iter().all(|a| {
+                !a.contains("中文")
+                    && !a.contains("目录")
+                    && !a.contains("quotes")
+                    && !a.contains('"')
+            }));
         }
     }
 
