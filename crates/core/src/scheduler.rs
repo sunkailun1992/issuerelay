@@ -143,4 +143,11 @@ mod tests {
         let queued = [c(1, "a", 4, 0), c(2, "a", 1, 1)];
         assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![2]);
     }
+
+    #[test]
+    fn a_directory_with_a_running_job_does_not_use_up_a_slot() {
+        let queued = [c(1, "a", 1, 0), c(2, "b", 2, 1)];
+        let busy: HashSet<PathBuf> = [PathBuf::from("a")].into_iter().collect();
+        assert_eq!(pick(&queued, &busy, 1, 2), vec![2]);
+    }
 }
