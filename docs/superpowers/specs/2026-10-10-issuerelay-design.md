@@ -204,13 +204,15 @@ issuerelay/
 
 任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）。
 
+三项检查同时进行。引擎按执行者分别缓存结果：确认的结果（包括「未安装」「未登录」）用 5 分钟；某项检查没跑成（超时、启动失败、输出读不懂）的执行者 60 秒后重查。「环境检查」页总是现查。
+
 ## 7. Linear 连接
 
 - 端点：`https://mcp.linear.app/mcp`（Streamable HTTP）。
-- 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。Linear 的授权服务器要求回调带 RFC 9207 的 `iss` 参数，所以回调时把完整回调地址交给 rmcp 校验（M0 实测）。
+- 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。Linear 的授权服务器要求回调带 RFC 9207 的 `iss` 参数，所以回调时把完整回调地址交给 rmcp 校验（M0 实测）。回环端口同时处理多个连接，只有带本次 `state` 的回调（或不带 `state` 的授权错误回调）结束等待，其余请求返回 404。
 - 令牌：存 macOS 钥匙串 / Windows 凭据管理器（`keyring` 库），不以明文写盘，自动续期。
 - 备用方式：高级设置里可以改用个人 API key（同样通过 `Authorization: Bearer` 连接 MCP）。
-- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。
+- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。只有这条错误算「需求不存在」；读不懂的回复（缺 `uuid`、状态或时间，或格式变了）一律当错误处理，本轮检查失败、不改任何任务的状态，不当成「需求已消失」或「没有候选」。每次调用最长等 30 秒。
 - 每次建立连接时先调用 `tools/list`，检查上述工具和参数是否存在；缺失时面板报「Linear 接口已变化」并暂停派活，不做猜测性调用。
 - 第一版只连接一个 Linear 工作区。
 

@@ -65,7 +65,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 |---|---|---|
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名 |
 | 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite |
-| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；Unix 上文件权限 0600 |
+| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器新建的日志在 Unix 上是 0600（已存在的文件保持原权限） |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<用户>-<哈希>` | 只限当前用户 |
 
@@ -73,7 +73,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ## 7. 外部接口变更规则
 
-- **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具要同步 `REQUIRED_TOOLS` 和测试用的假服务端。
+- **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
 

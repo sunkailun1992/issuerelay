@@ -61,8 +61,8 @@
 | F2 | （推断，待 M2 实机验证）从访达或开机自启启动的 macOS 图形程序只有最小 `PATH`，找不到装在 Homebrew 或 npm 全局目录下的 `claude`、`codex`（`codex` 还要靠 `PATH` 找到 `node`）。M0 的运行都从终端启动，没有覆盖这一点 | 设计第 8 节加一条：托盘程序启动时经登录 shell 读取 `PATH`，用它查找执行者并传给子进程；读取失败时在环境检查里提示。M2 实现并在实机验收里覆盖 |
 | F3 | 无人值守运行会加载用户级的指令文件、插件、hooks 和全部 MCP 服务器：两次运行都按用户级指令去调用了与本需求无关的个人知识库 MCP；Claude 输出了 132 条 `system` 事件，其中不少来自连不上的其他 MCP 服务器 | 不阻塞。设计第 14 节写明，README 的安全须知补一句；设计第 18 节新增待定问题：M2 评估按绑定提供「只加载 Linear MCP」的精简运行方式 |
 | F4 | `codex login status` 把结果写到标准错误 | 计划 Task 18 的 `parse_codex_login` 已同时读取标准输出和标准错误；测试补上「只有标准错误有内容」的用例 |
-| F5 | Linear 的授权服务器要求回调带 RFC 9207 的 `iss`；只把 `code`、`state` 交给 rmcp 会被拒绝 | 探针已改为 `handle_callback_url`；计划 Task 17 同样返回完整回调地址并调用 `handle_callback_url`，先读出 OAuth 的 `error` 参数再交给 rmcp（rmcp 不读它），任何 `/callback` 请求都结束等待；设计第 7 节写明 |
-| F6 | 查不到需求时的错误文字是 `Could not find referenced Issue.` | 计划 Task 16 的 `is_not_found` 同时认 `could not find` 与 `not found`，假服务端改用真实文字 |
+| F5 | Linear 的授权服务器要求回调带 RFC 9207 的 `iss`；只把 `code`、`state` 交给 rmcp 会被拒绝 | 探针已改为 `handle_callback_url`；计划 Task 17 同样返回完整回调地址并调用 `handle_callback_url`，先读出 OAuth 的 `error` 参数再交给 rmcp（rmcp 不读它），任何 `/callback` 请求都结束等待；设计第 7 节写明。2026-10-11 Task 17 评审后改为：只有带本次 `state` 的回调（或不带 `state` 的错误回调）结束等待，其余返回 404 |
+| F6 | 查不到需求时的错误文字是 `Could not find referenced Issue.` | 计划 Task 16 的 `is_not_found` 同时认 `could not find` 与 `not found`，假服务端改用真实文字。2026-10-11 Task 16 评审后收窄为只认 `Could not find referenced Issue`，其他工具错误一律报错 |
 | G1 | 设计 6.1 原表把提示词和目录写进参数（`claude -p <提示词>`，`codex exec <提示词> -C <目录> -o <结果文件>`）；计划早已改为标准输入加子进程工作目录，M0 按计划写法跑通 | 设计 6.1 改成实测写法，另外两档权限标为待实机 |
 | G2 | `claude mcp add` 默认只对当前目录生效，而 IssueRelay 会在多个绑定目录启动 Claude | M0 用 `--scope user` 注册；设计第 8 节与计划 Task 4 同步改为 `--scope user` |
 

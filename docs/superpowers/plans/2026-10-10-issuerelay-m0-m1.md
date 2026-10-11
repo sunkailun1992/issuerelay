@@ -4569,6 +4569,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 16: core Linear 接口与 MCP 实现
 
+> 执行说明（2026-10-11）：下面的代码块是派发时的版本，已落地代码以修复提交 `fix(core): treat unreadable Linear replies as errors and bound every call` 及其后的测试提交为准：读不懂的回复一律报错（`uuid` 与状态必填，列表里任何一条读不懂都让整次调用失败），只有「Could not find referenced Issue」算需求不存在，每次调用 30 秒超时，连接时检查 `REQUIRED_ARGUMENTS`（设计第 7 节），`list_projects` 用 `limit: 50` 并要 `uuid`，假服务端按 `crates/core/tests/fixtures/linear-tools.json` 校验每次调用。
+
 **Files:**
 - Create: `crates/core/src/linear/mod.rs`、`crates/core/src/linear/parse.rs`、`crates/core/src/linear/mcp.rs`、`crates/core/tests/common/mod.rs`、`crates/core/tests/common/fake_server.rs`、`crates/core/tests/common/fake_linear.rs`、`crates/core/tests/linear_mcp.rs`
 - Modify: `crates/core/src/lib.rs`、`crates/core/Cargo.toml`
@@ -5505,6 +5507,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 17: core Linear 授权与连接
 
+> 执行说明（2026-10-11）：已落地代码以修复提交 `fix(core): harden the Linear login listener and keychain handling` 为准：回环端口并发处理连接，只有带本次 `state` 的回调（或不带 `state` 的错误回调）结束等待；钥匙串测试改用内存存储，下面的 `keyring_round_trip` 已删除（真实钥匙串只在 Task 23 验收时用）；MCP 握手 30 秒超时；API key 只走 https；测试数以该提交为准。
+
 **Files:**
 - Create: `crates/core/src/linear/auth.rs`
 - Modify: `crates/core/src/linear/mod.rs`、`crates/core/Cargo.toml`
@@ -5849,6 +5853,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 18: core 环境检查
+
+> 执行说明（2026-10-11）：已落地代码以修复提交 `fix(core): cache readiness per executor and pin the doctor's behavior` 为准：`mcp list` 限时 60 秒、其余 20 秒，三项检查和两个执行者同时进行；按执行者缓存，没跑成的检查 60 秒后重查；`mcp list` 按 Linear 的主机和 `Connected` / `enabled` 状态精确匹配；问题描述带出真实状态；测试数以该提交为准。
 
 **Files:**
 - Create: `crates/core/src/doctor.rs`、`crates/core/tests/doctor.rs`
@@ -8828,5 +8834,6 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审） | M2 |
 | 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审） | M2 |
+| 6.4 | 环境检查命令超时后结束整棵进程树（被杀的 `claude mcp list` 可能留下它启动的 stdio MCP 服务器），从托盘程序运行时不弹控制台窗口（Task 18 评审） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 

@@ -29,4 +29,4 @@
 
 - **新增执行者**：`ExecutorKind` 加变体 → `executor::build` 加参数 → `outcome::observe` 识别最终消息 → `doctor::check_executor` 加检查 → 各自的测试 → 实机验收。
 - **新增 IPC 方法**：`METHODS` → `server` 的分发 → 调用方（命令行 / MCP）→ 测试。
-- **新增 Linear 工具**：先用 M0 探针取真实样本 → `REQUIRED_TOOLS` → `parse.rs` → `McpLinear` → 测试用假服务端。
+- **新增 Linear 工具**：先用 M0 探针取真实样本（包括 `tools/list` 的参数表）→ `REQUIRED_TOOLS` 与 `REQUIRED_ARGUMENTS` → `parse.rs`（读不懂就报错，不跳过）→ `McpLinear` → 更新 `crates/core/tests/fixtures/linear-tools.json`，假服务端按它校验每次调用 → 测试。
