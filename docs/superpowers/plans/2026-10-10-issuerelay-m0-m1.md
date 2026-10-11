@@ -7084,7 +7084,7 @@ impl Engine {
         let mut current = self.inner.config.write().expect("config lock");
         let mut next = current.clone();
         change(&mut next);
-        next.settings.validate()?;
+        next.validate()?;
         next.save(&self.inner.config_path)?;
         *current = next;
         Ok(())
