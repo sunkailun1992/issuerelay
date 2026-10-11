@@ -1,13 +1,13 @@
 //! Builds the command line for one executor run. The prompt always travels on stdin and the
-//! working directory is set on the process, so no user-controlled text ever becomes an
-//! argument (this keeps `claude.cmd` / `codex.cmd` safe on Windows).
+//! working directory is set on the process, so the only configurable argument is a validated
+//! model name (this keeps `claude.cmd` / `codex.cmd` safe on Windows).
 pub mod outcome;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{ExecutorKind, PermissionProfile};
+use crate::config::{ExecutorKind, PermissionProfile, is_valid_model_name};
 
 /// One executor process: the program, its fixed arguments, the working directory, and the
 /// prompt written to stdin.
@@ -31,20 +31,9 @@ pub fn is_git_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
-/// A model name is passed as one argument only when it is 1 to 100 ASCII letters, digits, `.`,
-/// `_`, `:` or `-` and does not start with `-`; anything else is dropped.
-fn is_safe_token(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= 100
-        && !text.starts_with('-')
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
-}
-
 /// Builds the command for one run. The arguments are fixed strings plus the model name (only
-/// when it passes `is_safe_token`); the prompt goes to stdin and `cwd` is set on the process,
-/// so neither ever appears in the arguments.
+/// when it passes `is_valid_model_name`); the prompt goes to stdin and `cwd` is set on the
+/// process, so neither ever appears in the arguments.
 pub fn build(
     kind: ExecutorKind,
     program: PathBuf,
@@ -53,7 +42,7 @@ pub fn build(
     cwd: &Path,
     prompt: String,
 ) -> CommandSpec {
-    let model = model.filter(|m| is_safe_token(m));
+    let model = model.filter(|m| is_valid_model_name(m));
     let mut args: Vec<String> = Vec::new();
     match kind {
         ExecutorKind::Claude => {
@@ -297,15 +286,17 @@ mod tests {
 
     #[test]
     fn model_names_are_limited_to_safe_tokens() {
-        assert!(is_safe_token("claude-sonnet-5-5"));
-        assert!(is_safe_token("org:model_v1.2"));
-        assert!(is_safe_token(&"a".repeat(100)));
-        assert!(!is_safe_token(&"a".repeat(101)));
-        assert!(!is_safe_token(""));
-        assert!(!is_safe_token("two words"));
-        assert!(!is_safe_token("模型"));
-        assert!(!is_safe_token("--dangerously-bypass-approvals-and-sandbox"));
-        assert!(!is_safe_token("-x"));
+        assert!(is_valid_model_name("claude-sonnet-5-5"));
+        assert!(is_valid_model_name("org:model_v1.2"));
+        assert!(is_valid_model_name(&"a".repeat(100)));
+        assert!(!is_valid_model_name(&"a".repeat(101)));
+        assert!(!is_valid_model_name(""));
+        assert!(!is_valid_model_name("two words"));
+        assert!(!is_valid_model_name("模型"));
+        assert!(!is_valid_model_name(
+            "--dangerously-bypass-approvals-and-sandbox"
+        ));
+        assert!(!is_valid_model_name("-x"));
     }
 
     #[test]
@@ -321,5 +312,44 @@ mod tests {
         );
         assert_eq!(spec.program, PathBuf::from("tools").join("claude"));
         assert_eq!(spec.cwd, dir.path());
+    }
+
+    #[test]
+    fn unsafe_or_flag_like_models_are_dropped_for_both_executors() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            for model in [
+                "x\" & calc",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-m",
+                "a b",
+                "gpt-5.5\n",
+            ] {
+                let args = build(
+                    kind,
+                    PathBuf::from("x"),
+                    PermissionProfile::Full,
+                    Some(model),
+                    repo.path(),
+                    "p".into(),
+                )
+                .args;
+                assert!(
+                    !args.iter().any(|a| a == "--model" || a == "-m"),
+                    "{kind:?} {model:?}: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_metacharacters_never_pass_as_a_model_name() {
+        for bad in [
+            "a&b", "a|b", "a^b", "a%b", "a<b", "a>b", "a(b", "a)b", "a!b", "a\"b", "a'b", "a;b",
+            "a,b", "a=b", "a\\b", "a$b", "a\nb", "a b", "a/b", "a@b",
+        ] {
+            assert!(!is_valid_model_name(bad), "{bad:?}");
+        }
     }
 }

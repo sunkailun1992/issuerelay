@@ -188,6 +188,17 @@ fn is_plain_name(name: &str) -> bool {
     !name.trim().is_empty() && !name.chars().any(|c| c.is_control() || c == '"')
 }
 
+/// A model name is passed to the executor as one argument, so it must be 1–100 ASCII letters,
+/// digits, `.`, `_`, `:` or `-`, and must not start with `-` (it would read as a switch).
+pub fn is_valid_model_name(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 100
+        && !text.starts_with('-')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     pub id: String,
@@ -214,6 +225,20 @@ pub struct Config {
 }
 
 impl Config {
+    /// Settings plus every binding's optional model name.
+    pub fn validate(&self) -> Result<()> {
+        self.settings.validate()?;
+        for (i, binding) in self.bindings.iter().enumerate() {
+            if let Some(model) = &binding.model {
+                anyhow::ensure!(
+                    is_valid_model_name(model),
+                    "bindings[{i}].model is not a valid model name: {model:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// A missing file gives the defaults; an unreadable or unparsable file, or invalid values,
     /// give an error naming the file.
     pub fn load(path: &Path) -> Result<Config> {
@@ -224,7 +249,6 @@ impl Config {
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         config
-            .settings
             .validate()
             .with_context(|| format!("invalid config file {}", path.display()))?;
         Ok(config)
@@ -501,5 +525,34 @@ mod tests {
         }
         std::fs::write(&path, "[settings.trigger]\ntodo = \"待办\"\n").unwrap();
         assert_eq!(Config::load(&path).unwrap().settings.trigger.todo, "待办");
+    }
+
+    #[test]
+    fn binding_model_names_are_checked_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let binding = |model: &str| {
+            format!(
+                "[[bindings]]\nid = \"b\"\nproject_id = \"p\"\nproject_name = \"Demo Project\"\ndirectory = \"demo\"\nmodel = \"{model}\"\n"
+            )
+        };
+        for bad in [
+            "sonnet[1m]",
+            " gpt-5.5",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "a b",
+        ] {
+            std::fs::write(&path, binding(bad)).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("bindings[0].model"),
+                "{bad:?}: {err:#}"
+            );
+        }
+        std::fs::write(&path, binding("claude-sonnet-5-5")).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().bindings[0].model.as_deref(),
+            Some("claude-sonnet-5-5")
+        );
     }
 }
