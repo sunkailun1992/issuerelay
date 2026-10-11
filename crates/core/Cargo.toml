@@ -9,6 +9,7 @@ anyhow = "1.0.104"
 async-trait = "0.1.92"
 chrono = { version = "0.4.45", features = ["serde"] }
 dirs = "7.0.0"
+keyring = "4.2.0"
 process-wrap = { version = "10.0.1", features = ["tokio1"] }
 reqwest = "0.13"
 rmcp = { version = "3.5", features = ["client", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
@@ -20,6 +21,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = "0.7.20"
 toml = "1.1.8"
+url = "2.5.8"
 which = "8.0.6"
 
 [dev-dependencies]

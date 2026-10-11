@@ -1,4 +1,5 @@
 //! Linear access through Linear's official MCP server.
+pub mod auth;
 pub mod mcp;
 pub mod parse;
 
