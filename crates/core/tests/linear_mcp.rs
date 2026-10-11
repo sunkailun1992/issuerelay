@@ -1,15 +1,84 @@
 mod common;
 
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
+use chrono::{DateTime, Utc};
 use common::fake_server::{
-    FakeLinearServer, Reply, connect_full, connect_partial, connect_with_hanging_tool_list,
-    connect_without_argument, issue_json, validate_arguments,
+    FakeLinearServer, Reply, connect_full, connect_partial, connect_with_hanging_close,
+    connect_with_hanging_tool_list, connect_without_argument, issue_json, validate_arguments,
 };
-use issuerelay_core::linear::{
-    LinearApi,
-    mcp::{LinearError, McpLinear},
+use issuerelay_core::{
+    linear::{
+        ISSUE_FIELDS, LinearApi, REQUIRED_ARGUMENTS,
+        mcp::{LinearClient, LinearError, McpLinear},
+    },
+    model::Issue,
 };
+use rmcp::model::CallToolRequestParams;
+
+/// The issue `issue_json(n)` describes, built from its JSON one field at a time. A parsed issue
+/// that equals it proves every field IssueRelay asks Linear for was asked for and read: the
+/// fake leaves out what is not requested, and a field left out no longer matches.
+fn expected_issue(n: u32) -> Issue {
+    let json = issue_json(n);
+    let text = |key: &str| json[key].as_str().unwrap().to_string();
+    let time = |key: &str| text(key).parse::<DateTime<Utc>>().unwrap();
+    Issue {
+        uuid: text("uuid"),
+        identifier: text("id"),
+        title: text("title"),
+        url: text("url"),
+        state: text("status"),
+        labels: json["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|label| label.as_str().unwrap().to_string())
+            .collect(),
+        project_id: Some(text("projectId")),
+        project_name: Some(text("project")),
+        assignee_id: Some(text("assigneeId")),
+        parent_identifier: json["parentId"].as_str().map(str::to_string),
+        priority: json["priority"]["value"].as_u64().unwrap() as u8,
+        created_at: time("createdAt"),
+        updated_at: time("updatedAt"),
+    }
+}
+
+/// Every call in `calls` must have asked for every field of `ISSUE_FIELDS`. Without `fields`
+/// the fake (like Linear) would answer with a default selection, and the whole-issue
+/// comparisons with `expected_issue` would still pass.
+fn assert_every_issue_field_requested(calls: &[serde_json::Value]) {
+    assert!(!calls.is_empty(), "no call was made");
+    for call in calls {
+        let requested: Vec<&str> = call["fields"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the call sent no `fields`: {call}"))
+            .iter()
+            .map(|field| field.as_str().unwrap())
+            .collect();
+        for field in ISSUE_FIELDS {
+            assert!(
+                requested.contains(&field),
+                "`{field}` was not requested: {requested:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_fake_issues_carry_a_value_for_every_requested_field() {
+    // A field the fake leaves empty everywhere could be dropped from `ISSUE_FIELDS` unnoticed.
+    for field in ISSUE_FIELDS {
+        assert!(
+            [1, 2].iter().any(|&n| !issue_json(n)[field].is_null()),
+            "no fake issue has a value for `{field}`"
+        );
+    }
+}
 
 #[tokio::test]
 async fn new_rejects_missing_tools() {
@@ -50,39 +119,34 @@ async fn candidate_issues_follows_pagination() {
         .await
         .unwrap();
     let issues = linear.candidate_issues("ai-ready", "Todo").await.unwrap();
-    assert_eq!(
-        issues
-            .iter()
-            .map(|i| i.identifier.as_str())
-            .collect::<Vec<_>>(),
-        ["DEMO-1", "DEMO-2"]
-    );
+    assert_eq!(issues, [expected_issue(1), expected_issue(2)]);
     let calls = server.calls_to("list_issues");
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0]["assignee"], "me");
     assert_eq!(calls[0]["label"], "ai-ready");
     assert_eq!(calls[0]["state"], "Todo");
-    assert!(
-        calls[0]["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f == "uuid")
-    );
+    assert_every_issue_field_requested(&calls);
     assert!(calls[0]["cursor"].is_null());
     assert_eq!(calls[1]["cursor"], "c2");
 }
 
 #[tokio::test]
 async fn issue_lookup_and_missing_issue() {
-    let linear = McpLinear::new(connect_full(FakeLinearServer::default()).await)
+    let server = FakeLinearServer::default();
+    let linear = McpLinear::new(connect_full(server.clone()).await)
         .await
         .unwrap();
-    let issue = linear.issue("DEMO-1").await.unwrap().unwrap();
-    assert_eq!(issue.priority, 2);
-    assert_eq!(issue.project_id.as_deref(), Some("proj-1"));
-    assert_eq!(issue.labels, ["ai-ready"]);
+    // The first fake issue has no parent and the second one has: both shapes are pinned.
+    assert_eq!(
+        linear.issue("DEMO-1").await.unwrap(),
+        Some(expected_issue(1))
+    );
+    assert_eq!(
+        linear.issue("DEMO-2").await.unwrap(),
+        Some(expected_issue(2))
+    );
     assert!(linear.issue("DEMO-404").await.unwrap().is_none());
+    assert_every_issue_field_requested(&server.calls_to("get_issue"));
 }
 
 #[tokio::test]
@@ -353,4 +417,138 @@ async fn connecting_to_a_linear_that_never_lists_its_tools_times_out() {
         .err()
         .expect("should fail");
     assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_a_connection_that_never_finishes_closing_gives_up() {
+    let linear = McpLinear::new(connect_with_hanging_close().await)
+        .await
+        .unwrap();
+    // Paused time: the 30 s limit passes as soon as every task is waiting. The outer limit
+    // makes an unbounded `close` fail this test instead of hanging it.
+    let err = tokio::time::timeout(Duration::from_secs(120), linear.close())
+        .await
+        .expect("close waited for ever on a connection that does not close")
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("did not close the connection"),
+        "{err:#}"
+    );
+}
+
+/// A two-page reply for a list tool. The fake repeats a programmed reply for every call, so the
+/// second call (the one that carries the cursor) gets the same cursor back, which ends the walk.
+fn two_pages(key: &str, entry: serde_json::Value) -> Reply {
+    Reply::Text(serde_json::json!({key: [entry], "hasNextPage": true, "cursor": "c2"}).to_string())
+}
+
+#[tokio::test]
+async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments() {
+    // `REQUIRED_ARGUMENTS` is what connect time checks against Linear's tool list. It only
+    // protects anything while it is the list of what the code really sends: a name missing from
+    // it would never be checked, a name too many would turn a harmless change into a refusal.
+    let server = FakeLinearServer::default();
+    server.reply(
+        "list_projects",
+        two_pages(
+            "projects",
+            serde_json::json!({"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project"}),
+        ),
+    );
+    server.reply(
+        "list_issue_labels",
+        two_pages("labels", serde_json::json!({"name": "ai-ready"})),
+    );
+    server.reply(
+        "list_teams",
+        two_pages("teams", serde_json::json!({"id": "team-1", "name": "Demo"})),
+    );
+    let linear = linear_with(&server).await;
+    linear.viewer().await.unwrap();
+    linear.candidate_issues("ai-ready", "Todo").await.unwrap();
+    linear.issue("DEMO-1").await.unwrap();
+    linear.set_state("uuid-9", "Done").await.unwrap();
+    linear.projects().await.unwrap();
+    linear.labels().await.unwrap();
+    linear.teams().await.unwrap();
+    linear.statuses("team-1").await.unwrap();
+
+    let mut sent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (tool, arguments) in server.calls.lock().unwrap().iter() {
+        let names = sent.entry(tool.clone()).or_default();
+        for (name, value) in arguments.as_object().unwrap() {
+            if !value.is_null() {
+                names.insert(name.clone());
+            }
+        }
+    }
+    let listed: BTreeMap<String, BTreeSet<String>> = REQUIRED_ARGUMENTS
+        .iter()
+        .map(|(tool, arguments)| {
+            (
+                tool.to_string(),
+                arguments.iter().map(|a| a.to_string()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(sent, listed);
+    // The paged tools really were asked for a second page, or `cursor` would not show up above.
+    for tool in [
+        "list_issues",
+        "list_projects",
+        "list_issue_labels",
+        "list_teams",
+    ] {
+        assert_eq!(server.calls_to(tool).len(), 2, "{tool}");
+    }
+}
+
+async fn get_issue_unchecked(
+    client: &LinearClient,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let arguments = arguments.as_object().unwrap().clone();
+    let result = client
+        .call_tool(CallToolRequestParams::new("get_issue").with_arguments(arguments))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let text: String = result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+        .collect();
+    serde_json::from_str(&text).unwrap()
+}
+
+#[tokio::test]
+async fn the_fake_returns_only_the_requested_fields() {
+    // The tests above lean on the fake leaving out what a call does not ask for.
+    let client = connect_full(FakeLinearServer::default()).await;
+    let issue = get_issue_unchecked(
+        &client,
+        serde_json::json!({"id": "DEMO-1", "fields": ["id", "title"]}),
+    )
+    .await;
+    let mut keys: Vec<&str> = issue
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["id", "title"]);
+    // Like Linear, it adds `id` unasked, and a requested field without a value is `null`.
+    let issue = get_issue_unchecked(
+        &client,
+        serde_json::json!({"id": "DEMO-1", "fields": ["title", "parentId"]}),
+    )
+    .await;
+    assert_eq!(
+        issue,
+        serde_json::json!({"id": "DEMO-1", "title": "Demo task 1", "parentId": null})
+    );
+    // Without `fields` the whole issue comes back.
+    let whole = get_issue_unchecked(&client, serde_json::json!({"id": "DEMO-1"})).await;
+    assert_eq!(whole, issue_json(1));
 }

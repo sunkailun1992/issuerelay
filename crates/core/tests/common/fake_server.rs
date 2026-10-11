@@ -11,13 +11,14 @@ use std::{
 
 use issuerelay_core::linear::mcp::LinearClient;
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    ErrorData, RoleClient, RoleServer, ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
     model::{
         CallToolRequestParams, CallToolResponse, ClientConfig, ListToolsResult,
         PaginatedRequestParams, ServerConfig,
     },
-    service::RequestContext,
+    service::{RequestContext, RxJsonRpcMessage, TxJsonRpcMessage},
+    transport::{Transport, async_rw::AsyncRwTransport},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -150,7 +151,10 @@ pub struct TeamArgs {
     pub team: String,
 }
 
+/// Fake issue `n` (1 or 2). Issue 2 is a sub-issue of issue 1, so the two together give every
+/// field of `ISSUE_FIELDS` a value that tests can tell from an empty one.
 pub fn issue_json(n: u32) -> Value {
+    let parent = (n == 2).then_some("DEMO-1");
     json!({
         "id": format!("DEMO-{n}"),
         "uuid": format!("00000000-0000-0000-0000-00000000000{n}"),
@@ -161,7 +165,7 @@ pub fn issue_json(n: u32) -> Value {
         "project": "Demo Project",
         "projectId": "proj-1",
         "assigneeId": "user-1",
-        "parentId": null,
+        "parentId": parent,
         "priority": {"value": 2, "name": "High"},
         "createdAt": "2026-10-01T08:00:00.000Z",
         "updatedAt": "2026-10-01T09:00:00.000Z"
@@ -254,11 +258,14 @@ impl FakeLinearServer {
         Parameters(args): Parameters<GetIssueArgs>,
     ) -> Result<String, String> {
         self.answer("get_issue", &args, || {
-            if args.id == "DEMO-1" || args.id.ends_with("0001") {
-                Ok(pick(&issue_json(1), args.fields.as_deref()).to_string())
-            } else {
+            // An issue is found by its identifier or by its uuid (which ends in `000n`).
+            let known = [1, 2]
+                .into_iter()
+                .find(|n| args.id == format!("DEMO-{n}") || args.id.ends_with(&format!("{n:04}")));
+            match known {
+                Some(n) => Ok(pick(&issue_json(n), args.fields.as_deref()).to_string()),
                 // Linear's real reply for an unknown issue (M0 sample get_issue_missing.json).
-                Err(r#"{"error":"invalid_request","message":"Could not find referenced Issue.","status":400}"#.to_string())
+                None => Err(r#"{"error":"invalid_request","message":"Could not find referenced Issue.","status":400}"#.to_string()),
             }
         })
         .await
@@ -403,17 +410,45 @@ impl ServerHandler for DriftedServer {
     }
 }
 
-async fn connect<S: ServerHandler>(server: S) -> LinearClient {
+/// Starts `server` on one end of an in-memory pipe and returns the other end.
+fn serve_in_memory<S: ServerHandler>(server: S) -> tokio::io::DuplexStream {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_io).await {
             let _ = running.waiting().await;
         }
     });
+    client_io
+}
+
+async fn connect<S: ServerHandler>(server: S) -> LinearClient {
     ClientConfig::default()
-        .serve(client_io)
+        .serve(serve_in_memory(server))
         .await
         .expect("client handshake")
+}
+
+/// A client transport whose `close` never finishes, like a half-open connection that never
+/// acknowledges the shutdown. Everything else is passed on to the transport it wraps.
+struct HangingClose<T>(T);
+
+impl<T: Transport<RoleClient>> Transport<RoleClient> for HangingClose<T> {
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.0.send(item)
+    }
+
+    fn receive(&mut self) -> impl Future<Output = Option<RxJsonRpcMessage<RoleClient>>> + Send {
+        self.0.receive()
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        std::future::pending().await
+    }
 }
 
 pub async fn connect_full(server: FakeLinearServer) -> LinearClient {
@@ -443,4 +478,13 @@ pub async fn connect_with_hanging_tool_list() -> LinearClient {
         drift: Drift::HangingToolList,
     })
     .await
+}
+
+/// A Linear whose connection never finishes closing: everything works until `close`.
+pub async fn connect_with_hanging_close() -> LinearClient {
+    let (read, write) = tokio::io::split(serve_in_memory(FakeLinearServer::default()));
+    ClientConfig::default()
+        .serve(HangingClose(AsyncRwTransport::new_client(read, write)))
+        .await
+        .expect("client handshake")
 }

@@ -111,9 +111,15 @@ impl McpLinear {
         self
     }
 
-    /// Ends the MCP session and waits for the connection task to stop.
+    /// Ends the MCP session and waits for the connection task to stop, but for at most
+    /// `CALL_TIMEOUT`: on a half-open connection the transport may never finish closing, and a
+    /// shutdown or a reconnect must not hang on it. Fails with "did not close the connection"
+    /// when the time is up; the connection task is then left behind.
     pub async fn close(self) -> Result<()> {
-        self.client.cancel().await?;
+        tokio::time::timeout(CALL_TIMEOUT, self.client.cancel())
+            .await
+            .map_err(|_| anyhow!("Linear did not close the connection within {CALL_TIMEOUT:?}"))?
+            .context("closing the connection to Linear")?;
         Ok(())
     }
 
