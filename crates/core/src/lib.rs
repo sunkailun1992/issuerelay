@@ -2,6 +2,7 @@
 //! to a fresh headless Claude Code or Codex run.
 pub mod config;
 pub mod executor;
+pub mod linear;
 pub mod model;
 pub mod paths;
 pub mod prompt;
