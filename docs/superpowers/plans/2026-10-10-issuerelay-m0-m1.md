@@ -6971,14 +6971,14 @@ pub struct Engine {
     inner: Arc<Inner>,
 }
 
-/// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
-/// status counts as success; the AI's own report alone never does.
 /// One spelling per folder for the one-run-per-directory rule: resolves symlinks, `..` and,
 /// on case-insensitive volumes, letter case. Falls back to the path as written.
 fn canonical_dir(dir: &Path) -> PathBuf {
     std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
+/// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
+/// status counts as success; the AI's own report alone never does.
 pub fn decide(
     exit: &ExitKind,
     state: Option<&str>,
