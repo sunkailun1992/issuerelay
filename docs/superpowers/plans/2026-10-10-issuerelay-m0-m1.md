@@ -6866,7 +6866,7 @@ Expected: 编译失败，报 `Engine`、`EngineDeps`、`JobRunner` 未定义
 //! released within one statement; no lock is held across `.await`.
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, RwLock},
     time::Duration,
 };
@@ -6973,6 +6973,12 @@ pub struct Engine {
 
 /// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
 /// status counts as success; the AI's own report alone never does.
+/// One spelling per folder for the one-run-per-directory rule: resolves symlinks, `..` and,
+/// on case-insensitive volumes, letter case. Falls back to the path as written.
+fn canonical_dir(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 pub fn decide(
     exit: &ExitKind,
     state: Option<&str>,
@@ -7217,7 +7223,9 @@ impl Engine {
     fn reassess(&self, job: &Job, cfg: &Config, eligibility: Eligibility) -> Result<()> {
         match eligibility {
             Eligibility::Eligible(binding) => {
-                let unchanged = job.state == JobState::Queued && job.binding_id.as_deref() == Some(binding.id.as_str());
+                let unchanged = job.state == JobState::Queued
+                    && job.binding_id.as_deref() == Some(binding.id.as_str())
+                    && job.directory.as_deref() == Some(binding.directory.as_path());
                 if !unchanged {
                     self.store().assign(job.id, JobState::Queued, Some(&binding), Some(cfg.executor_for(&binding)), None)?;
                 }
@@ -7239,9 +7247,12 @@ impl Engine {
         let candidates: Vec<Candidate> = queued
             .iter()
             .filter_map(|job| {
+                // The binding's current directory in one canonical spelling, so two bindings that
+                // name the same folder differently never run at the same time.
+                let binding = cfg.bindings.iter().find(|b| job.binding_id.as_deref() == Some(b.id.as_str()))?;
                 Some(Candidate {
                     job_id: job.id,
-                    directory: job.directory.clone()?,
+                    directory: canonical_dir(&binding.directory),
                     priority: job.priority,
                     issue_created_at: job.issue_created_at,
                 })
@@ -7314,7 +7325,7 @@ impl Engine {
             .running
             .lock()
             .expect("running lock")
-            .insert(job.id, RunningJob { directory: binding.directory.clone(), cancel: cancel.clone() });
+            .insert(job.id, RunningJob { directory: canonical_dir(&binding.directory), cancel: cancel.clone() });
         let started = self.store().mark_started(job.id, &log_path);
         if !matches!(started, Ok(true)) {
             // The user stopped it while the issue was being re-read, or the store failed.
