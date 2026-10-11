@@ -605,6 +605,11 @@ struct SpyLinear {
     fail_after_viewer: bool,
     /// Runs once, just before the first `issue()` call is answered.
     before_issue: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// `issue()` fails with this message for this uuid.
+    fail_issue: Mutex<Option<(String, String)>>,
+    /// The n-th `issue()` call (counting from 1) panics.
+    panic_on_issue_call: Mutex<Option<usize>>,
+    issue_calls: AtomicUsize,
     viewer_calls: AtomicUsize,
 }
 
@@ -615,12 +620,19 @@ impl SpyLinear {
             candidates: Mutex::new(None),
             fail_after_viewer: false,
             before_issue: Mutex::new(None),
+            fail_issue: Mutex::new(None),
+            panic_on_issue_call: Mutex::new(None),
+            issue_calls: AtomicUsize::new(0),
             viewer_calls: AtomicUsize::new(0),
         }
     }
 
     fn viewer_calls(&self) -> usize {
         self.viewer_calls.load(Ordering::SeqCst)
+    }
+
+    fn issue_calls(&self) -> usize {
+        self.issue_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -630,7 +642,7 @@ impl LinearApi for SpyLinear {
         self.viewer_calls.fetch_add(1, Ordering::SeqCst);
         let viewer = self.inner.viewer().await;
         if self.fail_after_viewer {
-            self.inner.fail_next("Linear is down");
+            self.inner.fail_next("Linear is down\n(try again)");
         }
         viewer
     }
@@ -644,9 +656,20 @@ impl LinearApi for SpyLinear {
     }
 
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
+        let call = self.issue_calls.fetch_add(1, Ordering::SeqCst) + 1;
         let hook = self.before_issue.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
+        }
+        let panics = *self.panic_on_issue_call.lock().unwrap() == Some(call);
+        if panics {
+            panic!("scripted panic in issue()");
+        }
+        let failure = self.fail_issue.lock().unwrap().clone();
+        if let Some((uuid, message)) = failure
+            && uuid == id
+        {
+            return Err(anyhow::anyhow!(message));
         }
         self.inner.issue(id).await
     }
@@ -828,6 +851,42 @@ async fn shutting_the_loop_down_stops_the_runs_in_progress() {
     h.settle().await;
     assert_eq!(h.latest("1").state, JobState::Canceled);
     assert_eq!(h.engine.status().running, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_moved_issue_is_started_by_the_next_cycle_without_waiting_for_the_timer() {
+    let root = tempfile::tempdir().unwrap();
+    let (alpha, beta) = (root.path().join("alpha"), root.path().join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(demo_binding("proj-1", &alpha));
+    cfg.bindings.push(demo_binding("proj-2", &beta));
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    // The issue moves to the other project while the first cycle re-reads it for the start.
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        fake.update("1", |i| i.project_id = Some("proj-2".into()));
+    }));
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&engine, &shutdown);
+    // The clock never moves here: only the re-assignment itself can wake the loop for the start.
+    eventually("the moved issue to start", || {
+        runner.started() == ["DEMO-1"]
+    })
+    .await;
+    assert_eq!(runner.specs.lock().unwrap()[0].cwd, beta);
+    stop_loop(&shutdown, worker).await;
+    engine.wait_idle().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1575,6 +1634,35 @@ async fn a_queued_or_waiting_job_can_be_stopped_before_it_starts() {
 }
 
 #[tokio::test]
+async fn a_row_that_says_running_without_a_run_cannot_be_stopped() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: Arc::new(fake.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(fake, false)),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    engine.poll_once().await.unwrap();
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    // A row that claims a run which is not there (a crash would leave one behind).
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE jobs SET state = 'running'", [])
+        .unwrap();
+    let err = engine.cancel_job(job.id).unwrap_err();
+    assert!(err.to_string().contains("no run is in progress"), "{err}");
+}
+
+#[tokio::test]
 async fn a_stopped_run_can_be_retried() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");
@@ -1779,10 +1867,13 @@ async fn doctor_reports_viewer_workspace_executors_and_bindings() {
 async fn doctor_reports_a_linear_failure_and_still_checks_the_rest() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");
-    h.linear.fail_next("Linear is down");
+    h.linear.fail_next("Linear is down\n(try again)");
     let report = h.engine.doctor().await;
     assert!(report.viewer.is_none());
-    assert!(report.linear_error.unwrap().contains("Linear is down"));
+    assert_eq!(
+        report.linear_error.as_deref(),
+        Some("Linear is down (try again)")
+    );
     assert!(
         report.workspace.is_none(),
         "no workspace check without a connection"
@@ -1810,7 +1901,7 @@ async fn doctor_keeps_the_error_of_a_failed_workspace_check() {
     assert!(report.workspace.is_none());
     assert_eq!(
         report.linear_error.as_deref(),
-        Some("workspace check failed: Linear is down")
+        Some("workspace check failed: Linear is down (try again)")
     );
 }
 
@@ -1887,4 +1978,802 @@ async fn log_tail_covers_exactly_the_last_mebibyte() {
     assert_eq!(h.engine.log_tail(job.id, 10).unwrap(), ["first", "second"]);
     assert_eq!(h.engine.log_tail(job.id, 1).unwrap(), ["second"]);
     assert!(h.engine.log_tail(job.id, 0).unwrap().is_empty());
+}
+
+// One run per directory, and a user's stop or retry is never overwritten.
+
+/// Runs `first` and `second` on two threads that start together; `second` waits `delay` first.
+async fn race<A, B>(
+    first: impl FnOnce() -> A + Send + 'static,
+    second: impl FnOnce() -> B + Send + 'static,
+    delay: Duration,
+) -> (A, B)
+where
+    A: Send + 'static,
+    B: Send + 'static,
+{
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (b1, b2) = (barrier.clone(), barrier);
+    let one = tokio::task::spawn_blocking(move || {
+        b1.wait();
+        first()
+    });
+    let two = tokio::task::spawn_blocking(move || {
+        b2.wait();
+        let start = std::time::Instant::now();
+        while start.elapsed() < delay {
+            std::hint::spin_loop();
+        }
+        second()
+    });
+    (one.await.unwrap(), two.await.unwrap())
+}
+
+/// The head start the first racer gets in `round`: from nothing to a few hundred microseconds,
+/// so the two calls meet at every point of each other's critical sections.
+fn head_start(round: u64) -> Duration {
+    Duration::from_micros((round % 60) * 5)
+}
+
+#[tokio::test]
+async fn an_issue_moved_to_a_busy_project_waits_for_that_projects_folder() {
+    let h = Harness::new(5, true);
+    h.bind("proj-1", "a");
+    let b = h.bind("proj-2", "b");
+    h.linear.upsert(issue("2", "proj-2"));
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("2").state, JobState::Running);
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").binding_id.as_deref(), Some("proj-1"));
+    // Between that poll and the dispatch the issue moves to the project whose folder is in use:
+    // the scheduler picks the job for folder `a`, but it would run in `b`.
+    h.linear
+        .update("1", |i| i.project_id = Some("proj-2".into()));
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.engine.status().running, 1, "one run per folder");
+    let moved = h.latest("1");
+    assert_eq!(moved.state, JobState::Queued);
+    assert_eq!(moved.binding_id.as_deref(), Some("proj-2"));
+    assert_eq!(moved.directory.as_deref(), Some(b.as_path()));
+    // Once the folder is free, the next cycle runs it there.
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Running);
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    let cwds: Vec<PathBuf> = h
+        .runner
+        .specs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|spec| spec.cwd.clone())
+        .collect();
+    assert_eq!(cwds, [b.clone(), b]);
+}
+
+#[tokio::test]
+async fn the_scheduler_picks_only_jobs_that_can_start() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir_all(root.path().join(name)).unwrap();
+    }
+    let mut cfg = Config::default();
+    cfg.settings.max_concurrent = 2;
+    cfg.bindings
+        .push(demo_binding("proj-1", &root.path().join("a")));
+    // The same folder as proj-1, named another way.
+    cfg.bindings
+        .push(demo_binding("proj-4", &root.path().join("a/../a")));
+    cfg.bindings
+        .push(demo_binding("proj-2", &root.path().join("b")));
+    cfg.bindings
+        .push(demo_binding("proj-3", &root.path().join("c")));
+    let fake = FakeLinear::new("user-1");
+    for (uuid, project) in [
+        ("1", "proj-1"),
+        ("4", "proj-4"),
+        ("2", "proj-2"),
+        ("3", "proj-3"),
+    ] {
+        fake.upsert(issue(uuid, project));
+    }
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, true));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    // Only DEMO-1 and DEMO-2 can start: DEMO-4 shares DEMO-1's folder and DEMO-3 finds no slot
+    // left. The other two are not even re-read in Linear.
+    assert_eq!(engine.dispatch().await.unwrap().len(), 2);
+    assert_eq!(spy.issue_calls(), 2);
+    assert_eq!(engine.status().running, 2);
+    // While both runs go on, a new round picks nothing.
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(spy.issue_calls(), 2);
+    runner.gate.add_permits(2);
+    engine.wait_idle().await;
+}
+
+#[tokio::test]
+async fn a_free_slot_goes_to_a_job_whose_folder_is_free() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.linear.upsert(issue("0", "proj-1"));
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.engine.status().running, 1);
+    // DEMO-1 queues behind the run in folder `a`; DEMO-2 can use the one free slot.
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-2"));
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.engine.status().running, 2);
+    assert_eq!(h.latest("2").state, JobState::Running);
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    h.runner.gate.add_permits(3);
+    h.settle().await;
+}
+
+#[tokio::test]
+async fn a_binding_that_moved_its_folder_is_picked_up_before_the_start() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    // The project's folder changes after the poll and before the dispatch; the job row must
+    // name the folder the run uses, so the start waits for the next cycle.
+    let new_folder = h.bind("proj-1", "c");
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.directory.as_deref(), Some(new_folder.as_path()));
+    assert_eq!(h.engine.dispatch().await.unwrap().len(), 1);
+    h.settle().await;
+    assert_eq!(h.runner.specs.lock().unwrap()[0].cwd, new_folder);
+}
+
+#[tokio::test]
+async fn a_stop_during_the_start_reread_is_not_undone_by_a_missing_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let folder = root.path().join("repo");
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(job.state, JobState::Queued);
+    // While the dispatch re-reads the issue, the user stops the job and the folder goes missing:
+    // the start would put the job back to waiting.
+    let (stopper, gone) = (engine.clone(), folder.clone());
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        stopper.cancel_job(job.id).unwrap();
+        std::fs::remove_dir_all(&gone).unwrap();
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    let after = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(after.state, JobState::Canceled, "the stop was undone");
+    assert_eq!(after.reason.as_deref(), Some("stopped by the user"));
+    // The folder is back; the stopped job stays stopped.
+    std::fs::create_dir_all(&folder).unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    assert_eq!(
+        engine.list_jobs(10).unwrap().remove(0).state,
+        JobState::Canceled
+    );
+    assert!(runner.started().is_empty(), "a stopped job ran");
+}
+
+/// Takes the issue out of every later poll, so rounds that share one harness stay independent.
+fn retire(h: &Harness, uuid: &str) {
+    h.linear.update(uuid, |i| i.labels.clear());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_poll_racing_a_retry_never_leaves_two_active_rows() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    for round in 0..150 {
+        let uuid = format!("e{round}");
+        h.linear.upsert(issue(&uuid, "proj-1"));
+        h.runner
+            .script(&format!("DEMO-{uuid}"), Script::exit_code(1));
+        h.engine.tick().await.unwrap();
+        h.settle().await;
+        let failed = h.latest(&uuid);
+        assert_eq!(failed.state, JobState::Failed);
+        // Someone edits the issue, so the poll wants to record a new run, just as the user
+        // retries the failed one.
+        h.linear.update(&uuid, |i| i.title.push_str(" (edited)"));
+        let (polling, retrying) = (h.engine.clone(), h.engine.clone());
+        let handle = tokio::runtime::Handle::current();
+        let (polled, _retried) = race(
+            move || handle.block_on(polling.poll_once()),
+            move || retrying.retry_job(failed.id).is_ok(),
+            head_start(round),
+        )
+        .await;
+        polled.unwrap();
+        let active: Vec<(i64, JobState)> = h
+            .engine
+            .list_jobs(1000)
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.issue_uuid == uuid && job.state.is_active())
+            .map(|job| (job.id, job.state))
+            .collect();
+        assert!(active.len() <= 1, "round {round}: active rows {active:?}");
+        retire(&h, &uuid);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_poll_racing_a_stop_never_undoes_the_stop() {
+    let h = Harness::new(2, false);
+    for round in 0..600 {
+        let uuid = format!("f{round}");
+        // No binding: the job waits, and every poll rewrites its row.
+        h.linear.upsert(issue(&uuid, "proj-unbound"));
+        h.engine.tick().await.unwrap();
+        let waiting = h.latest(&uuid);
+        assert_eq!(waiting.state, JobState::WaitingBinding);
+        let (polling, stopping) = (h.engine.clone(), h.engine.clone());
+        let handle = tokio::runtime::Handle::current();
+        let (polled, stopped) = race(
+            move || handle.block_on(polling.poll_once()),
+            move || stopping.cancel_job(waiting.id),
+            head_start(round),
+        )
+        .await;
+        polled.unwrap();
+        stopped.unwrap_or_else(|e| panic!("round {round}: the stop was refused: {e:#}"));
+        assert_eq!(
+            h.latest(&uuid).state,
+            JobState::Canceled,
+            "round {round}: a stop that succeeded was undone"
+        );
+        retire(&h, &uuid);
+    }
+}
+
+// The window this guards against (`cancel_job` looks at the running set, the run registers and
+// starts, `cancel_job` then reads the row) is a few hundred nanoseconds wide, so a race like this
+// hardly ever lands in it: the test is a smoke test of the invariant, not a detector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_that_races_the_start_is_never_refused() {
+    let h = Harness::new(2, true); // gated: a run ends only when it is stopped
+    h.bind("proj-1", "a");
+    for round in 0..150 {
+        let uuid = format!("s{round}");
+        h.linear.upsert(issue(&uuid, "proj-1"));
+        h.engine.poll_once().await.unwrap();
+        let queued = h.latest(&uuid);
+        assert_eq!(queued.state, JobState::Queued);
+        let (starting, stopping) = (h.engine.clone(), h.engine.clone());
+        let handle = tokio::runtime::Handle::current();
+        let (dispatched, stopped) = race(
+            move || handle.block_on(starting.dispatch()),
+            move || stopping.cancel_job(queued.id),
+            head_start(round),
+        )
+        .await;
+        dispatched.unwrap();
+        stopped.unwrap_or_else(|e| panic!("round {round}: the stop was refused: {e:#}"));
+        tokio::time::timeout(Duration::from_secs(10), h.settle())
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: the stopped run never ended"));
+        assert_eq!(h.latest(&uuid).state, JobState::Canceled, "round {round}");
+        retire(&h, &uuid);
+    }
+}
+
+#[tokio::test]
+async fn an_issue_moved_to_another_project_with_the_same_folder_is_reassigned_first() {
+    let h = Harness::new(2, false);
+    let folder = h.bind("proj-1", "a");
+    h.engine
+        .add_binding(Binding {
+            id: "bind-2".into(),
+            ..demo_binding("proj-2", &folder)
+        })
+        .unwrap();
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").binding_id.as_deref(), Some("proj-1"));
+    // Same folder, other binding: the run would be fine, but the row must name its binding.
+    h.linear
+        .update("1", |i| i.project_id = Some("proj-2".into()));
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").binding_id.as_deref(), Some("bind-2"));
+    assert_eq!(h.engine.dispatch().await.unwrap().len(), 1);
+    h.settle().await;
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
+async fn a_stop_during_the_start_reread_keeps_its_reason_when_the_issue_changed_too() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    // The user stops the job and someone takes the issue away, both while it is re-read.
+    let (stopper, linear) = (engine.clone(), fake.clone());
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        stopper.cancel_job(job.id).unwrap();
+        linear.update("1", |i| i.assignee_id = Some("someone-else".into()));
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    let after = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(after.state, JobState::Canceled);
+    assert_eq!(after.reason.as_deref(), Some("stopped by the user"));
+}
+
+#[tokio::test]
+async fn a_stop_during_the_start_reread_is_not_undone_by_a_project_change() {
+    let root = tempfile::tempdir().unwrap();
+    let (alpha, beta) = (root.path().join("alpha"), root.path().join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(demo_binding("proj-1", &alpha));
+    cfg.bindings.push(demo_binding("proj-2", &beta));
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    // While the issue is re-read the user stops the job and the issue moves to the other project:
+    // moving the row to the new binding must not bring the stopped job back.
+    let (stopper, linear) = (engine.clone(), fake.clone());
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        stopper.cancel_job(job.id).unwrap();
+        linear.update("1", |i| i.project_id = Some("proj-2".into()));
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    let after = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(after.state, JobState::Canceled);
+    assert_eq!(
+        after.binding_id.as_deref(),
+        Some("proj-1"),
+        "the stopped row was rewritten"
+    );
+    // The issue changed in Linear, so the next check may record a new run of it; the stopped
+    // row itself stays stopped and never runs.
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let rows = engine.list_jobs(10).unwrap();
+    let stopped = rows.iter().find(|row| row.id == job.id).unwrap();
+    assert_eq!(stopped.state, JobState::Canceled);
+    assert_eq!(stopped.started_at, None, "the stopped job ran");
+}
+
+// Pause, shutdown and failures while a job starts.
+
+#[tokio::test]
+async fn pausing_during_a_start_stops_that_start_and_the_rest_of_the_round() {
+    let root = tempfile::tempdir().unwrap();
+    let (alpha, beta) = (root.path().join("alpha"), root.path().join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(demo_binding("proj-1", &alpha));
+    cfg.bindings.push(demo_binding("proj-2", &beta));
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-2"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    // The user pauses while the first job's issue is re-read: neither that job nor the second
+    // one of the same round may start.
+    let pauser = engine.clone();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || pauser.pause().unwrap()));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    engine.wait_idle().await;
+    assert!(
+        runner.started().is_empty(),
+        "a run started after pause() returned"
+    );
+    for row in engine.list_jobs(10).unwrap() {
+        assert_eq!(row.state, JobState::Queued);
+    }
+    // Resumed, both start.
+    engine.resume().unwrap();
+    assert_eq!(engine.dispatch().await.unwrap().len(), 2);
+    engine.wait_idle().await;
+    let mut started = runner.started();
+    started.sort();
+    assert_eq!(started, ["DEMO-1", "DEMO-2"]);
+}
+
+#[tokio::test]
+async fn a_binding_removed_during_the_start_reread_stops_the_start() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    let remover = engine.clone();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        assert!(remover.remove_binding("proj-1").unwrap());
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    engine.wait_idle().await;
+    assert!(
+        runner.started().is_empty(),
+        "a run started without a binding"
+    );
+    assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Queued);
+}
+
+#[tokio::test]
+async fn a_binding_changed_during_the_start_reread_is_applied_to_the_run() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let folder = root.path().join("repo");
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    // The user switches the binding to the stricter permission profile while the start re-reads
+    // the issue: the run must not start with the profile the user just replaced.
+    let changer = engine.clone();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        changer
+            .add_binding(Binding {
+                permission: Some(PermissionProfile::Personal),
+                ..demo_binding("proj-1", &folder)
+            })
+            .unwrap();
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(engine.dispatch().await.unwrap().len(), 1);
+    engine.wait_idle().await;
+    let args = runner.specs.lock().unwrap()[0].args.clone();
+    assert!(args.contains(&"dontAsk".to_string()), "{args:?}");
+    assert!(!args.contains(&"bypassPermissions".to_string()), "{args:?}");
+}
+
+#[tokio::test]
+async fn a_configuration_change_during_one_start_only_delays_that_start() {
+    let root = tempfile::tempdir().unwrap();
+    let (alpha, beta) = (root.path().join("alpha"), root.path().join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(demo_binding("proj-1", &alpha));
+    cfg.bindings.push(demo_binding("proj-2", &beta));
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-2"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    // An unrelated binding is added while the first job's issue is re-read. That start is
+    // delayed (it was built from the older configuration); the second one is not affected.
+    let changer = engine.clone();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        changer
+            .add_binding(demo_binding("proj-3", &elsewhere))
+            .unwrap();
+    }));
+    let started = engine.dispatch().await.unwrap();
+    engine.wait_idle().await;
+    assert_eq!(started, [job_of(&engine, "2").id]);
+    assert_eq!(job_of(&engine, "1").state, JobState::Queued);
+    assert_eq!(engine.dispatch().await.unwrap().len(), 1);
+    engine.wait_idle().await;
+    assert_eq!(runner.started(), ["DEMO-2", "DEMO-1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_requested_during_the_start_reread_starts_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    let shutdown = CancellationToken::new();
+    let token = shutdown.clone();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || token.cancel()));
+    // The first cycle polls, queues the job and starts re-reading its issue; the shutdown
+    // arrives during that re-read.
+    let worker = spawn_loop(&engine, &shutdown);
+    eventually("the loop to stop", || worker.is_finished()).await;
+    worker.await.unwrap();
+    engine.wait_idle().await;
+    assert!(
+        runner.started().is_empty(),
+        "a run started after the shutdown"
+    );
+    assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Queued);
+    // Nothing starts later either, however the engine is driven.
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    engine.wait_idle().await;
+    assert!(runner.started().is_empty());
+}
+
+#[tokio::test]
+async fn one_job_that_cannot_be_started_does_not_block_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    let (alpha, beta) = (root.path().join("alpha"), root.path().join("beta"));
+    std::fs::create_dir_all(&alpha).unwrap();
+    std::fs::create_dir_all(&beta).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(demo_binding("proj-1", &alpha));
+    cfg.bindings.push(demo_binding("proj-2", &beta));
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-2"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    *spy.fail_issue.lock().unwrap() = Some(("1".into(), "Linear is down\nfor DEMO-1".into()));
+    let started = engine.dispatch().await.unwrap();
+    engine.wait_idle().await;
+    // The first job could not be re-read; the second still started.
+    let second = job_of(&engine, "2");
+    assert_eq!(started, [second.id]);
+    assert_eq!(runner.started(), ["DEMO-2"]);
+    assert_eq!(job_of(&engine, "1").state, JobState::Queued);
+    // The status says what went wrong, until the next successful check replaces it.
+    let error = engine.status().last_error.expect("the failure is reported");
+    assert_eq!(error, "could not start DEMO-1: Linear is down for DEMO-1");
+    engine.poll_once().await.unwrap();
+    assert_eq!(engine.status().last_error, None);
+}
+
+#[tokio::test]
+async fn a_panic_while_a_run_is_recorded_still_frees_its_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-1")); // same project, so the same folder
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    // `issue()` calls: 1 = DEMO-1's start re-read, 2 = the check of its result (panics).
+    *spy.panic_on_issue_call.lock().unwrap() = Some(2);
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.tick().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs after a panic while recording");
+    assert_eq!(engine.status().running, 0);
+    // The row does not stay `running` for a run that is over.
+    let first = job_of(&engine, "1");
+    assert_eq!(first.state, JobState::Failed);
+    assert!(
+        first
+            .reason
+            .unwrap()
+            .contains("before its result was recorded")
+    );
+    // The folder is free again: the issue that was waiting for it runs.
+    engine.tick().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs");
+    assert_eq!(runner.started(), ["DEMO-1", "DEMO-2"]);
+    assert_eq!(job_of(&engine, "2").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
+async fn a_result_that_cannot_be_stored_fails_the_job_and_frees_the_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), true));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: Arc::new(fake),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: runner.clone(),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    engine.tick().await.unwrap();
+    // From now on the database refuses to store a run as awaiting acceptance.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_result BEFORE UPDATE ON jobs \
+             WHEN NEW.state = 'awaiting_acceptance' \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    runner.gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs when the result cannot be stored");
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(job.state, JobState::Failed);
+    let reason = job.reason.unwrap();
+    assert!(
+        reason.contains("could not record the run result"),
+        "{reason}"
+    );
+    assert!(reason.contains("disk full"), "{reason}");
+    assert_eq!(engine.status().running, 0);
+}
+
+// Text that reaches the panel, the CLI and MCP.
+
+#[tokio::test]
+async fn text_from_linear_in_a_recorded_reason_is_cleaned() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    // The error text comes from outside: a line break and a right-to-left override.
+    h.linear.fail_next("Linear said\nno \u{202e}gnp");
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    assert_eq!(
+        h.latest("1").reason.as_deref(),
+        Some("could not verify the result in Linear: Linear said no gnp")
+    );
+}
+
+#[tokio::test]
+async fn a_poll_error_is_shown_as_one_clean_line() {
+    let h = Harness::new(2, false);
+    h.linear.fail_next("Linear said\nno \u{202e}gnp");
+    assert!(h.engine.tick().await.is_err());
+    assert_eq!(
+        h.engine.status().last_error.as_deref(),
+        Some("Linear said no gnp")
+    );
+}
+
+#[tokio::test]
+async fn the_last_output_is_kept_when_there_is_no_report() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-2"));
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            final_text: Some("I could not find the file".into()),
+            ..Script::exit_code(3)
+        },
+    );
+    h.runner.script(
+        "DEMO-2",
+        Script {
+            final_text: Some("two\nlines\u{200b}!".into()),
+            ..Script::exit_code(3)
+        },
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let first = h.latest("1");
+    assert_eq!(first.state, JobState::Failed);
+    assert_eq!(first.summary.as_deref(), Some("I could not find the file"));
+    // It is cleaned like any other summary.
+    assert_eq!(h.latest("2").summary.as_deref(), Some("two lines!"));
+}
+
+#[tokio::test]
+async fn an_empty_summary_is_no_summary() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-2"));
+    // A report line without text, and output that is nothing but invisible characters.
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            final_text: Some(r#"{"result":"in_testing","summary":""}"#.into()),
+            ..Script::success()
+        },
+    );
+    h.runner.script(
+        "DEMO-2",
+        Script {
+            final_text: Some(" \u{200b}\n".into()),
+            ..Script::exit_code(1)
+        },
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").summary, None);
+    assert_eq!(h.latest("2").summary, None);
 }

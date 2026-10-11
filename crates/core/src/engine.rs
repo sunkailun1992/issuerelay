@@ -2,15 +2,18 @@
 //! result in Linear and keeps the status the panel, CLI and MCP read.
 //!
 //! Locking: no std lock is ever held across an `.await`. They are taken and released within one
-//! statement, except in three short synchronous sections: `update_config` holds the config lock
-//! until the new file is saved, `retry_job` holds the store lock for its check-and-requeue, and
-//! `run_forever` holds the running-set lock while it tells the runs to stop. The async cycle lock
-//! is the one lock held across `.await`; it keeps a poll from interleaving with a dispatch.
+//! statement, except in short synchronous sections that must read and then write under one
+//! guard: `update_config` (the config), `retry_job`, the poll's step for each issue and
+//! `assign_if_queued` (the store), the registration of a run and the final loop of
+//! `run_forever` (the running set). The async cycle lock is the one lock held across `.await`;
+//! it keeps a poll from interleaving with a dispatch. A user's stop or retry can come at any
+//! time, also while a poll or a start waits for Linear, so every write that follows such a
+//! wait is conditional on the row still being in the state it was read in.
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, RwLock},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
     time::Duration,
 };
 
@@ -37,8 +40,8 @@ use crate::trigger::{self, Eligibility, WaitReason, same_name};
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
 
-/// The most characters of the AI's summary that are kept.
-const MAX_SUMMARY_CHARS: usize = 500;
+/// The most characters of a summary or a reason that are kept.
+const MAX_TEXT_CHARS: usize = 500;
 
 /// Starts one executor run and waits for it. The engine calls it from a task of its own.
 #[async_trait::async_trait]
@@ -99,7 +102,8 @@ pub struct StatusSnapshot {
     pub viewer: Option<Viewer>,
     /// When Linear was last checked, whether or not that worked. A paused engine makes no check.
     pub last_poll_at: Option<DateTime<Utc>>,
-    /// Why the last check failed.
+    /// Why the last check failed, or why a job could not be started in the last round; the
+    /// next successful check clears it.
     pub last_error: Option<String>,
     /// Runs in progress.
     pub running: usize,
@@ -121,6 +125,34 @@ struct RunningJob {
     cancel: CancellationToken,
 }
 
+/// A run's place in the running set, held by the task that watches the run. `release` frees the
+/// place once the result is recorded; dropping the slot frees it too, so a task that ends any
+/// other way (a panic, an abort) cannot leave the folder occupied or `wait_idle` waiting. The row
+/// of such a run is marked failed.
+struct RunSlot {
+    engine: Engine,
+    job_id: i64,
+    released: bool,
+}
+
+impl RunSlot {
+    /// Frees the place after the result was recorded.
+    fn release(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.engine.end_run(self.job_id);
+        }
+    }
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        if !self.released {
+            self.engine.abandon_run(self.job_id);
+        }
+    }
+}
+
 struct Inner {
     config_path: PathBuf,
     config: RwLock<Config>,
@@ -134,9 +166,14 @@ struct Inner {
     poll: Mutex<PollState>,
     poll_now: Notify,
     idle: Notify,
-    /// Held for the whole of a poll and of a dispatch, so the two never interleave: a poll
-    /// reassigns queued rows, which is only safe while no dispatch is starting them.
+    /// Held for the whole of a poll and of a dispatch, so the two never interleave: a dispatch
+    /// starts runs from rows a poll has just brought up to date, and a poll never rewrites a row
+    /// a dispatch is starting. It does not stand between those two and the user, who can stop or
+    /// retry a job at any moment; the store guard and conditional writes cover that.
     cycle: tokio::sync::Mutex<()>,
+    /// The token of the running `run_forever`: once it is cancelled nothing new starts, also in
+    /// a cycle that is already in progress.
+    shutdown: Mutex<Option<CancellationToken>>,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -151,19 +188,37 @@ fn canonical_dir(dir: &Path) -> PathBuf {
     std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
 }
 
-/// The AI's summary as one plain line: every control character (newline and tab included)
-/// becomes a space, the ends are trimmed and at most `MAX_SUMMARY_CHARS` characters are kept,
-/// with `…` added when the text was cut. The panel, CLI and MCP show it as it is stored.
-fn clean_summary(text: &str) -> String {
+/// Text from the AI, Linear or the operating system as one plain line, safe to show in the panel,
+/// the CLI and MCP: every control character (newline and tab included) becomes a space, zero-width
+/// and direction-changing characters are removed, the ends are trimmed and at most
+/// `MAX_TEXT_CHARS` characters are kept, with `…` added when the text was cut.
+fn clean_text(text: &str) -> String {
     let flat: String = text
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .filter_map(|c| {
+            if c.is_control() {
+                Some(' ')
+            } else if is_invisible(c) {
+                None
+            } else {
+                Some(c)
+            }
+        })
         .collect();
     let flat = flat.trim();
-    match flat.char_indices().nth(MAX_SUMMARY_CHARS) {
+    match flat.char_indices().nth(MAX_TEXT_CHARS) {
         Some((cut, _)) => format!("{}…", &flat[..cut]),
         None => flat.to_string(),
     }
+}
+
+/// Zero-width, line-separating and direction-changing characters. `char::is_control` lets them
+/// through, but they make text show differently from what it says.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+    )
 }
 
 /// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
@@ -236,6 +291,7 @@ impl Engine {
                 poll_now: Notify::new(),
                 idle: Notify::new(),
                 cycle: tokio::sync::Mutex::new(()),
+                shutdown: Mutex::new(None),
             }),
         })
     }
@@ -400,7 +456,7 @@ impl Engine {
         let result = self.poll_inner(&cfg).await;
         let state = PollState {
             at: Some(Utc::now()),
-            error: result.as_ref().err().map(|e| format!("{e:#}")),
+            error: result.as_ref().err().map(|e| clean_text(&format!("{e:#}"))),
             linear_ok: result.is_ok(),
         };
         *self.inner.poll.lock().expect("poll lock") = state;
@@ -422,16 +478,20 @@ impl Engine {
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let latest = self.store().latest_for_issue(&issue.uuid)?;
             let eligibility = trigger::evaluate(issue, cfg, &me.id, &ready);
+            // Read the latest run, decide and write under one store guard. A stop or a retry that
+            // came in between would otherwise be overwritten, or leave the issue with two
+            // active rows.
+            let store = self.store();
+            let latest = store.latest_for_issue(&issue.uuid)?;
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
-                    self.reassess(&job, cfg, eligibility)?;
+                    Self::reassess(&store, &job, cfg, eligibility)?;
                 }
                 Some(job) if job.state == JobState::Running => {}
                 latest => {
                     if trigger::should_enqueue(latest.as_ref(), issue) {
-                        self.enqueue(issue, cfg, eligibility)?;
+                        Self::enqueue(&store, issue, cfg, eligibility)?;
                     }
                 }
             }
@@ -439,9 +499,13 @@ impl Engine {
         let pending = self
             .store()
             .list_by_state(&[JobState::Queued, JobState::WaitingBinding])?;
+        let waiting = [JobState::Queued, JobState::WaitingBinding];
         for job in pending.iter().filter(|j| !seen.contains(&j.issue_uuid)) {
-            self.store().set_state(
+            // Only while it still waits: the user may have stopped or retried it since the list
+            // was read.
+            self.store().set_state_if(
                 job.id,
+                &waiting,
                 JobState::Canceled,
                 Some("no longer matches the trigger (label, assignee or status changed)"),
             )?;
@@ -449,7 +513,7 @@ impl Engine {
         Ok(())
     }
 
-    fn enqueue(&self, issue: &Issue, cfg: &Config, eligibility: Eligibility) -> Result<()> {
+    fn enqueue(store: &Store, issue: &Issue, cfg: &Config, eligibility: Eligibility) -> Result<()> {
         let new = match &eligibility {
             Eligibility::Eligible(binding) => NewJob {
                 issue,
@@ -467,21 +531,21 @@ impl Engine {
             },
             Eligibility::NotCandidate => return Ok(()),
         };
-        self.store().insert(new)?;
+        store.insert(new)?;
         Ok(())
     }
 
-    /// Brings a queued or waiting job in line with what the issue and the configuration say
-    /// now. Assigns unconditionally, which is safe because the cycle lock keeps a dispatch from
-    /// starting the row meanwhile.
-    fn reassess(&self, job: &Job, cfg: &Config, eligibility: Eligibility) -> Result<()> {
+    /// Brings a queued or waiting job in line with what the issue and the configuration say now.
+    /// The caller holds the store guard it read the job under, so a stop or a retry cannot slip in
+    /// between that read and these writes.
+    fn reassess(store: &Store, job: &Job, cfg: &Config, eligibility: Eligibility) -> Result<()> {
         match eligibility {
             Eligibility::Eligible(binding) => {
                 let unchanged = job.state == JobState::Queued
                     && job.binding_id.as_deref() == Some(binding.id.as_str())
                     && job.directory.as_deref() == Some(binding.directory.as_path());
                 if !unchanged {
-                    self.store().assign(
+                    store.assign(
                         job.id,
                         JobState::Queued,
                         Some(&binding),
@@ -491,7 +555,7 @@ impl Engine {
                 }
             }
             Eligibility::Waiting(reason) => {
-                self.store().assign(
+                store.assign(
                     job.id,
                     JobState::WaitingBinding,
                     None,
@@ -505,11 +569,13 @@ impl Engine {
     }
 
     /// Starts the queued jobs the scheduler picks (one run per directory, at most
-    /// `max_concurrent` in total) and returns their ids. Does nothing while paused.
+    /// `max_concurrent` in total) and returns their ids. A job that cannot be started is logged and
+    /// reported in the status, and does not stop the others. Does nothing while paused or after a
+    /// shutdown was requested.
     pub async fn dispatch(&self) -> Result<Vec<i64>> {
         let _cycle = self.inner.cycle.lock().await;
         let cfg = self.config();
-        if cfg.settings.paused {
+        if cfg.settings.paused || self.stopping() {
             return Ok(Vec::new());
         }
         let queued = self.store().list_by_state(&[JobState::Queued])?;
@@ -552,12 +618,36 @@ impl Engine {
         let me = self.viewer().await?;
         let (ready, reports) = self.readiness().await;
         let mut started = Vec::new();
+        let mut failure = None;
         for id in picks {
-            let job = self.store().get(id)?;
-            let Some(job) = job else { continue };
-            if self.start_job(&cfg, &me, &ready, &reports, job).await? {
-                started.push(id);
+            // Each start works from the configuration as it is now, and a pause or a shutdown
+            // that came meanwhile ends the round.
+            let cfg = self.config();
+            if cfg.settings.paused || self.stopping() {
+                break;
             }
+            let job = self.store().get(id);
+            let started_job = match job {
+                Ok(Some(job)) => {
+                    let label = job.issue_identifier.clone();
+                    self.start_job(&cfg, &me, &ready, &reports, job)
+                        .await
+                        .map_err(|e| (label, e))
+                }
+                Ok(None) => continue,
+                Err(e) => Err((format!("job {id}"), e)),
+            };
+            match started_job {
+                Ok(true) => started.push(id),
+                Ok(false) => {}
+                Err((label, e)) => {
+                    tracing::warn!(job_id = id, error = %format!("{e:#}"), "could not start the job");
+                    failure = Some(format!("could not start {label}: {e:#}"));
+                }
+            }
+        }
+        if let Some(message) = failure {
+            self.inner.poll.lock().expect("poll lock").error = Some(clean_text(&message));
         }
         Ok(started)
     }
@@ -570,13 +660,17 @@ impl Engine {
         reports: &[ExecutorReport],
         job: Job,
     ) -> Result<bool> {
-        // The issue may have changed while queued; re-read it right before starting.
+        // The issue may have changed while queued; re-read it right before starting. The user can
+        // stop the job, pause the engine or change the configuration while this waits, so every
+        // write below is conditional on the row still being queued, and the run only starts if
+        // the configuration is still the one it was built from.
         let current = self.inner.linear.issue(&job.issue_uuid).await?;
         let Some(issue) =
             current.filter(|i| trigger::is_candidate(i, &cfg.settings.trigger, &me.id))
         else {
-            self.store().set_state(
+            self.store().set_state_if(
                 job.id,
+                &[JobState::Queued],
                 JobState::Canceled,
                 Some("issue changed before the run started"),
             )?;
@@ -585,7 +679,7 @@ impl Engine {
         let binding = match trigger::evaluate(&issue, cfg, &me.id, ready) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
-                self.store().assign(
+                self.assign_if_queued(
                     job.id,
                     JobState::WaitingBinding,
                     None,
@@ -597,14 +691,29 @@ impl Engine {
             Eligibility::NotCandidate => return Ok(false),
         };
         let kind = cfg.executor_for(&binding);
+        // The scheduler picked this job for the folder of the binding recorded on its row. If the
+        // issue has moved to another project since (or the binding changed folder), the run
+        // would go where the scheduler did not look: record the new binding on the row and let
+        // the next cycle schedule it against the runs in progress.
+        let unchanged = job.binding_id.as_deref() == Some(binding.id.as_str())
+            && job.directory.as_deref().map(canonical_dir)
+                == Some(canonical_dir(&binding.directory));
+        if !unchanged {
+            let reassigned =
+                self.assign_if_queued(job.id, JobState::Queued, Some(&binding), Some(kind), None)?;
+            if reassigned {
+                // The next dispatch should not wait for the timer.
+                self.poll_now();
+            }
+            return Ok(false);
+        }
         let program = reports
             .iter()
             .find(|r| r.kind == kind)
             .and_then(|r| r.program.clone());
         let Some(program) = program else {
             let reason = WaitReason::ExecutorNotReady(kind).describe();
-            self.store()
-                .assign(job.id, JobState::WaitingBinding, None, None, Some(&reason))?;
+            self.assign_if_queued(job.id, JobState::WaitingBinding, None, None, Some(&reason))?;
             return Ok(false);
         };
         let language = cfg.settings.resolved_comment_language();
@@ -631,15 +740,35 @@ impl Engine {
         );
         // A manual retry reuses the row, so its log replaces the previous attempt's log.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
+        // Right before the run is registered: a pause or a changed binding that came while the
+        // issue was being read means this start must not happen. The job stays queued and the
+        // next cycle starts it from the new configuration, or not at all.
+        if self.config() != *cfg {
+            return Ok(false);
+        }
         // Register the run before marking it started, so a stop request in between finds the token.
         let cancel = CancellationToken::new();
-        self.inner.running.lock().expect("running lock").insert(
-            job.id,
-            RunningJob {
-                directory: canonical_dir(&binding.directory),
-                cancel: cancel.clone(),
-            },
-        );
+        let directory = canonical_dir(&binding.directory);
+        {
+            // The check and the insert happen under one lock. The scheduler's view of the running
+            // set is older than this moment, so the folder and the total are checked again. The
+            // shutdown is checked under the lock too, which `run_forever` also takes to stop the
+            // runs: a run is either registered before that and gets stopped, or sees the shutdown.
+            let mut running = self.inner.running.lock().expect("running lock");
+            if self.stopping()
+                || running.len() >= cfg.settings.max_concurrent
+                || running.values().any(|run| run.directory == directory)
+            {
+                return Ok(false);
+            }
+            running.insert(
+                job.id,
+                RunningJob {
+                    directory,
+                    cancel: cancel.clone(),
+                },
+            );
+        }
         let started = self.store().mark_started(job.id, &log_path);
         if !matches!(started, Ok(true)) {
             // The user stopped it while the issue was being re-read, or the store failed.
@@ -649,6 +778,11 @@ impl Engine {
         let limits = RunLimits {
             total: Duration::from_secs(cfg.settings.run_timeout_mins.saturating_mul(60)),
             stall: Duration::from_secs(cfg.settings.stall_timeout_mins.saturating_mul(60)),
+        };
+        let mut slot = RunSlot {
+            engine: self.clone(),
+            job_id: job.id,
+            released: false,
         };
         let engine = self.clone();
         let runner = self.inner.job_runner.clone();
@@ -667,16 +801,46 @@ impl Engine {
                     final_text: None,
                 },
             };
-            if let Err(e) = engine.finish_job(job_id, &issue_uuid, output).await {
+            if let Err(e) = engine
+                .finish_job(job_id, &issue_uuid, output, &mut slot)
+                .await
+            {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not record the run result");
             }
         });
         Ok(true)
     }
 
+    /// Sets the state, binding and reason of a job, but only while it is still queued, and says
+    /// whether it did. The check and the write happen under one store guard, so a stop that came
+    /// in meanwhile is never overwritten.
+    fn assign_if_queued(
+        &self,
+        job_id: i64,
+        state: JobState,
+        binding: Option<&Binding>,
+        executor: Option<ExecutorKind>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        let store = self.store();
+        match store.get(job_id)? {
+            Some(job) if job.state == JobState::Queued => {
+                store.assign(job_id, state, binding, executor, reason)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Checks the result in Linear, records it, frees the run's slot and wakes the loop so the
     /// next queued job can start.
-    async fn finish_job(&self, job_id: i64, issue_uuid: &str, output: RunOutput) -> Result<()> {
+    async fn finish_job(
+        &self,
+        job_id: i64,
+        issue_uuid: &str,
+        output: RunOutput,
+        slot: &mut RunSlot,
+    ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
         let verified = self.inner.linear.issue(issue_uuid).await;
@@ -703,7 +867,15 @@ impl Engine {
                 )
             }
         };
-        let summary = report.as_ref().map(|r| clean_summary(r.summary()));
+        // These texts come from outside (the AI, Linear, the operating system) and reach the
+        // panel, the CLI and MCP. The summary is the AI's own; without a report line it is the
+        // last thing the AI said.
+        let reason = reason.map(|reason| clean_text(&reason));
+        let summary = match &report {
+            Some(report) => Some(clean_text(report.summary())),
+            None => output.final_text.as_deref().map(clean_text),
+        }
+        .filter(|text| !text.is_empty());
         let recorded = self.store().mark_finished(
             job_id,
             state,
@@ -711,21 +883,61 @@ impl Engine {
             summary.as_deref(),
             verified_at,
         );
+        if let Err(e) = &recorded {
+            // Without this the row would stay `running` for a run that is over.
+            let reason = clean_text(&format!("could not record the run result: {e:#}"));
+            if let Err(e) = self
+                .store()
+                .set_state(job_id, JobState::Failed, Some(&reason))
+            {
+                tracing::error!(job_id, error = %format!("{e:#}"), "could not mark the run failed either");
+            }
+        }
         // Free the slot only after the result is stored: whoever sees the engine idle must also
         // see the result.
-        self.end_run(job_id);
+        slot.release();
         self.poll_now();
         recorded
     }
 
-    /// Drops the run from the running set and wakes `wait_idle`.
+    /// Drops the run from the running set and wakes `wait_idle`. Also runs from `RunSlot::drop`,
+    /// possibly while a panic unwinds, so a poisoned lock is used as it is instead of panicking.
     fn end_run(&self, job_id: i64) {
         self.inner
             .running
             .lock()
-            .expect("running lock")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(&job_id);
         self.inner.idle.notify_waiters();
+    }
+
+    /// Ends a run whose task stopped before it recorded the result: the row, if it still says
+    /// running, becomes failed, then the run's place is freed. Runs from `RunSlot::drop`, so like
+    /// `end_run` it must not panic.
+    fn abandon_run(&self, job_id: i64) {
+        let store = self
+            .inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _ = store.set_state_if(
+            job_id,
+            &[JobState::Running],
+            JobState::Failed,
+            Some("the run ended before its result was recorded"),
+        );
+        drop(store);
+        self.end_run(job_id);
+    }
+
+    /// A shutdown was requested: nothing new may start.
+    fn stopping(&self) -> bool {
+        self.inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
     }
 
     /// Resolves once no run is in progress (used by tests and by shutdown).
@@ -742,48 +954,54 @@ impl Engine {
     /// Stops a running job, or cancels one that is still queued or waiting. A stopped run is
     /// recorded as canceled once its process tree has ended.
     pub fn cancel_job(&self, job_id: i64) -> Result<()> {
-        let running = self
-            .inner
-            .running
-            .lock()
-            .expect("running lock")
-            .get(&job_id)
-            .map(|r| r.cancel.clone());
-        if let Some(token) = running {
-            token.cancel();
+        if self.stop_run(job_id) {
             return Ok(());
         }
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
-        if !matches!(job.state, JobState::Queued | JobState::WaitingBinding) {
-            bail!(
-                "job {job_id} is {} and cannot be stopped",
-                job.state.as_str()
-            );
+        match job.state {
+            JobState::Queued | JobState::WaitingBinding => {
+                let waiting = [JobState::Queued, JobState::WaitingBinding];
+                if self.store().set_state_if(
+                    job_id,
+                    &waiting,
+                    JobState::Canceled,
+                    Some("stopped by the user"),
+                )? {
+                    return Ok(());
+                }
+                // It started between the two reads: stop the run itself.
+                if self.stop_run(job_id) {
+                    return Ok(());
+                }
+                bail!("job {job_id} changed state while being stopped; try again")
+            }
+            JobState::Running => {
+                // It started after the first look at the running set.
+                if self.stop_run(job_id) {
+                    return Ok(());
+                }
+                bail!("job {job_id} is marked running but no run is in progress for it")
+            }
+            other => bail!("job {job_id} is {} and cannot be stopped", other.as_str()),
         }
-        let waiting = [JobState::Queued, JobState::WaitingBinding];
-        if self.store().set_state_if(
-            job_id,
-            &waiting,
-            JobState::Canceled,
-            Some("stopped by the user"),
-        )? {
-            return Ok(());
-        }
-        // It started between the two reads: stop the run itself.
-        let running = self
+    }
+
+    /// Tells the run of this job, if there is one, to stop; `false` when there is none.
+    fn stop_run(&self, job_id: i64) -> bool {
+        let token = self
             .inner
             .running
             .lock()
             .expect("running lock")
             .get(&job_id)
-            .map(|r| r.cancel.clone());
-        match running {
+            .map(|run| run.cancel.clone());
+        match token {
             Some(token) => {
                 token.cancel();
-                Ok(())
+                true
             }
-            None => bail!("job {job_id} changed state while being stopped; try again"),
+            None => false,
         }
     }
 
@@ -839,13 +1057,15 @@ impl Engine {
         let ready = doctor::ready_set(&executors);
         let (viewer, mut linear_error) = match self.inner.linear.viewer().await {
             Ok(viewer) => (Some(viewer), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
+            Err(e) => (None, Some(clean_text(&format!("{e:#}")))),
         };
         let mut workspace = None;
         if viewer.is_some() {
             match doctor::check_workspace(self.inner.linear.as_ref(), &cfg.settings.trigger).await {
                 Ok(report) => workspace = Some(report),
-                Err(e) => linear_error = Some(format!("workspace check failed: {e:#}")),
+                Err(e) => {
+                    linear_error = Some(clean_text(&format!("workspace check failed: {e:#}")))
+                }
             }
         }
         DoctorReport {
@@ -859,8 +1079,14 @@ impl Engine {
 
     /// The background loop: a cycle now, then again after the poll interval or as soon as
     /// `poll_now` is called. Returns after `shutdown` is cancelled and the running jobs were told
-    /// to stop; their results are recorded when they end (`wait_idle`).
+    /// to stop; their results are recorded when they end (`wait_idle`). Once the shutdown is
+    /// requested nothing new starts, not even in a cycle that is already in progress.
     pub async fn run_forever(&self, shutdown: CancellationToken) {
+        *self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(shutdown.clone());
         // Checked before every cycle, not only when waiting: if the shutdown and a wake-up are
         // ready together, `select!` may pick either, and no new cycle may start runs then.
         while !shutdown.is_cancelled() {
@@ -951,12 +1177,39 @@ mod tests {
     #[test]
     fn summaries_are_single_line_and_capped() {
         assert_eq!(
-            clean_summary(" pushed\nto\ttest\u{1b}[2J "),
+            clean_text(" pushed\nto\ttest\u{1b}[2J "),
             "pushed to test [2J"
         );
-        let long = clean_summary(&"x".repeat(2000));
+        let long = clean_text(&"x".repeat(2000));
         assert_eq!(long.chars().count(), 501);
         assert!(long.ends_with('…'));
-        assert_eq!(clean_summary("短摘要"), "短摘要");
+        assert_eq!(clean_text("短摘要"), "短摘要");
+    }
+
+    #[test]
+    fn invisible_and_bidirectional_characters_are_removed() {
+        // They survive `char::is_control`, yet make text read differently from what it says.
+        for c in [
+            '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}',
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2060}', '\u{2064}',
+            '\u{2066}', '\u{2069}', '\u{206f}', '\u{feff}',
+        ] {
+            assert_eq!(clean_text(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
+        }
+        // Their neighbours, other punctuation and other scripts stay.
+        for c in [
+            '\u{200a}', '\u{2010}', '\u{2026}', '\u{2027}', '\u{202f}', '\u{205f}', '\u{2070}',
+            '\u{fefe}', '\u{ff00}', 'é', '日',
+        ] {
+            let text = format!("a{c}b");
+            assert_eq!(clean_text(&text), text, "U+{:04X}", c as u32);
+        }
+        // Removed characters do not count towards the length limit.
+        let spread: String = (0..600).map(|_| "x\u{200b}").collect();
+        let cleaned = clean_text(&spread);
+        assert_eq!(cleaned.chars().count(), 501);
+        assert!(cleaned.starts_with("xxx") && cleaned.ends_with('…'));
+        // Nothing is left of a text that is all invisible.
+        assert_eq!(clean_text("\u{202e}\u{200b}\n"), "");
     }
 }
