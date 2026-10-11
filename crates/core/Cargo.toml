@@ -17,3 +17,9 @@ which = "8.0.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[bin]]
+name = "fake-agent"
+path = "src/bin/fake_agent.rs"
+test = false
+doc = false
