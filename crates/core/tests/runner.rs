@@ -43,6 +43,29 @@ fn file_len(path: &Path) -> u64 {
 const RESULT_LINE: &str =
     r#"{"type":"result","result":"done\n{\"result\":\"in_testing\",\"summary\":\"ok\"}"}"#;
 
+/// What `RESULT_LINE` carries in its `result` field: the run's final text.
+const RESULT_TEXT: &str = "done\n{\"result\":\"in_testing\",\"summary\":\"ok\"}";
+
+/// Waits until `path` has content. Returns false if it is still empty after 10 s.
+async fn wait_for_content(path: &Path) -> bool {
+    let give_up = Instant::now() + Duration::from_secs(10);
+    while file_len(path) == 0 {
+        if Instant::now() >= give_up {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+fn log_lines(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
 #[tokio::test]
 async fn exits_zero_captures_final_text_and_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,8 +187,11 @@ async fn kill_reaches_grandchildren() {
     );
     let token = CancellationToken::new();
     let canceller = token.clone();
+    let heartbeat = hb.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        // Cancel only once the grandchild is really running; a fixed delay is too short when the
+        // machine is busy or starts processes slowly (Windows).
+        wait_for_content(&heartbeat).await;
         canceller.cancel();
     });
     let out = runner::run(
@@ -225,6 +251,225 @@ async fn missing_program_reports_spawn_failure() {
     )
     .await;
     assert!(matches!(out.exit, ExitKind::SpawnFailed(_)));
+}
+
+// The caller drops the run future instead of cancelling it (here by aborting its task). The tree
+// must still end: on Unix process-wrap's drop only signals the leader, not the process group.
+#[tokio::test]
+async fn dropping_the_run_future_ends_the_process_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"heartbeat": hb, "every_ms": 50}, {"sleep_ms": 30_000}]),
+    );
+    let command = spec(agent(), dir.path(), &s, "");
+    let log = dir.path().join("l.jsonl");
+    let task = tokio::spawn(async move {
+        runner::run(
+            command,
+            ExecutorKind::Claude,
+            &log,
+            limits(60_000, 60_000),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    assert!(wait_for_content(&hb).await, "heartbeat child never ran");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = file_len(&hb);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        file_len(&hb),
+        settled,
+        "grandchild survived dropping the run"
+    );
+}
+
+// An outer timeout around the run (the engine will wrap whole runs in one) drops it the same way.
+#[tokio::test]
+async fn an_outer_timeout_ends_the_process_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"heartbeat": hb, "every_ms": 50}, {"sleep_ms": 30_000}]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let mut run = Box::pin(runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+    ));
+    // Drive the run until the grandchild is alive, so the timeout below cuts into a real tree
+    // however slow the machine is.
+    tokio::select! {
+        _ = &mut run => panic!("the run ended before the heartbeat appeared"),
+        started = wait_for_content(&hb) => assert!(started, "heartbeat child never ran"),
+    }
+    let timed = tokio::time::timeout(Duration::from_millis(1500), &mut run).await;
+    assert!(
+        timed.is_err(),
+        "the run should still be going when the timeout fires"
+    );
+    drop(run);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = file_len(&hb);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        file_len(&hb),
+        settled,
+        "grandchild survived the outer timeout"
+    );
+}
+
+// Chatty output must keep resetting the stall timer: the run ends at the total limit, not at the
+// much shorter stall limit. Both limits are generous because the stall clock also covers the
+// executor's start-up, which can take hundreds of milliseconds on a busy machine.
+#[tokio::test]
+async fn stdout_output_keeps_the_stall_timer_from_firing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"repeat_out": "tick", "every_ms": 50}]),
+    );
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        limits(3_000, 1_200),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::TimedOut);
+}
+
+// Same as above for stderr: the stall timer must not look at stdout only.
+#[tokio::test]
+async fn stderr_output_also_counts_as_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"repeat_err": "tick", "every_ms": 50}]),
+    );
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        limits(3_000, 1_200),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::TimedOut);
+}
+
+// The executor prints a burst and exits at once, long before the runner has written it all down.
+// Only the drain after the exit can deliver the tail, including the final result.
+#[tokio::test]
+async fn a_burst_before_exit_is_fully_drained() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut steps: Vec<serde_json::Value> = (0..3000)
+        .map(|n| serde_json::json!({"out": format!("line {n}")}))
+        .collect();
+    steps.push(serde_json::json!({"out": RESULT_LINE}));
+    steps.push(serde_json::json!({"exit": 0}));
+    let s = script(dir.path(), serde_json::Value::Array(steps));
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+    let lines = log_lines(&log);
+    assert!(
+        lines.len() >= 3001,
+        "only {} of 3001 lines reached the log",
+        lines.len()
+    );
+    assert_eq!(lines.last().map(String::as_str), Some(RESULT_LINE));
+}
+
+// Limits too large to add to the clock must mean "no deadline", not a panic in `Instant + Duration`.
+#[tokio::test]
+async fn huge_limits_mean_no_deadline_instead_of_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": RESULT_LINE}, {"exit": 0}]),
+    );
+    let huge = RunLimits {
+        total: Duration::MAX,
+        stall: Duration::MAX,
+    };
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        huge,
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+}
+
+#[tokio::test]
+async fn spawn_failure_is_written_to_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(dir.path(), serde_json::json!([]));
+    let log = dir.path().join("logs").join("1.jsonl");
+    let out = runner::run(
+        spec(dir.path().join("no-such-program"), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(5_000, 5_000),
+        CancellationToken::new(),
+    )
+    .await;
+    let ExitKind::SpawnFailed(message) = out.exit else {
+        panic!("expected SpawnFailed, got {:?}", out.exit);
+    };
+    let lines = log_lines(&log);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let entry: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(entry["stream"], "runner");
+    assert_eq!(entry["text"], format!("spawn failed: {message}"));
+}
+
+#[tokio::test]
+async fn the_log_is_private_to_the_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(dir.path(), serde_json::json!([{"out": "x"}, {"exit": 0}]));
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "log mode is {mode:o}");
+    }
+    #[cfg(windows)]
+    {
+        // Windows keeps the default access of the per-user directory the log lives in.
+        assert_eq!(log_lines(&log), ["x"]);
+    }
 }
 
 #[cfg(windows)]

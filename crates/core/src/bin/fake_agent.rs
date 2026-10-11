@@ -1,4 +1,16 @@
 //! Test double for `claude` / `codex`, driven by a JSON script. Only used by tests.
+//!
+//! Usage: `fake-agent <script.json>`. The script is an array of steps run in order; the exit code
+//! is 0 unless an `exit` step says otherwise. Each step holds one of:
+//!
+//! - `{"out": text}` / `{"err": text}`: print a line to stdout / stderr
+//! - `{"sleep_ms": n}`: sleep
+//! - `{"stdin_to": path}`: read all of stdin into a file
+//! - `{"heartbeat": path, "every_ms": n}`: start a background child that appends a byte to the
+//!   file every `n` ms (it stops by itself after 120 s)
+//! - `{"repeat_out": text, "every_ms": n}` / `{"repeat_err": text, "every_ms": n}`: print a line
+//!   to stdout / stderr every `n` ms, forever
+//! - `{"exit": code}`: exit at once
 use std::{
     io::{Read, Write},
     path::Path,
@@ -58,6 +70,13 @@ fn main() {
             loop {
                 println!("{line}");
                 std::io::stdout().flush().ok();
+                std::thread::sleep(Duration::from_millis(every));
+            }
+        }
+        if let Some(line) = step.get("repeat_err").and_then(Value::as_str) {
+            let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
+            loop {
+                eprintln!("{line}");
                 std::thread::sleep(Duration::from_millis(every));
             }
         }
