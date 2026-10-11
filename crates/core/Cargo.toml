@@ -29,6 +29,7 @@ url = "2.5.8"
 which = "8.0.6"
 
 [dev-dependencies]
+keyring-core = "1.0.0"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-async-rw", "schemars"] }
 schemars = "1.2.2"
 tempfile = "3.27.0"

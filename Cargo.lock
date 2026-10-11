@@ -1212,6 +1212,7 @@ dependencies = [
  "chrono",
  "dirs",
  "keyring",
+ "keyring-core",
  "process-wrap",
  "reqwest",
  "rmcp",
