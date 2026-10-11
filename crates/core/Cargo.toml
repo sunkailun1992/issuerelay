@@ -7,12 +7,16 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 async-trait = "0.1.92"
+# reqwest's rustls pulls in aws-lc-rs. On Windows x86-64 without NASM installed, aws-lc-sys then
+# uses its prebuilt objects instead of failing the build; the feature does nothing where NASM
+# is present or on other platforms.
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["prebuilt-nasm"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 dirs = "7.0.0"
 keyring = "4.2.0"
 process-wrap = { version = "10.0.1", features = ["tokio1"] }
 reqwest = "0.13"
-rmcp = { version = "3.5", features = ["client", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
+rmcp = { version = "3.5", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
@@ -28,6 +32,8 @@ which = "8.0.6"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-async-rw", "schemars"] }
 schemars = "1.2.2"
 tempfile = "3.27.0"
+# `start_paused` lets a test pass the 30 s call limit without waiting for it.
+tokio = { version = "1.53.2", features = ["test-util"] }
 
 [[bin]]
 name = "fake-agent"

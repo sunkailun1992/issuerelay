@@ -130,6 +130,7 @@ impl LinearApi for FakeLinear {
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {
+        self.check_failure()?;
         Ok(vec![Project {
             id: "proj-1".into(),
             name: "Demo Project".into(),
@@ -137,10 +138,12 @@ impl LinearApi for FakeLinear {
     }
 
     async fn labels(&self) -> Result<Vec<String>> {
+        self.check_failure()?;
         Ok(vec!["ai-ready".into(), "Bug".into()])
     }
 
     async fn teams(&self) -> Result<Vec<Team>> {
+        self.check_failure()?;
         Ok(vec![Team {
             id: "team-1".into(),
             name: "Demo".into(),
@@ -148,6 +151,7 @@ impl LinearApi for FakeLinear {
     }
 
     async fn statuses(&self, _team_id: &str) -> Result<Vec<String>> {
+        self.check_failure()?;
         Ok(self.state.lock().unwrap().statuses.clone())
     }
 }
