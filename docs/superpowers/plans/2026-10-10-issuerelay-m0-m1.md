@@ -4191,7 +4191,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 12 的 `CommandSpec`；Task 13 的 `FinalTextTracker`；Task 14 的 `fake-agent`
-- Produces: `runner::RunLimits { total: Duration, stall: Duration }`；`runner::ExitKind { Exited(Option<i32>), TimedOut, Stalled, Canceled, SpawnFailed(String) }`；`runner::RunOutput { exit: ExitKind, final_text: Option<String> }`；`runner::run(spec: CommandSpec, kind: ExecutorKind, log_path: &Path, limits: RunLimits, cancel: CancellationToken) -> RunOutput`。日志文件每行一条：标准输出原样写入，标准错误写成 `{"stream":"stderr","text":…}`。
+- Produces: `runner::RunLimits { total: Duration, stall: Duration }`；`runner::ExitKind { Exited(Option<i32>), TimedOut, Stalled, Canceled, SpawnFailed(String) }`；`runner::RunOutput { exit: ExitKind, final_text: Option<String> }`；`runner::run(spec: CommandSpec, kind: ExecutorKind, log_path: &Path, limits: RunLimits, cancel: CancellationToken) -> RunOutput`。日志文件每行一条：标准输出原样写入，标准错误写成 `{"stream":"stderr","text":…}`，启动失败写一行 `{"stream":"runner","text":…}`；Unix 上日志权限 0600。`run` 的 future 被丢弃时也会结束整棵进程树（评审补充）。
 
 - [ ] **Step 1: 加依赖**
 
@@ -8826,5 +8826,7 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 推断 F2，M2 实机验证） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
+| 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审） | M2 |
+| 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 

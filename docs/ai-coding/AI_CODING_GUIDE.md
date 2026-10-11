@@ -65,7 +65,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 |---|---|---|
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名 |
 | 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite |
-| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出 |
+| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；Unix 上文件权限 0600 |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<用户>-<哈希>` | 只限当前用户 |
 
