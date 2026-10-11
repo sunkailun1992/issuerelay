@@ -2,6 +2,7 @@
 //! does the Linear workspace have the label and statuses IssueRelay relies on; are bindings usable.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
@@ -48,8 +49,8 @@ const MCP_LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// only read local state.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// How long `SystemReadiness` keeps an executor's check that timed out or whose output could
-/// not be read, instead of the full cache TTL: soon enough to recover from a transient
+/// How long `SystemReadiness` keeps an executor's check that timed out, crashed or whose output
+/// could not be read, instead of the full cache TTL: soon enough to recover from a transient
 /// failure, late enough that the engine's poll loop does not re-run a slow `claude mcp list`
 /// on every poll.
 const FAILED_CHECK_TTL: Duration = Duration::from_secs(60);
@@ -64,7 +65,10 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 /// Runs the real check commands, each under its own time limit: by default 60 s for
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command still
 /// running at its limit has its process killed and the call fails with `timed out after 20s`
-/// (the limit as `Duration` prints it); processes it started itself may outlive it.
+/// (the limit as `Duration` prints it); processes it started itself may outlive it. Every
+/// command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour
+/// what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip
+/// colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -100,6 +104,7 @@ impl CommandRunner for SystemRunner {
         let limit = self.limit_for(args);
         let child = tokio::process::Command::new(program)
             .args(args)
+            .env("NO_COLOR", "1")
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output();
@@ -151,9 +156,10 @@ pub async fn check_executor(
 }
 
 /// `check_executor`, plus whether every check gave a usable answer. A check gives none when its
-/// command could not run (it timed out or did not start) or, for the login check, when its
-/// output cannot be read. A negative answer that can be read ("not logged in", no Linear
-/// server) is usable. `SystemReadiness` retries an incomplete result sooner.
+/// command could not run (it timed out or did not start), when the login check's output cannot
+/// be read, or when `mcp list` exited non-zero without showing any Linear line (it crashed). A
+/// negative answer that can be read ("not logged in", no Linear server) is usable.
+/// `SystemReadiness` retries an incomplete result sooner.
 async fn check_executor_detailed(
     kind: ExecutorKind,
     program: Option<PathBuf>,
@@ -186,7 +192,10 @@ async fn check_executor_detailed(
     let mut complete = true;
     match version {
         Ok(o) if o.code == Some(0) => {
-            report.version = o.stdout.lines().next().map(|l| l.trim().to_string())
+            report.version = strip_ansi(&o.stdout)
+                .lines()
+                .next()
+                .map(|l| l.trim().to_string())
         }
         Ok(o) => report.problems.push(with_detail(
             format!("`{name} --version` failed"),
@@ -208,13 +217,11 @@ async fn check_executor_detailed(
                 }
             }
             None => {
-                let code = o
-                    .code
-                    .map_or_else(|| "unknown".to_string(), |code| code.to_string());
                 report.problems.push(with_detail(
                     format!(
-                        "`{name} {}` gave no usable answer (exit code {code})",
-                        login_args.join(" ")
+                        "`{name} {}` gave no usable answer (exit code {})",
+                        login_args.join(" "),
+                        exit_code_text(o.code)
                     ),
                     first_line(&o.stderr),
                 ));
@@ -230,7 +237,9 @@ async fn check_executor_detailed(
         Ok(o) => {
             report.linear_mcp = mcp_list_has_linear(kind, &o.stdout);
             if !report.linear_mcp {
-                report.problems.push(linear_problem(kind, &o.stdout));
+                let (problem, usable) = linear_problem(kind, &o);
+                report.problems.push(problem);
+                complete &= usable;
             }
         }
         Err(e) => {
@@ -254,6 +263,7 @@ fn login_answer(kind: ExecutorKind, output: &CmdOutput) -> Option<bool> {
 
 /// `claude auth status` prints a JSON object with a boolean `loggedIn`; `None` for anything else.
 fn claude_login_answer(stdout: &str) -> Option<bool> {
+    let stdout = strip_ansi(stdout);
     serde_json::from_str::<serde_json::Value>(stdout.trim()).ok()?["loggedIn"].as_bool()
 }
 
@@ -261,7 +271,7 @@ fn claude_login_answer(stdout: &str) -> Option<bool> {
 /// are read because codex-cli 0.159.2 writes the status to stderr (M0 finding F4). `None` when
 /// neither "logged in" nor "not logged in" appears (the second contains the first).
 fn codex_login_answer(code: Option<i32>, stdout: &str, stderr: &str) -> Option<bool> {
-    let text = format!("{stdout}\n{stderr}").to_lowercase();
+    let text = format!("{}\n{}", strip_ansi(stdout), strip_ansi(stderr)).to_lowercase();
     text.contains("logged in")
         .then(|| code == Some(0) && !text.contains("not logged in"))
 }
@@ -282,11 +292,12 @@ pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool 
 /// when one of its whitespace-separated tokens is an `http(s)` URL on exactly `mcp.linear.app`;
 /// another host, a query parameter or a server name that merely contains that text does not
 /// count. Claude then has to say `Connected` after the last ` - ` (a leading check mark or other
-/// symbol is ignored); Codex has to show the `enabled` token and not `Not logged in`. The
-/// formats come from the M0 samples (docs/gates/samples/m0/executors/*-mcp-list.txt,
-/// 2026-10-10).
+/// symbol is ignored); Codex has to show the `enabled` token and not `Not logged in`. Colour
+/// codes are stripped first. The formats come from the M0 samples
+/// (docs/gates/samples/m0/executors/*-mcp-list.txt, 2026-10-10).
 pub fn mcp_list_has_linear(kind: ExecutorKind, stdout: &str) -> bool {
-    linear_lines(stdout).any(|line| line_usable(kind, line))
+    let stdout = strip_ansi(stdout);
+    linear_lines(&stdout).any(|line| line_usable(kind, line))
 }
 
 /// The lines of `mcp list` output that describe Linear's server.
@@ -347,30 +358,88 @@ fn line_status(kind: ExecutorKind, line: &str) -> String {
     }
 }
 
-/// Why `mcp list` shows no usable Linear server: what its Linear line says, or that there is no
-/// such line.
-fn linear_problem(kind: ExecutorKind, stdout: &str) -> String {
+/// The problem to report when `mcp list` ran without showing a usable Linear server, and whether
+/// that is a usable answer. What a Linear line says, or that there is none after a clean exit,
+/// is an answer about the setup. A command that exited non-zero without any Linear line
+/// crashed or was refused: that says nothing about the setup, so it is reported as a failure
+/// and is not a usable answer.
+fn linear_problem(kind: ExecutorKind, output: &CmdOutput) -> (String, bool) {
     let name = kind.program_name();
-    let status = linear_lines(stdout)
-        .next()
-        .map(|line| clean(&line_status(kind, line)))
-        .filter(|status| !status.is_empty());
-    match status {
-        Some(status) => format!("Linear MCP in {name}: {status}"),
-        None => format!("Linear MCP is not configured or not authorized in {name}"),
+    let not_configured = format!("Linear MCP is not configured or not authorized in {name}");
+    let stdout = strip_ansi(&output.stdout);
+    match linear_lines(&stdout).next() {
+        Some(line) => {
+            let status = clean(&line_status(kind, line));
+            if status.is_empty() {
+                (not_configured, true)
+            } else {
+                (format!("Linear MCP in {name}: {status}"), true)
+            }
+        }
+        None if output.code == Some(0) => (not_configured, true),
+        None => {
+            let failed = format!(
+                "`{name} mcp list` failed (exit code {})",
+                exit_code_text(output.code)
+            );
+            (with_detail(failed, first_line(&output.stderr)), false)
+        }
     }
 }
 
-/// Command output as a problem may show it: control characters dropped, at most
-/// `MAX_PROBLEM_TEXT` characters.
+/// An exit code as a problem shows it; `unknown` when a signal ended the process.
+fn exit_code_text(code: Option<i32>) -> String {
+    code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
+}
+
+/// `text` without ANSI CSI sequences: `ESC [`, parameter bytes (`0`-`?`), intermediate bytes
+/// (space-`/`) and one final byte (`@`-`~`). A CLI may colour what it prints into a pipe when
+/// colour is forced (`FORCE_COLOR`), which would hide the words and URLs the parsers look for.
+/// Anything that is not a complete CSI sequence stays as it is.
+fn strip_ansi(text: &str) -> Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return Cow::Borrowed(text);
+    }
+    let mut stripped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}[") {
+        stripped.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let bytes = after.as_bytes();
+        let mut end = 0;
+        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
+            end += 1;
+        }
+        while end < bytes.len() && matches!(bytes[end], 0x20..=0x2f) {
+            end += 1;
+        }
+        if end < bytes.len() && matches!(bytes[end], 0x40..=0x7e) {
+            // Every byte up to and including the final one is ASCII, so this is a char boundary.
+            rest = &after[end + 1..];
+        } else {
+            stripped.push_str("\u{1b}[");
+            rest = after;
+        }
+    }
+    stripped.push_str(rest);
+    Cow::Owned(stripped)
+}
+
+/// Command output as a problem may show it: colour codes and other control characters
+/// dropped, at most `MAX_PROBLEM_TEXT` characters.
 fn clean(text: &str) -> String {
-    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+    let text: String = strip_ansi(text)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     text.trim().chars().take(MAX_PROBLEM_TEXT).collect()
 }
 
-/// The first non-empty line of command output, `clean`ed; empty when there is none.
+/// The first non-empty line of command output, `clean`ed; empty when there is none. Colour
+/// codes go first, so a line that holds only those does not count.
 fn first_line(text: &str) -> String {
-    text.lines()
+    strip_ansi(text)
+        .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(clean)
@@ -495,7 +564,7 @@ struct CachedCheck {
 
 /// Checks the real `claude` / `codex` on PATH and caches what it finds, one entry per executor.
 /// An entry whose checks all gave a usable answer is reused for `ttl`; one with a check that
-/// timed out, did not start or could not be read for at most `FAILED_CHECK_TTL`, so it is
+/// timed out, did not start, crashed or could not be read for at most `FAILED_CHECK_TTL`, so it is
 /// retried soon without re-running a slow `claude mcp list` on every poll. Only the executors
 /// whose entry expired are checked again, together. One lock covers the whole refresh, so a
 /// caller that arrives meanwhile waits and then uses what the refresh recorded.
@@ -1038,7 +1107,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_status_in_a_problem_is_one_clean_short_line() {
-        let long = format!("Failed to connect \u{1b}[0m\t{}", "y".repeat(300));
+        // A bell and a tab are control characters; the rest is far longer than the limit.
+        let long = format!("Failed to connect \u{7}\t{}", "y".repeat(300));
         let line = format!("linear-server: https://mcp.linear.app/mcp (HTTP) - ✘ {long}");
         let (report, _) = detailed(
             ExecutorKind::Claude,
@@ -1049,7 +1119,7 @@ mod tests {
             ],
         )
         .await;
-        let expected: String = "Failed to connect [0m"
+        let expected: String = "Failed to connect "
             .chars()
             .chain(std::iter::repeat('y'))
             .take(200)
@@ -1061,14 +1131,286 @@ mod tests {
     }
 
     #[test]
+    fn ansi_csi_sequences_are_stripped_and_nothing_else() {
+        // Text without an escape is returned as it is, without a copy.
+        assert!(matches!(
+            strip_ansi("plain ✔ text"),
+            Cow::Borrowed("plain ✔ text")
+        ));
+        assert_eq!(strip_ansi("\u{1b}[36mhttps://x\u{1b}[39m"), "https://x");
+        // Several parameters, no parameter, other final bytes, a private marker, an intermediate
+        // byte, and multi-byte text right next to a sequence.
+        assert_eq!(strip_ansi("\u{1b}[1;31mred\u{1b}[0m"), "red");
+        assert_eq!(strip_ansi("a\u{1b}[mb"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}[2Kb\u{1b}[?25lc\u{1b}[~d"), "abcd");
+        assert_eq!(strip_ansi("a\u{1b}[2 qb"), "ab");
+        // The final byte may be any of `@` to `~`, and nothing outside that range.
+        assert_eq!(strip_ansi("a\u{1b}[3@b"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}[3\u{7f}b"), "a\u{1b}[3\u{7f}b");
+        assert_eq!(strip_ansi("\u{1b}[32m✔ Connected\u{1b}[39m"), "✔ Connected");
+        // Not a complete CSI sequence: left alone, and it does not hide a good one after it.
+        assert_eq!(strip_ansi("a\u{1b}[32"), "a\u{1b}[32");
+        assert_eq!(strip_ansi("a\u{1b}[ ✔"), "a\u{1b}[ ✔");
+        assert_eq!(strip_ansi("a\u{1b}[\u{7}b"), "a\u{1b}[\u{7}b");
+        assert_eq!(strip_ansi("\u{1b}[ \u{1b}[32mok\u{1b}[0m"), "\u{1b}[ ok");
+        // Escapes that are not CSI are not touched here.
+        assert_eq!(strip_ansi("a\u{1b}]8;;x\u{7}b"), "a\u{1b}]8;;x\u{7}b");
+        assert_eq!(strip_ansi("a\u{1b}Mb"), "a\u{1b}Mb");
+    }
+
+    #[test]
     fn command_output_in_problems_is_trimmed_clean_and_limited() {
-        assert_eq!(clean("  a\u{1b}[31mb\tc\r  "), "a[31mbc");
+        // A colour code goes away whole; any other control character is dropped on its own.
+        assert_eq!(clean("  a\u{1b}[31mb\tc\r  "), "abc");
+        assert_eq!(clean("a\u{1b}xb"), "axb");
         assert_eq!(clean(&"x".repeat(300)).chars().count(), 200);
         // The limit counts characters, not bytes.
         assert_eq!(clean(&"—".repeat(300)).chars().count(), 200);
         assert_eq!(first_line("\n  \n  first\nsecond"), "first");
         assert_eq!(first_line("a\u{7}b"), "ab");
         assert_eq!(first_line(" \n "), "");
+        // A line that is only colour codes is empty, so the next line is the first one.
+        assert_eq!(
+            first_line("\u{1b}[0m\n\u{1b}[31mboom\u{1b}[0m\nsecond"),
+            "boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn coloured_output_is_read_like_plain_output() {
+        // What the CLIs print into a pipe when the environment forces colour.
+        let (claude, complete) = detailed(
+            ExecutorKind::Claude,
+            &[
+                (
+                    "--version",
+                    out(0, "\u{1b}[1m2.1.285\u{1b}[22m (Claude Code)\n"),
+                ),
+                (
+                    "auth status",
+                    out(0, "\u{1b}[32m{\"loggedIn\": true}\u{1b}[0m"),
+                ),
+                (
+                    "mcp list",
+                    out(
+                        0,
+                        "\u{1b}[2mChecking MCP server health…\u{1b}[22m\n\nlinear-server: \u{1b}[36mhttps://mcp.linear.app/mcp\u{1b}[39m (HTTP) - \u{1b}[32m✔ Connected\u{1b}[39m\n",
+                    ),
+                ),
+            ],
+        )
+        .await;
+        assert!(claude.ready() && complete, "{claude:?}");
+        assert_eq!(claude.version.as_deref(), Some("2.1.285 (Claude Code)"));
+        assert!(claude.problems.is_empty(), "{claude:?}");
+
+        let coloured_login = |text: &str, code| CmdOutput {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: text.into(),
+        };
+        let row = "linear  https://mcp.linear.app/mcp  -  \u{1b}[32menabled\u{1b}[0m  OAuth";
+        // The colour codes sit inside the phrase, so it is only found once they are gone. The
+        // status is on stderr in codex-cli 0.159.2, but both streams are read.
+        let logged_in = "\u{1b}[32mLogged\u{1b}[0m \u{1b}[1min\u{1b}[22m using ChatGPT\n";
+        for login in [
+            coloured_login(logged_in, 0),
+            CmdOutput {
+                code: Some(0),
+                stdout: logged_in.into(),
+                stderr: String::new(),
+            },
+        ] {
+            let (codex, complete) = detailed(
+                ExecutorKind::Codex,
+                &[
+                    ("--version", out(0, "codex-cli 0.159.2")),
+                    ("login status", login),
+                    ("mcp list", out(0, row)),
+                ],
+            )
+            .await;
+            assert!(codex.ready() && complete, "{codex:?}");
+        }
+
+        // A coloured "logged out" answer is still a logged-out answer, not an unreadable one.
+        let (codex, complete) = detailed(
+            ExecutorKind::Codex,
+            &[
+                ("--version", out(0, "codex-cli 0.159.2")),
+                (
+                    "login status",
+                    coloured_login("\u{1b}[31mNot\u{1b}[0m logged \u{1b}[1min\u{1b}[22m\n", 1),
+                ),
+                ("mcp list", out(0, row)),
+            ],
+        )
+        .await;
+        assert_eq!(codex.problems, ["codex is not logged in"]);
+        assert!(complete);
+    }
+
+    #[tokio::test]
+    async fn colour_codes_do_not_reach_the_text_of_a_problem() {
+        let claude_line = "linear-server: \u{1b}[36mhttps://mcp.linear.app/mcp\u{1b}[39m (HTTP) - \u{1b}[31m✘ Failed to connect — HTTP 500\u{1b}[39m";
+        let (claude, _) = detailed(
+            ExecutorKind::Claude,
+            &[
+                ("--version", out(0, "2.1.285")),
+                ("auth status", out(0, r#"{"loggedIn": true}"#)),
+                ("mcp list", out(0, claude_line)),
+            ],
+        )
+        .await;
+        assert_eq!(
+            claude.problems,
+            ["Linear MCP in claude: Failed to connect — HTTP 500"]
+        );
+
+        let codex_row = "linear  https://mcp.linear.app/mcp  -  \u{1b}[32menabled\u{1b}[0m  \u{1b}[31mNot logged in\u{1b}[0m";
+        let (codex, _) = detailed(
+            ExecutorKind::Codex,
+            &[
+                ("--version", out(0, "codex-cli 0.159.2")),
+                ("login status", out(0, "Logged in using ChatGPT")),
+                ("mcp list", out(0, codex_row)),
+            ],
+        )
+        .await;
+        assert_eq!(
+            codex.problems,
+            ["Linear MCP in codex: enabled Not logged in"]
+        );
+
+        // The stderr line a problem quotes is cleaned the same way.
+        let (claude, _) = detailed(
+            ExecutorKind::Claude,
+            &[
+                ("--version", out(0, "2.1.285")),
+                (
+                    "auth status",
+                    CmdOutput {
+                        code: Some(1),
+                        stdout: "weird".into(),
+                        stderr: "\u{1b}[0m\n\u{1b}[31mboom\u{1b}[0m\n".into(),
+                    },
+                ),
+                ("mcp list", out(0, CLAUDE_OK)),
+            ],
+        )
+        .await;
+        assert_eq!(
+            claude.problems,
+            ["`claude auth status` gave no usable answer (exit code 1): boom"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_mcp_list_is_a_failure_not_a_missing_server() {
+        let crashed = |code, stderr: &str| CmdOutput {
+            code,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        };
+        let cases = [
+            (
+                ExecutorKind::Claude,
+                ("auth status", r#"{"loggedIn": true}"#),
+                crashed(Some(1), "boom\nsecond line\n"),
+                "`claude mcp list` failed (exit code 1): boom",
+            ),
+            (
+                ExecutorKind::Codex,
+                ("login status", "Logged in using ChatGPT"),
+                crashed(Some(2), "\u{1b}[31mboom\u{1b}[0m"),
+                "`codex mcp list` failed (exit code 2): boom",
+            ),
+            (
+                // Ended by a signal, nothing on stderr: there is no line to quote.
+                ExecutorKind::Claude,
+                ("auth status", r#"{"loggedIn": true}"#),
+                crashed(None, ""),
+                "`claude mcp list` failed (exit code unknown)",
+            ),
+        ];
+        for (kind, login, mcp_list, problem) in cases {
+            let (report, complete) = detailed(
+                kind,
+                &[
+                    ("--version", out(0, "1.0.0")),
+                    (login.0, out(0, login.1)),
+                    ("mcp list", mcp_list),
+                ],
+            )
+            .await;
+            assert!(!report.linear_mcp && !report.ready(), "{problem}");
+            assert_eq!(report.problems, [problem]);
+            // It says nothing about the setup, so the check is retried soon.
+            assert!(!complete, "{problem}");
+        }
+
+        // A clean exit with no Linear line is a real answer: the server is not set up.
+        for (kind, login, name) in [
+            (
+                ExecutorKind::Claude,
+                ("auth status", r#"{"loggedIn": true}"#),
+                "claude",
+            ),
+            (
+                ExecutorKind::Codex,
+                ("login status", "Logged in using ChatGPT"),
+                "codex",
+            ),
+        ] {
+            let (report, complete) = detailed(
+                kind,
+                &[
+                    ("--version", out(0, "1.0.0")),
+                    (login.0, out(0, login.1)),
+                    ("mcp list", out(0, "")),
+                ],
+            )
+            .await;
+            assert_eq!(
+                report.problems,
+                [format!(
+                    "Linear MCP is not configured or not authorized in {name}"
+                )]
+            );
+            assert!(complete);
+        }
+
+        // The exit code does not outweigh what the output shows: a usable Linear line stays
+        // usable, and a Linear line with a bad status keeps that status.
+        let mut exit_1 = out(1, CLAUDE_OK);
+        let (report, complete) = detailed(
+            ExecutorKind::Claude,
+            &[
+                ("--version", out(0, "2.1.285")),
+                ("auth status", out(0, r#"{"loggedIn": true}"#)),
+                ("mcp list", exit_1.clone()),
+            ],
+        )
+        .await;
+        assert!(report.ready() && complete, "{report:?}");
+        assert!(report.problems.is_empty());
+        exit_1.stdout =
+            "linear-server: https://mcp.linear.app/mcp (HTTP) - ✘ Failed to connect — HTTP 500"
+                .into();
+        let (report, complete) = detailed(
+            ExecutorKind::Claude,
+            &[
+                ("--version", out(0, "2.1.285")),
+                ("auth status", out(0, r#"{"loggedIn": true}"#)),
+                ("mcp list", exit_1),
+            ],
+        )
+        .await;
+        assert_eq!(
+            report.problems,
+            ["Linear MCP in claude: Failed to connect — HTTP 500"]
+        );
+        assert!(complete);
     }
 
     #[tokio::test]
@@ -1174,6 +1516,14 @@ mod tests {
             let (_, complete) = detailed(ExecutorKind::Claude, &replies).await;
             assert!(!complete, "{missing}");
         }
+        // A check that cannot run stays incomplete even when `mcp list` gave a real answer
+        // (here: no `auth status` reply, and `mcp list` ran cleanly without a Linear line).
+        let (_, complete) = detailed(
+            ExecutorKind::Claude,
+            &[("--version", out(0, "2.1.285")), ("mcp list", out(0, ""))],
+        )
+        .await;
+        assert!(!complete);
         // Readable negative answers are complete.
         let (report, complete) = detailed(
             ExecutorKind::Claude,
@@ -1234,6 +1584,24 @@ mod tests {
         ] {
             assert!(!mcp_list_has_linear(ExecutorKind::Codex, line), "{line}");
         }
+        // Colour codes (an environment with FORCE_COLOR can make the CLIs print them into a
+        // pipe) neither hide a connected line nor make a bad one pass.
+        assert!(mcp_list_has_linear(
+            ExecutorKind::Claude,
+            "linear-server: \u{1b}[36mhttps://mcp.linear.app/mcp\u{1b}[39m (HTTP) - \u{1b}[32m✔ Connected\u{1b}[39m"
+        ));
+        assert!(mcp_list_has_linear(
+            ExecutorKind::Codex,
+            "linear  https://mcp.linear.app/mcp  -  \u{1b}[32menabled\u{1b}[0m  OAuth"
+        ));
+        assert!(!mcp_list_has_linear(
+            ExecutorKind::Claude,
+            "linear-server: \u{1b}[36mhttps://mcp.linear.app/mcp\u{1b}[39m (HTTP) - \u{1b}[33m! Needs authentication\u{1b}[39m"
+        ));
+        assert!(!mcp_list_has_linear(
+            ExecutorKind::Codex,
+            "linear  https://mcp.linear.app/mcp  -  \u{1b}[32menabled\u{1b}[0m  \u{1b}[31mNot logged in\u{1b}[0m"
+        ));
     }
 
     #[test]
@@ -1310,6 +1678,22 @@ mod tests {
         // A failing exit code outweighs the text.
         assert!(!parse_codex_login(Some(1), "Logged in using ChatGPT", ""));
         assert!(!parse_codex_login(None, "Logged in using ChatGPT", ""));
+        // Colour codes do not change the answer, even when they sit inside it, on either stream.
+        assert!(parse_claude_auth("\u{1b}[32m{\"loggedIn\": true}\u{1b}[0m"));
+        assert!(parse_claude_auth(
+            "{\"loggedIn\": \u{1b}[33mtrue\u{1b}[39m}"
+        ));
+        assert!(!parse_claude_auth(
+            "\u{1b}[31m{\"loggedIn\": false}\u{1b}[0m"
+        ));
+        let split = "\u{1b}[32mLogged\u{1b}[0m \u{1b}[1min\u{1b}[22m using ChatGPT";
+        assert!(parse_codex_login(Some(0), "", split));
+        assert!(parse_codex_login(Some(0), split, ""));
+        assert!(!parse_codex_login(
+            Some(1),
+            "\u{1b}[31mNot logged in\u{1b}[0m",
+            ""
+        ));
     }
 
     #[test]

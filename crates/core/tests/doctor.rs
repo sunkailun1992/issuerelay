@@ -271,3 +271,82 @@ async fn a_command_that_timed_out_is_killed() {
         "the timed-out command kept running and finished"
     );
 }
+
+/// Runs `script`, trying again while the OS reports it as busy: executing a script right after
+/// writing it can fail with `ETXTBSY` when another test thread forks in between.
+async fn run_script(runner: &SystemRunner, script: &Path, args: &[&str]) -> Result<CmdOutput> {
+    let mut retries = 0;
+    loop {
+        match runner.run(script, args).await {
+            Err(err) if retries < 5 && is_executable_file_busy(&err) => {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn is_executable_file_busy(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::ExecutableFileBusy)
+}
+
+/// A variable every process environment has. The scripts print it, so the test can see that the
+/// environment reached them besides `NO_COLOR`.
+#[cfg(unix)]
+const INHERITED_VAR: &str = "PATH";
+#[cfg(windows)]
+const INHERITED_VAR: &str = "SystemRoot";
+
+/// `script` ignores its arguments, takes about a second and then prints `ok`, the value of
+/// `NO_COLOR` and the value of `INHERITED_VAR`. Under a 300 ms check limit and a 5 s `mcp list`
+/// limit, `run` has to give `mcp list` the longer limit and every other command the shorter
+/// one, whichever way it picks.
+async fn assert_each_command_gets_its_own_limit(script: &Path) {
+    let runner = SystemRunner::with_limits(Duration::from_millis(300), Duration::from_secs(5));
+    let inherited = std::env::var_os(INHERITED_VAR).expect("the test process has this variable");
+
+    let output = run_script(&runner, script, &["mcp", "list"]).await.unwrap();
+    // `NO_COLOR=1` reached the process, and so did the rest of the environment.
+    assert_eq!(
+        output.stdout.trim_end(),
+        format!("ok 1 {}", inherited.to_string_lossy()),
+        "{output:?}"
+    );
+
+    let err = run_script(&runner, script, &["--version"])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out after 300ms"), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_gives_mcp_list_its_own_limit_and_sets_no_color_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nsleep 1\nprintf 'ok %s %s\\n' \"$NO_COLOR\" \"$PATH\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_each_command_gets_its_own_limit(&script).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn run_gives_mcp_list_its_own_limit_and_sets_no_color_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.cmd");
+    // `ping -n 2` waits about a second between its two requests.
+    std::fs::write(
+        &script,
+        "@ping -n 2 127.0.0.1 >NUL\r\n@echo ok %NO_COLOR% %SystemRoot%\r\n",
+    )
+    .unwrap();
+    assert_each_command_gets_its_own_limit(&script).await;
+}
