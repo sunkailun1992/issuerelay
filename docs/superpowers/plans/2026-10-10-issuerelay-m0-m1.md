@@ -7309,7 +7309,12 @@ impl Engine {
             return Ok(false);
         };
         let language = cfg.settings.resolved_comment_language();
-        let template = binding.prompt_override.clone().unwrap_or_else(|| cfg.settings.prompt_template.clone());
+        // A blank override falls back to the global template instead of silently dropping it.
+        let template = binding
+            .prompt_override
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| cfg.settings.prompt_template.clone());
         let prompt_text = prompt::render(&PromptInput {
             identifier: &issue.identifier,
             url: &issue.url,
