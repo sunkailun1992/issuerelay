@@ -11,9 +11,11 @@ use chrono::{DateTime, Utc};
 pub struct Candidate {
     /// Store id of the job; the lowest id breaks the final tie.
     pub job_id: i64,
-    /// The bound directory; at most one run per directory at a time.
+    /// The bound directory; at most one run per directory at a time. Directories are compared
+    /// as literal `Path`s, so callers must pass one canonical spelling (the engine canonicalizes
+    /// both sides).
     pub directory: PathBuf,
-    /// Linear priority: 1 urgent … 4 low, 0 none (sorted last).
+    /// Linear priority, valid range 0..=4: 1 urgent … 4 low, 0 none (sorted last).
     pub priority: u8,
     /// When the issue was created in Linear; older goes first.
     pub issue_created_at: DateTime<Utc>,
@@ -99,6 +101,7 @@ mod tests {
 
     #[test]
     fn same_priority_and_time_break_ties_by_job_id() {
+        // Ids and directories are in opposite order on purpose; a directory tie-break fails.
         let queued = [c(9, "a", 2, 0), c(4, "b", 2, 0)];
         assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![4, 9]);
     }
@@ -122,7 +125,22 @@ mod tests {
 
     #[test]
     fn no_priority_goes_after_low_priority() {
+        // The no-priority job is older and has the lower id on purpose: ranking 0 like 4 fails.
         let queued = [c(1, "a", 0, 0), c(2, "b", 4, 5)];
         assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![2, 1]);
+    }
+
+    #[test]
+    fn a_skipped_busy_directory_does_not_use_up_a_slot() {
+        // Job 2 shares job 1's directory and is skipped; job 3 must still get the second slot.
+        let queued = [c(1, "a", 1, 0), c(2, "a", 2, 1), c(3, "b", 3, 2)];
+        assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![1, 3]);
+    }
+
+    #[test]
+    fn the_best_ranked_job_takes_a_contested_directory() {
+        // Listed first but low priority: the urgent job listed later must win directory "a".
+        let queued = [c(1, "a", 4, 0), c(2, "a", 1, 1)];
+        assert_eq!(pick(&queued, &HashSet::new(), 0, 2), vec![2]);
     }
 }
