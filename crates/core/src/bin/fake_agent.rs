@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -41,6 +41,8 @@ fn main() {
         }
         if let Some(path) = step.get("heartbeat").and_then(Value::as_str) {
             let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
+            // On Windows the grandchild inherits this process's inheritable handles, including
+            // the runner's pipes, so readers must not wait for EOF while a heartbeat is alive.
             // Deliberately left running: the runner tests check that ending the run also ends this grandchild.
             #[allow(clippy::zombie_processes)]
             Command::new(std::env::current_exe().expect("current exe"))
@@ -68,14 +70,24 @@ fn main() {
 }
 
 fn heartbeat(file: &Path, every_ms: u64) -> ! {
+    // A stray heartbeat would otherwise keep running forever, and on Windows a running
+    // fake-agent.exe blocks the next build from relinking. So it stops after 120 seconds,
+    // and as soon as its file cannot be opened (for example once the test directory is gone).
+    let cap = Duration::from_secs(120);
+    let started = Instant::now();
     loop {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
+        if started.elapsed() >= cap {
+            std::process::exit(0);
+        }
+        let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(file)
-        {
-            let _ = f.write_all(b".");
-        }
-        std::thread::sleep(Duration::from_millis(every_ms));
+        else {
+            std::process::exit(0);
+        };
+        let _ = f.write_all(b".");
+        let remaining = cap.saturating_sub(started.elapsed());
+        std::thread::sleep(Duration::from_millis(every_ms).min(remaining));
     }
 }
