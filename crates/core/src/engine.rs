@@ -364,9 +364,34 @@ impl Engine {
     }
 
     /// Adds the binding, replacing any existing one for the same project or id.
+    ///
+    /// Any client of the IPC can send a binding, so it is checked first: the folder must be an
+    /// absolute path (a relative one would resolve against the working directory of whatever
+    /// process hosts the engine), `id` and `project_id` must not be blank, and no name may hold a
+    /// control character (names are shown in the panel, the CLI and MCP).
     pub fn add_binding(&self, binding: Binding) -> Result<()> {
-        if binding.project_id.trim().is_empty() {
-            bail!("project id is required");
+        for (what, text) in [
+            ("binding id", &binding.id),
+            ("project id", &binding.project_id),
+        ] {
+            if text.trim().is_empty() {
+                bail!("{what} is required");
+            }
+        }
+        for (what, text) in [
+            ("binding id", &binding.id),
+            ("project id", &binding.project_id),
+            ("project name", &binding.project_name),
+        ] {
+            if text.chars().any(char::is_control) {
+                bail!("{what} must not contain control characters");
+            }
+        }
+        if !binding.directory.is_absolute() {
+            bail!(
+                "the binding's directory must be an absolute path, got {:?}",
+                binding.directory
+            );
         }
         self.update_config(|c| {
             c.bindings

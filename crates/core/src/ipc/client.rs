@@ -28,6 +28,7 @@ fn timeout_for(method: &str) -> Duration {
 }
 
 /// Sends one request and returns its `result`, or the error message the engine reported.
+/// `NotRunning` means no host owns the endpoint; any other failure to reach it says why.
 pub async fn call(endpoint: &IpcEndpoint, method: &str, params: Value) -> Result<Value> {
     let mut line = serde_json::to_string(&Request::new(1, method, params))?;
     line.push('\n');
@@ -46,9 +47,19 @@ async fn exchange(endpoint: &IpcEndpoint, line: String) -> Result<String> {
     match endpoint {
         #[cfg(unix)]
         IpcEndpoint::Unix(path) => {
-            let stream = tokio::net::UnixStream::connect(path)
-                .await
-                .map_err(|_| NotRunning)?;
+            use std::io::ErrorKind::{ConnectionRefused, NotFound};
+            let stream = match tokio::net::UnixStream::connect(path).await {
+                Ok(stream) => stream,
+                // No socket file, or a leftover one nobody listens on: no host is running.
+                Err(e) if matches!(e.kind(), NotFound | ConnectionRefused) => {
+                    return Err(NotRunning.into());
+                }
+                // Anything else (no permission, no file descriptors, ...) is not "not running".
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("cannot connect to {}", path.display())));
+                }
+            };
             roundtrip(stream, line).await
         }
         #[cfg(windows)]

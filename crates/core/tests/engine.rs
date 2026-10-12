@@ -1847,6 +1847,115 @@ async fn bindings_are_replaced_removed_validated_and_saved() {
 }
 
 #[tokio::test]
+async fn a_binding_needs_an_absolute_directory_and_plain_names() {
+    let h = Harness::new(2, false);
+    let config_path = h.root.path().join("config.toml");
+    let folder = h.bind("proj-1", "a");
+    let kept = h.engine.bindings();
+    let valid = demo_binding("proj-2", &folder);
+    let refused = [
+        (
+            "a relative directory",
+            Binding {
+                directory: PathBuf::from("repo"),
+                ..valid.clone()
+            },
+            "absolute",
+        ),
+        (
+            "a dot-relative directory",
+            Binding {
+                directory: PathBuf::from("./repo"),
+                ..valid.clone()
+            },
+            "absolute",
+        ),
+        (
+            "an empty directory",
+            Binding {
+                directory: PathBuf::new(),
+                ..valid.clone()
+            },
+            "absolute",
+        ),
+        (
+            "an empty id",
+            Binding {
+                id: String::new(),
+                ..valid.clone()
+            },
+            "binding id is required",
+        ),
+        (
+            "a blank id",
+            Binding {
+                id: " \t".into(),
+                ..valid.clone()
+            },
+            "binding id is required",
+        ),
+        (
+            "an empty project id",
+            Binding {
+                project_id: String::new(),
+                ..valid.clone()
+            },
+            "project id is required",
+        ),
+        (
+            "a blank project id",
+            Binding {
+                project_id: "  ".into(),
+                ..valid.clone()
+            },
+            "project id is required",
+        ),
+        (
+            "a control character in the id",
+            Binding {
+                id: "bind\u{1b}2".into(),
+                ..valid.clone()
+            },
+            "binding id must not contain control characters",
+        ),
+        (
+            "a control character in the project id",
+            Binding {
+                project_id: "proj\u{0}2".into(),
+                ..valid.clone()
+            },
+            "project id must not contain control characters",
+        ),
+        (
+            "an escape character in the project name",
+            Binding {
+                project_name: "Demo\u{1b}Project".into(),
+                ..valid.clone()
+            },
+            "project name must not contain control characters",
+        ),
+        (
+            "a newline in the project name",
+            Binding {
+                project_name: "Demo\nProject".into(),
+                ..valid.clone()
+            },
+            "project name must not contain control characters",
+        ),
+    ];
+    // Each refusal says what is wrong and changes nothing, in memory or on disk.
+    for (what, binding, message) in refused {
+        let err = h.engine.add_binding(binding).unwrap_err();
+        assert!(err.to_string().contains(message), "{what}: {err}");
+        assert_eq!(h.engine.bindings(), kept, "{what}");
+        assert_eq!(Config::load(&config_path).unwrap().bindings, kept, "{what}");
+    }
+    // The same binding with an absolute directory and plain names is accepted.
+    h.engine.add_binding(valid.clone()).unwrap();
+    assert!(h.engine.bindings().contains(&valid));
+}
+
+#[tokio::test]
 async fn an_unreadable_configuration_stops_the_engine_from_starting() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("config.toml"), "settings = 5\n").unwrap();

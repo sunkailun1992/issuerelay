@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{METHOD_NOT_FOUND, PARSE_ERROR, Request, Response, SERVER_ERROR};
+use super::protocol::{METHOD_NOT_FOUND, METHODS, PARSE_ERROR, Request, Response, SERVER_ERROR};
 use crate::config::Binding;
 use crate::engine::Engine;
 use crate::paths::IpcEndpoint;
@@ -15,6 +16,28 @@ use crate::paths::IpcEndpoint;
 /// How long `run` waits after a failed accept before it accepts again, so a failure that lasts
 /// (no free file descriptors, say) cannot spin the loop.
 const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// The longest request line a client may send, newline not counted. A longer one is answered with
+/// a parse error and the connection is closed.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// A connection that sends nothing for this long is closed, so clients that went away without
+/// closing cannot pile up.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `list_jobs` asks the store for this many jobs when the caller names no `limit`, and never for
+/// more than `MAX_JOBS`.
+const DEFAULT_JOBS: u64 = 20;
+const MAX_JOBS: u64 = 500;
+
+/// `logs` returns this many lines when the caller names no `lines`, and never more than
+/// `MAX_LOG_LINES`.
+const DEFAULT_LOG_LINES: u64 = 50;
+const MAX_LOG_LINES: u64 = 5_000;
+
+/// The file next to the socket whose lock makes one host the only owner of the endpoint.
+#[cfg(unix)]
+const LOCK_FILE: &str = "issuerelay.lock";
 
 /// Another host already owns the endpoint.
 #[derive(Debug, thiserror::Error)]
@@ -26,7 +49,15 @@ pub struct AlreadyRunning;
 struct UnknownMethod(String);
 
 /// Answers one request by calling the engine. A failure comes back as an error response.
+///
+/// The method table is the gate: a method that `METHODS` does not list is refused here, before
+/// `dispatch` is asked, so an arm added to `dispatch` alone can never make an action the table
+/// leaves out (marking Done, retrying, cancelling) reachable.
 pub async fn handle(engine: &Engine, request: Request) -> Response {
+    if !METHODS.contains(&request.method.as_str()) {
+        let unknown = UnknownMethod(request.method);
+        return Response::err(request.id, METHOD_NOT_FOUND, unknown.to_string());
+    }
     match dispatch(engine, &request.method, &request.params).await {
         Ok(value) => Response::ok(request.id, value),
         Err(e) if e.is::<UnknownMethod>() => {
@@ -51,14 +82,7 @@ async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value
             engine.poll_now();
             json!({"ok": true})
         }
-        "list_jobs" => {
-            let limit = params
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(20)
-                .min(500) as usize;
-            serde_json::to_value(engine.list_jobs(limit)?)?
-        }
+        "list_jobs" => serde_json::to_value(engine.list_jobs(jobs_limit(params)?)?)?,
         "doctor" => serde_json::to_value(engine.doctor().await)?,
         "bindings.list" => serde_json::to_value(engine.bindings())?,
         "bindings.add" => {
@@ -68,26 +92,58 @@ async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value
             json!({"ok": true})
         }
         "bindings.remove" => {
-            let id = params
-                .get("id")
-                .and_then(Value::as_str)
-                .context("missing `id`")?;
-            json!({"removed": engine.remove_binding(id)?})
+            json!({"removed": engine.remove_binding(string_param(params, "id")?)?})
         }
         "logs" => {
-            let job_id = params
-                .get("job_id")
-                .and_then(Value::as_i64)
-                .context("missing `job_id`")?;
-            let lines = params
-                .get("lines")
-                .and_then(Value::as_u64)
-                .unwrap_or(50)
-                .min(5_000) as usize;
-            serde_json::to_value(engine.log_tail(job_id, lines)?)?
+            let job_id = job_id_param(params)?;
+            serde_json::to_value(engine.log_tail(job_id, log_lines(params)?)?)?
         }
+        // Only reached when `METHODS` lists a method that has no arm above; a test dispatches
+        // every listed method, so the table and this match stay in step.
         other => return Err(UnknownMethod(other.to_string()).into()),
     })
+}
+
+/// How many jobs a `list_jobs` call asks the store for.
+fn jobs_limit(params: &Value) -> Result<usize> {
+    count_param(params, "limit", DEFAULT_JOBS, MAX_JOBS)
+}
+
+/// How many log lines a `logs` call asks for.
+fn log_lines(params: &Value) -> Result<usize> {
+    count_param(params, "lines", DEFAULT_LOG_LINES, MAX_LOG_LINES)
+}
+
+/// An optional count. Absent (or `null`) gives `default`; a non-negative whole number is capped
+/// at `max`; anything else is an error, not a silent default.
+fn count_param(params: &Value, name: &str, default: u64, max: u64) -> Result<usize> {
+    let count = match params.get(name) {
+        None | Some(Value::Null) => default,
+        Some(value) => value
+            .as_u64()
+            .with_context(|| format!("invalid `{name}`: expected a non-negative whole number"))?,
+    };
+    Ok(count.min(max) as usize)
+}
+
+/// The required `job_id`: a missing one and an unreadable one are different mistakes.
+fn job_id_param(params: &Value) -> Result<i64> {
+    match params.get("job_id") {
+        None | Some(Value::Null) => bail!("missing `job_id`"),
+        Some(value) => value
+            .as_i64()
+            .context("invalid `job_id`: expected a whole number"),
+    }
+}
+
+/// A required string parameter.
+fn string_param<'a>(params: &'a Value, name: &str) -> Result<&'a str> {
+    match params.get(name) {
+        None | Some(Value::Null) => bail!("missing `{name}`"),
+        Some(value) => value
+            .as_str()
+            .with_context(|| format!("invalid `{name}`: expected a string")),
+    }
 }
 
 /// A bound endpoint; `run` serves it.
@@ -100,6 +156,9 @@ enum Listener {
     Unix {
         listener: tokio::net::UnixListener,
         path: std::path::PathBuf,
+        /// The exclusive lock that makes this the only host for the endpoint. It is released
+        /// when the server is dropped, and not before.
+        _lock: std::fs::File,
     },
     #[cfg(windows)]
     Pipe {
@@ -110,15 +169,22 @@ enum Listener {
 
 impl IpcServer {
     /// Binds the endpoint; fails with `AlreadyRunning` when another host owns it.
+    ///
+    /// On Unix the owner is whoever holds the lock on `issuerelay.lock` in the socket's
+    /// directory, for as long as the server lives. Windows needs no lock, see `bind_pipe`.
     pub async fn bind(endpoint: &IpcEndpoint) -> Result<Self> {
         match endpoint {
             #[cfg(unix)]
-            IpcEndpoint::Unix(path) => Ok(Self {
-                listener: Listener::Unix {
-                    listener: bind_unix(path).await?,
-                    path: path.clone(),
-                },
-            }),
+            IpcEndpoint::Unix(path) => {
+                let (listener, lock) = bind_unix(path)?;
+                Ok(Self {
+                    listener: Listener::Unix {
+                        listener,
+                        path: path.clone(),
+                        _lock: lock,
+                    },
+                })
+            }
             #[cfg(windows)]
             IpcEndpoint::Pipe(name) => Ok(Self {
                 listener: Listener::Pipe {
@@ -130,15 +196,21 @@ impl IpcServer {
         }
     }
 
-    /// Serves connections until `shutdown` is cancelled. A failed accept (or pipe connect) is
+    /// Serves connections until `shutdown` is cancelled, then ends the ones still open: no
+    /// connection outlives the server. A failed accept (or pipe connect, or pipe instance) is
     /// logged and retried after a short pause instead of ending the server: the CLI and MCP
-    /// would otherwise lose the host until the app restarts. On Windows only a pipe instance
-    /// that cannot be created ends it with an error.
+    /// would otherwise lose the host until the app restarts.
     pub async fn run(self, engine: Engine, shutdown: CancellationToken) -> Result<()> {
         match self.listener {
             #[cfg(unix)]
-            Listener::Unix { listener, path } => {
+            Listener::Unix {
+                listener,
+                path,
+                _lock,
+            } => {
+                let mut connections = JoinSet::new();
                 loop {
+                    reap_finished(&mut connections);
                     let accepted = tokio::select! {
                         _ = shutdown.cancelled() => None,
                         accepted = listener.accept() => Some(accepted),
@@ -146,10 +218,7 @@ impl IpcServer {
                     let Some(accepted) = accepted else { break };
                     match accepted {
                         Ok((stream, _)) => {
-                            let engine = engine.clone();
-                            tokio::spawn(async move {
-                                let _ = serve_connection(stream, engine).await;
-                            });
+                            connections.spawn(serve_connection(stream, engine.clone()));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC accept failed; still serving");
@@ -159,41 +228,67 @@ impl IpcServer {
                         }
                     }
                 }
+                // New clients first find nobody home, then the open connections go; the lock is
+                // released last, when this arm ends, so no second host starts before that.
                 let _ = std::fs::remove_file(&path);
+                drop(listener);
+                connections.shutdown().await;
                 Ok(())
             }
             #[cfg(windows)]
             Listener::Pipe { first, name } => {
-                let mut server = first;
+                let mut connections = JoinSet::new();
+                // The instance that waits for the next client; `None` until one is created.
+                let mut waiting = Some(first);
                 loop {
+                    reap_finished(&mut connections);
+                    let server = match waiting.take() {
+                        Some(server) => server,
+                        None => match new_pipe_instance(&name) {
+                            Ok(server) => server,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "IPC pipe instance not created; still trying");
+                                if !pause_before_retry(&shutdown).await {
+                                    break;
+                                }
+                                continue;
+                            }
+                        },
+                    };
                     let connected = tokio::select! {
                         _ = shutdown.cancelled() => None,
                         result = server.connect() => Some(result),
                     };
                     let Some(result) = connected else { break };
-                    // Create the next instance first: after a successful connect it listens while
-                    // the connected one is served, after a failed connect it replaces the failed
-                    // one. Either way the pipe name always has a listening instance.
-                    let next = new_pipe_instance(&name)?;
                     match result {
+                        // The next loop turn creates the instance that takes its place.
                         Ok(()) => {
-                            let client = std::mem::replace(&mut server, next);
-                            let engine = engine.clone();
-                            tokio::spawn(async move {
-                                let _ = serve_connection(client, engine).await;
-                            });
+                            connections.spawn(serve_connection(server, engine.clone()));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC connect failed; still serving");
-                            server = next;
+                            drop(server);
                             if !pause_before_retry(&shutdown).await {
                                 break;
                             }
                         }
                     }
                 }
+                connections.shutdown().await;
                 Ok(())
             }
+        }
+    }
+}
+
+/// Collects the connection tasks that have ended, so the set does not grow with every client.
+fn reap_finished(connections: &mut JoinSet<Result<()>>) {
+    while let Some(ended) = connections.try_join_next() {
+        match ended {
+            Ok(Ok(())) => {}
+            // Clients hang up all the time.
+            Ok(Err(e)) => tracing::debug!(error = %format!("{e:#}"), "IPC connection ended"),
+            Err(e) => tracing::warn!(error = %e, "IPC connection task failed"),
         }
     }
 }
@@ -206,9 +301,19 @@ async fn pause_before_retry(shutdown: &CancellationToken) -> bool {
     }
 }
 
+/// Binds the socket and returns the lock that makes this host its only owner.
+///
+/// The lock comes first: an advisory exclusive lock on `LOCK_FILE` in the socket's directory,
+/// which a second host cannot get, so it is told `AlreadyRunning` however the two starts
+/// interleave. Probing the socket instead ("connect to see whether it is alive") races with the
+/// other host and mistakes any failed connect, such as running out of file descriptors, for a
+/// dead socket whose file it then deletes. The lock file is never deleted: a deleted one could
+/// be created and locked anew while another host still holds the old one.
 #[cfg(unix)]
-async fn bind_unix(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
-    use std::os::unix::fs::PermissionsExt;
+fn bind_unix(path: &std::path::Path) -> Result<(tokio::net::UnixListener, std::fs::File)> {
+    use std::fs::{OpenOptions, Permissions, TryLockError};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     let len = path.as_os_str().len();
     let max = crate::paths::UNIX_SOCKET_MAX;
     if len > max {
@@ -219,19 +324,62 @@ async fn bind_unix(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
     }
     let dir = path
         .parent()
-        .context("socket path has no parent directory")?;
-    std::fs::create_dir_all(dir)?;
+        .with_context(|| format!("socket path {} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     // Also tightens a data directory that another part of the app created earlier.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    if path.exists() {
-        if tokio::net::UnixStream::connect(path).await.is_ok() {
-            return Err(AlreadyRunning.into());
+    std::fs::set_permissions(dir, Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot restrict {} to the current user", dir.display()))?;
+
+    let lock_path = dir.join(LOCK_FILE);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("cannot open {}", lock_path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(AlreadyRunning.into()),
+        Err(TryLockError::Error(e)) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("cannot lock {}", lock_path.display()))
+            );
         }
-        std::fs::remove_file(path)?;
     }
-    Ok(tokio::net::UnixListener::bind(path)?)
+
+    // Holding the lock, whatever lies at the socket path is a leftover. `remove_file` does not
+    // follow symlinks, so a dangling link goes too (on macOS `bind` would otherwise create the
+    // socket at the link's target).
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("cannot remove the leftover {}", path.display())));
+        }
+    }
+    let listener = tokio::net::UnixListener::bind(path).map_err(|e| bind_error(e, path))?;
+    Ok((listener, lock))
 }
 
+/// A failed `bind` of the socket. Whatever lay at the path was removed while holding the lock, so
+/// a path that is taken again by now was taken by a process that ignores the lock (a build
+/// without one, say): "address in use" means someone else owns the endpoint.
+#[cfg(unix)]
+fn bind_error(error: std::io::Error, path: &std::path::Path) -> anyhow::Error {
+    use std::io::ErrorKind::{AddrInUse, AlreadyExists};
+    if matches!(error.kind(), AddrInUse | AlreadyExists) {
+        AlreadyRunning.into()
+    } else {
+        anyhow::Error::new(error).context(format!("cannot bind {}", path.display()))
+    }
+}
+
+/// Creates the first pipe instance. There is no lock file on Windows: asking for the first
+/// instance makes the system refuse (access denied) when any instance of the name exists, and it
+/// does so atomically, so racing hosts are told apart by the system itself. The name goes away
+/// with its last instance, so nothing is left over to clean up either.
 #[cfg(windows)]
 fn bind_pipe(name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
@@ -257,33 +405,151 @@ fn new_pipe_instance(
         .create(name)
 }
 
+/// Answers the request lines of one connection, one response per line, until the client hangs
+/// up, sends a line that is too long, or stays silent for `IDLE_TIMEOUT`.
 async fn serve_connection<S>(stream: S, engine: Engine) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (read, mut write) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read).lines();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => handle(&engine, request).await,
-            Err(e) => Response::err(0, PARSE_ERROR, format!("invalid request: {e}")),
+    let (read_half, mut write) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        // One byte more than the limit is read, so a line of exactly `MAX_LINE_BYTES` (plus its
+        // newline) can be told from a longer one.
+        let mut capped = (&mut reader).take(MAX_LINE_BYTES as u64 + 1);
+        let Ok(got) = tokio::time::timeout(IDLE_TIMEOUT, capped.read_until(b'\n', &mut line)).await
+        else {
+            return Ok(());
         };
-        let mut text = serde_json::to_string(&response)?;
-        text.push('\n');
-        write.write_all(text.as_bytes()).await?;
+        if got? == 0 {
+            return Ok(());
+        }
+        if line.last() != Some(&b'\n') && line.len() > MAX_LINE_BYTES {
+            let too_large = Response::err(0, PARSE_ERROR, "request too large");
+            send(&mut write, &too_large).await?;
+            return Ok(());
+        }
+        let response = match std::str::from_utf8(&line) {
+            Err(_) => Response::err(0, PARSE_ERROR, "invalid request: not valid UTF-8"),
+            Ok(text) if text.trim().is_empty() => continue,
+            Ok(text) => match serde_json::from_str::<Request>(text) {
+                Ok(request) => handle(&engine, request).await,
+                Err(e) => Response::err(0, PARSE_ERROR, format!("invalid request: {e}")),
+            },
+        };
+        send(&mut write, &response).await?;
     }
+}
+
+async fn send<W>(write: &mut W, response: &Response) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut text = serde_json::to_string(response)?;
+    text.push('\n');
+    write.write_all(text.as_bytes()).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // The method table gates what can be asked, but the hard rule is about what the server can
+    // do: nothing reachable over IPC may call the engine's panel-only operations, under any name.
+    #[test]
+    fn the_server_never_calls_a_panel_only_engine_method() {
+        let source = include_str!("server.rs");
+        let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+        assert!(
+            production.contains("engine.pause()"),
+            "the scan must reach the dispatcher"
+        );
+        for call in ["cancel_job", "retry_job", "mark_done"] {
+            assert!(
+                !production.contains(call),
+                "the IPC server must not call `{call}`"
+            );
+        }
+    }
+
+    #[test]
+    fn counts_default_when_absent_and_are_capped() {
+        assert_eq!(jobs_limit(&json!({})).unwrap(), 20);
+        assert_eq!(jobs_limit(&Value::Null).unwrap(), 20, "no params at all");
+        assert_eq!(jobs_limit(&json!({"limit": null})).unwrap(), 20);
+        assert_eq!(jobs_limit(&json!({"limit": 0})).unwrap(), 0);
+        assert_eq!(jobs_limit(&json!({"limit": 500})).unwrap(), 500);
+        assert_eq!(jobs_limit(&json!({"limit": 501})).unwrap(), 500);
+        assert_eq!(jobs_limit(&json!({"limit": 10_000})).unwrap(), 500);
+        assert_eq!(jobs_limit(&json!({"limit": u64::MAX})).unwrap(), 500);
+        assert_eq!(log_lines(&json!({})).unwrap(), 50);
+        assert_eq!(log_lines(&json!({"lines": 5_000})).unwrap(), 5_000);
+        assert_eq!(log_lines(&json!({"lines": 100_000})).unwrap(), 5_000);
+        assert_eq!(log_lines(&json!({"lines": 3})).unwrap(), 3);
+    }
+
+    #[test]
+    fn counts_that_cannot_be_read_are_errors_not_defaults() {
+        for bad in [
+            json!(-1),
+            json!("5"),
+            json!([5]),
+            json!({"n": 5}),
+            json!(1.5),
+            json!(true),
+        ] {
+            let err = jobs_limit(&json!({"limit": bad})).unwrap_err();
+            assert!(err.to_string().contains("invalid `limit`"), "{bad}: {err}");
+            let err = log_lines(&json!({"lines": bad})).unwrap_err();
+            assert!(err.to_string().contains("invalid `lines`"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_job_id_is_required_and_must_be_a_whole_number() {
+        assert_eq!(job_id_param(&json!({"job_id": 7})).unwrap(), 7);
+        for missing in [json!({}), json!({"job_id": null}), Value::Null] {
+            let err = job_id_param(&missing).unwrap_err();
+            assert!(err.to_string().contains("missing `job_id`"), "{err}");
+        }
+        for bad in [json!("7"), json!([7]), json!(7.5), json!(true)] {
+            let err = job_id_param(&json!({"job_id": bad})).unwrap_err();
+            assert!(err.to_string().contains("invalid `job_id`"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_string_parameter_is_required_and_must_be_a_string() {
+        assert_eq!(string_param(&json!({"id": "a"}), "id").unwrap(), "a");
+        let err = string_param(&json!({}), "id").unwrap_err();
+        assert!(err.to_string().contains("missing `id`"), "{err}");
+        let err = string_param(&json!({"id": 5}), "id").unwrap_err();
+        assert!(err.to_string().contains("invalid `id`"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn address_in_use_means_the_endpoint_is_owned() {
+        use std::io::{Error, ErrorKind};
+        let path = std::path::Path::new("/nowhere/issuerelay.sock");
+        for kind in [ErrorKind::AddrInUse, ErrorKind::AlreadyExists] {
+            let err = bind_error(Error::from(kind), path);
+            assert!(err.downcast_ref::<AlreadyRunning>().is_some(), "{kind:?}");
+        }
+        let err = bind_error(Error::from(ErrorKind::PermissionDenied), path);
+        assert!(err.downcast_ref::<AlreadyRunning>().is_none());
+        assert!(
+            err.to_string().contains("/nowhere/issuerelay.sock"),
+            "other failures name the socket: {err}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn an_over_long_socket_path_is_named_in_the_error() {
-        use super::*;
         let path = std::path::PathBuf::from(format!("/{}/issuerelay.sock", "a".repeat(120)));
         let len = path.as_os_str().len();
         let err = IpcServer::bind(&IpcEndpoint::Unix(path.clone()))
@@ -304,7 +570,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_socket_path_of_103_bytes_binds_and_one_of_104_does_not() {
-        use super::*;
         let root = tempfile::tempdir().unwrap();
         let tail = "issuerelay.sock";
         let fixed = root.path().as_os_str().len() + 1 + 1 + tail.len();
