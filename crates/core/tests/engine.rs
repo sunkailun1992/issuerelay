@@ -915,6 +915,10 @@ struct SpyLinear {
     panic_on_issue_call: Mutex<Option<usize>>,
     /// When set, every `viewer()` call waits for a permit before it is answered.
     viewer_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, every `issue()` call waits for a permit before it is answered.
+    issue_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, `projects()` answers with these.
+    projects: Mutex<Option<Vec<Project>>>,
     issue_calls: AtomicUsize,
     viewer_calls: AtomicUsize,
 }
@@ -930,6 +934,8 @@ impl SpyLinear {
             fail_issue: Mutex::new(None),
             panic_on_issue_call: Mutex::new(None),
             viewer_gate: Mutex::new(None),
+            issue_gate: Mutex::new(None),
+            projects: Mutex::new(None),
             issue_calls: AtomicUsize::new(0),
             viewer_calls: AtomicUsize::new(0),
         }
@@ -973,6 +979,10 @@ impl LinearApi for SpyLinear {
 
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
         let call = self.issue_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let gate = self.issue_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.expect("gate closed").forget();
+        }
         let hook = self.before_issue.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
@@ -999,7 +1009,11 @@ impl LinearApi for SpyLinear {
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {
-        self.inner.projects().await
+        let fixed = self.projects.lock().unwrap().clone();
+        match fixed {
+            Some(projects) => Ok(projects),
+            None => self.inner.projects().await,
+        }
     }
 
     async fn labels(&self) -> Result<Vec<String>> {
@@ -4563,4 +4577,124 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
     }))
     .unwrap();
     assert!(!older.draining);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_does_not_wait_for_a_check_that_waits_for_linear() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&h.engine, &shutdown);
+    eventually("DEMO-1 to start", || h.runner.started() == ["DEMO-1"]).await;
+    // From now on Linear never answers who the user is, so the next check hangs in that call.
+    let silent = Arc::new(SpyLinear::new(h.linear.clone()));
+    *silent.viewer_gate.lock().unwrap() = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    h.engine.set_linear(silent.clone());
+    eventually("the next check to wait for Linear", || {
+        silent.viewer_calls() == 1
+    })
+    .await;
+    // Paused clock: the limit only passes if the loop is still waiting for the check.
+    let asked = tokio::time::Instant::now();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_millis(500), worker)
+        .await
+        .expect("the stop waited for the check in progress")
+        .unwrap();
+    assert!(asked.elapsed() < Duration::from_millis(500));
+    // The run in progress was told to stop.
+    h.settle().await;
+    assert_eq!(h.latest("1").state, JobState::Canceled);
+}
+
+#[tokio::test]
+async fn a_stop_and_retry_during_a_failing_start_is_not_held_back() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.poll_once().await.unwrap();
+    let id = job_of(&engine, "1").id;
+    // The start's re-read of the issue waits for the test, and then fails.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *spy.issue_gate.lock().unwrap() = Some(gate.clone());
+    *spy.fail_issue.lock().unwrap() = Some(("1".into(), "Linear is unreachable".into()));
+    let dispatch = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.dispatch().await }
+    });
+    eventually("the start to read the issue", || spy.issue_calls() == 1).await;
+    // Meanwhile the user stops the job and runs it again.
+    engine.cancel_job(id).unwrap();
+    engine.retry_job(id).unwrap();
+    gate.add_permits(1);
+    assert!(dispatch.await.unwrap().unwrap().is_empty());
+    let error = engine.status().last_error.expect("the failure is reported");
+    assert!(error.contains("Linear is unreachable"), "{error}");
+    // That failure belongs to the attempt before the retry: the retried job starts at once.
+    *spy.issue_gate.lock().unwrap() = None;
+    *spy.fail_issue.lock().unwrap() = None;
+    assert_eq!(engine.dispatch().await.unwrap(), [id]);
+    engine.wait_idle().await;
+    assert_eq!(runner.started(), ["DEMO-1"]);
+}
+
+#[tokio::test]
+async fn project_names_are_shown_clean() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeLinear::new("user-1");
+    let mut hostile = fake.projects().await.unwrap().remove(0);
+    hostile.name = "Demo\u{202e} Pro\u{200b}ject\n\u{1b}".into();
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    *spy.projects.lock().unwrap() = Some(vec![hostile.clone()]);
+    let engine = build_engine(
+        root.path(),
+        &Config::default(),
+        spy,
+        Arc::new(FakeReadiness),
+        Arc::new(ScriptedRunner::new(fake, false)),
+    );
+    let projects = engine.projects().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].name, "Demo Project");
+    assert_eq!(projects[0].id, hostile.id, "the id stays as Linear sent it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn saved_settings_apply_without_waiting_for_the_timer() {
+    let h = Harness::new(1, true);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-2"));
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&h.engine, &shutdown);
+    eventually("DEMO-1 to start", || h.runner.started() == ["DEMO-1"]).await;
+    quiesce().await;
+    assert_eq!(
+        h.engine.status().queued,
+        1,
+        "DEMO-2 waits for the only slot"
+    );
+    // No time passes, so only the save can wake the loop for DEMO-2.
+    let mut settings = h.engine.settings();
+    settings.max_concurrent = 2;
+    h.engine.update_settings(settings).unwrap();
+    eventually("DEMO-2 to start", || {
+        h.runner.started() == ["DEMO-1", "DEMO-2"]
+    })
+    .await;
+    h.runner.gate.add_permits(2);
+    h.settle().await;
+    stop_loop(&shutdown, worker).await;
 }

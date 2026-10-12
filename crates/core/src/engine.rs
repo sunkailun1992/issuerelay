@@ -7,14 +7,18 @@
 //! guard: `update_config` (the config, and under it the file's last known bytes), `retry_job`,
 //! the poll's step for each issue and `assign_if_queued` (the store), the registration of a run
 //! and the final loop of `run_forever` (the running set), filling the viewer cache (the cache,
-//! and under it a read of the connection) and the start backoff in `dispatch` (the backoff
-//! table). The async cycle lock is the one lock held across `.await`; it keeps a poll from
-//! interleaving with a dispatch. A user's stop or retry can come at any time, also while a poll
-//! or a start waits for Linear, so every write that follows such a wait is conditional on the
-//! row still being in the state it was read in. The Linear connection can be replaced at any
-//! time too (`set_linear`): a poll, a dispatch and the issue list each take the connection once
-//! and use only that one. No event is sent while the store guard is held: `emit_job` reads the
-//! row under a guard of its own.
+//! and under it a read of the connection) and the start backoff (the backoff table). The async
+//! cycle lock is the one lock held across `.await`; it keeps a poll from interleaving with a
+//! dispatch. A user's stop or retry can come at any time, also while a poll or a start waits for
+//! Linear, so every write that follows such a wait is conditional on the row still being in the
+//! state it was read in (a start's backoff: on the job not having been retried meanwhile). The
+//! Linear connection can be replaced at any time too (`set_linear`): a poll, a dispatch and the
+//! issue list each take the connection once and use only that one. Every await of a cycle comes
+//! before the synchronous blocks that decide and write, so a cycle can be dropped at any of its
+//! awaits without leaving anything half done: a stop does not wait for it (`run_forever`).
+//! Events are sent with no lock held, except by `emit_job`, which reads a job's row and sends it
+//! under one store guard so that the last event for a job carries its newest row (sending never
+//! blocks and runs no subscriber code); its callers must not hold the store guard.
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
@@ -222,6 +226,16 @@ struct StartBackoff {
     until: tokio::time::Instant,
 }
 
+/// What `dispatch` remembers about failed starts.
+#[derive(Default)]
+struct Backoffs {
+    /// Queued jobs whose start failed lately, passed over until their pause ends.
+    held: HashMap<i64, StartBackoff>,
+    /// How often the user retried each queued job. A start that fails while its job is stopped
+    /// and retried is not held against the retry: the count changed during the start's wait.
+    retries: HashMap<i64, u64>,
+}
+
 /// A run's place in the running set, held by the task that watches the run. `release` frees the
 /// place once the result is recorded; dropping the slot frees it too, so a task that ends any
 /// other way (a panic, an abort) cannot leave the folder occupied or `wait_idle` waiting. The row
@@ -286,8 +300,9 @@ struct Inner {
     events: broadcast::Sender<EngineEvent>,
     /// Set by `set_draining`: nothing new starts, the runs in progress go on.
     draining: AtomicBool,
-    /// Queued jobs whose start failed lately, passed over by `dispatch` until their pause ends.
-    start_backoff: Mutex<HashMap<i64, StartBackoff>>,
+    /// The queued jobs `dispatch` passes over after a failed start, and how often each queued job
+    /// was retried (`Backoffs`).
+    start_backoff: Mutex<Backoffs>,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -415,7 +430,7 @@ impl Engine {
                 leftovers: Mutex::new(leftovers),
                 events: broadcast::channel(EVENT_CAPACITY).0,
                 draining: AtomicBool::new(false),
-                start_backoff: Mutex::new(HashMap::new()),
+                start_backoff: Mutex::new(Backoffs::default()),
             }),
         })
     }
@@ -442,20 +457,25 @@ impl Engine {
         let _ = self.inner.events.send(event);
     }
 
-    /// Announces the job as it is stored now. Takes the store lock, so the caller must not hold
-    /// it; a poisoned lock is used as it is, because `abandon_run` calls this while unwinding.
+    /// Announces the job as it is stored now. The row is read and sent under one store guard, so
+    /// two changes of one job announced from different tasks arrive in the order they were stored
+    /// and the last event carries the newest row. This is the one place that sends while holding
+    /// a lock: `broadcast::Sender::send` never blocks and runs no subscriber code. It takes the
+    /// store lock, so the caller must not hold it; a poisoned lock is used as it is, because
+    /// `abandon_run` calls this while unwinding.
     fn emit_job(&self, job_id: i64) {
-        let job = self
+        let store = self
             .inner
             .store
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(job_id);
-        match job {
+            .unwrap_or_else(PoisonError::into_inner);
+        let read = store.get(job_id);
+        match read {
             Ok(Some(job)) => self.emit(EngineEvent::Job { job }),
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!(job_id, error = %format!("{e:#}"), "could not read the job to announce its change")
+                drop(store);
+                tracing::warn!(job_id, error = %format!("{e:#}"), "could not read the job to announce its change");
             }
         }
     }
@@ -590,14 +610,17 @@ impl Engine {
         self.config().settings
     }
 
-    /// Validates and saves `settings`. `paused` keeps its current value: monitoring is switched
-    /// with `pause` and `resume`, never by saving the settings page.
+    /// Validates and saves `settings`, then wakes the loop so that a shorter interval or a higher
+    /// limit applies at once instead of after the current wait. `paused` keeps its current value:
+    /// monitoring is switched with `pause` and `resume`, never by saving the settings page.
     pub fn update_settings(&self, settings: Settings) -> Result<()> {
         self.update_config(|c| {
             let paused = c.settings.paused;
             c.settings = settings;
             c.settings.paused = paused;
-        })
+        })?;
+        self.poll_now();
+        Ok(())
     }
 
     /// The configured project bindings.
@@ -703,9 +726,17 @@ impl Engine {
         Ok(report)
     }
 
-    /// The Linear projects, for choosing what to bind.
+    /// The Linear projects, for choosing what to bind. Their names are Linear's text and are
+    /// cleaned for display (`clean_text`); the ids stay as Linear sent them.
     pub async fn projects(&self) -> Result<Vec<Project>> {
-        self.linear().projects().await
+        let projects = self.linear().projects().await?;
+        Ok(projects
+            .into_iter()
+            .map(|project| Project {
+                name: clean_text(&project.name),
+                ..project
+            })
+            .collect())
     }
 
     /// The panel's issue list (spec 9.2): the issues assigned to the user with the trigger label,
@@ -987,8 +1018,12 @@ impl Engine {
         let held_back: HashSet<i64> = {
             let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
             let queued_ids: HashSet<i64> = queued.iter().map(|job| job.id).collect();
-            backoff.retain(|id, _| queued_ids.contains(id));
+            // Nothing here outlives the job's stay in the queue. No start is waiting now (the
+            // cycle lock), so no retry count is dropped from under one.
+            backoff.held.retain(|id, _| queued_ids.contains(id));
+            backoff.retries.retain(|id, _| queued_ids.contains(id));
             backoff
+                .held
                 .iter()
                 .filter(|(_, b)| b.until > now)
                 .map(|(id, _)| *id)
@@ -1048,6 +1083,7 @@ impl Engine {
                 break;
             }
             let job = self.store().get(id);
+            let retries = self.retries_of(id);
             let started_job = match job {
                 Ok(Some(job)) => {
                     let label = job.issue_identifier.clone();
@@ -1064,6 +1100,7 @@ impl Engine {
                         .start_backoff
                         .lock()
                         .expect("backoff lock")
+                        .held
                         .remove(&id);
                     if started_now {
                         started.push(id);
@@ -1072,13 +1109,7 @@ impl Engine {
                 Err((label, e)) => {
                     tracing::warn!(job_id = id, error = %format!("{e:#}"), "could not start the job");
                     failure = Some(format!("could not start {label}: {e:#}"));
-                    let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
-                    let entry = backoff.entry(id).or_insert(StartBackoff {
-                        failures: 0,
-                        until: now,
-                    });
-                    entry.failures = entry.failures.saturating_add(1);
-                    entry.until = tokio::time::Instant::now() + start_pause(entry.failures);
+                    self.hold_back(id, retries);
                 }
             }
         }
@@ -1087,6 +1118,43 @@ impl Engine {
             self.emit(EngineEvent::Status);
         }
         Ok(started)
+    }
+
+    /// How often the user retried the job while it was queued; `hold_back` compares it.
+    fn retries_of(&self, job_id: i64) -> u64 {
+        self.inner
+            .start_backoff
+            .lock()
+            .expect("backoff lock")
+            .retries
+            .get(&job_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Passes a job whose start failed over for a while (`start_pause`), so that the jobs behind
+    /// it can start. The start waited for Linear, and the user may have stopped or retried the job
+    /// meanwhile: the pause is recorded only while the row is still queued and the job was not
+    /// retried since the start began (`retries`, read by `retries_of` before it), so a retry
+    /// starts afresh. `retry_job` queues the row before it counts the retry and drops any pause,
+    /// so a retry that lands after this check still undoes what it recorded.
+    fn hold_back(&self, job_id: i64, retries: u64) {
+        let queued = matches!(
+            self.store().get(job_id),
+            Ok(Some(job)) if job.state == JobState::Queued
+        );
+        let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
+        let retried = backoff.retries.get(&job_id).copied().unwrap_or(0) != retries;
+        if !queued || retried {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let entry = backoff.held.entry(job_id).or_insert(StartBackoff {
+            failures: 0,
+            until: now,
+        });
+        entry.failures = entry.failures.saturating_add(1);
+        entry.until = now + start_pause(entry.failures);
     }
 
     async fn start_job(
@@ -1561,12 +1629,14 @@ impl Engine {
                 "job queued again"
             );
         }
-        // A manual retry starts afresh, also when an earlier start of this job failed.
-        self.inner
-            .start_backoff
-            .lock()
-            .expect("backoff lock")
-            .remove(&job_id);
+        // A manual retry starts afresh: no pause from an earlier failed start, and a start of this
+        // job that is failing right now is not held against it (`hold_back`). Counted only after
+        // the row is queued again.
+        {
+            let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
+            backoff.held.remove(&job_id);
+            *backoff.retries.entry(job_id).or_default() += 1;
+        }
         self.emit_job(job_id);
         self.poll_now();
         Ok(())
@@ -1641,7 +1711,8 @@ impl Engine {
     /// by an earlier host left running (`runner::end_leftovers`), and only then clears their
     /// records. Returns after `shutdown` is cancelled and the running jobs were told to stop; their
     /// results are recorded when they end (`wait_idle`). Once the shutdown is requested nothing new
-    /// starts, not even in a cycle that is already in progress.
+    /// starts, not even in a cycle that is already in progress, and the stop does not wait for such
+    /// a cycle: it is dropped where it waits (for Linear, say).
     pub async fn run_forever(&self, shutdown: CancellationToken) {
         *self
             .inner
@@ -1689,8 +1760,18 @@ impl Engine {
         // Checked before every cycle, not only when waiting: if the shutdown and a wake-up are
         // ready together, `select!` may pick either, and no new cycle may start runs then.
         while !shutdown.is_cancelled() {
-            if let Err(e) = self.tick().await {
-                tracing::warn!(error = %format!("{e:#}"), "check failed");
+            // A check may wait for Linear for up to 30 s a call; a stop does not wait for it. The
+            // cycle is dropped at its current await, which leaves nothing half done: every await
+            // of a cycle comes before the synchronous blocks that decide and write, and every
+            // write after a wait is conditional (see the module doc).
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                result = self.tick() => {
+                    if let Err(e) = result {
+                        tracing::warn!(error = %format!("{e:#}"), "check failed");
+                    }
+                }
             }
             if last_cleanup.elapsed() >= LOG_CLEANUP_INTERVAL {
                 last_cleanup = tokio::time::Instant::now();
