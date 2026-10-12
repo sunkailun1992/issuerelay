@@ -1,6 +1,6 @@
 //! An executor that a crashed host left behind, for the tests of the sweep that ends such
-//! executors (`runner::end_leftover`, macOS only): fake-agent started the way a run starts it,
-//! leading a process group of its own, but owned by no run.
+//! executors (`runner::end_leftover`, macOS only): fake-agent or a shell started the way a run
+//! starts an executor, leading a process group of its own, but owned by no run.
 use std::{
     path::Path,
     process::{Child, Command, ExitStatus},
@@ -21,12 +21,25 @@ pub struct Orphan {
 impl Orphan {
     /// Starts fake-agent with `script`, leading a process group of its own.
     pub fn spawn(script: &Path) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fake-agent"));
+        command.arg(script);
+        Self::start(command)
+    }
+
+    /// Starts `/bin/sh -c <script> sh <args…>`, leading a process group of its own: for an
+    /// executor that handles SIGTERM, which fake-agent does not.
+    pub fn shell(script: &str, args: &[&Path]) -> Self {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script, "sh"]).args(args);
+        Self::start(command)
+    }
+
+    fn start(mut command: Command) -> Self {
         use std::os::unix::process::CommandExt;
-        let child = Command::new(env!("CARGO_BIN_EXE_fake-agent"))
-            .arg(script)
+        let child = command
             .process_group(0)
             .spawn()
-            .expect("start fake-agent");
+            .expect("start the leftover");
         Self {
             child,
             reaped: false,

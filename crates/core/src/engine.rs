@@ -45,7 +45,7 @@ use crate::model::{Issue, Job, JobState, ProcessTag};
 use crate::prompt::{self, PromptInput};
 use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
-use crate::store::{NewJob, Store};
+use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
 use crate::trigger::{self, Eligibility, WaitReason, same_name};
 
@@ -278,10 +278,10 @@ struct Inner {
     /// The token of the running `run_forever`: once it is cancelled nothing new starts, also in
     /// a cycle that is already in progress.
     shutdown: Mutex<Option<CancellationToken>>,
-    /// The executors that runs interrupted by the previous host may have left running, as
-    /// recorded when they started. `run_forever` takes them and ends them before anything new
-    /// starts.
-    leftovers: Mutex<Vec<ProcessTag>>,
+    /// The executors that runs interrupted by an earlier host may have left running, as recorded
+    /// when they started (`Store::leftovers`). `run_forever` takes them and ends them before
+    /// anything new starts; each record stays on its row until then.
+    leftovers: Mutex<Vec<Leftover>>,
     /// Tells subscribers what changed; see `EngineEvent`.
     events: broadcast::Sender<EngineEvent>,
     /// Set by `set_draining`: nothing new starts, the runs in progress go on.
@@ -377,9 +377,9 @@ pub fn decide(
 
 impl Engine {
     /// Loads the configuration and marks the runs a previous shutdown interrupted as failed; the
-    /// executors those runs left running are ended when `run_forever` starts. Only one engine may
-    /// use a database at a time: a second one would mark the first one's runs failed and end
-    /// their executors.
+    /// executors those runs left running, and any an earlier host did not finish sweeping, are
+    /// ended when `run_forever` starts. Only one engine may use a database at a time: a second one
+    /// would mark the first one's runs failed and end their executors.
     pub fn new(deps: EngineDeps) -> Result<Self> {
         // The bytes are read before the file is loaded: if it changes in between, the first save
         // refuses instead of overwriting the newer text.
@@ -392,10 +392,9 @@ impl Engine {
                 "runs interrupted by the previous shutdown were marked failed"
             );
         }
-        let leftovers = interrupted
-            .into_iter()
-            .filter_map(|run| run.process)
-            .collect();
+        // Read from the rows, not from the runs just recovered: a host that stopped before its
+        // sweep was done left the records of the executors it had not dealt with.
+        let leftovers = deps.store.leftovers()?;
         Ok(Self {
             inner: Arc::new(Inner {
                 config_path: deps.config_path,
@@ -1639,10 +1638,10 @@ impl Engine {
 
     /// The background loop: a cycle now, then again after the poll interval or as soon as
     /// `poll_now` is called. Before the first cycle it ends the executors that runs interrupted
-    /// by the previous host left running (`runner::end_leftover`). Returns after `shutdown` is
-    /// cancelled and the running jobs were told to stop; their results are recorded when they end
-    /// (`wait_idle`). Once the shutdown is requested nothing new starts, not even in a cycle that
-    /// is already in progress.
+    /// by an earlier host left running (`runner::end_leftovers`), and only then clears their
+    /// records. Returns after `shutdown` is cancelled and the running jobs were told to stop; their
+    /// results are recorded when they end (`wait_idle`). Once the shutdown is requested nothing new
+    /// starts, not even in a cycle that is already in progress.
     pub async fn run_forever(&self, shutdown: CancellationToken) {
         *self
             .inner
@@ -1650,7 +1649,7 @@ impl Engine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown.clone());
         // A previous host that died while runs were in progress may have left their executors
-        // running: end them before anything new starts.
+        // running: end them, all at once, before anything new starts.
         let leftovers = std::mem::take(
             &mut *self
                 .inner
@@ -1658,12 +1657,29 @@ impl Engine {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
-        for tag in leftovers {
-            if runner::end_leftover(&tag).await {
-                tracing::warn!(
-                    pid = tag.pid,
-                    "ended an executor the previous host left running"
-                );
+        if !leftovers.is_empty() {
+            let tags: Vec<ProcessTag> = leftovers.iter().map(|l| l.process.clone()).collect();
+            let ended = runner::end_leftovers(&tags).await;
+            for (leftover, ended) in leftovers.iter().zip(ended) {
+                if ended {
+                    tracing::warn!(
+                        job_id = leftover.job_id,
+                        pid = leftover.process.pid,
+                        "ended an executor the previous host left running"
+                    );
+                }
+                // Only now that it was dealt with: a host that stops during the sweep leaves the
+                // record for the next one.
+                let cleared = self
+                    .store()
+                    .clear_process(leftover.job_id, &leftover.process);
+                if let Err(e) = cleared {
+                    tracing::warn!(
+                        job_id = leftover.job_id,
+                        error = %format!("{e:#}"),
+                        "could not clear the executor record; the next start checks it again"
+                    );
+                }
             }
         }
         let mut last_cleanup = tokio::time::Instant::now();

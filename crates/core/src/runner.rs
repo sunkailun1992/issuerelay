@@ -399,51 +399,88 @@ fn format_started((seconds, micros): (u64, u64)) -> String {
 /// executor in `tag` still runs (same PID, same start time), its descendants are recorded, its
 /// process group gets SIGTERM, it gets up to `TERM_GRACE` to exit, the descendants are recorded
 /// again, and then the group (while its leader still runs) and every recorded descendant get
-/// SIGKILL, as `TreeGuard::end` does for a run that is stopped. Returns whether the executor was
-/// still running. A PID with another start time belongs to an unrelated process and is left
-/// alone, and so are this process, its process group and launchd, whatever the record says. An
-/// executor that has exited can no longer be followed to its descendants: they are out of reach,
-/// like the orphans `run` cannot find.
+/// SIGKILL, as `TreeGuard::end` does for a run that is stopped. Each signal to the group is sent
+/// only if the leader still has the recorded start time right before it. Returns whether the
+/// executor was still running. A PID with another start time belongs to an unrelated process and
+/// is left alone, and so are this process, its process group and launchd, whatever the record
+/// says. An executor that has exited can no longer be followed to its descendants: they are out
+/// of reach, like the orphans `run` cannot find.
 #[cfg(target_os = "macos")]
 pub async fn end_leftover(tag: &ProcessTag) -> bool {
-    end_leftover_within(tag, TERM_GRACE).await
+    end_leftovers(std::slice::from_ref(tag)).await[0]
 }
 
-/// `end_leftover` with the grace period as a parameter, so that tests can use a short one.
+/// `end_leftover` for several executors at once. They share the grace period: executors that
+/// ignore SIGTERM cost one grace period together, not one each. Returns whether each executor
+/// was still running, in the order of `tags`.
 #[cfg(target_os = "macos")]
-async fn end_leftover_within(tag: &ProcessTag, grace: Duration) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(tag.pid) else {
-        return false;
-    };
-    if !descendants::foreign(pid) {
-        return false;
+pub async fn end_leftovers(tags: &[ProcessTag]) -> Vec<bool> {
+    end_leftovers_within(tags, TERM_GRACE).await
+}
+
+/// `end_leftovers` with the grace period as a parameter, so that tests can use a short one.
+#[cfg(target_os = "macos")]
+async fn end_leftovers_within(tags: &[ProcessTag], grace: Duration) -> Vec<bool> {
+    let mut sweeps: Vec<Option<Sweep>> = tags.iter().map(Sweep::find).collect();
+    for sweep in sweeps.iter_mut().flatten() {
+        descendants::record(&[sweep.leader], &mut sweep.recorded);
+        sweep.signal_group(libc::SIGTERM);
     }
-    let Some(leader) = descendants::process(pid) else {
-        return false;
-    };
-    if format_started(leader.started) != tag.started {
-        return false;
-    }
-    let mut recorded = Vec::new();
-    descendants::record(&[leader], &mut recorded);
-    // SAFETY: a plain signal to the group of a process whose PID and start time were checked.
-    unsafe { libc::killpg(pid, libc::SIGTERM) };
     let deadline = Instant::now() + grace;
-    while descendants::process(pid) == Some(leader) && Instant::now() < deadline {
+    while sweeps.iter().flatten().any(Sweep::leader_runs) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let leader_alive = descendants::process(pid) == Some(leader);
-    let mut roots = recorded.clone();
-    if leader_alive {
-        roots.push(leader);
+    for sweep in sweeps.iter_mut().flatten() {
+        let mut roots = sweep.recorded.clone();
+        if sweep.leader_runs() {
+            roots.push(sweep.leader);
+        }
+        descendants::record(&roots, &mut sweep.recorded);
+        sweep.signal_group(libc::SIGKILL);
+        descendants::kill(&sweep.recorded);
     }
-    descendants::record(&roots, &mut recorded);
-    if leader_alive {
-        // SAFETY: as above; the leader still has the recorded start time.
-        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    sweeps.iter().map(Option::is_some).collect()
+}
+
+/// One leftover executor being ended: its leader as it was found, and the descendants recorded
+/// for it so far.
+#[cfg(target_os = "macos")]
+struct Sweep {
+    leader: descendants::Proc,
+    recorded: Vec<descendants::Proc>,
+}
+
+#[cfg(target_os = "macos")]
+impl Sweep {
+    /// The executor in `tag`, if it still runs with the recorded start time and may be
+    /// signalled at all (`descendants::foreign`).
+    fn find(tag: &ProcessTag) -> Option<Self> {
+        let pid = libc::pid_t::try_from(tag.pid).ok()?;
+        if !descendants::foreign(pid) {
+            return None;
+        }
+        let leader = descendants::process(pid)?;
+        (format_started(leader.started) == tag.started).then(|| Self {
+            leader,
+            recorded: Vec::new(),
+        })
     }
-    descendants::kill(&recorded);
-    true
+
+    /// Whether the leader still runs with the start time it was found with.
+    fn leader_runs(&self) -> bool {
+        descendants::process(self.leader.pid) == Some(self.leader)
+    }
+
+    /// Sends `signal` to the leader's process group, checked right before the call: a walk of
+    /// many processes may lie between finding the leader and this, and once the leader is gone,
+    /// its PID, and with it the group id, may belong to another process.
+    fn signal_group(&self, signal: libc::c_int) {
+        if self.leader_runs() {
+            // SAFETY: a plain signal to the group of a process whose PID and start time were
+            // checked just above.
+            unsafe { libc::killpg(self.leader.pid, signal) };
+        }
+    }
 }
 
 /// Windows: the Job Object of a run ends with the host that created it
@@ -452,6 +489,12 @@ async fn end_leftover_within(tag: &ProcessTag, grace: Duration) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub async fn end_leftover(_tag: &ProcessTag) -> bool {
     false
+}
+
+/// Nothing is left to end where nothing is recorded: see `end_leftover`.
+#[cfg(not(target_os = "macos"))]
+pub async fn end_leftovers(tags: &[ProcessTag]) -> Vec<bool> {
+    vec![false; tags.len()]
 }
 
 /// Windows: how executors and check commands are created. `CREATE_NO_WINDOW` keeps a console
@@ -1036,17 +1079,15 @@ mod tests {
         assert!(descendants::foreign(libc::pid_t::MAX));
     }
 
-    // A leftover executor that ignores SIGTERM is killed, with its process group, once the grace
-    // period is over. Only macOS records executors (`process_tag`).
+    /// A shell that ignores SIGTERM and outlives each of its children, started like an executor
+    /// (leading a process group of its own), so only a signal to the shell itself ends it; with
+    /// its record. Its guard is only the cleanup: it reaps the shell at the end, and ends the
+    /// tree should the test fail. The leftover is ended through its record, like one a crashed
+    /// host left behind.
     #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn a_leftover_that_ignores_sigterm_is_killed_when_the_grace_period_ends() {
-        let dir = tempfile::tempdir().unwrap();
-        let ready = dir.path().join("ready");
-        // The guard is only the cleanup: it reaps the shell at the end, and ends the tree if the
-        // test fails. The leftover is ended through its record, like one a crashed host left.
-        // The loop outlives each of its children, so only a signal to the shell itself ends it.
-        let mut guard = shell_guard(
+    async fn stubborn_leftover(dir: &Path, ready: &str) -> (TreeGuard, ProcessTag) {
+        let ready = dir.join(ready);
+        let guard = shell_guard(
             r#"trap '' TERM; : > "$1"; while :; do sleep 1; done"#,
             &[&ready],
             Duration::from_millis(300),
@@ -1054,21 +1095,104 @@ mod tests {
         wait_for_file(&ready).await;
         let pid = guard.leader().expect("the shell runs");
         let tag = process_tag(u32::try_from(pid).unwrap()).expect("a live process has a tag");
+        (guard, tag)
+    }
+
+    /// Waits, for at most 5 seconds, until the process in `tag` no longer runs: gone, or a zombie
+    /// its guard reaps. SIGKILL is delivered asynchronously.
+    #[cfg(target_os = "macos")]
+    async fn wait_until_gone(tag: &ProcessTag) {
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while process_tag(tag.pid).as_ref() == Some(tag) {
+            assert!(Instant::now() < give_up, "the leftover still runs");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // A leftover executor that ignores SIGTERM is killed, with its process group, once the grace
+    // period is over. Only macOS records executors (`process_tag`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_leftover_that_ignores_sigterm_is_killed_when_the_grace_period_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, tag) = stubborn_leftover(dir.path(), "ready").await;
         let grace = Duration::from_millis(300);
         let started = Instant::now();
-        assert!(end_leftover_within(&tag, grace).await);
+        let ended = end_leftovers_within(std::slice::from_ref(&tag), grace).await;
         let took = started.elapsed();
+        assert_eq!(ended, [true]);
         assert!(
             took >= grace,
             "killed before the grace period ended: {took:?}"
         );
         assert!(took < Duration::from_secs(10), "took {took:?}");
-        // SIGKILL is delivered asynchronously; the shell is gone, or a zombie the guard reaps.
-        let give_up = Instant::now() + Duration::from_secs(5);
-        while descendants::process(pid).is_some() {
-            assert!(Instant::now() < give_up, "the leftover still runs");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        wait_until_gone(&tag).await;
+        guard.end().await;
+        assert!(guard.done, "the tree was not reaped");
+    }
+
+    // Leftovers that ignore SIGTERM wait out one grace period together, not one each, before the
+    // host's first check; each is reported in the order of the records.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn leftovers_that_ignore_sigterm_share_one_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut first, first_tag) = stubborn_leftover(dir.path(), "first").await;
+        let (mut second, second_tag) = stubborn_leftover(dir.path(), "second").await;
+        let gone = ProcessTag {
+            pid: u32::MAX - 7,
+            started: "1.000001".into(),
+        };
+        let grace = Duration::from_millis(500);
+        let started = Instant::now();
+        let tags = [first_tag.clone(), gone, second_tag.clone()];
+        let ended = end_leftovers_within(&tags, grace).await;
+        let took = started.elapsed();
+        assert_eq!(ended, [true, false, true]);
+        assert!(
+            took >= grace,
+            "killed before the grace period ended: {took:?}"
+        );
+        assert!(
+            took < grace * 2,
+            "each leftover waited a grace period of its own: {took:?}"
+        );
+        wait_until_gone(&first_tag).await;
+        wait_until_gone(&second_tag).await;
+        for guard in [&mut first, &mut second] {
+            guard.end().await;
+            assert!(guard.done, "the tree was not reaped");
         }
+    }
+
+    // A leftover's group is signalled only while its leader still has the start time it was
+    // found with: checked right before each signal, as `descendants::kill` does, since a walk of
+    // many processes may lie between finding the leader and signalling its group.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_leftover_group_is_signalled_only_while_its_leader_is_the_one_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, tag) = stubborn_leftover(dir.path(), "ready").await;
+        let found = Sweep::find(&tag).expect("the leftover runs");
+        // The same PID with another start time stands for a leader that exited after it was
+        // found, its PID taken by another process since.
+        let replaced = Sweep {
+            leader: descendants::Proc {
+                started: (found.leader.started.0 - 1, found.leader.started.1),
+                ..found.leader
+            },
+            recorded: Vec::new(),
+        };
+        replaced.signal_group(libc::SIGKILL);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            process_tag(tag.pid).as_ref(),
+            Some(&tag),
+            "a group whose leader changed was signalled"
+        );
+        // With the leader as found, the group is signalled: the check above is not vacuous.
+        found.signal_group(libc::SIGKILL);
+        wait_until_gone(&tag).await;
         guard.end().await;
         assert!(guard.done, "the tree was not reaped");
     }

@@ -17,8 +17,6 @@ use common::{
     fake_linear::FakeLinear,
     issue,
 };
-#[cfg(target_os = "macos")]
-use issuerelay_core::runner;
 use issuerelay_core::{
     config::{Binding, Config, ExecutorKind, PermissionProfile, TriggerNames},
     doctor::{ExecutorReport, ReadinessProbe},
@@ -33,6 +31,8 @@ use issuerelay_core::{
     runner::{ExitKind, RunLimits},
     store::{NewJob, Store},
 };
+#[cfg(target_os = "macos")]
+use issuerelay_core::{model::ProcessTag, runner, store::Leftover};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -610,8 +610,72 @@ async fn a_started_run_records_its_executor_process() {
     );
 }
 
+/// Waits, for at most 10 seconds, until `path` exists.
+#[cfg(target_os = "macos")]
+async fn wait_for_path(path: &Path) {
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "{} never appeared",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits, for at most 10 seconds, until the process in `tag` no longer runs (a zombie counts as
+/// ended), without reaping it: the guard of the test can still end its group if anything of it
+/// survived.
+#[cfg(target_os = "macos")]
+async fn wait_until_gone(tag: &ProcessTag) {
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while runner::process_tag(tag.pid).as_ref() == Some(tag) {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "the leftover executor still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// What a host that died in the middle of a run left in the database at `db`: the run as started,
+/// with the record of its executor. Returns the job's id.
+#[cfg(target_os = "macos")]
+fn record_interrupted_run(db: &Path, root: &Path, tag: &ProcessTag) -> i64 {
+    let store = Store::open(db).unwrap();
+    let i = issue("1", "proj-1");
+    let job = store
+        .insert(NewJob {
+            issue: &i,
+            binding: None,
+            executor: None,
+            state: JobState::Queued,
+            reason: None,
+        })
+        .unwrap();
+    assert!(store.mark_started(job.id, &root.join("1.jsonl")).unwrap());
+    store.set_process(job.id, tag).unwrap();
+    job.id
+}
+
+/// An engine over the database at `db`, with fakes for Linear, the executors and the runs.
+#[cfg(target_os = "macos")]
+fn engine_on(db: &Path, root: &Path) -> Engine {
+    let linear = FakeLinear::new("user-1");
+    Engine::new(EngineDeps {
+        config_path: root.join("config.toml"),
+        store: Store::open(db).unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: root.join("logs"),
+    })
+    .unwrap()
+}
+
 // The loop of a host that starts after a crash ends the executor that a run of the previous host
-// left running. Only macOS records executors.
+// left running, and then forgets its record. Only macOS records executors.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn the_loop_ends_an_executor_the_previous_host_left_running() {
@@ -631,50 +695,13 @@ async fn the_loop_ends_an_executor_the_previous_host_left_running() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let tag = runner::process_tag(orphan.id()).expect("a live process has a start time");
-    // The previous host recorded the run as started, with its executor, and then died.
     let db = root.path().join("state.db");
-    {
-        let store = Store::open(&db).unwrap();
-        let i = issue("1", "proj-1");
-        let job = store
-            .insert(NewJob {
-                issue: &i,
-                binding: None,
-                executor: None,
-                state: JobState::Queued,
-                reason: None,
-            })
-            .unwrap();
-        assert!(
-            store
-                .mark_started(job.id, &root.path().join("1.jsonl"))
-                .unwrap()
-        );
-        store.set_process(job.id, &tag).unwrap();
-    }
-    let linear = FakeLinear::new("user-1");
-    let engine = Engine::new(EngineDeps {
-        config_path: root.path().join("config.toml"),
-        store: Store::open(&db).unwrap(),
-        linear: Arc::new(linear.clone()),
-        readiness: Arc::new(FakeReadiness),
-        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
-        logs_dir: root.path().join("logs"),
-    })
-    .unwrap();
+    record_interrupted_run(&db, root.path(), &tag);
+    let engine = engine_on(&db, root.path());
     assert!(orphan.is_running(), "creating the engine ends nothing yet");
     let shutdown = CancellationToken::new();
     let worker = spawn_loop(&engine, &shutdown);
-    // Waited for without reaping the leader, so that the guard can still end the group if the
-    // heartbeat survived.
-    let give_up = std::time::Instant::now() + Duration::from_secs(10);
-    while runner::process_tag(orphan.id()).as_ref() == Some(&tag) {
-        assert!(
-            std::time::Instant::now() < give_up,
-            "the leftover executor still runs"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until_gone(&tag).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let settled = beat_len();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -689,6 +716,62 @@ async fn the_loop_ends_an_executor_the_previous_host_left_running() {
         .expect("the loop did not stop")
         .unwrap();
     assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Failed);
+    let left = Store::open(&db).unwrap().leftovers().unwrap();
+    assert!(left.is_empty(), "the swept record stayed: {left:?}");
+}
+
+// A host that stops in the middle of its sweep (here while the executor takes its grace period)
+// leaves the record on the row, so the next host, which recovers no run, still finds the executor
+// and ends it. The leftover takes the first SIGTERM and dies of the second.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_host_that_stops_during_the_sweep_leaves_it_to_the_next_start() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let (ready, termed) = (root.path().join("ready"), root.path().join("termed"));
+    let mut orphan = Orphan::shell(
+        r#"trap 'trap - TERM; : > "$2"' TERM; : > "$1"; while :; do sleep 1; done"#,
+        &[&ready, &termed],
+    );
+    wait_for_path(&ready).await;
+    let tag = runner::process_tag(orphan.id()).expect("a live process has a start time");
+    let db = root.path().join("state.db");
+    let job_id = record_interrupted_run(&db, root.path(), &tag);
+    let first = engine_on(&db, root.path());
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&first, &shutdown);
+    wait_for_path(&termed).await;
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    drop(first);
+    assert_eq!(
+        runner::process_tag(orphan.id()).as_ref(),
+        Some(&tag),
+        "the first host did not stop in the middle of its sweep"
+    );
+    assert_eq!(
+        Store::open(&db).unwrap().leftovers().unwrap(),
+        [Leftover {
+            job_id,
+            process: tag.clone()
+        }]
+    );
+    let second = engine_on(&db, root.path());
+    let worker = spawn_loop(&second, &shutdown);
+    wait_until_gone(&tag).await;
+    let status = orphan
+        .exit_within(Duration::from_secs(10))
+        .await
+        .expect("the leftover executor was not reaped");
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), worker)
+        .await
+        .expect("the loop did not stop")
+        .unwrap();
+    let left = Store::open(&db).unwrap().leftovers().unwrap();
+    assert!(left.is_empty(), "the swept record stayed: {left:?}");
 }
 
 #[tokio::test]
