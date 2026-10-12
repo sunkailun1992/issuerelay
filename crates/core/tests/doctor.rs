@@ -152,6 +152,10 @@ impl LinearApi for Workspace {
         unimplemented!("not used by check_workspace")
     }
 
+    async fn labeled_issues(&self, _label: &str) -> Result<Vec<Issue>> {
+        unimplemented!("not used by check_workspace")
+    }
+
     async fn issue(&self, _id: &str) -> Result<Option<Issue>> {
         unimplemented!("not used by check_workspace")
     }

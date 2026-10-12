@@ -136,6 +136,32 @@ async fn candidate_issues_follows_pagination() {
 }
 
 #[tokio::test]
+async fn labeled_issues_reads_one_page_of_every_status() {
+    let server = FakeLinearServer::default();
+    let mut in_testing = issue_json(2);
+    in_testing["status"] = serde_json::json!("In Testing");
+    // The page says more follow: the issue list shows the newest page only.
+    let page = serde_json::json!({"issues": [issue_json(1), in_testing], "hasNextPage": true, "cursor": "c2"});
+    server.reply("list_issues", Reply::Text(page.to_string()));
+    let linear = linear_with(&server).await;
+    let issues = linear.labeled_issues("ai-ready").await.unwrap();
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0], expected_issue(1));
+    assert_eq!(issues[1].state, "In Testing");
+    let calls = server.calls_to("list_issues");
+    assert_eq!(calls.len(), 1, "one page only");
+    let call = &calls[0];
+    assert_eq!(call["assignee"], "me");
+    assert_eq!(call["label"], "ai-ready");
+    assert_eq!(call["orderBy"], "updatedAt");
+    assert_eq!(call["limit"], 50);
+    // The fake records an argument the caller left out as `null`.
+    assert!(call["state"].is_null(), "every status");
+    assert!(call["cursor"].is_null(), "one page only");
+    assert_every_issue_field_requested(&calls);
+}
+
+#[tokio::test]
 async fn issue_lookup_and_missing_issue() {
     let server = FakeLinearServer::default();
     let linear = McpLinear::new(connect_full(server.clone()).await)
@@ -276,6 +302,7 @@ async fn every_call_sends_arguments_linear_accepts() {
     let linear = linear_with(&server).await;
     linear.viewer().await.unwrap();
     linear.candidate_issues("ai-ready", "Todo").await.unwrap();
+    linear.labeled_issues("ai-ready").await.unwrap();
     linear.issue("DEMO-1").await.unwrap();
     linear.set_state("uuid-9", "In Testing").await.unwrap();
     linear.projects().await.unwrap();
@@ -315,12 +342,16 @@ fn the_fake_rejects_what_linear_rejects() {
 }
 
 /// Every read method of `LinearApi`, called once; `None` for a call that succeeded.
-async fn read_errors(linear: &McpLinear) -> [(&'static str, Option<anyhow::Error>); 6] {
+async fn read_errors(linear: &McpLinear) -> [(&'static str, Option<anyhow::Error>); 7] {
     [
         ("viewer", linear.viewer().await.err()),
         (
             "candidate_issues",
             linear.candidate_issues("ai-ready", "Todo").await.err(),
+        ),
+        (
+            "labeled_issues",
+            linear.labeled_issues("ai-ready").await.err(),
         ),
         ("projects", linear.projects().await.err()),
         ("labels", linear.labels().await.err()),
@@ -479,6 +510,7 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
     let linear = linear_with(&server).await;
     linear.viewer().await.unwrap();
     linear.candidate_issues("ai-ready", "Todo").await.unwrap();
+    linear.labeled_issues("ai-ready").await.unwrap();
     linear.issue("DEMO-1").await.unwrap();
     linear.set_state("uuid-9", "Done").await.unwrap();
     linear.projects().await.unwrap();
@@ -505,14 +537,15 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
         })
         .collect();
     assert_eq!(sent, listed);
-    // The paged tools really were asked for a second page, or `cursor` would not show up above.
-    for tool in [
-        "list_issues",
-        "list_projects",
-        "list_issue_labels",
-        "list_teams",
+    // The paged tools really were asked for a second page, or `cursor` would not show up above
+    // (`list_issues` once more: `labeled_issues` reads a single page).
+    for (tool, calls) in [
+        ("list_issues", 3),
+        ("list_projects", 2),
+        ("list_issue_labels", 2),
+        ("list_teams", 2),
     ] {
-        assert_eq!(server.calls_to(tool).len(), 2, "{tool}");
+        assert_eq!(server.calls_to(tool).len(), calls, "{tool}");
     }
 }
 

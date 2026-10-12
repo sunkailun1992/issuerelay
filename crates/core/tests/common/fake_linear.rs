@@ -1,5 +1,8 @@
 //! In-memory LinearApi used by doctor and engine tests.
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, anyhow};
 use chrono::Duration;
@@ -17,6 +20,8 @@ struct State {
     fail_next: Option<(String, usize)>,
     set_state_calls: Vec<(String, String)>,
     statuses: Vec<String>,
+    /// Uuids whose `issue()` reads fail until `clear_issue_failures`.
+    failing_issue_reads: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -76,6 +81,19 @@ impl FakeLinear {
         self.state.lock().unwrap().fail_next = (calls > 0).then(|| (message.into(), calls));
     }
 
+    /// Makes every `issue(uuid)` read fail until `clear_issue_failures`.
+    pub fn fail_issue_reads(&self, uuid: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .failing_issue_reads
+            .insert(uuid.into());
+    }
+
+    pub fn clear_issue_failures(&self) {
+        self.state.lock().unwrap().failing_issue_reads.clear();
+    }
+
     pub fn set_statuses(&self, statuses: &[&str]) {
         self.state.lock().unwrap().statuses = statuses.iter().map(|s| s.to_string()).collect();
     }
@@ -119,16 +137,33 @@ impl LinearApi for FakeLinear {
             .collect())
     }
 
-    async fn issue(&self, id: &str) -> Result<Option<Issue>> {
+    async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>> {
         self.check_failure()?;
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
+        let s = self.state.lock().unwrap();
+        let mut issues: Vec<Issue> = s
             .issues
             .iter()
-            .find(|i| i.uuid == id || i.identifier == id)
-            .cloned())
+            .filter(|i| {
+                i.labels.iter().any(|l| same_name(l, label))
+                    && i.assignee_id.as_deref() == Some(s.me.as_str())
+            })
+            .cloned()
+            .collect();
+        issues.sort_by_key(|i| std::cmp::Reverse(i.updated_at));
+        issues.truncate(50);
+        Ok(issues)
+    }
+
+    async fn issue(&self, id: &str) -> Result<Option<Issue>> {
+        self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        let found = s.issues.iter().find(|i| i.uuid == id || i.identifier == id);
+        // A read by identifier fails like a read by uuid.
+        let uuid = found.map_or(id, |i| i.uuid.as_str());
+        if s.failing_issue_reads.contains(uuid) {
+            return Err(anyhow!("Linear is unreachable"));
+        }
+        Ok(found.cloned())
     }
 
     async fn set_state(&self, id: &str, state: &str) -> Result<()> {

@@ -27,7 +27,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 |---|---|---|
 | `fake-agent` | `crates/core/src/bin/fake_agent.rs` | Claude Code / Codex 进程（按脚本输出、退出码、启动孙进程，包括离开运行进程组的孙进程） |
 | `FakeLinearServer`、`PartialServer` | `crates/core/tests/common/fake_server.rs` | Linear MCP 服务端（经内存管道连接）：按 `tests/fixtures/linear-tools.json` 校验每次调用的参数，只返回请求的 `fields`，可编程返回文本、工具错误或永不应答 |
-| `FakeLinear` | `crates/core/tests/common/fake_linear.rs` | `LinearApi` 的内存版；`fail_next` 让下一次任意调用失败，`fail_calls` 让接下来若干次调用失败 |
+| `FakeLinear` | `crates/core/tests/common/fake_linear.rs` | `LinearApi` 的内存版；`fail_next` 让下一次任意调用失败，`fail_calls` 让接下来若干次调用失败，`fail_issue_reads` 让某条需求的单条读取一直失败（直到 `clear_issue_failures`） |
 | 内存钥匙串 | `crates/core/src/linear/auth.rs` 的测试模块 | 系统钥匙串（测试不碰真实钥匙串，每个测试用自己的服务名） |
 | `ScriptedRunner`、`FakeReadiness` | `crates/core/tests/common/engine_kit.rs` | 子进程运行与环境检查（`ScriptedRunner` 报告的进程号是虚构的，只进存储，不能让宿主去清扫） |
 | `Orphan` | `crates/core/tests/common/orphan.rs` | 宿主崩溃后留下的执行者（macOS：领着自己进程组的 `fake-agent`）；测试结束时没被回收就整组结束并回收 |

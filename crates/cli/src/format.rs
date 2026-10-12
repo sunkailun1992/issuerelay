@@ -104,13 +104,19 @@ fn strings(value: &Value) -> Vec<String> {
 
 fn status(v: &Value) -> String {
     let monitoring = if v["paused"] == true { "paused" } else { "on" };
+    // Only while the host waits for its runs before it exits; older hosts send no such field.
+    let draining = if v["draining"] == true {
+        "\nDraining: finishing runs, starting nothing new"
+    } else {
+        ""
+    };
     let linear = if v["linear_ok"] == true {
         format!("connected as {}", text(&v["viewer"], "name"))
     } else {
         format!("not connected ({})", text(v, "last_error"))
     };
     let mut out = format!(
-        "Monitoring: {monitoring}\nLinear: {linear}\nRunning: {}  Queued: {}  Waiting for binding: {}\nLast check: {}",
+        "Monitoring: {monitoring}{draining}\nLinear: {linear}\nRunning: {}  Queued: {}  Waiting for binding: {}\nLast check: {}",
         v["running"],
         v["queued"],
         v["waiting"],
@@ -302,7 +308,10 @@ fn logs(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use issuerelay_core::env::{EnvSource, ExecEnv};
+    use issuerelay_core::{
+        engine::StatusSnapshot,
+        env::{EnvSource, ExecEnv},
+    };
     use serde_json::json;
 
     #[test]
@@ -338,6 +347,28 @@ mod tests {
             !text.chars().any(|c| c.is_control() && c != '\n'),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn status_says_when_the_host_is_draining() {
+        let draining = StatusSnapshot {
+            draining: true,
+            ..StatusSnapshot::default()
+        };
+        let text = human("status", &serde_json::to_value(draining).unwrap());
+        assert!(
+            text.contains("Monitoring: on\nDraining: finishing runs, starting nothing new\n"),
+            "{text}"
+        );
+        let text = human(
+            "status",
+            &serde_json::to_value(StatusSnapshot::default()).unwrap(),
+        );
+        assert!(!text.contains("Draining"), "{text}");
+        // A host from before `draining` existed sends no such field.
+        let older =
+            json!({"paused": false, "linear_ok": false, "running": 0, "queued": 0, "waiting": 0});
+        assert!(!human("status", &older).contains("Draining"));
     }
 
     #[test]

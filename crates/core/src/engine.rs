@@ -1,36 +1,45 @@
 //! The engine: polls Linear, records and schedules jobs, starts executor runs, verifies the
-//! result in Linear and keeps the status the panel, CLI and MCP read.
+//! result in Linear, keeps the status the panel, CLI and MCP read, and tells subscribers what
+//! changed (`EngineEvent`).
 //!
 //! Locking: no std lock is ever held across an `.await`. They are taken and released within one
 //! statement, except in short synchronous sections that must read and then write under one
 //! guard: `update_config` (the config, and under it the file's last known bytes), `retry_job`,
 //! the poll's step for each issue and `assign_if_queued` (the store), the registration of a run
-//! and the final loop of `run_forever` (the running set). The async cycle lock is the one lock
-//! held across `.await`; it keeps a poll from interleaving with a dispatch. A user's stop or
-//! retry can come at any time, also while a poll or a start waits for Linear, so every write
-//! that follows such a wait is conditional on the row still being in the state it was read in.
+//! and the final loop of `run_forever` (the running set), filling the viewer cache (the cache,
+//! and under it a read of the connection) and the start backoff in `dispatch` (the backoff
+//! table). The async cycle lock is the one lock held across `.await`; it keeps a poll from
+//! interleaving with a dispatch. A user's stop or retry can come at any time, also while a poll
+//! or a start waits for Linear, so every write that follows such a wait is conditional on the
+//! row still being in the state it was read in. The Linear connection can be replaced at any
+//! time too (`set_linear`): a poll, a dispatch and the issue list each take the connection once
+//! and use only that one. No event is sent while the store guard is held: `emit_job` reads the
+//! row under a guard of its own.
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
+use crate::config::{Binding, Config, ExecutorKind, Settings, TriggerNames};
 use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor::{
     self, CommandSpec,
     outcome::{self, Report},
 };
-use crate::linear::{LinearApi, Viewer};
+use crate::linear::{LinearApi, Project, Viewer};
 use crate::logs::{self, CleanupReport};
 use crate::model::{Issue, Job, JobState, ProcessTag};
 use crate::prompt::{self, PromptInput};
@@ -49,6 +58,14 @@ const LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The pauses before the second and the third read that verifies a run's result in Linear. One
 /// failed read (a network hiccup) must not fail a run that did its work.
 const VERIFY_RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// How many events wait for a slow subscriber before it lags.
+const EVENT_CAPACITY: usize = 256;
+
+/// How long a job whose start failed is passed over: doubled after each further failure, up to
+/// `START_RETRY_MAX`. Meanwhile the jobs behind it can start.
+const START_RETRY_BASE: Duration = Duration::from_secs(30);
+const START_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// Starts one executor run and waits for it. The engine calls it from a task of its own.
 #[async_trait::async_trait]
@@ -126,8 +143,9 @@ pub struct StatusSnapshot {
     pub viewer: Option<Viewer>,
     /// When Linear was last checked, whether or not that worked. A paused engine makes no check.
     pub last_poll_at: Option<DateTime<Utc>>,
-    /// Why the last check failed, or why a job could not be started in the last round; the
-    /// next successful check clears it.
+    /// Why the job records cannot be read (the counts then show 0); otherwise why the last check
+    /// failed, or why a job could not be started in the last round, which the next successful
+    /// check clears.
     pub last_error: Option<String>,
     /// Runs in progress.
     pub running: usize,
@@ -135,6 +153,55 @@ pub struct StatusSnapshot {
     pub queued: usize,
     /// Jobs waiting for a binding, a directory or a ready executor.
     pub waiting: usize,
+    /// Nothing new starts while the runs in progress finish (the "wait for completion" exit).
+    #[serde(default)]
+    pub draining: bool,
+}
+
+/// What changed in the engine, for the desktop panel. A subscriber that falls behind gets
+/// `RecvError::Lagged` and should read the whole state again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+// Not boxed: the channel holds at most `EVENT_CAPACITY` events, so the job inline costs a few
+// dozen KiB per channel, while a box would cost an allocation for every event and every clone
+// a subscriber receives.
+#[allow(clippy::large_enum_variant)]
+pub enum EngineEvent {
+    /// The status line may have changed: a check finished, monitoring was paused or resumed,
+    /// draining was switched, Linear was reconnected, a job could not be started, or a run gave
+    /// its slot back.
+    Status,
+    /// A job was recorded or changed; `job` is the row as stored now.
+    Job { job: Job },
+    /// The settings or the bindings were saved.
+    Config,
+}
+
+/// One issue of the panel's issue list: an issue assigned to the user with the trigger label,
+/// its newest local run, and whether it would be picked up now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueView {
+    /// The issue, with the text a person reads (title, status, labels, project and parent)
+    /// cleaned for display; the ids are as Linear sent them.
+    pub issue: Issue,
+    pub job: Option<Job>,
+    pub status: IssueStatus,
+}
+
+/// Whether an issue of the issue list would be picked up now, and if not, why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueStatus {
+    /// It meets every condition. `IssueView::job` says what happened with it so far.
+    Eligible,
+    /// Its status is not the trigger's Todo status; `state` is its status, cleaned for display.
+    NotTodo { state: String },
+    /// It does not match the trigger's label or assignee as IssueRelay compares them.
+    NotCandidate,
+    /// It waits for a binding, a folder or a ready executor.
+    Waiting { reason: String },
+    /// Monitoring is paused.
+    Paused,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -147,6 +214,12 @@ struct PollState {
 struct RunningJob {
     directory: PathBuf,
     cancel: CancellationToken,
+}
+
+/// A queued job whose start failed: how many times in a row, and until when it is passed over.
+struct StartBackoff {
+    failures: u32,
+    until: tokio::time::Instant,
 }
 
 /// A run's place in the running set, held by the task that watches the run. `release` frees the
@@ -184,12 +257,16 @@ struct Inner {
     /// there is no file. Only `update_config` reads or replaces it, under the config write lock.
     config_file: Mutex<Option<Vec<u8>>>,
     store: Mutex<Store>,
-    linear: Arc<dyn LinearApi>,
+    /// The connection to Linear; `set_linear` replaces it while the engine runs.
+    linear: RwLock<Arc<dyn LinearApi>>,
     readiness: Arc<dyn ReadinessProbe>,
     job_runner: Arc<dyn JobRunner>,
     logs_dir: PathBuf,
     running: Mutex<HashMap<i64, RunningJob>>,
-    viewer: Mutex<Option<Viewer>>,
+    /// The user a connection is authorized as, with the connection that said so. Only that
+    /// connection's answer is ever kept: `set_linear` empties it, and an answer that arrives
+    /// after its connection was replaced is not stored.
+    viewer: Mutex<Option<(Arc<dyn LinearApi>, Viewer)>>,
     poll: Mutex<PollState>,
     poll_now: Notify,
     idle: Notify,
@@ -205,6 +282,12 @@ struct Inner {
     /// recorded when they started. `run_forever` takes them and ends them before anything new
     /// starts.
     leftovers: Mutex<Vec<ProcessTag>>,
+    /// Tells subscribers what changed; see `EngineEvent`.
+    events: broadcast::Sender<EngineEvent>,
+    /// Set by `set_draining`: nothing new starts, the runs in progress go on.
+    draining: AtomicBool,
+    /// Queued jobs whose start failed lately, passed over by `dispatch` until their pause ends.
+    start_backoff: Mutex<HashMap<i64, StartBackoff>>,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -226,6 +309,27 @@ fn read_config_file(path: &Path) -> Result<Option<Vec<u8>>> {
 /// on case-insensitive volumes, letter case. Falls back to the path as written.
 fn canonical_dir(dir: &Path) -> PathBuf {
     std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// How long a job whose start failed `failures` times in a row is passed over: `START_RETRY_BASE`
+/// after the first failure, doubled after each further one, at most `START_RETRY_MAX`.
+fn start_pause(failures: u32) -> Duration {
+    START_RETRY_BASE
+        .saturating_mul(1u32 << failures.saturating_sub(1).min(10))
+        .min(START_RETRY_MAX)
+}
+
+/// The issue as the issue list shows it: the text a person reads is Linear's and goes through
+/// `clean_text`; the ids stay as they are, the identifier and the url were checked when parsed.
+fn display_issue(issue: Issue) -> Issue {
+    Issue {
+        title: clean_text(&issue.title),
+        state: clean_text(&issue.state),
+        labels: issue.labels.iter().map(|label| clean_text(label)).collect(),
+        project_name: issue.project_name.as_deref().map(clean_text),
+        parent_identifier: issue.parent_identifier.as_deref().map(clean_text),
+        ..issue
+    }
 }
 
 /// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
@@ -298,7 +402,7 @@ impl Engine {
                 config: RwLock::new(config),
                 config_file: Mutex::new(config_file),
                 store: Mutex::new(deps.store),
-                linear: deps.linear,
+                linear: RwLock::new(deps.linear),
                 readiness: deps.readiness,
                 job_runner: deps.job_runner,
                 logs_dir: deps.logs_dir,
@@ -310,6 +414,9 @@ impl Engine {
                 cycle: tokio::sync::Mutex::new(()),
                 shutdown: Mutex::new(None),
                 leftovers: Mutex::new(leftovers),
+                events: broadcast::channel(EVENT_CAPACITY).0,
+                draining: AtomicBool::new(false),
+                start_backoff: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -322,42 +429,128 @@ impl Engine {
         self.inner.store.lock().expect("store lock")
     }
 
-    fn count(&self, state: JobState) -> usize {
-        self.store()
-            .list_by_state(&[state])
-            .map(|jobs| jobs.len())
-            .unwrap_or(0)
+    /// The connection to Linear in use now.
+    fn linear(&self) -> Arc<dyn LinearApi> {
+        self.inner
+            .linear
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
-    /// The state the panel, CLI and MCP show. The job counts come from the store.
+    fn emit(&self, event: EngineEvent) {
+        // No subscriber is fine: the CLI-only host has none.
+        let _ = self.inner.events.send(event);
+    }
+
+    /// Announces the job as it is stored now. Takes the store lock, so the caller must not hold
+    /// it; a poisoned lock is used as it is, because `abandon_run` calls this while unwinding.
+    fn emit_job(&self, job_id: i64) {
+        let job = self
+            .inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(job_id);
+        match job {
+            Ok(Some(job)) => self.emit(EngineEvent::Job { job }),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(job_id, error = %format!("{e:#}"), "could not read the job to announce its change")
+            }
+        }
+    }
+
+    fn draining(&self) -> bool {
+        self.inner.draining.load(Ordering::SeqCst)
+    }
+
+    fn count(&self, state: JobState) -> Result<usize> {
+        Ok(self.store().list_by_state(&[state])?.len())
+    }
+
+    /// The state the panel, CLI and MCP show. The job counts come from the store; if it cannot be
+    /// read the counts show 0 and `last_error` says why.
     pub fn status(&self) -> StatusSnapshot {
         let paused = self.config().settings.paused;
         let poll = self.inner.poll.lock().expect("poll lock").clone();
-        let viewer = self.inner.viewer.lock().expect("viewer lock").clone();
+        let viewer = self
+            .inner
+            .viewer
+            .lock()
+            .expect("viewer lock")
+            .clone()
+            .map(|(_, viewer)| viewer);
         let running = self.inner.running.lock().expect("running lock").len();
+        let counts = self
+            .count(JobState::Queued)
+            .and_then(|queued| Ok((queued, self.count(JobState::WaitingBinding)?)));
+        let (queued, waiting, store_error) = match counts {
+            Ok((queued, waiting)) => (queued, waiting, None),
+            Err(e) => (
+                0,
+                0,
+                Some(clean_text(&format!("cannot read the job records: {e:#}"))),
+            ),
+        };
         StatusSnapshot {
             paused,
             linear_ok: poll.linear_ok,
             viewer,
             last_poll_at: poll.at,
-            last_error: poll.error,
+            last_error: store_error.or(poll.error),
             running,
-            queued: self.count(JobState::Queued),
-            waiting: self.count(JobState::WaitingBinding),
+            queued,
+            waiting,
+            draining: self.draining(),
         }
+    }
+
+    /// Tells subscribers about every later change; see `EngineEvent`.
+    pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
+        self.inner.events.subscribe()
     }
 
     /// Stops polling and starting runs, and remembers that across restarts. Runs already in
     /// progress continue.
     pub fn pause(&self) -> Result<()> {
-        self.update_config(|c| c.settings.paused = true)
+        self.update_config(|c| c.settings.paused = true)?;
+        self.emit(EngineEvent::Status);
+        Ok(())
     }
 
     /// Undoes `pause` and checks at once.
     pub fn resume(&self) -> Result<()> {
         self.update_config(|c| c.settings.paused = false)?;
+        self.emit(EngineEvent::Status);
         self.poll_now();
         Ok(())
+    }
+
+    /// While on, nothing new starts but the runs in progress go on; polls still record new
+    /// issues. Not saved: it serves the "wait for completion" exit and ends with the host.
+    pub fn set_draining(&self, on: bool) {
+        self.inner.draining.store(on, Ordering::SeqCst);
+        self.emit(EngineEvent::Status);
+        if !on {
+            self.poll_now();
+        }
+    }
+
+    /// Uses `linear` for every later call: after a login, a logout or a new API key. The cached
+    /// user is forgotten and a check runs at once. Runs in progress continue; their results are
+    /// read through the new connection.
+    pub fn set_linear(&self, linear: Arc<dyn LinearApi>) {
+        // The connection first, then the cache: `viewer` checks the connection under the cache's
+        // lock before it fills the cache.
+        *self
+            .inner
+            .linear
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = linear;
+        *self.inner.viewer.lock().expect("viewer lock") = None;
+        self.emit(EngineEvent::Status);
+        self.poll_now();
     }
 
     /// Wakes the background loop for an immediate check.
@@ -386,7 +579,26 @@ impl Engine {
         next.save(&self.inner.config_path)?;
         *known = Some(text.into_bytes());
         *current = next;
+        // Announced once both locks are free: a subscriber may read the configuration at once.
+        drop(known);
+        drop(current);
+        self.emit(EngineEvent::Config);
         Ok(())
+    }
+
+    /// The current settings.
+    pub fn settings(&self) -> Settings {
+        self.config().settings
+    }
+
+    /// Validates and saves `settings`. `paused` keeps its current value: monitoring is switched
+    /// with `pause` and `resume`, never by saving the settings page.
+    pub fn update_settings(&self, settings: Settings) -> Result<()> {
+        self.update_config(|c| {
+            let paused = c.settings.paused;
+            c.settings = settings;
+            c.settings.paused = paused;
+        })
     }
 
     /// The configured project bindings.
@@ -420,6 +632,11 @@ impl Engine {
     /// The newest jobs first, at most `limit`.
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<Job>> {
         self.store().list_recent(limit)
+    }
+
+    /// One job by id; `None` when there is none.
+    pub fn job(&self, id: i64) -> Result<Option<Job>> {
+        self.store().get(id)
     }
 
     /// The last `lines` lines of the job's log; empty while it has none, and also once the log
@@ -487,13 +704,65 @@ impl Engine {
         Ok(report)
     }
 
-    async fn viewer(&self) -> Result<Viewer> {
+    /// The Linear projects, for choosing what to bind.
+    pub async fn projects(&self) -> Result<Vec<Project>> {
+        self.linear().projects().await
+    }
+
+    /// The panel's issue list (spec 9.2): the issues assigned to the user with the trigger label,
+    /// each with its newest local run and whether it would be picked up now.
+    pub async fn issues(&self) -> Result<Vec<IssueView>> {
+        let cfg = self.config();
+        let names = &cfg.settings.trigger;
+        let linear = self.linear();
+        let me = self.viewer(&linear).await?;
+        let issues = linear.labeled_issues(&names.label).await?;
+        let (ready, _) = self.readiness().await;
+        let mut views = Vec::with_capacity(issues.len());
+        for issue in issues {
+            let status = if !same_name(&issue.state, &names.todo) {
+                IssueStatus::NotTodo {
+                    state: clean_text(&issue.state),
+                }
+            } else if cfg.settings.paused {
+                IssueStatus::Paused
+            } else {
+                // Looks at the bound folder on disk, so it runs before the store is locked.
+                match trigger::evaluate(&issue, &cfg, &me.id, &ready) {
+                    Eligibility::Eligible(_) => IssueStatus::Eligible,
+                    Eligibility::Waiting(reason) => IssueStatus::Waiting {
+                        reason: reason.describe(),
+                    },
+                    Eligibility::NotCandidate => IssueStatus::NotCandidate,
+                }
+            };
+            let job = self.store().latest_for_issue(&issue.uuid)?;
+            views.push(IssueView {
+                issue: display_issue(issue),
+                job,
+                status,
+            });
+        }
+        Ok(views)
+    }
+
+    /// The user `linear` is authorized as. The cache only answers for the connection that filled
+    /// it, so a cycle that took its connection before `set_linear` replaced it keeps to that one
+    /// connection, and the answer of a replaced connection is never kept.
+    async fn viewer(&self, linear: &Arc<dyn LinearApi>) -> Result<Viewer> {
         let cached = self.inner.viewer.lock().expect("viewer lock").clone();
-        if let Some(viewer) = cached {
+        if let Some((owner, viewer)) = cached
+            && Arc::ptr_eq(&owner, linear)
+        {
             return Ok(viewer);
         }
-        let viewer = self.inner.linear.viewer().await?;
-        *self.inner.viewer.lock().expect("viewer lock") = Some(viewer.clone());
+        let viewer = linear.viewer().await?;
+        // Checked under the cache's lock: `set_linear` replaces the connection before it empties
+        // the cache under this lock, so a connection replaced meanwhile cannot fill it.
+        let mut cache = self.inner.viewer.lock().expect("viewer lock");
+        if Arc::ptr_eq(linear, &self.linear()) {
+            *cache = Some((linear.clone(), viewer.clone()));
+        }
         Ok(viewer)
     }
 
@@ -525,25 +794,47 @@ impl Engine {
             linear_ok: result.is_ok(),
         };
         *self.inner.poll.lock().expect("poll lock") = state;
+        self.emit(EngineEvent::Status);
         result
     }
 
     async fn poll_inner(&self, cfg: &Config) -> Result<()> {
         let names = &cfg.settings.trigger;
-        let me = self.viewer().await?;
-        let issues = self
-            .inner
-            .linear
-            .candidate_issues(&names.label, &names.todo)
-            .await?;
+        // One connection for the whole poll, also if `set_linear` replaces it meanwhile: the user
+        // and the issues it is compared with must come from the same one.
+        let linear = self.linear();
+        let me = self.viewer(&linear).await?;
+        let issues = linear.candidate_issues(&names.label, &names.todo).await?;
         let (ready, _) = self.readiness().await;
+        // The jobs this poll records or changes are announced once no store guard is held, also
+        // when a store error ends the poll part way.
+        let mut changed = Vec::new();
+        let result = self.reconcile(cfg, &me, &issues, &ready, &mut changed);
+        for id in changed {
+            self.emit_job(id);
+        }
+        result
+    }
+
+    /// Brings the jobs in line with the candidate `issues`: new ones are recorded, queued and
+    /// waiting jobs are reassessed, and those whose issue is no longer a candidate are canceled.
+    /// Pushes the id of every job it records or changes onto `changed`.
+    fn reconcile(
+        &self,
+        cfg: &Config,
+        me: &Viewer,
+        issues: &[Issue],
+        ready: &HashSet<ExecutorKind>,
+        changed: &mut Vec<i64>,
+    ) -> Result<()> {
+        let names = &cfg.settings.trigger;
         let mut seen = HashSet::new();
         for issue in issues
             .iter()
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, &ready);
+            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready);
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
@@ -551,12 +842,16 @@ impl Engine {
             let latest = store.latest_for_issue(&issue.uuid)?;
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
-                    Self::reassess(&store, &job, cfg, eligibility)?;
+                    if Self::reassess(&store, &job, cfg, eligibility)? {
+                        changed.push(job.id);
+                    }
                 }
                 Some(job) if job.state == JobState::Running => {}
                 latest => {
-                    if trigger::should_enqueue(latest.as_ref(), issue) {
-                        Self::enqueue(&store, issue, cfg, eligibility)?;
+                    if trigger::should_enqueue(latest.as_ref(), issue)
+                        && let Some(id) = Self::enqueue(&store, issue, cfg, eligibility)?
+                    {
+                        changed.push(id);
                     }
                 }
             }
@@ -568,17 +863,26 @@ impl Engine {
         for job in pending.iter().filter(|j| !seen.contains(&j.issue_uuid)) {
             // Only while it still waits: the user may have stopped or retried it since the list
             // was read.
-            self.store().set_state_if(
+            let canceled = self.store().set_state_if(
                 job.id,
                 &waiting,
                 JobState::Canceled,
                 Some("no longer matches the trigger (label, assignee or status changed)"),
             )?;
+            if canceled {
+                changed.push(job.id);
+            }
         }
         Ok(())
     }
 
-    fn enqueue(store: &Store, issue: &Issue, cfg: &Config, eligibility: Eligibility) -> Result<()> {
+    /// Records a job for the issue and returns its id; `None` when the issue is no candidate.
+    fn enqueue(
+        store: &Store,
+        issue: &Issue,
+        cfg: &Config,
+        eligibility: Eligibility,
+    ) -> Result<Option<i64>> {
         // The title is Linear's text and reaches the panel, the CLI and MCP; the prompt never
         // contains it. The store gets a cleaned copy of the issue.
         let issue = &Issue {
@@ -600,75 +904,103 @@ impl Engine {
                 state: JobState::WaitingBinding,
                 reason: Some(reason.describe()),
             },
-            Eligibility::NotCandidate => return Ok(()),
+            Eligibility::NotCandidate => return Ok(None),
         };
         let job = store.insert(new)?;
         // The identifier and the state only: titles and summaries are Linear's and the AI's text.
+        let message = if job.state == JobState::Queued {
+            "job queued"
+        } else {
+            "job waiting"
+        };
         tracing::info!(
             job_id = job.id,
             issue = %job.issue_identifier,
             state = job.state.as_str(),
-            "job queued"
+            "{message}"
         );
-        Ok(())
+        Ok(Some(job.id))
     }
 
-    /// Brings a queued or waiting job in line with what the issue and the configuration say now.
-    /// The caller holds the store guard it read the job under, so a stop or a retry cannot slip in
+    /// Brings a queued or waiting job in line with what the issue and the configuration say now,
+    /// and says whether that changed the row; a row that already says so is not written. The
+    /// caller holds the store guard it read the job under, so a stop or a retry cannot slip in
     /// between that read and these writes.
-    fn reassess(store: &Store, job: &Job, cfg: &Config, eligibility: Eligibility) -> Result<()> {
+    fn reassess(store: &Store, job: &Job, cfg: &Config, eligibility: Eligibility) -> Result<bool> {
         match eligibility {
             Eligibility::Eligible(binding) => {
                 let unchanged = job.state == JobState::Queued
                     && job.binding_id.as_deref() == Some(binding.id.as_str())
                     && job.directory.as_deref() == Some(binding.directory.as_path())
                     && job.executor == Some(cfg.executor_for(&binding));
-                if !unchanged {
-                    store.assign(
-                        job.id,
-                        JobState::Queued,
-                        Some(&binding),
-                        Some(cfg.executor_for(&binding)),
-                        None,
-                    )?;
-                    if job.state == JobState::WaitingBinding {
-                        tracing::info!(
-                            job_id = job.id,
-                            issue = %job.issue_identifier,
-                            state = JobState::Queued.as_str(),
-                            "job queued"
-                        );
-                    }
+                if unchanged {
+                    return Ok(false);
                 }
-            }
-            Eligibility::Waiting(reason) => {
                 store.assign(
                     job.id,
-                    JobState::WaitingBinding,
+                    JobState::Queued,
+                    Some(&binding),
+                    Some(cfg.executor_for(&binding)),
                     None,
-                    None,
-                    Some(&reason.describe()),
                 )?;
+                if job.state == JobState::WaitingBinding {
+                    tracing::info!(
+                        job_id = job.id,
+                        issue = %job.issue_identifier,
+                        state = JobState::Queued.as_str(),
+                        "job queued"
+                    );
+                }
+                Ok(true)
             }
-            Eligibility::NotCandidate => {}
+            Eligibility::Waiting(reason) => {
+                let reason = reason.describe();
+                // Waiting jobs are looked at on every poll; one that waits for the same reason
+                // as before is left as it is.
+                let unchanged = job.state == JobState::WaitingBinding
+                    && job.binding_id.is_none()
+                    && job.directory.is_none()
+                    && job.executor.is_none()
+                    && job.reason.as_deref() == Some(reason.as_str());
+                if unchanged {
+                    return Ok(false);
+                }
+                store.assign(job.id, JobState::WaitingBinding, None, None, Some(&reason))?;
+                Ok(true)
+            }
+            Eligibility::NotCandidate => Ok(false),
         }
-        Ok(())
     }
 
     /// Starts the queued jobs the scheduler picks (one run per directory, at most
     /// `max_concurrent` in total) and returns their ids. A job that cannot be started is logged and
-    /// reported in the status, and does not stop the others. Does nothing while paused or after a
-    /// shutdown was requested.
+    /// reported in the status, does not stop the others, and is passed over for a while
+    /// (`start_pause`) so that the jobs behind it can start. Does nothing while paused, while
+    /// draining or after a shutdown was requested.
     pub async fn dispatch(&self) -> Result<Vec<i64>> {
         let _cycle = self.inner.cycle.lock().await;
         let cfg = self.config();
-        if cfg.settings.paused || self.stopping() {
+        if cfg.settings.paused || self.stopping() || self.draining() {
             return Ok(Vec::new());
         }
         let queued = self.store().list_by_state(&[JobState::Queued])?;
+        let now = tokio::time::Instant::now();
+        let held_back: HashSet<i64> = {
+            let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
+            let queued_ids: HashSet<i64> = queued.iter().map(|job| job.id).collect();
+            backoff.retain(|id, _| queued_ids.contains(id));
+            backoff
+                .iter()
+                .filter(|(_, b)| b.until > now)
+                .map(|(id, _)| *id)
+                .collect()
+        };
         let candidates: Vec<Candidate> = queued
             .iter()
             .filter_map(|job| {
+                if held_back.contains(&job.id) {
+                    return None;
+                }
                 // The binding's current directory in one canonical spelling, so two bindings that
                 // name the same folder differently never run at the same time.
                 let binding = cfg
@@ -702,22 +1034,25 @@ impl Engine {
         if picks.is_empty() {
             return Ok(Vec::new());
         }
-        let me = self.viewer().await?;
+        // One connection for the whole round, like a poll: the user and the issues re-read before
+        // each start come from the same one.
+        let linear = self.linear();
+        let me = self.viewer(&linear).await?;
         let (ready, reports) = self.readiness().await;
         let mut started = Vec::new();
         let mut failure = None;
         for id in picks {
-            // Each start works from the configuration as it is now, and a pause or a shutdown
-            // that came meanwhile ends the round.
+            // Each start works from the configuration as it is now, and a pause, a drain or a
+            // shutdown that came meanwhile ends the round.
             let cfg = self.config();
-            if cfg.settings.paused || self.stopping() {
+            if cfg.settings.paused || self.stopping() || self.draining() {
                 break;
             }
             let job = self.store().get(id);
             let started_job = match job {
                 Ok(Some(job)) => {
                     let label = job.issue_identifier.clone();
-                    self.start_job(&cfg, &me, &ready, &reports, job)
+                    self.start_job(linear.as_ref(), &cfg, &me, &ready, &reports, job)
                         .await
                         .map_err(|e| (label, e))
                 }
@@ -725,22 +1060,39 @@ impl Engine {
                 Err(e) => Err((format!("job {id}"), e)),
             };
             match started_job {
-                Ok(true) => started.push(id),
-                Ok(false) => {}
+                Ok(started_now) => {
+                    self.inner
+                        .start_backoff
+                        .lock()
+                        .expect("backoff lock")
+                        .remove(&id);
+                    if started_now {
+                        started.push(id);
+                    }
+                }
                 Err((label, e)) => {
                     tracing::warn!(job_id = id, error = %format!("{e:#}"), "could not start the job");
                     failure = Some(format!("could not start {label}: {e:#}"));
+                    let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
+                    let entry = backoff.entry(id).or_insert(StartBackoff {
+                        failures: 0,
+                        until: now,
+                    });
+                    entry.failures = entry.failures.saturating_add(1);
+                    entry.until = tokio::time::Instant::now() + start_pause(entry.failures);
                 }
             }
         }
         if let Some(message) = failure {
             self.inner.poll.lock().expect("poll lock").error = Some(clean_text(&message));
+            self.emit(EngineEvent::Status);
         }
         Ok(started)
     }
 
     async fn start_job(
         &self,
+        linear: &dyn LinearApi,
         cfg: &Config,
         me: &Viewer,
         ready: &HashSet<ExecutorKind>,
@@ -751,28 +1103,34 @@ impl Engine {
         // stop the job, pause the engine or change the configuration while this waits, so every
         // write below is conditional on the row still being queued, and the run only starts if
         // the configuration is still the one it was built from.
-        let current = self.inner.linear.issue(&job.issue_uuid).await?;
+        let current = linear.issue(&job.issue_uuid).await?;
         let Some(issue) =
             current.filter(|i| trigger::is_candidate(i, &cfg.settings.trigger, &me.id))
         else {
-            self.store().set_state_if(
+            let canceled = self.store().set_state_if(
                 job.id,
                 &[JobState::Queued],
                 JobState::Canceled,
                 Some("issue changed before the run started"),
             )?;
+            if canceled {
+                self.emit_job(job.id);
+            }
             return Ok(false);
         };
         let binding = match trigger::evaluate(&issue, cfg, &me.id, ready) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
-                self.assign_if_queued(
+                let waiting = self.assign_if_queued(
                     job.id,
                     JobState::WaitingBinding,
                     None,
                     None,
                     Some(&reason.describe()),
                 )?;
+                if waiting {
+                    self.emit_job(job.id);
+                }
                 return Ok(false);
             }
             Eligibility::NotCandidate => return Ok(false),
@@ -791,6 +1149,7 @@ impl Engine {
             let reassigned =
                 self.assign_if_queued(job.id, JobState::Queued, Some(&binding), Some(kind), None)?;
             if reassigned {
+                self.emit_job(job.id);
                 // The next dispatch should not wait for the timer.
                 self.poll_now();
             }
@@ -802,7 +1161,11 @@ impl Engine {
             .and_then(|r| r.program.clone());
         let Some(program) = program else {
             let reason = WaitReason::ExecutorNotReady(kind).describe();
-            self.assign_if_queued(job.id, JobState::WaitingBinding, None, None, Some(&reason))?;
+            let waiting =
+                self.assign_if_queued(job.id, JobState::WaitingBinding, None, None, Some(&reason))?;
+            if waiting {
+                self.emit_job(job.id);
+            }
             return Ok(false);
         };
         let language = cfg.settings.resolved_comment_language();
@@ -845,8 +1208,10 @@ impl Engine {
             // set is older than this moment, so the folder and the total are checked again. The
             // shutdown is checked under the lock too, which `run_forever` also takes to stop the
             // runs: a run is either registered before that and gets stopped, or sees the shutdown.
+            // A drain that began meanwhile stops the start as well.
             let mut running = self.inner.running.lock().expect("running lock");
             if self.stopping()
+                || self.draining()
                 || running.len() >= cfg.settings.max_concurrent
                 || running.values().any(|run| run.directory == directory)
             {
@@ -873,6 +1238,7 @@ impl Engine {
             executor = kind.as_str(),
             "job started"
         );
+        self.emit_job(job.id);
         let limits = RunLimits {
             total: Duration::from_secs(cfg.settings.run_timeout_mins.saturating_mul(60)),
             stall: Duration::from_secs(cfg.settings.stall_timeout_mins.saturating_mul(60)),
@@ -1007,8 +1373,9 @@ impl Engine {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not mark the run failed either");
             }
         }
-        // Free the slot only after the result is stored: whoever sees the engine idle must also
-        // see the result.
+        // Announce the result and free the slot only after it is stored: whoever sees the engine
+        // idle must also see the result, and has been told about it.
+        self.emit_job(job_id);
         slot.release();
         self.poll_now();
         recorded
@@ -1016,11 +1383,13 @@ impl Engine {
 
     /// Reads the issue of a finished run, up to three times: a read that fails is tried again
     /// after the pauses in `VERIFY_RETRY_PAUSES`. An issue Linear reports as gone is an answer,
-    /// not a failure, and is not read again.
+    /// not a failure, and is not read again. Each read goes through the connection in use at that
+    /// moment, so a run that ends after a reconnect is checked through the new connection.
     async fn verify_read(&self, job_id: i64, issue_uuid: &str) -> Result<Option<Issue>> {
         let mut pauses = VERIFY_RETRY_PAUSES.into_iter();
         loop {
-            match self.inner.linear.issue(issue_uuid).await {
+            let read = self.linear().issue(issue_uuid).await;
+            match read {
                 Ok(issue) => return Ok(issue),
                 Err(e) => {
                     let Some(pause) = pauses.next() else {
@@ -1037,14 +1406,16 @@ impl Engine {
         }
     }
 
-    /// Drops the run from the running set and wakes `wait_idle`. Also runs from `RunSlot::drop`,
-    /// possibly while a panic unwinds, so a poisoned lock is used as it is instead of panicking.
+    /// Drops the run from the running set, tells subscribers that the count of runs changed and
+    /// wakes `wait_idle`. Also runs from `RunSlot::drop`, possibly while a panic unwinds, so a
+    /// poisoned lock is used as it is instead of panicking.
     fn end_run(&self, job_id: i64) {
         self.inner
             .running
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&job_id);
+        self.emit(EngineEvent::Status);
         self.inner.idle.notify_waiters();
     }
 
@@ -1076,6 +1447,7 @@ impl Engine {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not record the abandoned run");
             }
         }
+        self.emit_job(job_id);
         self.end_run(job_id);
         self.poll_now();
     }
@@ -1112,12 +1484,14 @@ impl Engine {
         match job.state {
             JobState::Queued | JobState::WaitingBinding => {
                 let waiting = [JobState::Queued, JobState::WaitingBinding];
-                if self.store().set_state_if(
+                let canceled = self.store().set_state_if(
                     job_id,
                     &waiting,
                     JobState::Canceled,
                     Some("stopped by the user"),
-                )? {
+                )?;
+                if canceled {
+                    self.emit_job(job_id);
                     return Ok(());
                 }
                 // It started between the two reads: stop the run itself.
@@ -1188,6 +1562,13 @@ impl Engine {
                 "job queued again"
             );
         }
+        // A manual retry starts afresh, also when an earlier start of this job failed.
+        self.inner
+            .start_backoff
+            .lock()
+            .expect("backoff lock")
+            .remove(&job_id);
+        self.emit_job(job_id);
         self.poll_now();
         Ok(())
     }
@@ -1201,19 +1582,20 @@ impl Engine {
             bail!("job {job_id} is not awaiting acceptance");
         }
         let done = self.config().settings.trigger.done;
-        self.inner.linear.set_state(&job.issue_uuid, &done).await?;
+        self.linear().set_state(&job.issue_uuid, &done).await?;
         // The row may have changed while Linear was being updated; it becomes Done only from
         // awaiting acceptance.
         let waiting = [JobState::AwaitingAcceptance];
-        if !self
+        let marked = self
             .store()
-            .set_state_if(job_id, &waiting, JobState::Done, None)?
-        {
+            .set_state_if(job_id, &waiting, JobState::Done, None)?;
+        if !marked {
             bail!(
                 "job {job_id} changed while it was being marked done; Linear has already been \
                  updated to {done:?}"
             );
         }
+        self.emit_job(job_id);
         Ok(())
     }
 
@@ -1224,13 +1606,14 @@ impl Engine {
         let cfg = self.config();
         let executors = self.inner.readiness.executor_reports(true).await;
         let ready = doctor::ready_set(&executors);
-        let (viewer, mut linear_error) = match self.inner.linear.viewer().await {
+        let linear = self.linear();
+        let (viewer, mut linear_error) = match linear.viewer().await {
             Ok(viewer) => (Some(viewer), None),
             Err(e) => (None, Some(clean_text(&format!("{e:#}")))),
         };
         let mut workspace = None;
         if viewer.is_some() {
-            match doctor::check_workspace(self.inner.linear.as_ref(), &cfg.settings.trigger).await {
+            match doctor::check_workspace(linear.as_ref(), &cfg.settings.trigger).await {
                 Ok(report) => workspace = Some(report),
                 Err(e) => {
                     linear_error = Some(clean_text(&format!("workspace check failed: {e:#}")))
@@ -1319,6 +1702,15 @@ mod tests {
 
     fn names() -> TriggerNames {
         TriggerNames::default()
+    }
+
+    #[test]
+    fn a_failed_start_waits_twice_as_long_each_time_up_to_five_minutes() {
+        let secs = |failures| start_pause(failures).as_secs();
+        assert_eq!([1, 2, 3, 4, 5, 6].map(secs), [30, 60, 120, 240, 300, 300]);
+        // No overflow, however many times a start failed.
+        assert_eq!(secs(40), 300);
+        assert_eq!(secs(u32::MAX), 300);
     }
 
     #[test]

@@ -197,6 +197,13 @@ impl LinearApi for McpLinear {
             .await
     }
 
+    async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>> {
+        // One page, the most recently updated first: the panel lists recent work, not every
+        // issue that ever carried the label.
+        let args = json!({"assignee": "me", "label": label, "limit": 50, "orderBy": "updatedAt", "fields": ISSUE_FIELDS});
+        Ok(parse::parse_issue_page(&self.call("list_issues", args).await?)?.items)
+    }
+
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
         match self
             .call("get_issue", json!({"id": id, "fields": ISSUE_FIELDS}))

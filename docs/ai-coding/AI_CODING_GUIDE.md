@@ -40,6 +40,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 5. 开跑前重新读取需求，不再满足条件就取消。
 6. `prompt::render` 与 `executor::build` 生成命令，`runner::run` 启动并记录日志。
 7. 结束后再次读取需求，`engine::decide` 结合退出码、Linear 状态和 AI 的报告决定结果，写回 `store`。
+8. 任务每次变化、每次检查结束、配置每次保存，引擎都经 `Engine::subscribe` 发出 `EngineEvent`；面板（M2）在进程内订阅它刷新界面，落后太多（`Lagged`）时重新读取全部状态。
 
 ## 5. 关键文件索引
 
