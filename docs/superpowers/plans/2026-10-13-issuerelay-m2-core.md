@@ -3546,6 +3546,7 @@ git commit -m "fix(core): keep Chinese issue links, check fields and only bound 
 - Produces:
   - `pub struct config::NotificationSettings { pub run_started: bool, pub awaiting_acceptance: bool, pub needs_info: bool, pub failed: bool }`（`#[serde(default)]`，默认全开）
   - `Settings.notifications: NotificationSettings`、`Settings.auto_update: bool`（默认 `true`）
+  - `Settings.onboarding_completed: bool`、`Settings.full_access_acknowledged: bool`（默认 `false`；桌面面板的首次引导是否走完、第一次选「完全放开」时的风险提示是否已确认，设计第 8、14 节）
   - `pub fn config::unknown_keys(text: &str) -> Vec<String>`（形如 `settings.foo`、`bindings[1].bar`）
 - Consumes: Task 6 的 `text::is_invisible`
 
@@ -3560,6 +3561,8 @@ git commit -m "fix(core): keep Chinese issue links, check fields and only bound 
         assert!(settings.notifications.run_started && settings.notifications.awaiting_acceptance);
         assert!(settings.notifications.needs_info && settings.notifications.failed);
         assert!(settings.auto_update);
+        assert!(!settings.onboarding_completed, "a new install starts with the guide");
+        assert!(!settings.full_access_acknowledged, "the full-access warning has not been shown yet");
         let partial: Config = toml::from_str("[settings.notifications]\nfailed = false\n").unwrap();
         assert!(!partial.settings.notifications.failed);
         assert!(partial.settings.notifications.run_started, "unnamed switches keep their default");
@@ -3689,7 +3692,7 @@ impl Default for NotificationSettings {
 }
 ```
 
-`Settings` 在 `trigger` 之后加 `pub notifications: NotificationSettings,` 与 `/// Check for and install updates automatically (from M3). pub auto_update: bool,`；`Default` 补 `notifications: NotificationSettings::default(), auto_update: true`。`validate` 里语言两项的条件改为：
+`Settings` 在 `trigger` 之后加 `pub notifications: NotificationSettings,`、`/// Check for and install updates automatically (from M3). pub auto_update: bool,`、`/// The desktop panel's first-run guide was finished. pub onboarding_completed: bool,` 与 `/// The user confirmed the full-access warning (design section 14) once. pub full_access_acknowledged: bool,`；`Default` 补 `notifications: NotificationSettings::default(), auto_update: true, onboarding_completed: false, full_access_acknowledged: false`。`validate` 里语言两项的条件改为：
 
 ```rust
         let plain_value = |value: &str| {
@@ -4146,7 +4149,7 @@ git commit -m "feat(core): add the one-click executor setup commands"
 **Interfaces:**
 - Produces:
   - `pub fn auth::clear_oauth_credentials() -> Result<()>`、`pub fn auth::clear_api_key() -> Result<()>`（会阻塞，异步调用方放到阻塞线程池）
-  - `pub enum host::AuthMethod { OAuth, ApiKey }`（serde snake_case）
+  - `pub enum host::AuthMethod { OAuth, ApiKey }`（serde 名为 `"oauth"`、`"api_key"`，面板的 TypeScript 类型照此读取）
   - `pub enum host::LinearSetup { Connected { method: AuthMethod }, NotConfigured, InterfaceChanged { message: String }, ConnectFailed { message: String } }`（serde `tag = "kind"`, `rename_all = "snake_case"`）
   - `pub enum host::StopMode { WaitForRuns, StopRuns }`
   - `#[async_trait] pub trait host::Connector`：`stored() -> Result<Option<(Arc<dyn LinearApi>, AuthMethod)>>`、`login(open_url: Box<dyn Fn(&str) + Send + Sync>) -> Result<Arc<dyn LinearApi>>`、`api_key(key: &str) -> Result<Arc<dyn LinearApi>>`、`logout() -> Result<()>`
@@ -4461,6 +4464,8 @@ const RETRY_EVERY: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
+    // snake_case would make it "o_auth".
+    #[serde(rename = "oauth")]
     OAuth,
     ApiKey,
 }
@@ -4756,7 +4761,24 @@ impl Host {
 }
 ```
 
-Run: `cargo test -p issuerelay-core --test host`
+`host.rs` 末尾加：
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_reads_stable_names() {
+        assert_eq!(serde_json::to_string(&AuthMethod::OAuth).unwrap(), "\"oauth\"");
+        assert_eq!(serde_json::to_string(&AuthMethod::ApiKey).unwrap(), "\"api_key\"");
+        let setup = serde_json::to_value(LinearSetup::ConnectFailed { message: "down".into() }).unwrap();
+        assert_eq!(setup, serde_json::json!({"kind": "connect_failed", "message": "down"}));
+    }
+}
+```
+
+Run: `cargo test -p issuerelay-core --test host` 与 `cargo test -p issuerelay-core --lib host::`
 Expected: PASS。
 
 - [ ] **Step 4: devhost 改用 `Host`**
