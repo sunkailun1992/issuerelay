@@ -225,10 +225,36 @@ pub struct Config {
 }
 
 impl Config {
-    /// Settings plus every binding's optional model name.
+    /// Settings plus every binding: its folder, names and optional model name. Runs on every
+    /// load, and before the engine saves a change, so a hand-edited file is held to the same
+    /// rules as a binding added through the CLI or the panel.
     pub fn validate(&self) -> Result<()> {
         self.settings.validate()?;
         for (i, binding) in self.bindings.iter().enumerate() {
+            // A relative folder would resolve against the working directory of whatever process
+            // hosts the engine (a GUI app's is not the user's).
+            anyhow::ensure!(
+                binding.directory.is_absolute(),
+                "bindings[{i}].directory must be an absolute path: {:?}",
+                binding.directory
+            );
+            for (field, text) in [("id", &binding.id), ("project_id", &binding.project_id)] {
+                anyhow::ensure!(
+                    !text.trim().is_empty(),
+                    "bindings[{i}].{field} must not be empty"
+                );
+            }
+            // Ids and names are shown in the panel, the CLI and MCP.
+            for (field, text) in [
+                ("id", &binding.id),
+                ("project_id", &binding.project_id),
+                ("project_name", &binding.project_name),
+            ] {
+                anyhow::ensure!(
+                    !text.chars().any(char::is_control),
+                    "bindings[{i}].{field} must not contain control characters"
+                );
+            }
             if let Some(model) = &binding.model {
                 anyhow::ensure!(
                     is_valid_model_name(model),
@@ -308,14 +334,13 @@ fn temp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn binding(project: &str, executor: Option<ExecutorKind>) -> Binding {
         Binding {
             id: project.into(),
             project_id: project.into(),
             project_name: "Demo Project".into(),
-            directory: PathBuf::from("demo"),
+            directory: std::env::temp_dir().join("demo"),
             executor,
             permission: None,
             model: None,
@@ -533,7 +558,8 @@ mod tests {
         let path = dir.path().join("config.toml");
         let binding = |model: &str| {
             format!(
-                "[[bindings]]\nid = \"b\"\nproject_id = \"p\"\nproject_name = \"Demo Project\"\ndirectory = \"demo\"\nmodel = \"{model}\"\n"
+                "{}model = \"{model}\"\n",
+                binding_toml(&[("directory", absolute_dir_literal())])
             )
         };
         for bad in [
@@ -554,5 +580,142 @@ mod tests {
             Config::load(&path).unwrap().bindings[0].model.as_deref(),
             Some("claude-sonnet-5-5")
         );
+    }
+
+    /// The absolute directory the tests bind, as a TOML literal string: single quotes keep the
+    /// backslashes of a Windows path as they are.
+    fn absolute_dir_literal() -> String {
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().expect("the temp dir is valid UTF-8");
+        assert!(!dir.contains('\''), "the temp dir cannot be a TOML literal");
+        format!("'{dir}'")
+    }
+
+    /// A `[[bindings]]` table with valid fields, except where `overrides` give a TOML value for
+    /// a field.
+    fn binding_toml(overrides: &[(&str, String)]) -> String {
+        let mut fields = vec![
+            ("id", "\"b\"".to_string()),
+            ("project_id", "\"p\"".to_string()),
+            ("project_name", "\"Demo Project\"".to_string()),
+            ("directory", absolute_dir_literal()),
+        ];
+        for (name, value) in overrides {
+            fields.retain(|(field, _)| field != name);
+            fields.push((name, value.clone()));
+        }
+        let mut text = String::from("[[bindings]]\n");
+        for (name, value) in fields {
+            text.push_str(&format!("{name} = {value}\n"));
+        }
+        text
+    }
+
+    /// Writes `text` as a config file and loads it, returning the error text of the whole chain.
+    fn load_error(text: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        format!("{:#}", Config::load(&path).unwrap_err())
+    }
+
+    #[test]
+    fn a_binding_with_an_absolute_directory_and_plain_names_loads() {
+        // Only control characters are refused: other scripts and emoji sequences (which hold
+        // zero-width joiners) are fine in a name.
+        let text = binding_toml(&[
+            ("id", "\"绑定-1\"".into()),
+            ("project_name", "\"团队 \u{1F469}\u{200D}\u{1F4BB}\"".into()),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.bindings.len(), 1);
+        assert_eq!(cfg.bindings[0].id, "绑定-1");
+        assert!(cfg.bindings[0].project_name.contains('\u{200d}'));
+        assert!(cfg.bindings[0].directory.is_absolute());
+    }
+
+    #[test]
+    fn a_relative_binding_directory_is_rejected_on_load() {
+        for relative in ["demo", "./demo", "../demo", ""] {
+            let err = load_error(&binding_toml(&[("directory", format!("'{relative}'"))]));
+            assert!(
+                err.contains("bindings[0].directory must be an absolute path"),
+                "{relative:?}: {err}"
+            );
+            assert!(err.contains("config.toml"), "the file is named: {err}");
+        }
+    }
+
+    #[test]
+    fn a_blank_binding_id_is_rejected_on_load() {
+        for blank in ["\"\"", "\"   \"", "\"\\t\""] {
+            let err = load_error(&binding_toml(&[("id", blank.into())]));
+            assert!(
+                err.contains("bindings[0].id must not be empty"),
+                "{blank}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_binding_project_id_is_rejected_on_load() {
+        for blank in ["\"\"", "\"   \"", "\"\\t\""] {
+            let err = load_error(&binding_toml(&[("project_id", blank.into())]));
+            assert!(
+                err.contains("bindings[0].project_id must not be empty"),
+                "{blank}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_in_a_binding_id_are_rejected_on_load() {
+        for bad in ["\"b\\u001b[2J\"", "\"b\\n2\"", "\"b\\u0000\""] {
+            let err = load_error(&binding_toml(&[("id", bad.into())]));
+            assert!(
+                err.contains("bindings[0].id must not contain control characters"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_in_a_binding_project_id_are_rejected_on_load() {
+        for bad in ["\"p\\u001b[2J\"", "\"p\\n2\"", "\"p\\u0000\""] {
+            let err = load_error(&binding_toml(&[("project_id", bad.into())]));
+            assert!(
+                err.contains("bindings[0].project_id must not contain control characters"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_in_a_binding_project_name_are_rejected_on_load() {
+        for bad in [
+            "\"Demo\\u001bProject\"",
+            "\"Demo\\nProject\"",
+            "\"Demo\\u007fProject\"",
+        ] {
+            let err = load_error(&binding_toml(&[("project_name", bad.into())]));
+            assert!(
+                err.contains("bindings[0].project_name must not contain control characters"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_second_bad_binding_is_named_by_its_position() {
+        let text = format!(
+            "{}{}",
+            binding_toml(&[]),
+            binding_toml(&[("id", "\"c\"".into()), ("directory", "'demo'".into())])
+        );
+        let err = load_error(&text);
+        assert!(err.contains("bindings[1].directory"), "{err}");
     }
 }

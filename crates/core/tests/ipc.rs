@@ -1,15 +1,22 @@
 mod common;
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
-use common::{engine_kit::Harness, issue};
+use common::{
+    engine_kit::{Harness, ScriptedRunner},
+    fake_linear::FakeLinear,
+    issue,
+};
 use issuerelay_core::{
+    doctor::{ExecutorReport, ReadinessProbe},
+    engine::{Engine, EngineDeps},
     ipc::{
         client::{self, NotRunning},
         protocol::{METHOD_NOT_FOUND, METHODS, PARSE_ERROR, Request, Response, SERVER_ERROR},
         server::{AlreadyRunning, IpcServer, handle},
     },
     paths::{AppPaths, IpcEndpoint},
+    store::Store,
 };
 use serde_json::json;
 use tokio::io::{
@@ -17,12 +24,17 @@ use tokio::io::{
 };
 use tokio_util::sync::CancellationToken;
 
-async fn start(h: &Harness) -> (IpcEndpoint, CancellationToken) {
-    let endpoint = AppPaths::under(&h.root.path().join("app")).ipc_endpoint();
+/// Serves `engine` on an endpoint under `root`.
+async fn serve(engine: &Engine, root: &Path) -> (IpcEndpoint, CancellationToken) {
+    let endpoint = AppPaths::under(&root.join("app")).ipc_endpoint();
     let server = IpcServer::bind(&endpoint).await.unwrap();
     let token = CancellationToken::new();
-    tokio::spawn(server.run(h.engine.clone(), token.clone()));
+    tokio::spawn(server.run(engine.clone(), token.clone()));
     (endpoint, token)
+}
+
+async fn start(h: &Harness) -> (IpcEndpoint, CancellationToken) {
+    serve(&h.engine, h.root.path()).await
 }
 
 /// A connection spoken to by hand, for what the client library never does: send lines it would
@@ -338,11 +350,14 @@ async fn a_leftover_socket_nobody_listens_on_means_not_running() {
 
 #[tokio::test(start_paused = true)]
 async fn status_gives_up_after_30_seconds_and_doctor_after_180() {
-    let root = tempfile::tempdir().unwrap();
-    let endpoint = AppPaths::under(root.path()).ipc_endpoint();
-    // Bound but never served: a client can connect and send its request, and nobody answers.
-    let _silent = IpcServer::bind(&endpoint).await.unwrap();
     for (method, seconds) in [("status", 30), ("doctor", 180)] {
+        // Every call gets a silent server of its own. A pipe instance serves one client, and one
+        // that nobody disconnects stays occupied after that client has timed out and gone, so a
+        // second call on the same server would find the pipe busy instead of waiting.
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = AppPaths::under(root.path()).ipc_endpoint();
+        // Bound but never served: a client can connect and send its request, and nobody answers.
+        let _silent = IpcServer::bind(&endpoint).await.unwrap();
         let started = tokio::time::Instant::now();
         let err = client::call(&endpoint, method, json!({}))
             .await
@@ -737,5 +752,56 @@ async fn a_connection_is_closed_after_a_minute_without_a_request() {
         matches!(late, Ok(None)),
         "still open after a minute of silence"
     );
+    token.cancel();
+}
+
+/// A readiness probe that takes 90 seconds, as a real `doctor` can: longer than the idle timeout.
+struct SlowReadiness {
+    asked: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl ReadinessProbe for SlowReadiness {
+    async fn executor_reports(&self, _fresh: bool) -> Vec<ExecutorReport> {
+        self.asked.notify_one();
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn a_request_slower_than_the_idle_timeout_is_answered_not_cut_off() {
+    let root = tempfile::tempdir().unwrap();
+    let linear = FakeLinear::new("user-1");
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let engine = Engine::new(EngineDeps {
+        config_path: root.path().join("config.toml"),
+        store: Store::open_in_memory().unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(SlowReadiness {
+            asked: asked.clone(),
+        }),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    let (endpoint, token) = serve(&engine, root.path()).await;
+    let mut wire = Wire::connect(&endpoint).await;
+    wire.send(&request_line(1, "doctor")).await.unwrap();
+    // Real time until the server is inside the request; the clock is frozen only then.
+    asked.notified().await;
+    tokio::time::pause();
+    // Past the idle limit the request is still being handled: the connection stays open and
+    // nothing is answered yet. (Handling is not reading, so no idle timer runs meanwhile.)
+    tokio::time::advance(Duration::from_secs(61)).await;
+    let early = tokio::time::timeout(Duration::from_millis(100), wire.response()).await;
+    assert!(early.is_err(), "the connection was cut off mid-request");
+    // The probe's 90 seconds are up: the answer comes.
+    tokio::time::advance(Duration::from_secs(40)).await;
+    let answer = response_without_idling(&mut wire)
+        .await
+        .expect("the slow request is answered");
+    assert_eq!(answer.id, 1);
+    assert!(answer.error.is_none(), "{:?}", answer.error);
     token.cancel();
 }

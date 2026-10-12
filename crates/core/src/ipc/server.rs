@@ -238,7 +238,8 @@ impl IpcServer {
             #[cfg(windows)]
             Listener::Pipe { first, name } => {
                 let mut connections = JoinSet::new();
-                // The instance that waits for the next client; `None` until one is created.
+                // The instance that waits for the next client; `None` only while a replacement
+                // could not be created.
                 let mut waiting = Some(first);
                 loop {
                     reap_finished(&mut connections);
@@ -260,18 +261,32 @@ impl IpcServer {
                         result = server.connect() => Some(result),
                     };
                     let Some(result) = connected else { break };
+                    // The replacement is created before the connected instance is handed to its
+                    // task, or the failed one is dropped. A pipe name without any instance shows
+                    // clients nobody home ("not running") and lets a second host's
+                    // `first_pipe_instance` succeed. Only when the replacement cannot be created
+                    // does the name go without a listener, until the retry at the top works.
+                    let replacement = new_pipe_instance(&name);
+                    let mut trouble = false;
                     match result {
-                        // The next loop turn creates the instance that takes its place.
                         Ok(()) => {
                             connections.spawn(serve_connection(server, engine.clone()));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC connect failed; still serving");
                             drop(server);
-                            if !pause_before_retry(&shutdown).await {
-                                break;
-                            }
+                            trouble = true;
                         }
+                    }
+                    match replacement {
+                        Ok(next) => waiting = Some(next),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "IPC pipe instance not created; still trying");
+                            trouble = true;
+                        }
+                    }
+                    if trouble && !pause_before_retry(&shutdown).await {
+                        break;
                     }
                 }
                 connections.shutdown().await;

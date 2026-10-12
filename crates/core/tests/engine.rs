@@ -1860,7 +1860,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 directory: PathBuf::from("repo"),
                 ..valid.clone()
             },
-            "absolute",
+            "directory must be an absolute path",
         ),
         (
             "a dot-relative directory",
@@ -1868,7 +1868,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 directory: PathBuf::from("./repo"),
                 ..valid.clone()
             },
-            "absolute",
+            "directory must be an absolute path",
         ),
         (
             "an empty directory",
@@ -1876,7 +1876,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 directory: PathBuf::new(),
                 ..valid.clone()
             },
-            "absolute",
+            "directory must be an absolute path",
         ),
         (
             "an empty id",
@@ -1884,7 +1884,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 id: String::new(),
                 ..valid.clone()
             },
-            "binding id is required",
+            ".id must not be empty",
         ),
         (
             "a blank id",
@@ -1892,7 +1892,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 id: " \t".into(),
                 ..valid.clone()
             },
-            "binding id is required",
+            ".id must not be empty",
         ),
         (
             "an empty project id",
@@ -1900,7 +1900,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 project_id: String::new(),
                 ..valid.clone()
             },
-            "project id is required",
+            ".project_id must not be empty",
         ),
         (
             "a blank project id",
@@ -1908,7 +1908,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 project_id: "  ".into(),
                 ..valid.clone()
             },
-            "project id is required",
+            ".project_id must not be empty",
         ),
         (
             "a control character in the id",
@@ -1916,7 +1916,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 id: "bind\u{1b}2".into(),
                 ..valid.clone()
             },
-            "binding id must not contain control characters",
+            ".id must not contain control characters",
         ),
         (
             "a control character in the project id",
@@ -1924,7 +1924,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 project_id: "proj\u{0}2".into(),
                 ..valid.clone()
             },
-            "project id must not contain control characters",
+            ".project_id must not contain control characters",
         ),
         (
             "an escape character in the project name",
@@ -1932,7 +1932,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 project_name: "Demo\u{1b}Project".into(),
                 ..valid.clone()
             },
-            "project name must not contain control characters",
+            ".project_name must not contain control characters",
         ),
         (
             "a newline in the project name",
@@ -1940,7 +1940,7 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
                 project_name: "Demo\nProject".into(),
                 ..valid.clone()
             },
-            "project name must not contain control characters",
+            ".project_name must not contain control characters",
         ),
     ];
     // Each refusal says what is wrong and changes nothing, in memory or on disk.
@@ -1953,6 +1953,31 @@ async fn a_binding_needs_an_absolute_directory_and_plain_names() {
     // The same binding with an absolute directory and plain names is accepted.
     h.engine.add_binding(valid.clone()).unwrap();
     assert!(h.engine.bindings().contains(&valid));
+}
+
+#[tokio::test]
+async fn a_hand_edited_binding_with_a_relative_directory_stops_the_engine_from_starting() {
+    let root = tempfile::tempdir().unwrap();
+    let config_path = root.path().join("config.toml");
+    // TOML literal strings (single quotes) keep the backslashes of a Windows path as they are.
+    let text = "[[bindings]]\nid = 'p'\nproject_id = 'p'\nproject_name = 'Demo Project'\ndirectory = 'repo'\n";
+    std::fs::write(&config_path, text).unwrap();
+    let linear = FakeLinear::new("user-1");
+    let result = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open_in_memory().unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: root.path().join("logs"),
+    });
+    let err = result.err().expect("a relative folder must not start");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("bindings[0].directory must be an absolute path"),
+        "{message}"
+    );
+    assert!(message.contains("config.toml"), "{message}");
 }
 
 #[tokio::test]
