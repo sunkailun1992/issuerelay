@@ -1,13 +1,13 @@
 //! Development-only headless host for the IssueRelay engine. Not shipped; the M2 tray app
 //! embeds the engine the same way.
 use std::{
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use issuerelay_core::{
     doctor::SystemReadiness,
@@ -19,9 +19,11 @@ use issuerelay_core::{
     },
     paths::AppPaths,
     store::Store,
-    text::clean_text,
+    text::{clean_text, is_invisible},
 };
+use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
 #[derive(Parser)]
 #[command(
@@ -37,7 +39,8 @@ struct Cli {
 enum Command {
     /// Authorize with Linear in the browser and keep the token in the system keychain.
     Login,
-    /// Read a Linear personal API key from stdin and keep it in the system keychain.
+    /// Read a Linear personal API key from stdin and keep it in the system keychain. A terminal
+    /// is refused; pipe the key in, for example: `pbpaste | issuerelay-devhost api-key`.
     ApiKey,
     /// Forget stored Linear credentials.
     Logout,
@@ -61,6 +64,176 @@ async fn connect() -> Result<LinearClient> {
     bail!("no Linear credentials; run `issuerelay-devhost login` (or `api-key`) first")
 }
 
+/// `text` with every control character turned into a space and every invisible character
+/// (zero-width and direction-changing ones) removed. This is `clean_text` without the trimming
+/// and the length cap, for text that must keep its end, such as the root cause of an error.
+fn strip_control(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| {
+            if c.is_control() {
+                Some(' ')
+            } else if is_invisible(c) {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect()
+}
+
+/// Passes what is written to `W` with `strip_control` applied, keeping only the line ending that
+/// closes the text (the last byte, when it is a newline). A log line can then neither move the
+/// cursor, change the terminal's state nor forge a second line. The tracing subscriber hands
+/// over each line in a single `write_all`; a character split across two writes would show as
+/// U+FFFD.
+struct CleanLines<W>(W);
+
+impl<W: Write> Write for CleanLines<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let text = String::from_utf8_lossy(bytes);
+        let (body, ending) = match text.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (&*text, ""),
+        };
+        let mut clean = strip_control(body);
+        clean.push_str(ending);
+        self.0.write_all(clean.as_bytes())?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// Where the logs go: stderr, through `CleanLines`. The subscriber escapes only the message and
+/// error values of an event; named fields are written as they are, and the engine and the IPC
+/// server log fields (`error = %…`) that can hold Linear's text.
+struct CleanStderr;
+
+impl<'a> MakeWriter<'a> for CleanStderr {
+    type Writer = CleanLines<io::Stderr>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CleanLines(io::stderr())
+    }
+}
+
+/// What is logged unless `RUST_LOG` says otherwise. `run` is the long-lived host and logs what the
+/// engine does; the other commands print their result and stay quiet unless something is wrong
+/// (rmcp logs every connection at `info`).
+fn default_filter(command: &Command) -> &'static str {
+    match command {
+        Command::Run => "info,issuerelay_core=debug",
+        Command::Login | Command::ApiKey | Command::Logout | Command::Projects => "warn",
+    }
+}
+
+/// Logs to stderr, so stdout carries only what a subcommand prints as its result. Colors are off
+/// so the writer never has to let an escape sequence through. `RUST_LOG` overrides
+/// `default_filter`.
+fn init_logging(default_filter: &str) {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
+        )
+        .with_ansi(false)
+        .with_writer(CleanStderr)
+        // The subscriber reports a failed log write with `eprintln!`, which panics when stderr is
+        // gone, as it is once the terminal has closed (SIGHUP). The host must keep shutting down.
+        .log_internal_errors(false)
+        .init();
+}
+
+/// Writes `text` and a line break. A reader that went away (`projects | head -1`) is not a
+/// failure: the output was only wanted up to there.
+fn write_line(out: &mut impl Write, text: &str) -> io::Result<()> {
+    match writeln!(out, "{text}").and_then(|()| out.flush()) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// Prints `text` and a line break to stdout (see `write_line`).
+fn print_line(text: &str) -> io::Result<()> {
+    write_line(&mut io::stdout().lock(), text)
+}
+
+/// Resolves when the host is asked to stop: on Ctrl+C, and on SIGTERM (`kill`, a closed task) and
+/// SIGHUP (the terminal was closed). The executors lead process groups of their own, so a host
+/// that simply died would leave full-permission runs working as orphans.
+#[cfg(unix)]
+async fn shutdown_signal() -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    tokio::select! {
+        interrupt = tokio::signal::ctrl_c() => interrupt,
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+    }
+}
+
+/// Resolves when the host is asked to stop: on Ctrl+C, Ctrl+Break, the console being closed and
+/// the system shutting down. (Windows ends the process shortly after the last two; the job
+/// object of each run then ends its process tree.)
+#[cfg(windows)]
+async fn shutdown_signal() -> io::Result<()> {
+    use tokio::signal::windows;
+
+    let mut ctrl_break = windows::ctrl_break()?;
+    let mut ctrl_close = windows::ctrl_close()?;
+    let mut ctrl_shutdown = windows::ctrl_shutdown()?;
+    tokio::select! {
+        interrupt = tokio::signal::ctrl_c() => interrupt,
+        _ = ctrl_break.recv() => Ok(()),
+        _ = ctrl_close.recv() => Ok(()),
+        _ = ctrl_shutdown.recv() => Ok(()),
+    }
+}
+
+/// Runs the engine and the IPC server until the host is asked to stop, then waits for the runs in
+/// progress to end. A second stop signal in the meantime returns at once, and so does an engine
+/// task that panicked (nobody has told the runs to stop then). Either way the runtime shuts down
+/// after `main` returns, and the guard of each run ends its process tree.
+async fn serve(engine: Engine, server: IpcServer) -> Result<()> {
+    let shutdown = CancellationToken::new();
+    let ipc = tokio::spawn(server.run(engine.clone(), shutdown.clone()));
+    let worker = {
+        let engine = engine.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { engine.run_forever(shutdown).await })
+    };
+    tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
+    shutdown_signal()
+        .await
+        .context("cannot listen for stop signals")?;
+    tracing::info!(
+        "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
+    );
+    shutdown.cancel();
+    let drain = async {
+        // `run_forever` tells the running jobs to stop on its way out. If it panicked nobody did,
+        // and `wait_idle` would wait for them to finish on their own.
+        worker.await?;
+        let _ = ipc.await;
+        engine.wait_idle().await;
+        Ok::<(), JoinError>(())
+    };
+    tokio::select! {
+        drained = drain => drained.map_err(|error| {
+            tracing::error!(%error, "the engine task failed; the runs still going end with the host");
+            anyhow!("the engine task failed: {error}")
+        }),
+        second = shutdown_signal() => {
+            second.context("cannot listen for a second stop signal")?;
+            tracing::warn!("second stop signal: ending the remaining runs now");
+            Ok(())
+        }
+    }
+}
+
 /// Runs one subcommand. The viewer's name and the projects' ids and names come from Linear, whose
 /// content is untrusted and may carry terminal escape sequences, so they are printed through
 /// `clean_text`.
@@ -70,16 +243,22 @@ async fn run(command: Command) -> Result<()> {
             let client = auth::login(auth::LINEAR_MCP_URL, |url| {
                 // Not passed through `clean_text`: rmcp serializes the URL with `url::Url`, so it
                 // holds no control characters, and `clean_text` would cut a long one.
-                println!("Open this URL to authorize IssueRelay:\n{url}");
+                let _ = print_line(&format!("Open this URL to authorize IssueRelay:\n{url}"));
                 let _ = open::that_detached(url);
             })
             .await?;
             let linear = McpLinear::new(client).await?;
             let viewer = linear.viewer().await?;
-            println!("Logged in to Linear as {}", clean_text(&viewer.name));
+            print_line(&format!(
+                "Logged in to Linear as {}",
+                clean_text(&viewer.name)
+            ))?;
             linear.close().await
         }
         Command::ApiKey => {
+            if io::stdin().is_terminal() {
+                bail!("pipe the key in, for example: pbpaste | issuerelay-devhost api-key");
+            }
             let mut key = String::new();
             io::stdin().read_to_string(&mut key)?;
             let key = key.trim();
@@ -89,19 +268,27 @@ async fn run(command: Command) -> Result<()> {
             let linear =
                 McpLinear::new(auth::connect_api_key(auth::LINEAR_MCP_URL, key).await?).await?;
             let viewer = linear.viewer().await?;
-            println!("API key works for {}", clean_text(&viewer.name));
+            print_line(&format!("API key works for {}", clean_text(&viewer.name)))?;
             auth::save_api_key(key)?;
             linear.close().await
         }
         Command::Logout => {
             auth::clear_credentials()?;
-            println!("Stored Linear credentials removed.");
+            print_line("Stored Linear credentials removed.")?;
             Ok(())
         }
         Command::Projects => {
             let linear = McpLinear::new(connect().await?).await?;
-            for project in linear.projects().await? {
-                println!("{}\t{}", clean_text(&project.id), clean_text(&project.name));
+            let lines: Vec<String> = linear
+                .projects()
+                .await?
+                .iter()
+                .map(|project| {
+                    format!("{}\t{}", clean_text(&project.id), clean_text(&project.name))
+                })
+                .collect();
+            if !lines.is_empty() {
+                print_line(&lines.join("\n"))?;
             }
             linear.close().await
         }
@@ -117,43 +304,131 @@ async fn run(command: Command) -> Result<()> {
                 job_runner: Arc::new(ProcessJobRunner),
                 logs_dir: paths.logs_dir(),
             })?;
-            let shutdown = CancellationToken::new();
-            let ipc = tokio::spawn(server.run(engine.clone(), shutdown.clone()));
-            let worker = {
-                let engine = engine.clone();
-                let shutdown = shutdown.clone();
-                tokio::spawn(async move { engine.run_forever(shutdown).await })
-            };
-            tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
-            tokio::signal::ctrl_c().await?;
-            shutdown.cancel();
-            let _ = worker.await;
-            let _ = ipc.await;
-            engine.wait_idle().await;
-            Ok(())
+            serve(engine, server).await
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Logs go to stderr: stdout carries only what a subcommand prints as its result.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,issuerelay_core=debug")
-            }),
-        )
-        .with_writer(io::stderr)
-        .init();
-    match run(Cli::parse().command).await {
+    let cli = Cli::parse();
+    init_logging(default_filter(&cli.command));
+    match run(cli.command).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // One line with the whole cause chain. The chain can carry Linear's text, so it is
-            // cleaned. If stderr is gone there is nobody to tell, and the exit code still says
-            // the command failed.
-            let _ = writeln!(io::stderr(), "Error: {}", clean_text(&format!("{error:#}")));
+            // cleaned, but not cut: the root cause is its last part. If stderr is gone there is
+            // nobody to tell, and the exit code still says the command failed.
+            let _ = writeln!(
+                io::stderr(),
+                "Error: {}",
+                strip_control(&format!("{error:#}"))
+            );
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `CleanLines` passes on when `text` is written to it in one go.
+    fn written(text: &str) -> String {
+        let mut out = CleanLines(Vec::new());
+        out.write_all(text.as_bytes()).unwrap();
+        String::from_utf8(out.0).unwrap()
+    }
+
+    #[test]
+    fn a_log_line_carries_no_terminal_escapes() {
+        // Clear screen, OSC 52 (write the clipboard, ended by BEL), a lone BEL, a carriage return
+        // that would overwrite the line, and a right-to-left override.
+        let hostile =
+            "WARN poll: error=boom\u{1b}[2J\u{1b}]52;c;ZXZpbA==\u{7} more\rrewritten \u{202e}end\n";
+        assert_eq!(
+            written(hostile),
+            "WARN poll: error=boom [2J ]52;c;ZXZpbA==  more rewritten end\n"
+        );
+    }
+
+    #[test]
+    fn only_the_closing_newline_survives() {
+        // A newline inside the text would let a field forge a second log line.
+        assert_eq!(
+            written("INFO a: x=one\nINFO forged: y=two\n"),
+            "INFO a: x=one INFO forged: y=two\n"
+        );
+        assert_eq!(written("\n"), "\n");
+        assert_eq!(written("no ending"), "no ending");
+        // Text that already ends in a newline before the closing one keeps just one.
+        assert_eq!(written("tail\n\n"), "tail \n");
+        // Other scripts and punctuation are untouched; so is the C1 range's neighbour U+00A0.
+        assert_eq!(written("日本語 é \u{a0}…\n"), "日本語 é \u{a0}…\n");
+        // The C1 controls (here NEL and CSI) are controls too.
+        assert_eq!(written("a\u{85}b\u{9b}c\n"), "a b c\n");
+    }
+
+    /// A writer whose every write fails with `kind`.
+    struct Failing(io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    #[test]
+    fn a_write_reports_the_bytes_it_was_given_and_passes_errors_on() {
+        let mut out = CleanLines(Vec::new());
+        // `write_all` relies on this: the cleaned text is shorter than what came in.
+        assert_eq!(out.write(b"a\x1b[2Jb\n").unwrap(), 7);
+        assert_eq!(out.0, b"a [2Jb\n");
+
+        let error = CleanLines(Failing(io::ErrorKind::BrokenPipe))
+            .write_all(b"gone\n")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_a_failure_but_other_write_errors_are() {
+        assert!(write_line(&mut Failing(io::ErrorKind::BrokenPipe), "text").is_ok());
+        let error = write_line(&mut Failing(io::ErrorKind::PermissionDenied), "text").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let mut out = Vec::new();
+        write_line(&mut out, "first\nsecond").unwrap();
+        assert_eq!(out, b"first\nsecond\n");
+    }
+
+    #[test]
+    fn only_run_logs_below_warnings_by_default() {
+        assert_eq!(default_filter(&Command::Run), "info,issuerelay_core=debug");
+        for command in [
+            Command::Login,
+            Command::ApiKey,
+            Command::Logout,
+            Command::Projects,
+        ] {
+            assert_eq!(default_filter(&command), "warn");
+        }
+    }
+
+    #[test]
+    fn the_error_line_keeps_the_root_cause_however_long_the_chain() {
+        let error = anyhow!("root cause\u{1b}[2J")
+            .context("x".repeat(600))
+            .context("outer\n");
+        let line = strip_control(&format!("{error:#}"));
+        assert!(line.starts_with("outer : xxx"), "{line}");
+        assert!(line.ends_with(": root cause [2J"), "{line}");
+        assert_eq!(
+            line.chars().count(),
+            "outer : ".len() + 600 + ": root cause [2J".len()
+        );
     }
 }
