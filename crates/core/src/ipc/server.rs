@@ -299,4 +299,31 @@ mod tests {
         );
         assert!(err.downcast_ref::<AlreadyRunning>().is_none());
     }
+
+    // 103 bytes is the last length that fits macOS's 104-byte `sun_path` with its NUL.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_path_of_103_bytes_binds_and_one_of_104_does_not() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let tail = "issuerelay.sock";
+        let fixed = root.path().as_os_str().len() + 1 + 1 + tail.len();
+        assert!(fixed < 103, "the temp dir is too long for this test");
+        // <root>/<padding>/issuerelay.sock, `total` bytes in all.
+        let path_of = |total: usize| root.path().join("p".repeat(total - fixed)).join(tail);
+        let fits = path_of(103);
+        assert_eq!(fits.as_os_str().len(), 103);
+        IpcServer::bind(&IpcEndpoint::Unix(fits))
+            .await
+            .expect("a 103-byte path fits");
+        let err = IpcServer::bind(&IpcEndpoint::Unix(path_of(104)))
+            .await
+            .err()
+            .expect("a 104-byte path does not");
+        assert!(
+            err.to_string()
+                .starts_with("IPC socket path is too long (104 bytes, at most 103): "),
+            "{err}"
+        );
+    }
 }
