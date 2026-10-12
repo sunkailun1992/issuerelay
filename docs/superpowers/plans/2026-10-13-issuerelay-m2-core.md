@@ -1269,6 +1269,8 @@ git commit -m "feat(core): give executors the login shell's PATH and the system 
 
 ### Task 2: Windows：不弹控制台窗口、执行者不收 Ctrl+C、命名管道只认当前用户
 
+> 执行说明（2026-10-13）：已落地代码以提交 `6fb6db4` 与修复 `0983008` 为准，与下文有三处不同。① 管道描述符改为运行时按宿主所在用户的 SID 生成：`pipe_sddl(user_sid)` 给出 `O:<sid>D:P(A;;GA;;;<sid>)(A;;GA;;;SY)`，取代下文的常量 `PIPE_SDDL` 与 `OW`；`OW` 在宿主提权运行时会指向 Administrators 组（控制者裁决 R11）。② `server_runs_as_current_user` 接收 `BorrowedHandle<'_>`，不是 `RawHandle`。③ 同一任务还改写了 `SystemRunner::run`（裁决 R9）：两路输出各由自己的任务读取，等命令自己的进程退出（Windows 等原生子进程），再结束整组 / Job Object，输出最多再读 2 秒；读取出错或读取任务失败时，检查记为未完成。
+
 M1 计划「本计划不覆盖」6.2、10.2 两行与评审遗留「`ipc` Windows 属主 SID」。Windows 代码只能在 CI 上编译和测试：这一任务的提交推上去后，主智能体要看 Windows 任务的结果，失败就进入修复轮。函数签名一律以本机 `~/.cargo/registry/src/*/windows-sys-0.61.2/` 里的声明为准（下面的写法已对照过）。
 
 **Files:**
