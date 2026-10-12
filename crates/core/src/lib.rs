@@ -12,4 +12,5 @@ pub mod prompt;
 pub mod runner;
 pub mod scheduler;
 pub mod store;
+pub mod text;
 pub mod trigger;

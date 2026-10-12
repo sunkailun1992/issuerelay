@@ -1,6 +1,11 @@
 //! The `issuerelay` command: sends each subcommand to the running engine host over local IPC,
 //! or serves the MCP control tools with `issuerelay mcp`.
-use std::path::PathBuf;
+use std::{
+    future::Future,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -40,12 +45,15 @@ enum Command {
     Doctor,
     /// List recent runs.
     Jobs {
+        /// How many runs to list, newest first (at most 500).
         #[arg(long, default_value_t = 20)]
         limit: u64,
     },
     /// Show the last lines of a run's log.
     Logs {
+        /// The run's number, as in the `#` column of `issuerelay jobs`.
         job_id: i64,
+        /// How many lines to show from the end of the log (at most 5000).
         #[arg(long, default_value_t = 50)]
         lines: u64,
     },
@@ -79,7 +87,10 @@ enum BindCommand {
         permission: Option<PermissionProfile>,
     },
     /// Remove a binding by its id (the project id it was added with).
-    Remove { id: String },
+    Remove {
+        /// The binding's id, as `issuerelay bind list` shows it.
+        id: String,
+    },
 }
 
 fn parse_executor(text: &str) -> Result<ExecutorKind, String> {
@@ -131,56 +142,68 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
     })
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Writes `text` and a line break. A reader that went away (`issuerelay logs 3 | head -1`) is
+/// not a failure: the output was only wanted up to there.
+fn write_line(out: &mut impl Write, text: &str) -> io::Result<()> {
+    match writeln!(out, "{text}").and_then(|()| out.flush()) {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// Sends the subcommand's request through `send` and renders the answer: the raw JSON with
+/// `--json`, otherwise the summary. Nothing is sent when the request cannot be built.
+async fn execute<Fut>(cli: &Cli, send: impl FnOnce(&'static str, Value) -> Fut) -> Result<String>
+where
+    Fut: Future<Output = Result<Value>>,
+{
+    let (method, params) = request(&cli.command)?;
+    let value = send(method, params).await?;
+    Ok(format::render(method, &value, cli.json))
+}
+
+/// Tells the user why the command failed and returns the exit code for it. The line is cleaned
+/// like all other output. If `err` is gone too there is nobody to tell; the exit code still says
+/// the command failed.
+fn fail(error: &anyhow::Error, err: &mut impl Write) -> ExitCode {
+    let _ = writeln!(err, "{}", format::error_line(error));
+    ExitCode::FAILURE
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let endpoint = AppPaths::system()?.ipc_endpoint();
     if matches!(cli.command, Command::Mcp) {
         return mcp::serve(endpoint).await;
     }
-    let (method, params) = request(&cli.command)?;
-    let value = client::call(&endpoint, method, params).await?;
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        println!("{}", format::human(method, &value));
-    }
+    let text = execute(&cli, |method, params| {
+        client::call(&endpoint, method, params)
+    })
+    .await?;
+    write_line(&mut io::stdout().lock(), &text)?;
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => fail(&error, &mut io::stderr().lock()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Mutex};
 
+    use anyhow::anyhow;
     use clap::CommandFactory;
 
     use super::*;
 
-    fn collect_names(command: &clap::Command, names: &mut Vec<String>) {
-        for sub in command.get_subcommands() {
-            names.push(sub.get_name().to_ascii_lowercase());
-            collect_names(sub, names);
-        }
-    }
-
-    #[test]
-    fn no_subcommand_marks_done_retries_or_cancels() {
-        // Only the desktop panel may do these (AGENTS.md); the CLI must not offer them in any
-        // spelling, at any depth of its command tree.
-        let mut names = Vec::new();
-        collect_names(&Cli::command(), &mut names);
-        assert!(
-            names.iter().any(|n| n == "status") && names.iter().any(|n| n == "add"),
-            "the walk should reach top-level and nested subcommands: {names:?}"
-        );
-        for name in &names {
-            for word in ["done", "retry", "cancel"] {
-                assert!(
-                    !name.contains(word),
-                    "`{name}` looks like a panel-only action"
-                );
-            }
-        }
+    fn parse(args: &[&str]) -> Cli {
+        let argv = std::iter::once("issuerelay").chain(args.iter().copied());
+        Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?} should parse: {e}"))
     }
 
     fn bind_add(dir: &Path) -> Command {
@@ -191,6 +214,140 @@ mod tests {
             executor: Some(ExecutorKind::Codex),
             permission: None,
         })
+    }
+
+    fn collect_names(command: &clap::Command, names: &mut Vec<String>) {
+        for sub in command.get_subcommands() {
+            names.push(sub.get_name().to_ascii_lowercase());
+            names.extend(sub.get_all_aliases().map(str::to_ascii_lowercase));
+            collect_names(sub, names);
+        }
+    }
+
+    /// A writer whose every write fails with `kind`.
+    struct Failing(io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    /// Runs `issuerelay <args>` against a host that answers `answer`; returns what was printed
+    /// and every `(method, params)` that was sent.
+    async fn run_command(
+        args: &[&str],
+        answer: Value,
+    ) -> (Result<String>, Vec<(&'static str, Value)>) {
+        let sent = Mutex::new(Vec::new());
+        let printed = execute(&parse(args), |method, params| {
+            sent.lock().unwrap().push((method, params));
+            std::future::ready(Ok(answer))
+        })
+        .await;
+        (printed, sent.into_inner().unwrap())
+    }
+
+    #[test]
+    fn every_subcommand_sends_its_method_and_params() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_str().unwrap();
+        let cases: Vec<(Vec<&str>, &str, Value)> = vec![
+            (vec!["status"], "status", json!({})),
+            (vec!["pause"], "pause", json!({})),
+            (vec!["resume"], "resume", json!({})),
+            (vec!["poll"], "poll_now", json!({})),
+            (vec!["doctor"], "doctor", json!({})),
+            (vec!["jobs"], "list_jobs", json!({"limit": 20})),
+            (
+                vec!["jobs", "--limit", "5"],
+                "list_jobs",
+                json!({"limit": 5}),
+            ),
+            (vec!["logs", "7"], "logs", json!({"job_id": 7, "lines": 50})),
+            (
+                vec!["logs", "7", "--lines", "3"],
+                "logs",
+                json!({"job_id": 7, "lines": 3}),
+            ),
+            (vec!["bind", "list"], "bindings.list", json!({})),
+            (
+                vec!["bind", "remove", "proj-1"],
+                "bindings.remove",
+                json!({"id": "proj-1"}),
+            ),
+            // Nothing is sent for an executor or permission that was not named.
+            (
+                vec![
+                    "bind",
+                    "add",
+                    "--project-id",
+                    "proj-1",
+                    "--project-name",
+                    "Demo Project",
+                    "--dir",
+                    dir,
+                ],
+                "bindings.add",
+                json!({"binding": {"id": "proj-1", "project_id": "proj-1",
+                    "project_name": "Demo Project", "directory": root.path()}}),
+            ),
+            (
+                vec![
+                    "bind",
+                    "add",
+                    "--project-id",
+                    "proj-1",
+                    "--project-name",
+                    "Demo Project",
+                    "--dir",
+                    dir,
+                    "--executor",
+                    "Codex",
+                    "--permission",
+                    "auto",
+                ],
+                "bindings.add",
+                json!({"binding": {"id": "proj-1", "project_id": "proj-1",
+                    "project_name": "Demo Project", "directory": root.path(),
+                    "executor": "codex", "permission": "auto"}}),
+            ),
+        ];
+        for (args, method, params) in cases {
+            let (sent_method, sent_params) = request(&parse(&args).command).unwrap();
+            assert_eq!(
+                (sent_method, &sent_params),
+                (method, &params),
+                "issuerelay {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_json_flag_works_before_and_after_the_subcommand_and_is_off_by_default() {
+        assert!(parse(&["--json", "status"]).json);
+        assert!(parse(&["status", "--json"]).json);
+        assert!(parse(&["bind", "list", "--json"]).json);
+        assert!(!parse(&["status"]).json);
+        assert!(!parse(&["bind", "list"]).json);
+    }
+
+    #[test]
+    fn unknown_executors_and_permissions_are_refused() {
+        let add = |option: &str, value: &str| {
+            let argv = ["issuerelay", "bind", "add", "--project-id", "p"]
+                .into_iter()
+                .chain(["--project-name", "n", "--dir", ".", option, value]);
+            Cli::try_parse_from(argv)
+        };
+        assert!(add("--executor", "gemini").is_err());
+        assert!(add("--permission", "everything").is_err());
+        assert!(add("--executor", "claude").is_ok());
+        assert!(add("--permission", "personal").is_ok());
     }
 
     #[test]
@@ -225,5 +382,96 @@ mod tests {
         let sent = PathBuf::from(binding["directory"].as_str().unwrap());
         assert_eq!(sent, std::path::absolute(".").unwrap());
         assert!(sent.is_absolute());
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_a_failure_but_other_write_errors_are() {
+        assert!(write_line(&mut Failing(io::ErrorKind::BrokenPipe), "text").is_ok());
+        let error = write_line(&mut Failing(io::ErrorKind::PermissionDenied), "text").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let mut written = Vec::new();
+        write_line(&mut written, "first\nsecond").unwrap();
+        assert_eq!(written, b"first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn the_answer_is_printed_as_a_summary_or_with_json_as_the_raw_result() {
+        let answer = json!({"paused": true});
+        let (summary, sent) = run_command(&["pause"], answer.clone()).await;
+        assert_eq!(
+            summary.unwrap(),
+            "Monitoring paused (running jobs continue)."
+        );
+        assert_eq!(sent, [("pause", json!({}))]);
+        let (raw, sent) = run_command(&["--json", "pause"], answer.clone()).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&raw.unwrap()).unwrap(),
+            answer
+        );
+        assert_eq!(sent, [("pause", json!({}))]);
+        // What is sent includes the parameters, and the summary is the one for that method.
+        let (listed, sent) = run_command(&["jobs", "--limit", "5"], json!([])).await;
+        assert_eq!(listed.unwrap(), "No runs yet.");
+        assert_eq!(sent, [("list_jobs", json!({"limit": 5}))]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_is_the_commands_error_and_a_bad_request_sends_nothing() {
+        let failed = execute(&parse(&["status"]), |_, _| {
+            std::future::ready(Err(anyhow!("inner").context("outer")))
+        })
+        .await;
+        assert_eq!(format!("{:#}", failed.unwrap_err()), "outer: inner");
+        // `bind add` for a missing directory fails before anything is sent.
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("typo");
+        let args = ["bind", "add", "--project-id", "p", "--project-name", "n"];
+        let args: Vec<&str> = args
+            .into_iter()
+            .chain(["--dir", missing.to_str().unwrap()])
+            .collect();
+        let (printed, sent) = run_command(&args, json!({})).await;
+        assert!(
+            printed
+                .unwrap_err()
+                .to_string()
+                .contains("is not a directory")
+        );
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn a_failure_is_one_clean_line_with_its_causes_and_exit_code_1() {
+        let mut shown = Vec::new();
+        let error = anyhow!("bad\u{1b}]52;c;ZXZpbA==\u{7}end").context("outer");
+        let code = fail(&error, &mut shown);
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "Error: outer: bad ]52;c;ZXZpbA== end\n"
+        );
+        assert_eq!(code, ExitCode::FAILURE);
+        // A stderr that is gone changes nothing about the exit code.
+        let closed = &mut Failing(io::ErrorKind::BrokenPipe);
+        assert_eq!(fail(&anyhow!("x"), closed), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn no_subcommand_marks_done_retries_or_cancels() {
+        // Only the desktop panel may do these (AGENTS.md); the CLI must not offer them in any
+        // spelling, at any depth of its command tree, under its own name or an alias.
+        let mut names = Vec::new();
+        collect_names(&Cli::command(), &mut names);
+        assert!(
+            names.iter().any(|n| n == "status") && names.iter().any(|n| n == "add"),
+            "the walk should reach top-level and nested subcommands: {names:?}"
+        );
+        for name in &names {
+            for word in ["done", "retry", "cancel"] {
+                assert!(
+                    !name.contains(word),
+                    "`{name}` looks like a panel-only action"
+                );
+            }
+        }
     }
 }
