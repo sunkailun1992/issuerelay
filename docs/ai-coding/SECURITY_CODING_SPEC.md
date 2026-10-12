@@ -27,7 +27,7 @@
 ## 5. 本机通信
 
 - macOS：套接字所在目录权限 0700；启动前检测是否已有宿主在运行，只有残留的套接字文件才删除。
-- Windows：命名管道设 `reject_remote_clients(true)`；用 `first_pipe_instance(true)` 保证只有一个宿主；安全描述符只给属主和 SYSTEM 访问权（`ipc::pipe_security::PIPE_SDDL`）；客户端连接后核对管道服务端进程的用户，与自己不同就拒绝通信。
+- Windows：命名管道设 `reject_remote_clients(true)`；用 `first_pipe_instance(true)` 保证只有一个宿主；安全描述符按宿主所在用户的 SID 生成（`ipc::pipe_security::pipe_sddl`）：属主是这个用户，只有它和 SYSTEM 有访问权；不用 `OW`（属主权限），因为提权宿主的默认属主常是 Administrators 组，会挡住同一用户未提权的命令行、放进所有提权的管理员进程；客户端连接后核对管道服务端进程的用户，与自己不同就拒绝通信。
 - 只提供 `METHODS` 列出的方法；「标记完成」「重试」「取消」只在面板（进程内）提供。
 
 ## 6. 日志与数据

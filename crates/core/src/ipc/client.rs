@@ -77,9 +77,8 @@ async fn open_pipe(name: &str) -> Result<tokio::net::windows::named_pipe::NamedP
     for _ in 0..50 {
         match ClientOptions::new().open(name) {
             Ok(client) => {
-                use std::os::windows::io::AsRawHandle;
-                match crate::ipc::pipe_security::server_runs_as_current_user(client.as_raw_handle())
-                {
+                use std::os::windows::io::AsHandle;
+                match crate::ipc::pipe_security::server_runs_as_current_user(client.as_handle()) {
                     Ok(true) => return Ok(client),
                     Ok(false) => bail!(
                         "IssueRelay's pipe is served by another user's process; refusing to talk to it"

@@ -5,6 +5,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
     future::Future,
+    io,
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
@@ -43,8 +44,8 @@ pub struct CmdOutput {
 /// Runs one check command. `SystemRunner` is the real implementation; tests use a fake.
 #[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
-    /// `Err` means the command could not run to completion (it did not start, or timed out); a
-    /// command that ran and exited non-zero is an `Ok`.
+    /// `Err` means the command could not run to completion (it did not start, timed out, or what
+    /// it printed could not be read); a command that ran and exited non-zero is an `Ok`.
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput>;
 }
 
@@ -82,11 +83,12 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 /// executors will get). A check is done when the command's own process exits: whatever it left
 /// running in its group is ended then (`claude mcp list` starts stdio MCP servers of its own,
 /// which inherit its pipes), and the output is what the pipes delivered up to `PIPE_DRAIN` after
-/// that. A command still running at its limit is killed together with everything it started and
-/// the call fails with `timed out after 20s` (the limit as `Duration` prints it). Every command
-/// also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they
-/// print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour
-/// codes too).
+/// that. A pipe that cannot be read fails the call: half of an `mcp list` must not pass for the
+/// whole answer. A command still running at its limit is killed together with everything it
+/// started and the call fails with `timed out after 20s` (the limit as `Duration` prints it).
+/// Every command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not
+/// colour what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers
+/// strip colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -196,55 +198,69 @@ impl CommandRunner for SystemRunner {
         let status = status?;
         let drain_until = Instant::now() + PIPE_DRAIN;
         let (stdout, stderr) = tokio::join!(
-            collected(stdout, &stop_reading, drain_until),
-            collected(stderr, &stop_reading, drain_until),
+            collected(stdout, &stop_reading, drain_until, "stdout"),
+            collected(stderr, &stop_reading, drain_until, "stderr"),
         );
         Ok(CmdOutput {
             code: status.code(),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stdout: stdout?,
+            stderr: stderr?,
         })
     }
 }
 
-/// Reads one pipe of a check command, in a task of its own, until the pipe ends or `stop` fires;
-/// the task returns what it read.
-fn read_pipe<R>(pipe: Option<R>, stop: CancellationToken) -> JoinHandle<Vec<u8>>
+/// Reads one pipe of a check command, in a task of its own, until the pipe ends or `stop` fires.
+/// The task returns what it read, or the error that ended the reading; an interrupted read is
+/// tried again.
+fn read_pipe<R>(pipe: Option<R>, stop: CancellationToken) -> JoinHandle<io::Result<Vec<u8>>>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
         let mut bytes = Vec::new();
         let Some(mut pipe) = pipe else {
-            return bytes;
+            return Ok(bytes);
         };
         let mut chunk = [0_u8; 8192];
         loop {
             tokio::select! {
                 // Cancel-safe: when `stop` wins, this read has taken nothing from the pipe.
                 read = pipe.read(&mut chunk) => match read {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => return Ok(bytes),
                     Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
                 },
-                _ = stop.cancelled() => break,
+                // The drain deadline passed (`collected`), or the check is over: what was read
+                // so far stands.
+                _ = stop.cancelled() => return Ok(bytes),
             }
         }
-        bytes
     })
 }
 
-/// What a pipe reader collected: everything up to the end of the pipe when that comes by
-/// `deadline`, otherwise what it had read by then (`stop` ends it).
+/// What one pipe of a check delivered, as text: everything up to the end of the pipe when that
+/// comes by `deadline`, otherwise what was read by then (`stop` ends the reader). A read error,
+/// or a reader task that failed, is an error naming `stream`: half of an `mcp list` that exited
+/// 0 would otherwise read as "Linear is not configured" and be cached as a verdict.
 async fn collected(
-    mut reader: JoinHandle<Vec<u8>>,
+    mut reader: JoinHandle<io::Result<Vec<u8>>>,
     stop: &CancellationToken,
     deadline: Instant,
-) -> Vec<u8> {
-    if let Ok(done) = tokio::time::timeout_at(deadline, &mut reader).await {
-        return done.unwrap_or_default();
+    stream: &str,
+) -> Result<String> {
+    let joined = match tokio::time::timeout_at(deadline, &mut reader).await {
+        Ok(joined) => joined,
+        Err(_) => {
+            stop.cancel();
+            reader.await
+        }
+    };
+    match joined {
+        Ok(Ok(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Ok(Err(e)) => bail!("cannot read its {stream}: {e}"),
+        Err(e) => bail!("the reader of its {stream} failed: {e}"),
     }
-    stop.cancel();
-    reader.await.unwrap_or_default()
 }
 
 /// Whether one executor can take jobs, and what is wrong when it cannot.
@@ -1996,8 +2012,9 @@ mod tests {
         far_end.write_all(b"partial").await.unwrap();
         let stop = CancellationToken::new();
         let reader = read_pipe(Some(near_end), stop.clone());
-        let bytes = collected(reader, &stop, Instant::now() + Duration::from_millis(200)).await;
-        assert_eq!(bytes, b"partial");
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let text = collected(reader, &stop, deadline, "stdout").await.unwrap();
+        assert_eq!(text, "partial");
         assert!(stop.is_cancelled(), "the reader was not told to stop");
         drop(far_end);
     }
@@ -2013,11 +2030,88 @@ mod tests {
         let text = "line\n".repeat(100);
         far_end.write_all(text.as_bytes()).await.unwrap();
         drop(far_end);
-        let bytes = collected(reader, &stop, Instant::now() + Duration::from_secs(10)).await;
-        assert_eq!(bytes, text.as_bytes());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(
+            collected(reader, &stop, deadline, "stdout").await.unwrap(),
+            text
+        );
         assert!(!stop.is_cancelled());
         let absent = read_pipe(None::<tokio::io::DuplexStream>, stop.clone());
-        assert!(absent.await.unwrap().is_empty());
+        assert!(absent.await.unwrap().unwrap().is_empty());
+    }
+
+    /// A pipe that hands out one scripted step per read: bytes or an error, and the end of input
+    /// once the steps run out.
+    struct ScriptedPipe(std::collections::VecDeque<io::Result<Vec<u8>>>);
+
+    impl AsyncRead for ScriptedPipe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(match self.0.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf.put_slice(&bytes);
+                    Ok(())
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(()),
+            })
+        }
+    }
+
+    // Half of an `mcp list` that exited 0 would read as "Linear is not configured" and be cached
+    // for the full TTL; as an error the check counts as incomplete and is retried soon.
+    #[tokio::test]
+    async fn a_pipe_that_fails_half_way_is_an_error_not_the_end_of_the_output() {
+        let pipe = ScriptedPipe(
+            [
+                Ok(b"half of the list".to_vec()),
+                Err(io::Error::other("boom")),
+            ]
+            .into(),
+        );
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(pipe), stop.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let err = collected(reader, &stop, deadline, "stdout")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "cannot read its stdout: boom");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_read_is_tried_again() {
+        let pipe = ScriptedPipe(
+            [
+                Ok(b"one ".to_vec()),
+                Err(io::ErrorKind::Interrupted.into()),
+                Ok(b"two".to_vec()),
+            ]
+            .into(),
+        );
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(pipe), stop.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let text = collected(reader, &stop, deadline, "stdout").await.unwrap();
+        assert_eq!(text, "one two");
+    }
+
+    #[tokio::test]
+    async fn a_reader_task_that_failed_is_an_error() {
+        let reader: JoinHandle<io::Result<Vec<u8>>> = tokio::spawn(std::future::pending());
+        reader.abort();
+        let stop = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let err = collected(reader, &stop, deadline, "stderr")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("the reader of its stderr failed: "),
+            "{err}"
+        );
     }
 
     #[test]

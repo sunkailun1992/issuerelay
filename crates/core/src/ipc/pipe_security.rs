@@ -4,11 +4,11 @@
 //! local user could create the pipe first under IssueRelay's name.
 use std::ffi::c_void;
 use std::io;
-use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
@@ -18,13 +18,19 @@ use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows_sys::core::PWSTR;
 
-/// Full access for the pipe's owner, the user the host runs as (`OW`), and for SYSTEM; nobody
-/// else, not even the read access Everyone gets by default. `P` keeps inherited entries out.
-pub const PIPE_SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+/// The pipe's security descriptor, in SDDL, for the user whose SID (`S-1-5-…`) is `user_sid`:
+/// that user owns the pipe, and only that user and SYSTEM may open it (full access); `P` keeps
+/// inherited entries out. The user is named by SID instead of as "the owner" (`OW`, owner
+/// rights): an elevated host's default owner is often the Administrators group, which would shut
+/// out the same user's unelevated command line and let in every elevated administrator.
+pub fn pipe_sddl(user_sid: &str) -> String {
+    format!("O:{user_sid}D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)")
+}
 
-/// A security descriptor built from `PIPE_SDDL`, kept for the server's life: every pipe
-/// instance is created with it.
+/// A security descriptor built with `pipe_sddl` for the user this process runs as, kept for the
+/// server's life: every pipe instance is created with it.
 pub struct PipeSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
     attributes: SECURITY_ATTRIBUTES,
@@ -37,10 +43,13 @@ unsafe impl Send for PipeSecurity {}
 unsafe impl Sync for PipeSecurity {}
 
 impl PipeSecurity {
-    /// Builds the descriptor from `PIPE_SDDL`. Fails only when the system cannot parse or
-    /// allocate it.
+    /// Builds the descriptor for the user this process runs as. Fails when that user's SID
+    /// cannot be read, or when the system cannot parse or allocate the descriptor.
     pub fn new() -> io::Result<Self> {
-        let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+        let sddl: Vec<u16> = pipe_sddl(&current_user_sid()?)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated UTF-16. On success the system allocates the
         // descriptor with LocalAlloc; `Drop` frees it.
@@ -76,6 +85,34 @@ impl Drop for PipeSecurity {
     fn drop(&mut self) {
         // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW, freed once.
         unsafe { LocalFree(self.descriptor) };
+    }
+}
+
+/// The SID of the user this process runs as, in its `S-1-…` form.
+fn current_user_sid() -> io::Result<String> {
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing.
+    TokenUserSid::of_process(unsafe { GetCurrentProcess() })?.to_text()
+}
+
+/// A NUL-terminated UTF-16 string the system allocated with LocalAlloc. Dropping it frees it, so
+/// it is freed exactly once however the code that holds it ends.
+struct LocalString(PWSTR);
+
+impl LocalString {
+    fn to_string_lossy(&self) -> String {
+        // SAFETY: the system wrote a NUL-terminated UTF-16 string at `self.0`, which lives until
+        // `self` is dropped.
+        unsafe {
+            let len = (0..).take_while(|&i| *self.0.add(i) != 0).count();
+            String::from_utf16_lossy(std::slice::from_raw_parts(self.0, len))
+        }
+    }
+}
+
+impl Drop for LocalString {
+    fn drop(&mut self) {
+        // SAFETY: allocated with LocalAlloc by the call that filled it; only freed here.
+        unsafe { LocalFree(self.0.cast()) };
     }
 }
 
@@ -131,19 +168,26 @@ impl TokenUserSid {
                 .Sid
         }
     }
+
+    /// The SID in its `S-1-…` form.
+    fn to_text(&self) -> io::Result<String> {
+        let mut text: PWSTR = std::ptr::null_mut();
+        // SAFETY: `self.sid()` points into the live buffer. On success the system allocates the
+        // string with LocalAlloc (`LocalString` frees it); on failure it allocates nothing.
+        if unsafe { ConvertSidToStringSidW(self.sid(), &mut text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let text = LocalString(text);
+        Ok(text.to_string_lossy())
+    }
 }
 
-/// Whether the process serving the pipe behind `handle` (a client end) runs as the same user as
+/// Whether the process serving the pipe behind `pipe` (a client end) runs as the same user as
 /// this process. An error means it could not be told, which callers treat like a "no".
-// `handle` is a kernel handle value, not a pointer into this process's memory: it is only passed
-// to GetNamedPipeServerProcessId, which checks it and fails with ERROR_INVALID_HANDLE when it is
-// not an open handle, so taking it in a safe function cannot lead to undefined behaviour.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn server_runs_as_current_user(handle: RawHandle) -> io::Result<bool> {
+pub fn server_runs_as_current_user(pipe: BorrowedHandle<'_>) -> io::Result<bool> {
     let mut pid = 0_u32;
-    // SAFETY: the system validates `handle` (see above); `RawHandle` and `HANDLE` are both
-    // `*mut c_void`.
-    if unsafe { GetNamedPipeServerProcessId(handle, &mut pid) } == 0 {
+    // SAFETY: `pipe` is an open handle for as long as it is borrowed.
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the handle is checked and closed below.
@@ -159,4 +203,18 @@ pub fn server_runs_as_current_user(handle: RawHandle) -> io::Result<bool> {
     let ours = TokenUserSid::of_process(unsafe { GetCurrentProcess() })?;
     // SAFETY: both SIDs point into buffers that live until the end of this function.
     Ok(unsafe { EqualSid(theirs.sid(), ours.sid()) } != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_descriptor_makes_the_user_the_owner_and_admits_only_that_user_and_system() {
+        assert_eq!(
+            pipe_sddl("S-1-5-21-1000-2000-3000-1001"),
+            "O:S-1-5-21-1000-2000-3000-1001\
+             D:P(A;;GA;;;S-1-5-21-1000-2000-3000-1001)(A;;GA;;;SY)"
+        );
+    }
 }
