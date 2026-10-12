@@ -82,6 +82,9 @@ pub fn clean(raw: &str) -> String {
         .collect()
 }
 
+/// The most characters of a reason or summary that the jobs table shows.
+const WHY_CHARS: usize = 60;
+
 fn text(value: &Value, key: &str) -> String {
     clean(value.get(key).and_then(Value::as_str).unwrap_or("-"))
 }
@@ -129,16 +132,36 @@ fn jobs(v: &Value) -> String {
     items
         .iter()
         .map(|j| {
-            format!(
+            let mut line = format!(
                 "#{:<5} {:<12} {:<20} {}",
                 j["id"].as_i64().unwrap_or_default(),
                 text(j, "issue_identifier"),
                 text(j, "state"),
                 text(j, "title")
-            )
+            );
+            let why = why(j);
+            if !why.is_empty() {
+                let _ = write!(line, " — {why}");
+            }
+            line
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Why a job is where it is: its reason, else its summary, cleaned and cut to `WHY_CHARS`
+/// characters (`…` marks a cut); empty when it has neither.
+fn why(job: &Value) -> String {
+    let text = ["reason", "summary"]
+        .into_iter()
+        .filter_map(|key| job.get(key).and_then(Value::as_str))
+        .map(|text| clean(text).trim().to_string())
+        .find(|text| !text.is_empty())
+        .unwrap_or_default();
+    match text.char_indices().nth(WHY_CHARS) {
+        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+        None => text,
+    }
 }
 
 fn doctor(v: &Value) -> String {
@@ -285,6 +308,20 @@ mod tests {
                 && text.contains("running")
                 && text.ends_with("Demo task")
         );
+        // The last column says why: the reason, else the summary.
+        let table = human(
+            "list_jobs",
+            &json!([
+                {"id": 3, "issue_identifier": "DEMO-1", "state": "running", "title": "Demo task"},
+                {"id": 2, "issue_identifier": "DEMO-2", "state": "failed", "title": "Other task",
+                    "reason": "run exceeded the time limit", "summary": null}
+            ]),
+        );
+        assert_eq!(
+            table,
+            "#3     DEMO-1       running              Demo task\n\
+             #2     DEMO-2       failed               Other task — run exceeded the time limit"
+        );
         let hostile = human(
             "list_jobs",
             &json!([{"id": 4, "issue_identifier": "DEMO-2", "state": "queued", "title": "a\u{1b}]52;c;ZXZpbA==\u{7}b\nc"}]),
@@ -297,6 +334,54 @@ mod tests {
             &json!([{"id": 5, "issue_identifier": "DEMO-3", "state": "queued", "title": "x\u{202e}y\u{200b}z\u{feff}"}]),
         );
         assert!(spoofed.ends_with("xyz"), "{spoofed:?}");
+    }
+
+    #[test]
+    fn the_jobs_table_ends_with_the_reason_or_the_summary() {
+        let line = |job: Value| human("list_jobs", &json!([job]));
+        // The reason says why a run failed or stopped; it comes before the summary.
+        let failed = line(
+            json!({"id": 6, "issue_identifier": "DEMO-4", "state": "failed",
+            "title": "Demo task", "reason": "executor exited with code 1", "summary": "tried twice"}),
+        );
+        assert!(
+            failed.ends_with("Demo task — executor exited with code 1"),
+            "{failed}"
+        );
+        let accepted = line(json!({"id": 7, "issue_identifier": "DEMO-5",
+            "state": "awaiting_acceptance", "title": "Demo task", "reason": null,
+            "summary": "pushed to test"}));
+        assert!(
+            accepted.ends_with("Demo task — pushed to test"),
+            "{accepted}"
+        );
+        let blank_reason = line(
+            json!({"id": 8, "issue_identifier": "DEMO-6", "state": "failed",
+            "title": "Demo task", "reason": "  ", "summary": "the last words"}),
+        );
+        assert!(blank_reason.ends_with("— the last words"), "{blank_reason}");
+        let neither = line(
+            json!({"id": 9, "issue_identifier": "DEMO-7", "state": "queued",
+            "title": "Demo task", "reason": null, "summary": null}),
+        );
+        assert!(neither.ends_with("Demo task"), "{neither}");
+        // Cleaned and cut to 60 characters, `…` marking the cut.
+        let long = format!("x\u{1b}[2Jy\n{}", "z".repeat(100));
+        let cut = line(
+            json!({"id": 10, "issue_identifier": "DEMO-8", "state": "failed",
+            "title": "Demo task", "reason": long}),
+        );
+        let (_, why) = cut.split_once(" — ").unwrap();
+        assert!(!cut.chars().any(char::is_control), "{cut:?}");
+        assert!(why.starts_with("x [2Jy z"), "{why}");
+        assert_eq!(why.chars().count(), 61, "{why}");
+        assert!(why.ends_with('…'), "{why}");
+        let exactly = "w".repeat(60);
+        let full = line(
+            json!({"id": 11, "issue_identifier": "DEMO-9", "state": "failed",
+            "title": "Demo task", "reason": exactly}),
+        );
+        assert!(full.ends_with(&format!(" — {exactly}")), "{full}");
     }
 
     #[test]

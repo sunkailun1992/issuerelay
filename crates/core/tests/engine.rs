@@ -1619,14 +1619,16 @@ async fn the_stored_summary_is_one_clean_line() {
     assert!(!summary.contains(['\n', '\t']));
 }
 
-#[tokio::test]
+// Paused time: the pauses between the reads that verify a result pass at once.
+#[tokio::test(start_paused = true)]
 async fn a_result_that_cannot_be_verified_fails_the_job() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
     h.engine.tick().await.unwrap();
-    // The run ends once the gate opens; the first thing the engine then does is read the issue.
-    h.linear.fail_next("Linear is down");
+    // The run ends once the gate opens; the first thing the engine then does is read the issue,
+    // up to three times.
+    h.linear.fail_calls("Linear is down", 3);
     h.runner.gate.add_permits(1);
     h.settle().await;
     let job = h.latest("1");
@@ -1639,14 +1641,14 @@ async fn a_result_that_cannot_be_verified_fails_the_job() {
     assert_eq!(job.summary.as_deref(), Some("pushed to test"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stopped_run_stays_stopped_when_linear_cannot_be_read() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
     h.engine.tick().await.unwrap();
     h.engine.cancel_job(h.latest("1").id).unwrap();
-    h.linear.fail_next("Linear is down");
+    h.linear.fail_calls("Linear is down", 3);
     h.settle().await;
     let job = h.latest("1");
     assert_eq!(job.state, JobState::Canceled);
@@ -1654,6 +1656,64 @@ async fn a_stopped_run_stays_stopped_when_linear_cannot_be_read() {
         job.reason
             .unwrap()
             .starts_with("could not verify the result in Linear"),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_verification_read_that_fails_once_is_retried() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.linear.fail_next("Linear is down");
+    let before = tokio::time::Instant::now();
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+    assert_eq!(job.reason, None);
+    assert_eq!(job.verified_updated_at, Some(h.linear.get("1").updated_at));
+    // The second read came after the first pause, not at once.
+    let waited = before.elapsed();
+    assert!(
+        waited >= Duration::from_secs(2) && waited < Duration::from_secs(7),
+        "{waited:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_result_is_read_three_times_with_pauses_before_the_run_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, true));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.tick().await.unwrap();
+    assert_eq!(spy.issue_calls(), 1, "the re-read before the start");
+    *spy.fail_issue.lock().unwrap() = Some(("1".into(), "Linear is down".into()));
+    let before = tokio::time::Instant::now();
+    runner.gate.add_permits(1);
+    engine.wait_idle().await;
+    assert_eq!(spy.issue_calls(), 4, "three reads to verify the result");
+    // 2 s before the second read, 5 s before the third.
+    let waited = before.elapsed();
+    assert!(
+        waited >= Duration::from_secs(7) && waited < Duration::from_secs(8),
+        "{waited:?}"
+    );
+    let job = job_of(&engine, "1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("could not verify the result in Linear: Linear is down")
     );
 }
 
@@ -3200,14 +3260,15 @@ async fn a_result_that_cannot_be_stored_fails_the_job_and_frees_the_folder() {
 
 // Text that reaches the panel, the CLI and MCP.
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn text_from_linear_in_a_recorded_reason_is_cleaned() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
     h.engine.tick().await.unwrap();
-    // The error text comes from outside: a line break and a right-to-left override.
-    h.linear.fail_next("Linear said\nno \u{202e}gnp");
+    // The error text comes from outside: a line break and a right-to-left override. Every read
+    // that verifies the result fails with it.
+    h.linear.fail_calls("Linear said\nno \u{202e}gnp", 3);
     h.runner.gate.add_permits(1);
     h.settle().await;
     assert_eq!(

@@ -225,9 +225,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// Settings plus every binding: its folder, names and optional model name. Runs on every
-    /// load, and before the engine saves a change, so a hand-edited file is held to the same
-    /// rules as a binding added through the CLI or the panel.
+    /// Settings plus every binding: its folder, names and optional model name, and that no two
+    /// bindings share an `id` or a `project_id`. Runs on every load, and before the engine saves a
+    /// change, so a hand-edited file is held to the same rules as a binding added through the CLI
+    /// or the panel.
     pub fn validate(&self) -> Result<()> {
         self.settings.validate()?;
         for (i, binding) in self.bindings.iter().enumerate() {
@@ -259,6 +260,20 @@ impl Config {
                 anyhow::ensure!(
                     is_valid_model_name(model),
                     "bindings[{i}].model is not a valid model name: {model:?}"
+                );
+            }
+            // A second binding for a project would leave which folder and executor it runs with
+            // to the order of the file; a second one with the same id could not be told apart.
+            for (j, earlier) in self.bindings[..i].iter().enumerate() {
+                anyhow::ensure!(
+                    earlier.id != binding.id,
+                    "bindings[{j}] and bindings[{i}] have the same id {:?}",
+                    binding.id
+                );
+                anyhow::ensure!(
+                    earlier.project_id != binding.project_id,
+                    "bindings[{j}] and bindings[{i}] have the same project_id {:?}",
+                    binding.project_id
                 );
             }
         }
@@ -713,9 +728,51 @@ mod tests {
         let text = format!(
             "{}{}",
             binding_toml(&[]),
-            binding_toml(&[("id", "\"c\"".into()), ("directory", "'demo'".into())])
+            binding_toml(&[
+                ("id", "\"c\"".into()),
+                ("project_id", "\"q\"".into()),
+                ("directory", "'demo'".into())
+            ])
         );
         let err = load_error(&text);
         assert!(err.contains("bindings[1].directory"), "{err}");
+    }
+
+    #[test]
+    fn two_bindings_with_the_same_id_or_project_are_rejected_naming_both() {
+        let three_bindings = |overrides: &[(&str, String)]| {
+            format!(
+                "{}{}{}",
+                binding_toml(&[]),
+                binding_toml(&[("id", "\"c\"".into()), ("project_id", "\"q\"".into())]),
+                binding_toml(overrides)
+            )
+        };
+        let same_id = load_error(&three_bindings(&[("project_id", "\"r\"".into())]));
+        assert!(
+            same_id.contains("bindings[0] and bindings[2] have the same id \"b\""),
+            "{same_id}"
+        );
+        let same_project = load_error(&three_bindings(&[
+            ("id", "\"d\"".into()),
+            ("project_id", "\"q\"".into()),
+        ]));
+        assert!(
+            same_project.contains("bindings[1] and bindings[2] have the same project_id \"q\""),
+            "{same_project}"
+        );
+        assert!(
+            same_project.contains("config.toml"),
+            "the file is named: {same_project}"
+        );
+        // Different ids and projects may share a folder (the engine runs them one at a time).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            three_bindings(&[("id", "\"d\"".into()), ("project_id", "\"r\"".into())]),
+        )
+        .unwrap();
+        assert_eq!(Config::load(&path).unwrap().bindings.len(), 3);
     }
 }

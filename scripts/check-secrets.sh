@@ -3,15 +3,21 @@
 # Linear / Anthropic / OpenAI / GitHub / AWS tokens, private network addresses
 # and machine-specific absolute paths. Prints file:line for each hit, never the
 # matched text, so CI logs cannot leak a secret. New files are scanned only
-# after `git add`.
+# after `git add`. `git grep -I` skips files Git treats as binary (a NUL byte
+# near the start, or a `binary` / `-diff` attribute in .gitattributes), so
+# samples and fixtures must stay plain text to be scanned.
 #
 # Usage: bash scripts/check-secrets.sh [--strict]
 # Exit codes: 0 = no hits, or hits without --strict
 #             1 = hits with --strict
 #             2 = bad arguments, or the scan itself failed: git grep exited
 #                 above 1 or reported any error (outside a git checkout, an
-#                 invalid pattern, an unreadable file); it never fails open
+#                 invalid pattern, an unreadable file), or any other command
+#                 failed; it never fails open
 set -euo pipefail
+# Any failing command ends the script through `set -e`; the trap makes that
+# exit code 2, so a broken scan never reads as "hits found" (1).
+trap 'echo "check-secrets: scan failed (a command exited with $?)" >&2; exit 2' ERR
 cd "$(dirname "$0")/.."
 
 usage() { echo "usage: bash scripts/check-secrets.sh [--strict]"; }

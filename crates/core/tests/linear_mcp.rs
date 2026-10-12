@@ -128,6 +128,11 @@ async fn candidate_issues_follows_pagination() {
     assert_every_issue_field_requested(&calls);
     assert!(calls[0]["cursor"].is_null());
     assert_eq!(calls[1]["cursor"], "c2");
+    // Every page in creation order: under Linear's default (`updatedAt`) an issue edited during
+    // the walk moves to another page and can be missed.
+    for call in &calls {
+        assert_eq!(call["orderBy"], "createdAt", "{call}");
+    }
 }
 
 #[tokio::test]
@@ -299,6 +304,14 @@ fn the_fake_rejects_what_linear_rejects() {
     assert!(
         validate_arguments("list_issues", &serde_json::json!({"fields": ["notAField"]})).is_err()
     );
+    // `orderBy` takes one of the values its schema lists.
+    for order in ["createdAt", "updatedAt"] {
+        let args = serde_json::json!({"orderBy": order});
+        assert!(validate_arguments("list_issues", &args).is_ok(), "{order}");
+    }
+    let err =
+        validate_arguments("list_issues", &serde_json::json!({"orderBy": "priority"})).unwrap_err();
+    assert!(err.contains("orderBy"), "{err}");
 }
 
 /// Every read method of `LinearApi`, called once; `None` for a call that succeeded.

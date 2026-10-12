@@ -49,7 +49,9 @@ pub const REQUIRED_TOOLS: [&str; 8] = [
 pub const REQUIRED_ARGUMENTS: &[(&str, &[&str])] = &[
     (
         "list_issues",
-        &["assignee", "label", "state", "limit", "fields", "cursor"],
+        &[
+            "assignee", "label", "state", "limit", "orderBy", "fields", "cursor",
+        ],
     ),
     ("get_issue", &["id", "fields"]),
     ("save_issue", &["id", "state"]),

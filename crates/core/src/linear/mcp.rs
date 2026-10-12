@@ -189,7 +189,10 @@ impl LinearApi for McpLinear {
     }
 
     async fn candidate_issues(&self, label: &str, state: &str) -> Result<Vec<Issue>> {
-        let args = json!({"assignee": "me", "label": label, "state": state, "limit": 50, "fields": ISSUE_FIELDS});
+        // Pages in creation order. Linear's default order, `updatedAt`, moves an issue edited
+        // during the walk to another page, where it can be missed; the engine would then cancel
+        // its queued job as no longer matching the trigger.
+        let args = json!({"assignee": "me", "label": label, "state": state, "limit": 50, "orderBy": "createdAt", "fields": ISSUE_FIELDS});
         self.all_pages("list_issues", args, parse::parse_issue_page)
             .await
     }

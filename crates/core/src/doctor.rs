@@ -20,7 +20,7 @@ use url::Url;
 
 use crate::config::{Config, ExecutorKind, TriggerNames};
 use crate::executor;
-use crate::linear::{LinearApi, Viewer};
+use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
 use crate::trigger::same_name;
 
 /// What a finished check command printed and how it exited.
@@ -360,9 +360,9 @@ fn line_status(kind: ExecutorKind, line: &str) -> String {
 
 /// The problem to report when `mcp list` ran without showing a usable Linear server, and whether
 /// that is a usable answer. What a Linear line says, or that there is none after a clean exit,
-/// is an answer about the setup. A command that exited non-zero without any Linear line
-/// crashed or was refused: that says nothing about the setup, so it is reported as a failure
-/// and is not a usable answer.
+/// is an answer about the setup; without a Linear line the problem also says how to register
+/// the server. A command that exited non-zero without any Linear line crashed or was refused:
+/// that says nothing about the setup, so it is reported as a failure and is not a usable answer.
 fn linear_problem(kind: ExecutorKind, output: &CmdOutput) -> (String, bool) {
     let name = kind.program_name();
     let not_configured = format!("Linear MCP is not configured or not authorized in {name}");
@@ -376,7 +376,13 @@ fn linear_problem(kind: ExecutorKind, output: &CmdOutput) -> (String, bool) {
                 (format!("Linear MCP in {name}: {status}"), true)
             }
         }
-        None if output.code == Some(0) => (not_configured, true),
+        None if output.code == Some(0) => (
+            format!(
+                "{not_configured} (register it for all directories with: {})",
+                register_linear_command(kind)
+            ),
+            true,
+        ),
         None => {
             let failed = format!(
                 "`{name} mcp list` failed (exit code {})",
@@ -384,6 +390,20 @@ fn linear_problem(kind: ExecutorKind, output: &CmdOutput) -> (String, bool) {
             );
             (with_detail(failed, first_line(&output.stderr)), false)
         }
+    }
+}
+
+/// The official command that registers Linear's MCP server for every directory (design section
+/// 8). Runs happen in the bindings' folders while this check runs in the host's, so a server
+/// registered for one directory only would pass here and be missing there; Claude's default
+/// scope is the current project, hence `--scope user`; `codex mcp add` writes the user's own
+/// configuration.
+fn register_linear_command(kind: ExecutorKind) -> String {
+    match kind {
+        ExecutorKind::Claude => {
+            format!("claude mcp add --scope user --transport http linear-server {LINEAR_MCP_URL}")
+        }
+        ExecutorKind::Codex => format!("codex mcp add linear --url {LINEAR_MCP_URL}"),
     }
 }
 
@@ -1095,14 +1115,33 @@ mod tests {
             )
             .await;
             let name = kind.program_name();
-            assert_eq!(
-                report.problems,
-                [format!(
-                    "Linear MCP is not configured or not authorized in {name}"
-                )]
-            );
+            let not_configured =
+                format!("Linear MCP is not configured or not authorized in {name}");
+            // Without a Linear line the problem says how to register the server for every
+            // folder; a Linear line without a status means it is registered already.
+            let expected = if mcp_list == no_status {
+                not_configured
+            } else {
+                format!(
+                    "{not_configured} (register it for all directories with: {})",
+                    register_linear_command(kind)
+                )
+            };
+            assert_eq!(report.problems, [expected]);
             assert!(complete);
         }
+    }
+
+    #[test]
+    fn the_registration_hint_is_the_official_command_for_every_directory() {
+        assert_eq!(
+            register_linear_command(ExecutorKind::Claude),
+            "claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp"
+        );
+        assert_eq!(
+            register_linear_command(ExecutorKind::Codex),
+            "codex mcp add linear --url https://mcp.linear.app/mcp"
+        );
     }
 
     #[tokio::test]
@@ -1374,7 +1413,13 @@ mod tests {
             assert_eq!(
                 report.problems,
                 [format!(
-                    "Linear MCP is not configured or not authorized in {name}"
+                    "Linear MCP is not configured or not authorized in {name} (register it for \
+                     all directories with: {name} mcp add {})",
+                    if name == "claude" {
+                        "--scope user --transport http linear-server https://mcp.linear.app/mcp"
+                    } else {
+                        "linear --url https://mcp.linear.app/mcp"
+                    }
                 )]
             );
             assert!(complete);

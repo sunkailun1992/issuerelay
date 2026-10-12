@@ -13,7 +13,8 @@ use issuerelay_core::{
 struct State {
     me: String,
     issues: Vec<Issue>,
-    fail_next: Option<String>,
+    /// The message the next calls fail with, and how many calls are left to fail.
+    fail_next: Option<(String, usize)>,
     set_state_calls: Vec<(String, String)>,
     statuses: Vec<String>,
 }
@@ -65,8 +66,14 @@ impl FakeLinear {
             .expect("unknown issue")
     }
 
+    /// The next call, whatever it is, fails with `message`.
     pub fn fail_next(&self, message: &str) {
-        self.state.lock().unwrap().fail_next = Some(message.into());
+        self.fail_calls(message, 1);
+    }
+
+    /// The next `calls` calls, whatever they are, fail with `message`.
+    pub fn fail_calls(&self, message: &str, calls: usize) {
+        self.state.lock().unwrap().fail_next = (calls > 0).then(|| (message.into(), calls));
     }
 
     pub fn set_statuses(&self, statuses: &[&str]) {
@@ -78,8 +85,14 @@ impl FakeLinear {
     }
 
     fn check_failure(&self) -> Result<()> {
-        match self.state.lock().unwrap().fail_next.take() {
-            Some(message) => Err(anyhow!(message)),
+        let mut state = self.state.lock().unwrap();
+        match state.fail_next.take() {
+            Some((message, left)) => {
+                if left > 1 {
+                    state.fail_next = Some((message.clone(), left - 1));
+                }
+                Err(anyhow!(message))
+            }
             None => Ok(()),
         }
     }

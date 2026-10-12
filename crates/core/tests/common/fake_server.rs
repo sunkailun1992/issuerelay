@@ -36,8 +36,8 @@ fn linear_tools() -> &'static [Value] {
 
 /// Checks `args` the way Linear's input schema for `tool` does: every non-null argument must be
 /// a listed property (the schemas say `additionalProperties: false`), a number may not exceed
-/// its `maximum`, array items must be among `items.enum` where the schema lists them, and every
-/// `required` argument must be present. The error reads like the tool error Linear sends:
+/// its `maximum`, a value must be among `enum` and array items among `items.enum` where the
+/// schema lists them, and every `required` argument must be present. The error reads like the tool error Linear sends:
 /// `invalid arguments for {tool}: …`.
 pub fn validate_arguments(tool: &str, args: &Value) -> Result<(), String> {
     let invalid = |why: String| format!("invalid arguments for {tool}: {why}");
@@ -72,6 +72,13 @@ pub fn validate_arguments(tool: &str, args: &Value) -> Result<(), String> {
         {
             return Err(invalid(format!(
                 "`{name}` is {number}, at most {maximum} is allowed"
+            )));
+        }
+        if let Some(allowed) = property["enum"].as_array()
+            && !allowed.contains(value)
+        {
+            return Err(invalid(format!(
+                "`{name}` is {value}, which is not allowed"
             )));
         }
         if let Some(allowed) = property["items"]["enum"].as_array()
@@ -112,6 +119,8 @@ pub struct ListIssuesArgs {
     pub state: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
+    #[serde(rename = "orderBy")]
+    pub order_by: Option<String>,
     pub fields: Option<Vec<String>>,
 }
 

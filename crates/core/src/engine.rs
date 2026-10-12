@@ -41,6 +41,10 @@ use crate::trigger::{self, Eligibility, WaitReason, same_name};
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
 
+/// The pauses before the second and the third read that verifies a run's result in Linear. One
+/// failed read (a network hiccup) must not fail a run that did its work.
+const VERIFY_RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
 /// Starts one executor run and waits for it. The engine calls it from a task of its own.
 #[async_trait::async_trait]
 pub trait JobRunner: Send + Sync {
@@ -531,7 +535,14 @@ impl Engine {
             },
             Eligibility::NotCandidate => return Ok(()),
         };
-        store.insert(new)?;
+        let job = store.insert(new)?;
+        // The identifier and the state only: titles and summaries are Linear's and the AI's text.
+        tracing::info!(
+            job_id = job.id,
+            issue = %job.issue_identifier,
+            state = job.state.as_str(),
+            "job queued"
+        );
         Ok(())
     }
 
@@ -553,6 +564,14 @@ impl Engine {
                         Some(cfg.executor_for(&binding)),
                         None,
                     )?;
+                    if job.state == JobState::WaitingBinding {
+                        tracing::info!(
+                            job_id = job.id,
+                            issue = %job.issue_identifier,
+                            state = JobState::Queued.as_str(),
+                            "job queued"
+                        );
+                    }
                 }
             }
             Eligibility::Waiting(reason) => {
@@ -780,6 +799,13 @@ impl Engine {
             self.end_run(job.id);
             return started.map(|_| false);
         }
+        tracing::info!(
+            job_id = job.id,
+            issue = %job.issue_identifier,
+            state = JobState::Running.as_str(),
+            executor = kind.as_str(),
+            "job started"
+        );
         let limits = RunLimits {
             total: Duration::from_secs(cfg.settings.run_timeout_mins.saturating_mul(60)),
             stall: Duration::from_secs(cfg.settings.stall_timeout_mins.saturating_mul(60)),
@@ -793,6 +819,7 @@ impl Engine {
         let runner = self.inner.job_runner.clone();
         let job_id = job.id;
         let issue_uuid = job.issue_uuid.clone();
+        let identifier = job.issue_identifier.clone();
         tokio::spawn(async move {
             // The runner gets a task of its own: if it panics, the job must still be recorded as
             // finished and give its slot back. Unwinding drops the runner's process-tree guard,
@@ -807,7 +834,7 @@ impl Engine {
                 },
             };
             if let Err(e) = engine
-                .finish_job(job_id, &issue_uuid, output, &mut slot)
+                .finish_job(job_id, &issue_uuid, &identifier, output, &mut slot)
                 .await
             {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not record the run result");
@@ -843,12 +870,13 @@ impl Engine {
         &self,
         job_id: i64,
         issue_uuid: &str,
+        identifier: &str,
         output: RunOutput,
         slot: &mut RunSlot,
     ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
-        let verified = self.inner.linear.issue(issue_uuid).await;
+        let verified = self.verify_read(job_id, issue_uuid).await;
         let (state, reason, verified_at) = match verified {
             Ok(issue) => {
                 let (state, reason) = decide(
@@ -888,6 +916,9 @@ impl Engine {
             summary.as_deref(),
             verified_at,
         );
+        if recorded.is_ok() {
+            tracing::info!(job_id, issue = %identifier, state = state.as_str(), "job finished");
+        }
         if let Err(e) = &recorded {
             // Without this the row would stay `running` for a run that is over.
             let reason = clean_text(&format!("could not record the run result: {e:#}"));
@@ -903,6 +934,29 @@ impl Engine {
         slot.release();
         self.poll_now();
         recorded
+    }
+
+    /// Reads the issue of a finished run, up to three times: a read that fails is tried again
+    /// after the pauses in `VERIFY_RETRY_PAUSES`. An issue Linear reports as gone is an answer,
+    /// not a failure, and is not read again.
+    async fn verify_read(&self, job_id: i64, issue_uuid: &str) -> Result<Option<Issue>> {
+        let mut pauses = VERIFY_RETRY_PAUSES.into_iter();
+        loop {
+            match self.inner.linear.issue(issue_uuid).await {
+                Ok(issue) => return Ok(issue),
+                Err(e) => {
+                    let Some(pause) = pauses.next() else {
+                        return Err(e);
+                    };
+                    tracing::warn!(
+                        job_id,
+                        error = %format!("{e:#}"),
+                        "could not read the issue to verify the run; trying again"
+                    );
+                    tokio::time::sleep(pause).await;
+                }
+            }
+        }
     }
 
     /// Drops the run from the running set and wakes `wait_idle`. Also runs from `RunSlot::drop`,
@@ -1049,6 +1103,12 @@ impl Engine {
                 );
             }
             store.requeue(job_id)?;
+            tracing::info!(
+                job_id,
+                issue = %job.issue_identifier,
+                state = JobState::Queued.as_str(),
+                "job queued again"
+            );
         }
         self.poll_now();
         Ok(())
