@@ -368,6 +368,88 @@ async fn paused_engine_does_nothing_and_pause_is_saved() {
 }
 
 #[tokio::test]
+async fn a_config_file_edited_while_running_is_never_overwritten() {
+    let h = Harness::new(2, false);
+    let config_path = h.root.path().join("config.toml");
+    // In M1 a hand edit is the only way to change the limits, intervals and templates.
+    let saved = std::fs::read_to_string(&config_path).unwrap();
+    let hand_edit = saved.replace("run_timeout_mins = 60", "run_timeout_mins = 2");
+    assert_ne!(hand_edit, saved, "the file names run_timeout_mins");
+    std::fs::write(&config_path, &hand_edit).unwrap();
+
+    let err = h.engine.pause().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "config.toml was changed while IssueRelay was running; restart the host to use it \
+         (nothing was saved)"
+    );
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), hand_edit);
+    assert!(
+        !h.engine.status().paused,
+        "the refused change reached memory"
+    );
+
+    // A restarted host loads the edit and saves on top of it.
+    let linear = FakeLinear::new("user-1");
+    let restarted = Engine::new(EngineDeps {
+        config_path: config_path.clone(),
+        store: Store::open_in_memory().unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: h.root.path().join("logs"),
+    })
+    .unwrap();
+    restarted.pause().unwrap();
+    let on_disk = Config::load(&config_path).unwrap();
+    assert!(on_disk.settings.paused);
+    assert_eq!(on_disk.settings.run_timeout_mins, 2);
+    // Its own save does not count as a change made behind its back.
+    restarted.resume().unwrap();
+    assert!(!Config::load(&config_path).unwrap().settings.paused);
+}
+
+#[tokio::test]
+async fn a_config_file_created_or_removed_while_running_is_a_change_too() {
+    // Started without a file: the defaults.
+    let root = tempfile::tempdir().unwrap();
+    let config_path = root.path().join("config.toml");
+    let linear = FakeLinear::new("user-1");
+    let engine = Engine::new(EngineDeps {
+        config_path: config_path.clone(),
+        store: Store::open_in_memory().unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    std::fs::write(&config_path, "[settings]\npoll_interval_secs = 10\n").unwrap();
+    let err = engine.pause().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("was changed while IssueRelay was running"),
+        "{err:#}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "[settings]\npoll_interval_secs = 10\n"
+    );
+    // A file the engine saved and someone then removed.
+    std::fs::remove_file(&config_path).unwrap();
+    engine.pause().unwrap();
+    std::fs::remove_file(&config_path).unwrap();
+    let err = engine.resume().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("was changed while IssueRelay was running"),
+        "{err:#}"
+    );
+    assert!(!config_path.exists(), "the removed file was written again");
+    assert!(engine.status().paused);
+}
+
+#[tokio::test]
 async fn poll_error_is_reported_without_state_changes() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");

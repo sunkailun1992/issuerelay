@@ -3,12 +3,12 @@
 //!
 //! Locking: no std lock is ever held across an `.await`. They are taken and released within one
 //! statement, except in short synchronous sections that must read and then write under one
-//! guard: `update_config` (the config), `retry_job`, the poll's step for each issue and
-//! `assign_if_queued` (the store), the registration of a run and the final loop of
-//! `run_forever` (the running set). The async cycle lock is the one lock held across `.await`;
-//! it keeps a poll from interleaving with a dispatch. A user's stop or retry can come at any
-//! time, also while a poll or a start waits for Linear, so every write that follows such a
-//! wait is conditional on the row still being in the state it was read in.
+//! guard: `update_config` (the config, and under it the file's last known bytes), `retry_job`,
+//! the poll's step for each issue and `assign_if_queued` (the store), the registration of a run
+//! and the final loop of `run_forever` (the running set). The async cycle lock is the one lock
+//! held across `.await`; it keeps a poll from interleaving with a dispatch. A user's stop or
+//! retry can come at any time, also while a poll or a start waits for Linear, so every write
+//! that follows such a wait is conditional on the row still being in the state it was read in.
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
@@ -154,6 +154,9 @@ impl Drop for RunSlot {
 struct Inner {
     config_path: PathBuf,
     config: RwLock<Config>,
+    /// The configuration file's bytes as this engine last loaded or saved them; `None` while
+    /// there is no file. Only `update_config` reads or replaces it, under the config write lock.
+    config_file: Mutex<Option<Vec<u8>>>,
     store: Mutex<Store>,
     linear: Arc<dyn LinearApi>,
     readiness: Arc<dyn ReadinessProbe>,
@@ -178,6 +181,15 @@ struct Inner {
 #[derive(Clone)]
 pub struct Engine {
     inner: Arc<Inner>,
+}
+
+/// The bytes of the configuration file; `None` when there is none.
+fn read_config_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
 }
 
 /// One spelling per folder for the one-run-per-directory rule: resolves symlinks, `..` and,
@@ -233,6 +245,9 @@ impl Engine {
     /// Loads the configuration and marks the runs a previous shutdown interrupted as failed.
     /// Only one engine may use a database at a time.
     pub fn new(deps: EngineDeps) -> Result<Self> {
+        // The bytes are read before the file is loaded: if it changes in between, the first save
+        // refuses instead of overwriting the newer text.
+        let config_file = read_config_file(&deps.config_path)?;
         let config = Config::load(&deps.config_path)?;
         let recovered = deps.store.recover_interrupted()?;
         if recovered > 0 {
@@ -245,6 +260,7 @@ impl Engine {
             inner: Arc::new(Inner {
                 config_path: deps.config_path,
                 config: RwLock::new(config),
+                config_file: Mutex::new(config_file),
                 store: Mutex::new(deps.store),
                 linear: deps.linear,
                 readiness: deps.readiness,
@@ -312,13 +328,26 @@ impl Engine {
         self.inner.poll_now.notify_one();
     }
 
-    /// Validates the changed configuration, saves it and only then makes it current.
+    /// Validates the changed configuration, saves it and only then makes it current. The file
+    /// must still hold what this engine last loaded or saved: a hand edit made while the host
+    /// runs (in M1 the only way to change limits, intervals and templates) is not in memory, and
+    /// saving would silently revert it. Such a change is refused and nothing is saved or changed.
     fn update_config(&self, change: impl FnOnce(&mut Config)) -> Result<()> {
         let mut current = self.inner.config.write().expect("config lock");
         let mut next = current.clone();
         change(&mut next);
         next.validate()?;
+        let mut known = self.inner.config_file.lock().expect("config file lock");
+        if read_config_file(&self.inner.config_path)? != *known {
+            bail!(
+                "config.toml was changed while IssueRelay was running; restart the host to use it \
+                 (nothing was saved)"
+            );
+        }
+        // The text `Config::save` writes, to compare against before the next save.
+        let text = toml::to_string_pretty(&next)?;
         next.save(&self.inner.config_path)?;
+        *known = Some(text.into_bytes());
         *current = next;
         Ok(())
     }
