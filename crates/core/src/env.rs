@@ -8,6 +8,7 @@
 //! `ExecEnv::apply` hands the result to every child.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -84,7 +85,10 @@ pub enum EnvSource {
 }
 
 /// The environment children get on top of the host's own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` prints the proxy variables masked (`proxy_for_display`), so a log line or a failed
+/// assertion that shows an environment, or a report holding one, cannot show a password.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecEnv {
     /// The PATH children get and executors are looked up on; `None` keeps the host's.
     pub path: Option<String>,
@@ -99,6 +103,18 @@ pub struct ExecEnv {
 /// One environment, shared by the job runner and the readiness checks; the environment check
 /// replaces it with a freshly resolved one.
 pub type SharedEnv = Arc<RwLock<ExecEnv>>;
+
+impl std::fmt::Debug for ExecEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecEnv")
+            .field("path", &self.path)
+            .field("path_source", &self.path_source)
+            .field("proxy", &self.proxy_for_display())
+            .field("proxy_source", &self.proxy_source)
+            .field("problems", &self.problems)
+            .finish()
+    }
+}
 
 impl ExecEnv {
     /// The host's environment as it is, without any lookup.
@@ -140,17 +156,33 @@ impl ExecEnv {
     }
 }
 
-/// `url` with its user-info part (`user:password@`) replaced by `***@`. Text that is not a URL
-/// with an authority is returned as it is.
+/// `url` with its user-info part (`user:password@`) replaced by `***@`. The user-info ends at
+/// the last `@` before the first `/`, so a password that holds an `@` is masked whole. The
+/// scheme is optional: curl also accepts `user:password@host:port` as a proxy. Text without
+/// such an `@` is returned as it is.
 pub fn mask_credentials(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
+        _ => (None, url),
     };
     let authority_end = rest.find('/').unwrap_or(rest.len());
-    match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{scheme}://***@{}", &rest[at + 1..]),
-        None => url.to_string(),
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return url.to_string();
+    };
+    let host = &rest[at + 1..];
+    match scheme {
+        Some(scheme) => format!("{scheme}://***@{host}"),
+        None => format!("***@{host}"),
     }
+}
+
+/// Whether `text` can be the scheme of a URL (`http`, `socks5h`). A `://` further in, in a path or
+/// a query, does not make what comes before it a scheme.
+fn is_scheme(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 fn interesting(name: &str) -> bool {
@@ -178,9 +210,18 @@ fn host_vars() -> Vars {
 /// Works out the environment children should get (see the module documentation). Never fails:
 /// what could not be read is listed in `problems`.
 pub async fn resolve() -> ExecEnv {
-    let host = host_vars();
-    let shell = login_shell_vars().await;
-    let system = system_proxy().await;
+    resolve_from(host_vars(), login_shell_vars(), system_proxy()).await
+}
+
+/// `resolve` over the three sources as they are given. The login shell and the system settings
+/// are read together: either can be slow (the shell runs the user's rc files), and a fresh
+/// environment check waits for this while it holds the readiness cache's lock.
+async fn resolve_from(
+    host: Vars,
+    shell: impl Future<Output = Result<Vars, String>>,
+    system: impl Future<Output = Result<Vec<(String, String)>, String>>,
+) -> ExecEnv {
+    let (shell, system) = tokio::join!(shell, system);
     combine(&host, shell, system)
 }
 
@@ -281,8 +322,12 @@ async fn login_shell_vars() -> Result<Vars, String> {
 
 /// Runs `shell -l -i -c <script>`, where the script prints `env` between two markers. The shell
 /// leads a session and a process group of its own; the group, with anything the rc files left
-/// running in it, is killed once the output is read, or after `limit` if the shell has not
-/// finished by then.
+/// running in it, is killed once the end marker has arrived (or the shell has ended), or after
+/// `limit` if neither has happened by then.
+///
+/// The read stops at the end marker, not at the end of the pipe: an rc file can leave a process
+/// running that holds the shell's stdout, and then the pipe would stay open until `limit` and
+/// the variables, which are complete by then, would be lost.
 ///
 /// A session of its own, not just a group: an interactive zsh in a background process group of
 /// the host's terminal is stopped by the terminal and never prints (measured with zsh 5.9 on
@@ -294,7 +339,6 @@ pub async fn shell_vars(shell: &Path, limit: Duration) -> Result<Vars, String> {
     use std::process::Stdio;
 
     use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
-    use tokio::io::AsyncReadExt;
 
     let script = format!("printf '\\n%s\\n' {BEGIN}; env; printf '\\n%s\\n' {END}");
     let mut command = CommandWrap::with_new(shell, |c| {
@@ -312,11 +356,7 @@ pub async fn shell_vars(shell: &Path, limit: Duration) -> Result<Vars, String> {
         let _ = child.start_kill();
         return Err(format!("{} has no output pipe", shell.display()));
     };
-    let read = async {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
-    };
-    let outcome = tokio::time::timeout(limit, read).await;
+    let outcome = tokio::time::timeout(limit, read_until_end_marker(&mut stdout)).await;
     // Ends the shell and whatever its rc files left running in its group.
     let _ = child.start_kill();
     match outcome {
@@ -327,6 +367,36 @@ pub async fn shell_vars(shell: &Path, limit: Duration) -> Result<Vars, String> {
             "{} did not finish within {limit:?}",
             shell.display()
         )),
+    }
+}
+
+/// What `pipe` delivers up to and including the end marker, or up to the end of the pipe when the
+/// marker does not come. The marker is on a line of its own, whatever the rc files printed before
+/// it.
+#[cfg(unix)]
+async fn read_until_end_marker<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let marker = format!("\n{END}");
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = pipe.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        // The marker may be split across two reads, so the search starts before the new bytes.
+        let from = bytes.len().saturating_sub(marker.len() - 1);
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes[from..]
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+        {
+            return Ok(bytes);
+        }
     }
 }
 
@@ -664,6 +734,69 @@ mod tests {
     }
 
     #[test]
+    fn credentials_without_a_scheme_are_masked_too() {
+        // curl accepts `user:password@host:port` as a proxy; the credentials end at the last `@`
+        // before the first `/`, so a password that holds an `@` is masked whole.
+        assert_eq!(
+            mask_credentials("jane:s3cret@proxy.example:8080"),
+            "***@proxy.example:8080"
+        );
+        assert_eq!(
+            mask_credentials("token@proxy.example:8080"),
+            "***@proxy.example:8080"
+        );
+        assert_eq!(
+            mask_credentials("jane:p@ss@proxy.example:8080"),
+            "***@proxy.example:8080"
+        );
+        assert_eq!(
+            mask_credentials("jane:s3cret@proxy.example:8080/path@x"),
+            "***@proxy.example:8080/path@x"
+        );
+        assert_eq!(
+            mask_credentials("socks5h://jane:s3cret@proxy.example:1080"),
+            "socks5h://***@proxy.example:1080"
+        );
+        // An `@` after the first `/` belongs to a path, not to credentials.
+        assert_eq!(
+            mask_credentials("proxy.example:8080/path@x"),
+            "proxy.example:8080/path@x"
+        );
+        assert_eq!(mask_credentials("proxy.example:8080"), "proxy.example:8080");
+        assert_eq!(mask_credentials(""), "");
+        // `://` further in is not a scheme: the credentials in front of it are still found.
+        assert_eq!(
+            mask_credentials("jane:s3cret@proxy.example/redirect?to=http://other.example"),
+            "***@proxy.example/redirect?to=http://other.example"
+        );
+    }
+
+    #[test]
+    fn debug_output_shows_the_proxy_masked() {
+        let env = ExecEnv {
+            proxy: vec![
+                (
+                    "HTTPS_PROXY".into(),
+                    "http://jane:s3cret@proxy.example:8080".into(),
+                ),
+                ("ALL_PROXY".into(), "jane:s3cret@proxy.example:1080".into()),
+            ],
+            proxy_source: EnvSource::LoginShell,
+            problems: vec!["demo problem".into()],
+            ..ExecEnv::inherit()
+        };
+        for text in [format!("{env:?}"), format!("{env:#?}")] {
+            assert!(!text.contains("s3cret"), "{text}");
+            assert!(text.contains("http://***@proxy.example:8080"), "{text}");
+            assert!(text.contains("***@proxy.example:1080"), "{text}");
+            // Everything else is printed as the derive would print it.
+            assert!(text.contains("ExecEnv"), "{text}");
+            assert!(text.contains("LoginShell"), "{text}");
+            assert!(text.contains("demo problem"), "{text}");
+        }
+    }
+
+    #[test]
     fn env_output_is_read_between_the_markers_only() {
         let text = format!(
             "rc noise PATH=/wrong\n\n{BEGIN}\nPATH=/opt/demo/bin:/usr/bin\nHOME=/home/demo\nHTTPS_PROXY=http://p:1/?a=b\n\n{END}\nmore noise HTTP_PROXY=x\n"
@@ -838,6 +971,34 @@ mod tests {
         );
     }
 
+    // Both sources can be slow (the login shell runs the user's rc files) and `resolve` runs while
+    // the readiness check holds its lock: they are read together, not one after the other.
+    #[tokio::test(start_paused = true)]
+    async fn the_login_shell_and_the_system_settings_are_read_at_the_same_time() {
+        use std::time::Duration;
+
+        let started = tokio::time::Instant::now();
+        let shell = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(vars(&[("PATH", "/opt/demo/bin")]))
+        };
+        let system = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(vec![(
+                "HTTPS_PROXY".to_string(),
+                "http://127.0.0.1:7890".to_string(),
+            )])
+        };
+        let env = resolve_from(Vars::new(), shell, system).await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(10),
+            "one after the other would take 15 s"
+        );
+        assert_eq!(env.path_source, EnvSource::LoginShell);
+        assert_eq!(env.proxy_source, EnvSource::SystemSettings);
+    }
+
     #[cfg(unix)]
     fn fake_shell(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -845,6 +1006,58 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    // The pipe delivers one byte at a time, so the marker is split across reads at every
+    // position, and it never ends: the read has to stop at the marker.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reading_stops_at_the_end_marker_even_when_it_arrives_in_pieces() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut far_end, near_end) = tokio::io::duplex(1);
+        let text = format!("rc noise\n\n{BEGIN}\nPATH=/opt/demo/bin\n\n{END}\nlater output\n");
+        let writer = tokio::spawn(async move {
+            let _ = far_end.write_all(text.as_bytes()).await;
+            // Not closed: whoever reads to the end of the pipe waits forever.
+            std::future::pending::<()>().await;
+        });
+        let bytes = tokio::time::timeout(Duration::from_secs(5), read_until_end_marker(near_end))
+            .await
+            .expect("the read waited for the end of the pipe")
+            .unwrap();
+        writer.abort();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.ends_with(END), "{text:?}");
+        assert_eq!(parse_env_output(&text).unwrap()["PATH"], "/opt/demo/bin");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reading_without_an_end_marker_goes_on_to_the_end_of_the_pipe() {
+        // A marker in the middle of a line is not the marker: it is on a line of its own.
+        let text = format!("noise {END} more noise\n").into_bytes();
+        let bytes = read_until_end_marker(&text[..]).await.unwrap();
+        assert_eq!(bytes, text);
+        assert!(read_until_end_marker(&b""[..]).await.unwrap().is_empty());
+    }
+
+    /// `shell_vars`, trying again while the OS reports the fake shell as busy: executing a script
+    /// right after writing it can fail with `ETXTBSY` when another test thread forks in between
+    /// (`tests/doctor.rs::run_script` does the same).
+    #[cfg(unix)]
+    async fn shell_vars_retrying(shell: &Path, limit: Duration) -> Result<Vars, String> {
+        let busy = format!("(os error {})", libc::ETXTBSY);
+        let mut retries = 0;
+        loop {
+            match shell_vars(shell, limit).await {
+                Err(error) if retries < 5 && error.contains(&busy) => {
+                    retries += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -857,9 +1070,55 @@ mod tests {
             dir.path(),
             "echo 'welcome from the rc file'\nPATH=/opt/demo/bin:$PATH; export PATH\nHTTPS_PROXY=http://127.0.0.1:9; export HTTPS_PROXY\neval \"$4\"",
         );
-        let vars = shell_vars(&shell, Duration::from_secs(5)).await.unwrap();
+        let vars = shell_vars_retrying(&shell, Duration::from_secs(5))
+            .await
+            .unwrap();
         assert!(vars["PATH"].starts_with("/opt/demo/bin:"));
         assert_eq!(vars["HTTPS_PROXY"], "http://127.0.0.1:9");
+    }
+
+    // An rc file can leave a process running that holds the shell's stdout (a daemon started from
+    // `.zshrc`): the pipe then does not end when the shell does. The variables are complete once the
+    // end marker has arrived, so the read stops there, and the session, that process included, is
+    // ended.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_the_rc_file_leaves_holding_stdout_does_not_delay_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("background.pid");
+        let shell = fake_shell(
+            dir.path(),
+            &format!(
+                "sleep 30 &\necho $! > \"{}\"\nPATH=/opt/demo/bin:$PATH; export PATH\neval \"$4\"",
+                pid_file.display()
+            ),
+        );
+        let started = std::time::Instant::now();
+        let vars = shell_vars_retrying(&shell, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(2),
+            "waited for the pipe to end: {took:?}"
+        );
+        assert!(vars["PATH"].starts_with("/opt/demo/bin:"));
+
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 sends nothing; it only reports whether the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            if std::time::Instant::now() >= give_up {
+                // SAFETY: a plain signal call for the process this test started.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                panic!("the process the rc file left running was not ended");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[cfg(unix)]
@@ -868,7 +1127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = fake_shell(dir.path(), "sleep 30");
         let started = std::time::Instant::now();
-        let error = shell_vars(&shell, Duration::from_millis(300))
+        let error = shell_vars_retrying(&shell, Duration::from_millis(300))
             .await
             .unwrap_err();
         assert!(error.contains("did not finish"), "{error}");

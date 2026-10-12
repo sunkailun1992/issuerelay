@@ -686,7 +686,8 @@ pub struct DoctorReport {
     /// `None` when the workspace could not be checked.
     pub workspace: Option<WorkspaceReport>,
     pub bindings: Vec<BindingReport>,
-    /// The PATH and proxy executors get; `None` when the probe does not resolve one.
+    /// The PATH and proxy executors get, with any user name and password in a proxy URL masked
+    /// (`ExecEnv::proxy_for_display`); `None` when the probe does not resolve one.
     #[serde(default)]
     pub env: Option<ExecEnv>,
 }
@@ -701,7 +702,8 @@ pub trait ReadinessProbe: Send + Sync {
     /// therefore uses that check's result instead of running the commands a second time.
     async fn executor_reports(&self, fresh: bool) -> Vec<ExecutorReport>;
 
-    /// The environment executors are found and run with, when this probe resolves one.
+    /// The environment executors are found and run with, when this probe resolves one. The proxy
+    /// values are the real ones; `Engine::doctor` masks them for the report.
     fn env(&self) -> Option<ExecEnv> {
         None
     }
@@ -750,6 +752,12 @@ impl SystemReadiness {
     /// `env` is shared with the job runner: executors are looked up on its PATH, check commands
     /// run with it, and every fresh check resolves it again first.
     pub fn new(ttl: Duration, env: SharedEnv) -> Self {
+        Self::with_refresh(ttl, env, Arc::new(|| Box::pin(crate::env::resolve())))
+    }
+
+    /// `new` with another way to resolve the environment again; the tests use it so that no login
+    /// shell runs. The check commands and the lookup of the executables are wired as `new` does.
+    fn with_refresh(ttl: Duration, env: SharedEnv, refresh_env: RefreshEnv) -> Self {
         let lookup = env.clone();
         Self::with_parts(
             ttl,
@@ -764,7 +772,7 @@ impl SystemReadiness {
                 executor::resolve_program_in(kind, path.as_deref()).ok()
             }),
             env,
-            Arc::new(|| Box::pin(crate::env::resolve())),
+            refresh_env,
         )
     }
 
@@ -2294,6 +2302,78 @@ mod tests {
         let reports = probe.executor_reports(false).await;
         assert_eq!(reports[0].program, Some(program));
         assert_eq!(reports[1].program, None);
+    }
+
+    // H1 depends on this wiring: `claude` is a node launcher that needs the resolved PATH, and it
+    // reaches Linear only with the resolved proxy. A fresh check resolves the environment first;
+    // `with_refresh` replaces only that step, so no login shell runs and everything else is wired
+    // as in `new`. Unix only because the fake `claude` is a shell script; the same hand-over of the
+    // shared environment to a `.cmd` check command is tested in tests/doctor.rs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_check_runs_the_executor_found_on_the_resolved_path_with_the_resolved_proxy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        // `--version` shows what reached the command; the other commands print nothing.
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"fake-claude $ISSUERELAY_TEST_MARKER\"; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resolved = ExecEnv {
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            proxy: vec![("ISSUERELAY_TEST_MARKER".into(), "resolved".into())],
+            ..ExecEnv::inherit()
+        };
+        let probe = SystemReadiness::with_refresh(
+            TTL,
+            ExecEnv::inherit().shared(),
+            Arc::new(move || {
+                let resolved = resolved.clone();
+                Box::pin(async move { resolved })
+            }),
+        );
+        // Executing a script right after writing it can fail with `ETXTBSY` when another test
+        // thread forks in between (`tests/doctor.rs::run_script` does the same): try again.
+        let mut reports = Vec::new();
+        for _ in 0..5 {
+            reports = probe.executor_reports(true).await;
+            if reports[0].version.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            reports[0].version.as_deref(),
+            Some("fake-claude resolved"),
+            "{reports:?}"
+        );
+        assert_eq!(reports[0].program, Some(claude));
+        assert_eq!(reports[1].program, None, "{reports:?}");
+    }
+
+    #[test]
+    fn a_doctor_report_does_not_print_proxy_credentials_in_its_debug_output() {
+        let report = DoctorReport {
+            viewer: None,
+            linear_error: None,
+            executors: Vec::new(),
+            workspace: None,
+            bindings: Vec::new(),
+            env: Some(ExecEnv {
+                proxy: vec![(
+                    "HTTPS_PROXY".into(),
+                    "http://jane:s3cret@proxy.example:8080".into(),
+                )],
+                ..ExecEnv::inherit()
+            }),
+        };
+        let text = format!("{report:?}");
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(text.contains("http://***@proxy.example:8080"), "{text}");
     }
 
     #[tokio::test(start_paused = true)]

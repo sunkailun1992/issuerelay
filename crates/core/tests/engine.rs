@@ -2343,6 +2343,52 @@ async fn doctor_reports_the_environment_the_probe_resolved() {
     assert_eq!(h.engine.doctor().await.env, None);
 }
 
+// The report goes out over IPC and `doctor --json`, and is shown in the panel: a password in the
+// proxy URL must not go with it. The probe, whose environment the job runner shares, keeps the
+// real value.
+#[tokio::test]
+async fn doctor_masks_proxy_credentials_in_the_report() {
+    let root = tempfile::tempdir().unwrap();
+    let env = ExecEnv {
+        proxy: vec![
+            (
+                "HTTPS_PROXY".into(),
+                "http://jane:s3cret@proxy.example:8080".into(),
+            ),
+            ("NO_PROXY".into(), "localhost".into()),
+        ],
+        proxy_source: EnvSource::LoginShell,
+        ..ExecEnv::inherit()
+    };
+    let probe = Arc::new(ResolvesEnv(env.clone()));
+    let engine = build_engine(
+        root.path(),
+        &Config::default(),
+        Arc::new(FakeLinear::new("user-1")),
+        probe.clone(),
+        Arc::new(ScriptedRunner::new(FakeLinear::new("user-1"), false)),
+    );
+    let report = engine.doctor().await;
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(json.contains("***@proxy.example:8080"), "{json}");
+    assert!(!json.contains("s3cret"), "{json}");
+    assert!(!format!("{report:?}").contains("s3cret"));
+    // Only the credentials are hidden: the other variables and the sources are as they were.
+    let shown = report.env.expect("the probe resolved an environment");
+    assert_eq!(
+        shown.proxy,
+        [
+            (
+                "HTTPS_PROXY".to_string(),
+                "http://***@proxy.example:8080".to_string()
+            ),
+            ("NO_PROXY".to_string(), "localhost".to_string()),
+        ]
+    );
+    assert_eq!(shown.proxy_source, EnvSource::LoginShell);
+    assert_eq!(probe.env().unwrap(), env, "the real value is untouched");
+}
+
 // Logs.
 
 #[tokio::test]

@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe};
-use crate::env::SharedEnv;
+use crate::env::{ExecEnv, SharedEnv};
 use crate::executor::{
     self, CommandSpec,
     outcome::{self, Report},
@@ -1155,7 +1155,7 @@ impl Engine {
 
     /// Checks the whole setup: executors (freshly, not from the cache), the Linear connection
     /// and workspace, and every binding. The report also carries the PATH and proxy the
-    /// executors get, when the readiness probe resolves them.
+    /// executors get, when the readiness probe resolves them; the proxy URLs are masked there.
     pub async fn doctor(&self) -> DoctorReport {
         let cfg = self.config();
         let executors = self.inner.readiness.executor_reports(true).await;
@@ -1173,13 +1173,20 @@ impl Engine {
                 }
             }
         }
+        // The report goes out over IPC and `doctor --json` and is shown in the panel, so a proxy
+        // URL leaves it without its user name and password. The environment the runs get, which
+        // the probe holds, keeps the real value.
+        let env = self.inner.readiness.env().map(|env| ExecEnv {
+            proxy: env.proxy_for_display(),
+            ..env
+        });
         DoctorReport {
             viewer,
             linear_error,
             executors,
             workspace,
             bindings: doctor::check_bindings(&cfg, &ready),
-            env: self.inner.readiness.env(),
+            env,
         }
     }
 

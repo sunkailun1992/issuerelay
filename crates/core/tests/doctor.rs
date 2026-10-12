@@ -273,10 +273,36 @@ async fn a_command_that_timed_out_is_killed() {
     );
 }
 
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Waits until `path` has content. Returns false if it is still empty after 10 s.
+async fn wait_for_content(path: &Path) -> bool {
+    let give_up = Instant::now() + Duration::from_secs(10);
+    while file_len(path) == 0 {
+        if Instant::now() >= give_up {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+/// Fails with `message` unless the file at `path` has stopped growing: it is measured 500 ms from
+/// now and again 500 ms later.
+async fn assert_stops_growing(path: &Path, message: &str) {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = file_len(path);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(file_len(path), settled, "{message}");
+}
+
 // `claude mcp list` starts MCP servers of its own: a check that outlives its limit must take
-// everything it started with it, not only the process it launched. The limit is generous because
-// the check only proves something once the heartbeat child has really started writing.
-#[cfg(unix)]
+// everything it started with it, not only the process it launched (on Windows the Job Object holds
+// the heartbeat child). The limit is long enough for the child to start on a slow runner, and the
+// check is driven until the child has written something, before the limit can end it, so the test
+// can neither pass without having tested anything nor be cut short by a slow start.
 #[tokio::test]
 async fn a_timed_out_check_ends_its_whole_process_group() {
     let dir = tempfile::tempdir().unwrap();
@@ -285,16 +311,18 @@ async fn a_timed_out_check_ends_its_whole_process_group() {
         dir.path(),
         serde_json::json!([{"heartbeat": beat, "every_ms": 50}, {"sleep_ms": 30_000}]),
     );
-    let runner =
-        SystemRunner::with_limits(Duration::from_millis(1500), Duration::from_millis(1500));
-    let error = runner.run(agent(), &[script.as_str()]).await.unwrap_err();
+    let runner = SystemRunner::with_limits(Duration::from_secs(5), Duration::from_secs(5));
+    let args = [script.as_str()];
+    let mut check = runner.run(agent(), &args);
+    tokio::select! {
+        result = &mut check => panic!("the check ended before the heartbeat appeared: {result:?}"),
+        started = wait_for_content(&beat) => assert!(started, "the heartbeat child never ran"),
+    }
+    let error = check.await.unwrap_err();
     assert!(error.to_string().contains("timed out"), "{error:#}");
-    // The heartbeat grandchild was in the check's process group: it must stop growing the file.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let size = std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0);
-    assert!(size > 0, "the heartbeat child never ran");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0), size);
+    // The heartbeat grandchild was in the check's process group (Windows: its Job Object): it
+    // must stop growing the file.
+    assert_stops_growing(&beat, "the heartbeat child outlived the timed-out check").await;
 }
 
 // A check command can leave a process behind that inherited its output pipe (`claude mcp list`
