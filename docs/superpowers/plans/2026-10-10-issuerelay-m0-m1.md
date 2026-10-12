@@ -8854,3 +8854,78 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 
+### 评审遗留的小项（2026-10-13 整理）
+
+M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终评审（c3921f5）的分类整理，并对照 5c336e6 的代码逐条核对过，已解决的不再列出。写 M2、M3 计划时逐条认领，或写明不做及原因。
+
+**M2：引擎与运行**
+
+| 模块 | 内容 | 来源 |
+|---|---|---|
+| `engine` | 重新授权后要重建引擎：`viewer` 在引擎的整个生命周期里只取一次 | Task 19 评审 |
+| `engine` | `count()` 读存储出错时返回 0，错误被吞掉 | Task 19 评审 |
+| `engine` | 退出时的「等待完成」需要能持久的暂停（现在的停止标志只在进程内）；第一次停止信号要等当前这轮检查结束（最长约 60 秒）才通知运行停止 | Task 19 评审、最终评审 |
+| `engine` | 队首任务启动前的重读一直失败时，`max_concurrent = 1` 或同一目录下的其他任务一直轮不到 | Task 19 评审 |
+| `engine` | 严格解析的取舍（读不懂的回复一律报错）：一条读不懂的需求会让这一轮不派活、挡住所有排队任务，错误会指明是哪条；面板要把这个错误显示清楚 | 最终评审 |
+| `engine` | 状态为 `waiting_binding` 的新任务，日志也写成 `job queued` | 最终修复复审 |
+| `engine`、面板 | `MissingArguments` 要和 `MissingTools` 一样转成用户看得懂的提示（设计 §7）；`list()` 的错误用 `{:#}` 显示 | Task 16 评审 |
+| `runner` | 离开进程组的后代只收到 SIGKILL，没有先收到 SIGTERM；停止最多多等 5 秒；执行者在 SIGTERM 处理里新起的独立进程，如果它在宽限期内退出，会成为找不到的孤儿（M1 验收 H6 看到会话结束钩子几秒内自行退出）；对已回收的进程组 id 调 `killpg`（影响可忽略） | 最终修复、复审 |
+| `runner` | 失控输出：通道没有上限，单行也没有长度上限 | Task 15 评审 |
+| `runner` | 运行日志：写入失败要能上报（有日志系统后）；重试会覆盖上一次的 `{job.id}.jsonl`（目前有意为之并已注明），做日志页时决定是否保留；0600 只对新建的日志文件生效 | Task 15 评审 |
+| 设计 | 超时和卡住判定用的单调时钟，在系统睡眠期间是否计时因平台而异，写进设计 | Task 15 评审 |
+
+**M2：Linear、环境检查、IPC、命令行与面板**
+
+| 模块 | 内容 | 来源 |
+|---|---|---|
+| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值 | Task 16 评审 |
+| `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放 | Task 17、22 评审 |
+| `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示 | Task 17、19、21 评审 |
+| `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |
+| `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队 | 最终评审 |
+| `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做） | 最终评审 |
+| `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过） | Task 7、11 评审 |
+| `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`） | Task 12 评审 |
+| `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出 | Task 21 评审、最终评审 |
+| 面板 | 「默认模型」存 `None`，不存空字符串；带 `[ ]` 的模型名（例如 `sonnet[1m]`）按设计会被拒绝，面板说明要写明 | Task 12 评审 |
+
+**M3**
+
+| 模块 | 内容 | 来源 |
+|---|---|---|
+| `store` | 数据库的 `user_version` 比当前程序新时不拒绝，第一次改表结构时处理 | Task 9 评审 |
+| 打包 | 命令行依赖整个 `core`；`fake-agent` 是 `issuerelay-core` 的普通可执行目标，打包时会被一起构建 | Task 21 评审、最终评审 |
+| 依赖 | chrono 的默认特性（clock、wasmbind）用不到，可改成 `default-features = false` 加 `["std", "now", "serde"]` | Task 8 评审 |
+| CI | `ci.yml` 显式安装 1.99.0，和 `rust-toolchain.toml` 重复（rustup 1.28 起 `rustup show` 不再自动安装，所以要显式装）：升级工具链时两处一起改 | Task 1 评审 |
+
+**Windows 实机验收时一起看**
+
+- 凭据在 Windows 凭据管理器里能否持久保存，以及长度上限（2560 字节）。
+- 每次请求都读一次钥匙串，在 Windows 上是否有问题（macOS 验收时没有弹窗）。
+- Windows 专用代码目前只在 CI 里编译和跑测试。
+- 卡住判定的测试要求启动后 1.2 秒内出第一行，Windows 首次运行时的杀毒扫描可能让它偶发失败，留意 CI。
+
+**测试打磨（没有已知缺陷）**
+
+- `store`：测试夹具的 id 与 project_id 相同（`proj-1`），两者互换测不出来；`assign_stores_a_reason` 没断言 executor 为 `None`。
+- `config`：模型名检查的测试只覆盖 `bindings[0]`，闭包 `binding` 遮住了同名的测试辅助函数；校验测试补空白的 `comment_language` / `language` 用例。
+- `executor::outcome`：补 CRLF、缩进的 JSON、行内代码里的 JSON、跳过解析不了的 `{` 行、Claude 取最后一个结果事件、两种执行者互不干扰的测试；`is_error` 结果的文本仍会成为 `final_text`，要写进文档；夹具来源说明；用显式的 match 分支代替 `_ => None`。
+- `fake-agent`：脚本校验宽松（类型错误、拼错的键被忽略，`every_ms` 没有下限）；文件头没列出每一步的键和顺序。
+- `runner`：`end()` 在 `wait()` 出错时也会置为结束（无害）；`run` 的文档说启动失败会写日志，但日志目录或文件建不了时无处可写。
+- `linear::auth`：`serve_one` 只读一次（请求行被拆成几次读时会返回 404，并等到登录超时；浏览器会一次写完请求头）；内存钥匙串由第一个钥匙串测试懒加载（以后若有库测试调用 `APP_ID` 的包装函数，可能因测试顺序碰到真实钥匙串）；返回时取消任务、连接超时的调用点、accept 失败重试、404 写入失败都没有测试；可改用 keyring-core 的 `mock::Store`。
+- `trigger`：`all_lists_every_variant_once` 的注释说过了头；`is_candidate` 内联和 `JobState::parse` 大小写的变异体存活。
+- `cli`：`ControlServer::new` 到 `client::call` 的衔接只有「宿主未运行」这一个测试覆盖。
+
+**扫描脚本**
+
+- 可选的本机私有清单（不进 git，放所有者名字、工作区标识、团队前缀），让 `check-secrets.sh` 一起查；在那之前，提交验收报告或样本前要先用自己的私有清单手动 grep 一遍。
+- `git grep` 会跳过被跟踪的符号链接，脚本头部没写明。
+
+**文档与计划文字（不影响行为）**
+
+- `config.rs` 里 `Settings::validate` 的文档注释仍只说「stall or spin the engine」。
+- `AI_CODING_GUIDE.md` 第 3 节和 `AI_DESIGN_PATTERN_GUIDE.md` 的反模式一节说纯逻辑层不做 IO，没写 `trigger` 检查目录是否存在这个例外；`AI_CODING_GUIDE.md` 第 5 节的索引没提 `config.rs` 里的模型名规则。
+- `MAINTAINERS.md` 的设置表缺「首次贡献者的工作流运行需要批准」一行，批准运行的职责可加一句「先看 diff」；`AI_AUTOMATION_WORKFLOW.md` 第七节第 2 条是一整行长句；CODEOWNERS 的适用范围在 `AGENTS.md` 和流程文档里写「极高风险」，在 CODEOWNERS 和目录指南里写「高风险」；squash 提交的正文直接取 PR 描述（含模板里的勾选项），要靠维护者合并时整理。
+- `linear::mcp` 关于空数组 `[]` 的文档说法过头；新加的外部事实注释缺日期（`CONNECT_TIMEOUT`、Linux 钥匙串说明、Vault / mock 说明）。
+- 本计划里的历史快照：Task 1 的 `.gitignore` 仍是 `/spikes/**/samples-raw/`（仓库实际是 `**/samples-raw/`），Task 1 内嵌的 AI 编程指南仍写 `data_dir()` / `%APPDATA%`；Task 11、12 的代码块是修复前的版本（旧的团队说明标题、`is_safe_token`）；Task 3、4、23 经 `docs/gates/README.md` 转到 `TESTING_SPEC.md`；Task 6 的报告模板标题早于 `TESTING_SPEC.md`；Task 18 的一个反例还留着旧的「✓」。
+
