@@ -8,6 +8,9 @@
 //! - `{"stdin_to": path}`: read all of stdin into a file
 //! - `{"heartbeat": path, "every_ms": n}`: start a background child that appends a byte to the
 //!   file every `n` ms (it stops by itself after 120 s)
+//! - `{"escaped_heartbeat": path, "every_ms": n}`: the same, but the child leaves the run's
+//!   process group the way Claude Code's detached tool shells do (Unix: a process group of its
+//!   own; Windows: a detached process in a new process group, still inside the run's Job Object)
 //! - `{"repeat_out": text, "every_ms": n}` / `{"repeat_err": text, "every_ms": n}`: print a line
 //!   to stdout / stderr every `n` ms, forever
 //! - `{"exit": code}`: exit at once
@@ -53,17 +56,19 @@ fn main() {
         }
         if let Some(path) = step.get("heartbeat").and_then(Value::as_str) {
             let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
-            // On Windows the grandchild inherits this process's inheritable handles, including
-            // the runner's pipes, so readers must not wait for EOF while a heartbeat is alive.
             // Deliberately left running: the runner tests check that ending the run also ends this grandchild.
             #[allow(clippy::zombie_processes)]
-            Command::new(std::env::current_exe().expect("current exe"))
-                .args(["--heartbeat", path, &every.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+            heartbeat_command(path, every)
                 .spawn()
                 .expect("spawn heartbeat");
+        }
+        if let Some(path) = step.get("escaped_heartbeat").and_then(Value::as_str) {
+            let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
+            let mut command = heartbeat_command(path, every);
+            leave_the_process_group(&mut command);
+            // Deliberately left running, like the heartbeat above.
+            #[allow(clippy::zombie_processes)]
+            command.spawn().expect("spawn escaped heartbeat");
         }
         if let Some(line) = step.get("repeat_out").and_then(Value::as_str) {
             let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
@@ -86,6 +91,38 @@ fn main() {
         }
     }
     std::process::exit(code);
+}
+
+/// This program again, as a heartbeat child writing to `file` every `every_ms` ms. On Windows the
+/// child inherits this process's inheritable handles, including the runner's pipes, so readers
+/// must not wait for EOF while a heartbeat is alive.
+fn heartbeat_command(file: &str, every_ms: u64) -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("current exe"));
+    command
+        .args(["--heartbeat", file, &every_ms.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Unix: the child leads a process group of its own, so signalling the run's process group no
+/// longer reaches it (Claude Code starts its tool shells with `setsid`, which has the same effect).
+#[cfg(unix)]
+fn leave_the_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Windows: a detached process in a new process group. It stays in the run's Job Object anyway:
+/// the job does not allow breakaway.
+#[cfg(windows)]
+fn leave_the_process_group(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    // Process creation flags from the Win32 API (winbase.h).
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
 fn heartbeat(file: &Path, every_ms: u64) -> ! {

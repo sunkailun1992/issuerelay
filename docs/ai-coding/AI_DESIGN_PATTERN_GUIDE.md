@@ -14,7 +14,7 @@
 | 单一编排者 | `Engine` | 运行状态只在 `Engine` 里；命令行、MCP、面板都是它的客户端 |
 | 记录先行 | `store::mark_started` 在启动子进程之前 | 先写 SQLite，再做外部动作；重启后能恢复 |
 | 薄 IPC | `ipc::server` 的分发函数 | 只做参数解析和分发，业务规则留在 `Engine` |
-| 进程树守卫 | `runner::run` | 进程组 / Job Object 加 `KillOnDrop`，结束时总是清理整棵树 |
+| 进程树守卫 | `runner::run` 的 `TreeGuard` | 结束时总是清理整棵树：Unix 是进程组以及所有后代进程，包括已离开该组的（顺着父进程查找，核对启动时间后才发信号），Windows 是 Job Object，另加 `KillOnDrop`。超时、卡住、取消先向进程组发 SIGTERM、给执行者 5 秒收尾；future 被丢弃时立即强制结束；正常退出后执行者已不在，只清理进程组里的残留 |
 
 ## 3. 反模式（禁止）
 

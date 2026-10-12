@@ -58,6 +58,25 @@ async fn wait_for_content(path: &Path) -> bool {
     true
 }
 
+/// Fails with `message` unless the heartbeat file at `path` has stopped growing: it is measured
+/// 500 ms from now and again 500 ms later.
+#[cfg(any(target_os = "macos", windows))]
+async fn assert_stops_growing(path: &Path, message: &str) {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = file_len(path);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(file_len(path), settled, "{message}");
+}
+
+/// A script whose heartbeat grandchild leaves the run's process group, then a long sleep.
+#[cfg(any(target_os = "macos", windows))]
+fn escaped_heartbeat_script(dir: &Path, heartbeat: &Path) -> PathBuf {
+    script(
+        dir,
+        serde_json::json!([{"escaped_heartbeat": heartbeat, "every_ms": 50}, {"sleep_ms": 30_000}]),
+    )
+}
+
 fn log_lines(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap()
@@ -208,6 +227,84 @@ async fn kill_reaches_grandchildren() {
     let settled = file_len(&hb);
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(file_len(&hb), settled, "grandchild survived the kill");
+}
+
+// Tool processes may leave the executor's process group: on macOS Claude Code starts its Bash tool
+// shells with `setsid`. Ending a run must end them too. On Windows the Job Object holds them
+// anyway. (Linux is not a target platform and only ends the process group, so it skips these.)
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn an_escaped_grandchild_is_ended_on_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = escaped_heartbeat_script(dir.path(), &hb);
+    let log = dir.path().join("l.jsonl");
+    let mut run = Box::pin(runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(5_000, 60_000),
+        CancellationToken::new(),
+    ));
+    // The total limit must cut into a grandchild that is really running, however slowly the
+    // machine starts processes.
+    tokio::select! {
+        out = &mut run => panic!("the run ended before the heartbeat appeared: {:?}", out.exit),
+        started = wait_for_content(&hb) => assert!(started, "heartbeat child never ran"),
+    }
+    assert_eq!(run.await.exit, ExitKind::TimedOut);
+    assert_stops_growing(&hb, "the escaped grandchild survived the timeout").await;
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn an_escaped_grandchild_is_ended_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = escaped_heartbeat_script(dir.path(), &hb);
+    let token = CancellationToken::new();
+    let canceller = token.clone();
+    let heartbeat = hb.clone();
+    let started = tokio::spawn(async move {
+        let started = wait_for_content(&heartbeat).await;
+        canceller.cancel();
+        started
+    });
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        limits(60_000, 60_000),
+        token,
+    )
+    .await;
+    assert!(started.await.unwrap(), "heartbeat child never ran");
+    assert_eq!(out.exit, ExitKind::Canceled);
+    assert_stops_growing(&hb, "the escaped grandchild survived the cancel").await;
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn an_escaped_grandchild_is_ended_when_the_run_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = escaped_heartbeat_script(dir.path(), &hb);
+    let command = spec(agent(), dir.path(), &s, "");
+    let log = dir.path().join("l.jsonl");
+    let task = tokio::spawn(async move {
+        runner::run(
+            command,
+            ExecutorKind::Claude,
+            &log,
+            limits(60_000, 60_000),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    assert!(wait_for_content(&hb).await, "heartbeat child never ran");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_stops_growing(&hb, "the escaped grandchild survived dropping the run").await;
 }
 
 #[tokio::test]

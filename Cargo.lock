@@ -1355,6 +1355,7 @@ dependencies = [
  "dirs",
  "keyring",
  "keyring-core",
+ "libc",
  "process-wrap",
  "reqwest",
  "rmcp",
