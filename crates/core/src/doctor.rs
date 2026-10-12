@@ -4,21 +4,24 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use url::Url;
 
 use crate::config::{Config, ExecutorKind, TriggerNames};
+use crate::env::{ExecEnv, SharedEnv};
 use crate::executor;
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
 use crate::trigger::same_name;
@@ -63,29 +66,44 @@ const MAX_PROBLEM_TEXT: usize = 200;
 const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 
 /// Runs the real check commands, each under its own time limit: by default 60 s for
-/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command still
-/// running at its limit has its process killed and the call fails with `timed out after 20s`
-/// (the limit as `Duration` prints it); processes it started itself may outlive it. Every
+/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command runs in the
+/// user's home directory, in a process group of its own (Windows: a Job Object), with the shared
+/// environment (the PATH and proxy the executors will get). A command still running at its limit
+/// is killed together with everything it started (`claude mcp list` starts MCP servers of its
+/// own) and the call fails with `timed out after 20s` (the limit as `Duration` prints it). Every
 /// command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour
 /// what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip
 /// colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
+    env: SharedEnv,
 }
 
 impl Default for SystemRunner {
     fn default() -> Self {
-        Self::with_limits(CHECK_TIMEOUT, MCP_LIST_TIMEOUT)
+        Self::with_env(ExecEnv::inherit().shared())
     }
 }
 
 impl SystemRunner {
+    /// Runs check commands with `env` (the PATH and proxy the executors will get) and the default
+    /// limits.
+    pub fn with_env(env: SharedEnv) -> Self {
+        Self {
+            check_timeout: CHECK_TIMEOUT,
+            mcp_list_timeout: MCP_LIST_TIMEOUT,
+            env,
+        }
+    }
+
     /// For tests: `check` limits every command except `mcp list`, `mcp_list` limits that one.
+    /// The environment is the host's own.
     pub fn with_limits(check: Duration, mcp_list: Duration) -> Self {
         Self {
             check_timeout: check,
             mcp_list_timeout: mcp_list,
+            env: ExecEnv::inherit().shared(),
         }
     }
 
@@ -101,21 +119,75 @@ impl SystemRunner {
 #[async_trait::async_trait]
 impl CommandRunner for SystemRunner {
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput> {
+        #[cfg(windows)]
+        use process_wrap::tokio::JobObject;
+        #[cfg(unix)]
+        use process_wrap::tokio::ProcessGroup;
+        use process_wrap::tokio::{CommandWrap, KillOnDrop};
+        use tokio::io::AsyncReadExt;
+
         let limit = self.limit_for(args);
-        let child = tokio::process::Command::new(program)
-            .args(args)
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output();
-        let output = tokio::time::timeout(limit, child)
-            .await
-            .map_err(|_| anyhow!("timed out after {limit:?}"))??;
-        Ok(CmdOutput {
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        let env = self
+            .env
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut command = CommandWrap::with_new(program, |c| {
+            c.args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            // `claude mcp list` answers per directory, and a host started from Finder starts in
+            // `/`. The home directory matches the user-level registration (`--scope user`).
+            if let Some(home) = dirs::home_dir() {
+                c.current_dir(home);
+            }
+            env.apply(c);
+            c.env("NO_COLOR", "1");
+        });
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(JobObject);
+        command.wrap(KillOnDrop);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout().take();
+        let stderr = child.stderr().take();
+        let collect = async {
+            // One block per pipe: `ChildStdout` and `ChildStderr` are different types.
+            let read_stdout = async move {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = stdout {
+                    let _ = pipe.read_to_end(&mut bytes).await;
+                }
+                bytes
+            };
+            let read_stderr = async move {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = stderr {
+                    let _ = pipe.read_to_end(&mut bytes).await;
+                }
+                bytes
+            };
+            let (out, err) = tokio::join!(read_stdout, read_stderr);
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((status, out, err))
+        };
+        match tokio::time::timeout(limit, collect).await {
+            Ok(result) => {
+                let (status, out, err) = result?;
+                Ok(CmdOutput {
+                    code: status.code(),
+                    stdout: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: String::from_utf8_lossy(&err).into_owned(),
+                })
+            }
+            Err(_) => {
+                // The whole group: `claude mcp list` starts stdio MCP servers of its own.
+                let _ = child.start_kill();
+                bail!("timed out after {limit:?}")
+            }
+        }
     }
 }
 
@@ -558,6 +630,9 @@ pub struct DoctorReport {
     /// `None` when the workspace could not be checked.
     pub workspace: Option<WorkspaceReport>,
     pub bindings: Vec<BindingReport>,
+    /// The PATH and proxy executors get; `None` when the probe does not resolve one.
+    #[serde(default)]
+    pub env: Option<ExecEnv>,
 }
 
 /// Where the engine gets its executor reports. `SystemReadiness` is the real implementation;
@@ -569,6 +644,11 @@ pub trait ReadinessProbe: Send + Sync {
     /// recorded after the call was made. A `fresh` caller that waited behind a running check
     /// therefore uses that check's result instead of running the commands a second time.
     async fn executor_reports(&self, fresh: bool) -> Vec<ExecutorReport>;
+
+    /// The environment executors are found and run with, when this probe resolves one.
+    fn env(&self) -> Option<ExecEnv> {
+        None
+    }
 }
 
 /// One executor's last check as `SystemReadiness` keeps it.
@@ -582,6 +662,12 @@ struct CachedCheck {
     refresh: u64,
 }
 
+/// Finds where an executor is installed; `None` when it is not.
+type FindProgram = Arc<dyn Fn(ExecutorKind) -> Option<PathBuf> + Send + Sync>;
+
+/// Works out the environment executors get, again.
+type RefreshEnv = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ExecEnv> + Send>> + Send + Sync>;
+
 /// Checks the real `claude` / `codex` on PATH and caches what it finds, one entry per executor.
 /// An entry whose checks all gave a usable answer is reused for `ttl`; one with a check that
 /// timed out, did not start, crashed or could not be read for at most `FAILED_CHECK_TTL`, so it is
@@ -590,7 +676,10 @@ struct CachedCheck {
 /// caller that arrives meanwhile waits and then uses what the refresh recorded.
 pub struct SystemReadiness {
     runner: Arc<dyn CommandRunner>,
-    resolve: fn(ExecutorKind) -> Option<PathBuf>,
+    resolve: FindProgram,
+    /// Shared with the job runner; executors are looked up on its PATH.
+    env: SharedEnv,
+    refresh_env: RefreshEnv,
     ttl: Duration,
     failed_ttl: Duration,
     /// How many refreshes have been recorded. A `fresh` caller reads it before it waits for the
@@ -602,26 +691,42 @@ pub struct SystemReadiness {
 
 impl SystemReadiness {
     /// `ttl` is how long `executor_reports(false)` reuses a check whose answers were all usable.
-    pub fn new(ttl: Duration) -> Self {
+    /// `env` is shared with the job runner: executors are looked up on its PATH, check commands
+    /// run with it, and every fresh check resolves it again first.
+    pub fn new(ttl: Duration, env: SharedEnv) -> Self {
+        let lookup = env.clone();
         Self::with_parts(
             ttl,
             FAILED_CHECK_TTL,
-            Arc::new(SystemRunner::default()),
-            |kind| executor::resolve_program(kind).ok(),
+            Arc::new(SystemRunner::with_env(env.clone())),
+            Arc::new(move |kind| {
+                let path = lookup
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .path
+                    .clone();
+                executor::resolve_program_in(kind, path.as_deref()).ok()
+            }),
+            env,
+            Arc::new(|| Box::pin(crate::env::resolve())),
         )
     }
 
-    /// The seams the unit tests use: both lifetimes, the command runner and where to find the
-    /// executables.
+    /// The seams the unit tests use: both lifetimes, the command runner, where to find the
+    /// executables, the shared environment and how to resolve it again.
     fn with_parts(
         ttl: Duration,
         failed_ttl: Duration,
         runner: Arc<dyn CommandRunner>,
-        resolve: fn(ExecutorKind) -> Option<PathBuf>,
+        resolve: FindProgram,
+        env: SharedEnv,
+        refresh_env: RefreshEnv,
     ) -> Self {
         Self {
             runner,
             resolve,
+            env,
+            refresh_env,
             ttl,
             failed_ttl,
             refreshes: AtomicU64::new(0),
@@ -663,6 +768,12 @@ impl ReadinessProbe for SystemReadiness {
         // The lock stays held while checking, so a caller that arrives meanwhile waits for the
         // refresh instead of starting a second round of commands.
         let mut cache = self.cache.lock().await;
+        // A fresh check looks at the PATH and proxy again too, before the executors are found:
+        // installing `claude` or changing the proxy shows up without restarting the host.
+        if fresh {
+            let resolved = (self.refresh_env)().await;
+            *self.env.write().unwrap_or_else(PoisonError::into_inner) = resolved;
+        }
         let now = Instant::now();
         let due = |kind: ExecutorKind| match cache.get(&kind) {
             None => true,
@@ -696,6 +807,15 @@ impl ReadinessProbe for SystemReadiness {
             .iter()
             .map(|kind| cache[kind].report.clone())
             .collect()
+    }
+
+    fn env(&self) -> Option<ExecEnv> {
+        Some(
+            self.env
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
     }
 }
 
@@ -1818,9 +1938,19 @@ mod tests {
 
     /// A `SystemReadiness` over `runner` that finds an executable named like the executor.
     fn readiness<R: CommandRunner + 'static>(runner: &Arc<R>, ttl: Duration) -> SystemReadiness {
-        SystemReadiness::with_parts(ttl, FAILED_CHECK_TTL, runner.clone(), |kind| {
-            Some(PathBuf::from(kind.program_name()))
-        })
+        SystemReadiness::with_parts(
+            ttl,
+            FAILED_CHECK_TTL,
+            runner.clone(),
+            Arc::new(|kind| Some(PathBuf::from(kind.program_name()))),
+            ExecEnv::inherit().shared(),
+            inherited(),
+        )
+    }
+
+    /// A `refresh_env` that resolves to the host's environment as it is.
+    fn inherited() -> RefreshEnv {
+        Arc::new(|| Box::pin(async { ExecEnv::inherit() }))
     }
 
     fn kinds(reports: &[ExecutorReport]) -> Vec<ExecutorKind> {
@@ -1829,7 +1959,7 @@ mod tests {
 
     #[test]
     fn the_real_probe_keeps_the_ttl_and_retries_failed_checks_after_a_minute() {
-        let probe = SystemReadiness::new(TTL);
+        let probe = SystemReadiness::new(TTL, ExecEnv::inherit().shared());
         assert_eq!(probe.ttl, TTL);
         assert_eq!(probe.failed_ttl, Duration::from_secs(60));
     }
@@ -2007,12 +2137,86 @@ mod tests {
         assert!(reports.iter().all(|r| r.ready()), "{reports:?}");
     }
 
+    #[tokio::test]
+    async fn a_fresh_check_resolves_the_environment_and_reports_it() {
+        use crate::env::EnvSource;
+
+        let env = ExecEnv::inherit().shared();
+        let readiness = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            Arc::new(runner(&[])),
+            Arc::new(|_| None),
+            env.clone(),
+            Arc::new(|| {
+                Box::pin(async {
+                    ExecEnv {
+                        path: Some("/opt/demo/bin".into()),
+                        path_source: EnvSource::LoginShell,
+                        ..ExecEnv::inherit()
+                    }
+                })
+            }),
+        );
+        assert_eq!(
+            readiness.env().unwrap().path,
+            None,
+            "nothing resolved before the first fresh check"
+        );
+        readiness.executor_reports(false).await;
+        assert_eq!(
+            readiness.env().unwrap().path,
+            None,
+            "a cached check does not re-resolve"
+        );
+        readiness.executor_reports(true).await;
+        assert_eq!(
+            readiness.env().unwrap().path.as_deref(),
+            Some("/opt/demo/bin")
+        );
+        assert_eq!(
+            env.read().unwrap().path.as_deref(),
+            Some("/opt/demo/bin"),
+            "the job runner sees it too"
+        );
+    }
+
+    #[tokio::test]
+    async fn executors_are_looked_up_on_the_shared_environments_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        };
+        let program = dir.path().join(name);
+        std::fs::write(&program, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = ExecEnv::inherit().shared();
+        let probe = SystemReadiness::new(TTL, env.clone());
+        // The path is set after the probe exists and replaces the host's PATH, so a `claude` or
+        // `codex` installed on the machine running the test cannot be the one that is found.
+        env.write().unwrap().path = Some(dir.path().to_string_lossy().into_owned());
+        let reports = probe.executor_reports(false).await;
+        assert_eq!(reports[0].program, Some(program));
+        assert_eq!(reports[1].program, None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_executor_that_is_not_installed_is_reported_without_running_commands() {
         let fake = Arc::new(both_ready());
-        let probe = SystemReadiness::with_parts(TTL, FAILED_CHECK_TTL, fake.clone(), |kind| {
-            (kind == ExecutorKind::Claude).then(|| PathBuf::from("claude"))
-        });
+        let probe = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            fake.clone(),
+            Arc::new(|kind| (kind == ExecutorKind::Claude).then(|| PathBuf::from("claude"))),
+            ExecEnv::inherit().shared(),
+            inherited(),
+        );
         let reports = probe.executor_reports(false).await;
         assert_eq!(kinds(&reports), [ExecutorKind::Claude, ExecutorKind::Codex]);
         assert!(reports[0].ready());

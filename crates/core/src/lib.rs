@@ -3,6 +3,7 @@
 pub mod config;
 pub mod doctor;
 pub mod engine;
+pub mod env;
 pub mod executor;
 pub mod ipc;
 pub mod linear;

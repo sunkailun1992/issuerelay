@@ -34,6 +34,10 @@ which = "8.0.6"
 # signals them; the version is the one process-wrap already brings in.
 libc = "0.2.190"
 
+[target.'cfg(windows)'.dependencies]
+# `env::resolve` reads the system proxy from the current user's Internet Settings in the registry.
+winreg = "0.56"
+
 [dev-dependencies]
 keyring-core = "1.0.0"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-async-rw", "schemars"] }

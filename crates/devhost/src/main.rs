@@ -296,12 +296,13 @@ async fn run(command: Command) -> Result<()> {
             let paths = AppPaths::system()?;
             let server = IpcServer::bind(&paths.ipc_endpoint()).await?;
             let linear = Arc::new(McpLinear::new(connect().await?).await?);
+            let env = issuerelay_core::env::resolve().await.shared();
             let engine = Engine::new(EngineDeps {
                 config_path: paths.config_file(),
                 store: Store::open(&paths.state_db())?,
                 linear,
-                readiness: Arc::new(SystemReadiness::new(Duration::from_secs(300))),
-                job_runner: Arc::new(ProcessJobRunner),
+                readiness: Arc::new(SystemReadiness::new(Duration::from_secs(300), env.clone())),
+                job_runner: Arc::new(ProcessJobRunner::new(env)),
                 logs_dir: paths.logs_dir(),
             })?;
             serve(engine, server).await

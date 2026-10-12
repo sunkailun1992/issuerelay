@@ -10,6 +10,7 @@ use common::fake_linear::FakeLinear;
 use issuerelay_core::{
     config::TriggerNames,
     doctor::{CmdOutput, CommandRunner, SystemRunner, check_workspace},
+    env::ExecEnv,
     linear::{LinearApi, Project, Team, Viewer},
     model::Issue,
 };
@@ -272,6 +273,30 @@ async fn a_command_that_timed_out_is_killed() {
     );
 }
 
+// `claude mcp list` starts MCP servers of its own: a check that outlives its limit must take
+// everything it started with it, not only the process it launched. The limit is generous because
+// the check only proves something once the heartbeat child has really started writing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timed_out_check_ends_its_whole_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let beat = dir.path().join("beat");
+    let script = script(
+        dir.path(),
+        serde_json::json!([{"heartbeat": beat, "every_ms": 50}, {"sleep_ms": 30_000}]),
+    );
+    let runner =
+        SystemRunner::with_limits(Duration::from_millis(1500), Duration::from_millis(1500));
+    let error = runner.run(agent(), &[script.as_str()]).await.unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    // The heartbeat grandchild was in the check's process group: it must stop growing the file.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let size = std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0);
+    assert!(size > 0, "the heartbeat child never ran");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0), size);
+}
+
 /// Runs `script`, trying again while the OS reports it as busy: executing a script right after
 /// writing it can fail with `ETXTBSY` when another test thread forks in between.
 async fn run_script(runner: &SystemRunner, script: &Path, args: &[&str]) -> Result<CmdOutput> {
@@ -349,4 +374,58 @@ async fn run_gives_mcp_list_its_own_limit_and_sets_no_color_windows() {
     )
     .unwrap();
     assert_each_command_gets_its_own_limit(&script).await;
+}
+
+/// `script` ignores its arguments and prints the value of `ISSUERELAY_TEST_PROXY` and its working
+/// directory. A check command has to get the proxy of the shared environment, and has to run in
+/// the user's home directory: `claude mcp list` answers differently per directory, and a host
+/// started from Finder starts in `/`.
+async fn assert_check_runs_in_the_home_directory_with_the_shared_environment(
+    script: &Path,
+    home: &Path,
+) {
+    let env = ExecEnv {
+        proxy: vec![("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:9".into())],
+        ..ExecEnv::inherit()
+    }
+    .shared();
+    let runner = SystemRunner::with_env(env);
+    let output = run_script(&runner, script, &[]).await.unwrap();
+    assert_eq!(
+        output.stdout.trim_end(),
+        format!("http://127.0.0.1:9 {}", home.display()),
+        "{output:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_check_runs_in_the_home_directory_with_the_shared_environment_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.sh");
+    // `pwd -P` prints the physical directory, so the expected path is resolved the same way.
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s %s\\n' \"$ISSUERELAY_TEST_PROXY\" \"$(pwd -P)\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dirs::home_dir().expect("the test user has a home directory");
+    assert_check_runs_in_the_home_directory_with_the_shared_environment(
+        &script,
+        &home.canonicalize().unwrap(),
+    )
+    .await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_check_runs_in_the_home_directory_with_the_shared_environment_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.cmd");
+    std::fs::write(&script, "@echo %ISSUERELAY_TEST_PROXY% %CD%\r\n").unwrap();
+    let home = dirs::home_dir().expect("the test user has a home directory");
+    assert_check_runs_in_the_home_directory_with_the_shared_environment(&script, &home).await;
 }

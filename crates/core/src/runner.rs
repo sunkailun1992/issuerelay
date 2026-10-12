@@ -18,6 +18,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ExecutorKind;
+use crate::env::ExecEnv;
 use crate::executor::{CommandSpec, outcome::FinalTextTracker};
 
 /// The time limits of one run.
@@ -378,12 +379,16 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// so a process whose parent exited before the run ended is out of reach, and after a normal exit
 /// only the process group is left to end: the executor is gone, so its descendants that left the
 /// group can no longer be found through it.
+///
+/// `env` supplies PATH and proxy variables on top of the host's environment and removes the
+/// nested-session markers (`env::REMOVED_VARS`).
 pub async fn run(
     spec: CommandSpec,
     kind: ExecutorKind,
     log_path: &Path,
     limits: RunLimits,
     cancel: CancellationToken,
+    env: &ExecEnv,
 ) -> RunOutput {
     if let Some(dir) = log_path.parent()
         && let Err(e) = tokio::fs::create_dir_all(dir).await
@@ -401,6 +406,7 @@ pub async fn run(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        env.apply(c);
     });
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());

@@ -5,7 +5,10 @@
 //! in the JSON or in the error line.
 use std::fmt::Write as _;
 
-use issuerelay_core::text::is_invisible;
+use issuerelay_core::{
+    env::{EnvSource, mask_credentials},
+    text::is_invisible,
+};
 use serde_json::Value;
 
 /// What `issuerelay` prints for a result: the JSON itself with `--json`, otherwise the summary
@@ -185,6 +188,9 @@ fn doctor(v: &Value) -> String {
         };
         out.push(format!("{}: {detail}", text(e, "kind")));
     }
+    if let Some(env) = v.get("env").filter(|x| x.is_object()) {
+        out.extend(environment(env));
+    }
     if let Some(ws) = v.get("workspace").filter(|x| !x.is_null()) {
         let label = if ws["label_ok"] == true {
             "label ok"
@@ -223,6 +229,44 @@ fn doctor(v: &Value) -> String {
     out.join("\n")
 }
 
+/// The lines for the environment executors get: where the PATH and the proxy come from, the
+/// proxy variables with any user name and password in a URL masked, and what could not be read.
+fn environment(env: &Value) -> Vec<String> {
+    let mut lines = vec![
+        format!("PATH: {}", source_label(&env["path_source"])),
+        format!("Proxy: {}", source_label(&env["proxy_source"])),
+    ];
+    for pair in env["proxy"].as_array().into_iter().flatten() {
+        if let Some([name, value]) = pair.as_array().map(Vec::as_slice)
+            && let (Some(name), Some(value)) = (name.as_str(), value.as_str())
+        {
+            lines.push(format!(
+                "  {}={}",
+                clean(name),
+                clean(&mask_credentials(value))
+            ));
+        }
+    }
+    lines.extend(
+        strings(&env["problems"])
+            .into_iter()
+            .map(|p| format!("  ! {p}")),
+    );
+    lines
+}
+
+/// What an `EnvSource` as the engine sent it means; a value this version does not know is not
+/// echoed.
+fn source_label(value: &Value) -> &'static str {
+    match serde_json::from_value::<EnvSource>(value.clone()) {
+        Ok(EnvSource::Host) => "inherited from the host",
+        Ok(EnvSource::LoginShell) => "login shell",
+        Ok(EnvSource::SystemSettings) => "system settings",
+        Ok(EnvSource::None) => "none",
+        Err(_) => "unknown",
+    }
+}
+
 fn bindings(v: &Value) -> String {
     let items = v.as_array().map(Vec::as_slice).unwrap_or_default();
     if items.is_empty() {
@@ -258,6 +302,7 @@ fn logs(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use issuerelay_core::env::{EnvSource, ExecEnv};
     use serde_json::json;
 
     #[test]
@@ -455,6 +500,101 @@ mod tests {
         assert_eq!(executor(json!("/x/codex"), true, false), "codex: not ready");
         assert_eq!(executor(json!("/x/codex"), false, true), "codex: not ready");
         assert_eq!(executor(Value::Null, true, true), "codex: not ready");
+    }
+
+    /// A `doctor` result whose environment is `env`, as it arrives over IPC.
+    fn doctor_with_env(env: &ExecEnv) -> Value {
+        json!({"viewer": null, "linear_error": "offline", "executors": [], "workspace": null,
+            "bindings": [], "env": serde_json::to_value(env).unwrap()})
+    }
+
+    #[test]
+    fn doctor_shows_where_path_and_proxy_come_from_with_credentials_masked() {
+        let report = doctor_with_env(&ExecEnv {
+            path: Some("/opt/demo/bin:/usr/bin".into()),
+            path_source: EnvSource::LoginShell,
+            proxy: vec![(
+                "HTTPS_PROXY".into(),
+                "http://jane:s3cret@proxy.example:8080".into(),
+            )],
+            proxy_source: EnvSource::SystemSettings,
+            problems: vec!["could not read the login shell's environment: timed out".into()],
+        });
+        let text = human("doctor", &report);
+        assert!(text.contains("PATH: login shell"), "{text}");
+        assert!(text.contains("Proxy: system settings"), "{text}");
+        assert!(
+            text.contains("HTTPS_PROXY=http://***@proxy.example:8080"),
+            "{text}"
+        );
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(text.contains("timed out"), "{text}");
+    }
+
+    #[test]
+    fn doctor_names_every_source_and_stays_quiet_without_an_environment() {
+        let source = |path_source, proxy_source| {
+            let report = doctor_with_env(&ExecEnv {
+                path_source,
+                proxy_source,
+                ..ExecEnv::inherit()
+            });
+            let text = human("doctor", &report);
+            text.lines()
+                .filter(|line| line.starts_with("PATH:") || line.starts_with("Proxy:"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        assert_eq!(
+            source(EnvSource::Host, EnvSource::None),
+            "PATH: inherited from the host | Proxy: none"
+        );
+        assert_eq!(
+            source(EnvSource::SystemSettings, EnvSource::LoginShell),
+            "PATH: system settings | Proxy: login shell"
+        );
+        // The probe has no environment, or an older engine does not send one: nothing is shown.
+        for env in [json!(null), json!("odd")] {
+            let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+                "workspace": null, "bindings": [], "env": env});
+            assert_eq!(human("doctor", &report), "Linear: not connected (offline)");
+        }
+        // A source this version does not know is not echoed.
+        let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+            "workspace": null, "bindings": [],
+            "env": {"path_source": "from\u{1b}[2Jsomewhere", "proxy_source": 3, "proxy": [], "problems": []}});
+        let text = human("doctor", &report);
+        assert!(text.contains("PATH: unknown\nProxy: unknown"), "{text}");
+    }
+
+    #[test]
+    fn the_environment_of_a_doctor_result_is_cleaned_like_everything_else() {
+        // The proxy and the problems come from the host's environment, a login shell and the
+        // system settings; none of that may move the cursor or forge a line.
+        let report = doctor_with_env(&ExecEnv {
+            proxy: vec![(
+                "HTTPS_PROXY".into(),
+                "http://jane:s3cret@proxy.example\u{1b}[2J:8080".into(),
+            )],
+            proxy_source: EnvSource::LoginShell,
+            problems: vec!["bad\u{1b}]52;c;ZXZpbA==\u{7}\nforged line".into()],
+            ..ExecEnv::inherit()
+        });
+        let text = human("doctor", &report);
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(
+            text.contains("  HTTPS_PROXY=http://***@proxy.example [2J:8080"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  ! bad ]52;c;ZXZpbA==  forged line"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 5, "{text}");
     }
 
     #[test]

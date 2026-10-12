@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe};
+use crate::env::SharedEnv;
 use crate::executor::{
     self, CommandSpec,
     outcome::{self, Report},
@@ -61,8 +62,16 @@ pub trait JobRunner: Send + Sync {
     ) -> RunOutput;
 }
 
-/// Runs real executor processes.
-pub struct ProcessJobRunner;
+/// Runs real executor processes, each with the environment the readiness checks resolved.
+pub struct ProcessJobRunner {
+    env: SharedEnv,
+}
+
+impl ProcessJobRunner {
+    pub fn new(env: SharedEnv) -> Self {
+        Self { env }
+    }
+}
 
 #[async_trait::async_trait]
 impl JobRunner for ProcessJobRunner {
@@ -74,7 +83,12 @@ impl JobRunner for ProcessJobRunner {
         limits: RunLimits,
         cancel: CancellationToken,
     ) -> RunOutput {
-        runner::run(spec, kind, &log_path, limits, cancel).await
+        let env = self
+            .env
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        runner::run(spec, kind, &log_path, limits, cancel, &env).await
     }
 }
 
@@ -1140,7 +1154,8 @@ impl Engine {
     }
 
     /// Checks the whole setup: executors (freshly, not from the cache), the Linear connection
-    /// and workspace, and every binding.
+    /// and workspace, and every binding. The report also carries the PATH and proxy the
+    /// executors get, when the readiness probe resolves them.
     pub async fn doctor(&self) -> DoctorReport {
         let cfg = self.config();
         let executors = self.inner.readiness.executor_reports(true).await;
@@ -1164,6 +1179,7 @@ impl Engine {
             executors,
             workspace,
             bindings: doctor::check_bindings(&cfg, &ready),
+            env: self.inner.readiness.env(),
         }
     }
 

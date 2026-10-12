@@ -19,6 +19,7 @@ use issuerelay_core::{
     config::{Binding, Config, ExecutorKind, PermissionProfile, TriggerNames},
     doctor::{ExecutorReport, ReadinessProbe},
     engine::{Engine, EngineDeps, JobRunner, ProcessJobRunner, StatusSnapshot},
+    env::{EnvSource, ExecEnv},
     executor::CommandSpec,
     linear::{LinearApi, Project, Team, Viewer},
     model::{Issue, Job, JobState},
@@ -814,6 +815,20 @@ impl ReadinessProbe for RecordsFresh {
     async fn executor_reports(&self, fresh: bool) -> Vec<ExecutorReport> {
         self.0.lock().unwrap().push(fresh);
         FakeReadiness.executor_reports(fresh).await
+    }
+}
+
+/// A probe that also resolved `env`, as `SystemReadiness` does.
+struct ResolvesEnv(ExecEnv);
+
+#[async_trait::async_trait]
+impl ReadinessProbe for ResolvesEnv {
+    async fn executor_reports(&self, fresh: bool) -> Vec<ExecutorReport> {
+        FakeReadiness.executor_reports(fresh).await
+    }
+
+    fn env(&self) -> Option<ExecEnv> {
+        Some(self.0.clone())
     }
 }
 
@@ -1736,7 +1751,7 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
         stall: Duration::from_secs(30),
     };
     let log = dir.path().join("logs").join("1.jsonl");
-    let output = ProcessJobRunner
+    let output = ProcessJobRunner::new(ExecEnv::inherit().shared())
         .run(
             spec,
             ExecutorKind::Claude,
@@ -1751,6 +1766,53 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
         Some("done\n{\"result\":\"in_testing\",\"summary\":\"ok\"}")
     );
     assert!(log.exists());
+}
+
+// The readiness check replaces the shared environment; the runs that start afterwards get the
+// new one.
+#[tokio::test]
+async fn the_process_runner_gives_each_run_the_current_shared_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("script.json");
+    let steps = serde_json::json!([{ "print_env": "ISSUERELAY_TEST_PROXY" }]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let env = ExecEnv::inherit().shared();
+    let runner = ProcessJobRunner::new(env.clone());
+    let limits = RunLimits {
+        total: Duration::from_secs(30),
+        stall: Duration::from_secs(30),
+    };
+    let mut printed = Vec::new();
+    for (round, proxy) in [None, Some("http://127.0.0.1:9")].into_iter().enumerate() {
+        if let Some(proxy) = proxy {
+            env.write().unwrap().proxy = vec![("ISSUERELAY_TEST_PROXY".into(), proxy.into())];
+        }
+        let spec = CommandSpec {
+            program: PathBuf::from(env!("CARGO_BIN_EXE_fake-agent")),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: dir.path().to_path_buf(),
+            stdin: String::new(),
+        };
+        let log = dir.path().join(format!("{round}.jsonl"));
+        let output = runner
+            .run(
+                spec,
+                ExecutorKind::Claude,
+                log.clone(),
+                limits,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(output.exit, ExitKind::Exited(Some(0)));
+        printed.push(std::fs::read_to_string(&log).unwrap());
+    }
+    assert_eq!(
+        printed,
+        [
+            "ISSUERELAY_TEST_PROXY=<unset>\n",
+            "ISSUERELAY_TEST_PROXY=http://127.0.0.1:9\n"
+        ]
+    );
 }
 
 // Stop, retry and mark done.
@@ -2258,6 +2320,27 @@ async fn doctor_asks_for_fresh_executor_checks_and_the_loop_for_cached_ones() {
         !calls.is_empty() && calls.iter().all(|fresh| !fresh),
         "{calls:?}"
     );
+}
+
+#[tokio::test]
+async fn doctor_reports_the_environment_the_probe_resolved() {
+    let root = tempfile::tempdir().unwrap();
+    let env = ExecEnv {
+        path: Some("/opt/demo/bin".into()),
+        path_source: EnvSource::LoginShell,
+        ..ExecEnv::inherit()
+    };
+    let engine = build_engine(
+        root.path(),
+        &Config::default(),
+        Arc::new(FakeLinear::new("user-1")),
+        Arc::new(ResolvesEnv(env.clone())),
+        Arc::new(ScriptedRunner::new(FakeLinear::new("user-1"), false)),
+    );
+    assert_eq!(engine.doctor().await.env, Some(env));
+    // A probe that resolves nothing leaves the report without an environment.
+    let h = Harness::new(2, false);
+    assert_eq!(h.engine.doctor().await.env, None);
 }
 
 // Logs.

@@ -215,7 +215,7 @@ mod tests {
     en0 : <dictionary> {
       HTTPSEnable : 1
       HTTPSPort : 9999
-      HTTPSProxy : 10.9.9.9
+      HTTPSProxy : 203.0.113.9
     }
   }
 }

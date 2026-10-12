@@ -22,8 +22,21 @@ pub struct CommandSpec {
 
 /// Resolves `claude` / `codex` on PATH, including `.cmd` shims on Windows.
 pub fn resolve_program(kind: ExecutorKind) -> Result<PathBuf> {
-    which::which(kind.program_name())
-        .with_context(|| format!("`{}` was not found on PATH", kind.program_name()))
+    resolve_program_in(kind, None)
+}
+
+/// Resolves `claude` / `codex` on `path` (the environment check's resolved PATH), or on the
+/// host's own PATH when `path` is `None`.
+pub fn resolve_program_in(kind: ExecutorKind, path: Option<&str>) -> Result<PathBuf> {
+    let name = kind.program_name();
+    let found = match path {
+        Some(path) => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            which::which_in(name, Some(path), cwd)
+        }
+        None => which::which(name),
+    };
+    found.with_context(|| format!("`{name}` was not found on PATH"))
 }
 
 /// Whether `dir` is a git checkout: it has a `.git` directory, or a `.git` file as worktrees do.
@@ -233,6 +246,29 @@ mod tests {
         assert!(!is_git_repo(dir.path()));
         std::fs::write(dir.path().join(".git"), "gitdir: elsewhere").unwrap();
         assert!(is_git_repo(dir.path()));
+    }
+
+    #[test]
+    fn executors_are_looked_up_on_the_given_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        };
+        let program = dir.path().join(name);
+        std::fs::write(&program, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = dir.path().to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_program_in(ExecutorKind::Claude, Some(&path)).unwrap(),
+            program
+        );
+        assert!(resolve_program_in(ExecutorKind::Codex, Some(&path)).is_err());
     }
 
     #[test]

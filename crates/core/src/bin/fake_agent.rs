@@ -4,6 +4,7 @@
 //! is 0 unless an `exit` step says otherwise. Each step holds one of:
 //!
 //! - `{"out": text}` / `{"err": text}`: print a line to stdout / stderr
+//! - `{"print_env": name}`: print `name=<value>` (or `name=<unset>`) to stdout
 //! - `{"sleep_ms": n}`: sleep
 //! - `{"stdin_to": path}`: read all of stdin into a file
 //! - `{"heartbeat": path, "every_ms": n}`: start a background child that appends a byte to the
@@ -39,6 +40,11 @@ fn main() {
     for step in steps {
         if let Some(line) = step.get("out").and_then(Value::as_str) {
             println!("{line}");
+            std::io::stdout().flush().ok();
+        }
+        if let Some(name) = step.get("print_env").and_then(Value::as_str) {
+            let value = std::env::var(name).unwrap_or_else(|_| "<unset>".into());
+            println!("{name}={value}");
             std::io::stdout().flush().ok();
         }
         if let Some(line) = step.get("err").and_then(Value::as_str) {

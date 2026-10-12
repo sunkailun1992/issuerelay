@@ -5,6 +5,7 @@ use std::{
 
 use issuerelay_core::{
     config::ExecutorKind,
+    env::ExecEnv,
     executor::CommandSpec,
     runner::{self, ExitKind, RunLimits},
 };
@@ -103,6 +104,7 @@ async fn exits_zero_captures_final_text_and_prompt() {
         &log,
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -131,10 +133,47 @@ async fn nonzero_exit_code_is_reported() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(3)));
     assert_eq!(out.final_text, None);
+}
+
+// The proxy variable is set on the child only, through `env`; this process never sets it. The
+// nested-session marker comes from the environment of whoever runs the tests (set when the tests
+// run inside a Claude Code session) and must not reach the child either way.
+#[tokio::test]
+async fn the_run_gets_the_resolved_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"print_env": "ISSUERELAY_TEST_PROXY"}, {"print_env": "CLAUDECODE"}]),
+    );
+    let log = dir.path().join("1.jsonl");
+    let env = ExecEnv {
+        proxy: vec![("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:9".into())],
+        ..ExecEnv::inherit()
+    };
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &env,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let lines = log_lines(&log);
+    assert!(
+        lines.contains(&"ISSUERELAY_TEST_PROXY=http://127.0.0.1:9".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"CLAUDECODE=<unset>".to_string()),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -151,6 +190,7 @@ async fn stalled_run_is_stopped() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 400),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Stalled);
@@ -170,6 +210,7 @@ async fn chatty_run_hits_total_timeout() {
         &dir.path().join("l.jsonl"),
         limits(600, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -191,6 +232,7 @@ async fn cancel_stops_the_run() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         token,
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Canceled);
@@ -219,6 +261,7 @@ async fn kill_reaches_grandchildren() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         token,
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Canceled);
@@ -239,12 +282,14 @@ async fn an_escaped_grandchild_is_ended_on_timeout() {
     let hb = dir.path().join("hb.txt");
     let s = escaped_heartbeat_script(dir.path(), &hb);
     let log = dir.path().join("l.jsonl");
+    let env = ExecEnv::inherit();
     let mut run = Box::pin(runner::run(
         spec(agent(), dir.path(), &s, ""),
         ExecutorKind::Claude,
         &log,
         limits(5_000, 60_000),
         CancellationToken::new(),
+        &env,
     ));
     // The total limit must cut into a grandchild that is really running, however slowly the
     // machine starts processes.
@@ -276,6 +321,7 @@ async fn an_escaped_grandchild_is_ended_on_cancel() {
         &dir.path().join("l.jsonl"),
         limits(60_000, 60_000),
         token,
+        &ExecEnv::inherit(),
     )
     .await;
     assert!(started.await.unwrap(), "heartbeat child never ran");
@@ -298,6 +344,7 @@ async fn an_escaped_grandchild_is_ended_when_the_run_is_dropped() {
             &log,
             limits(60_000, 60_000),
             CancellationToken::new(),
+            &ExecEnv::inherit(),
         )
         .await
     });
@@ -322,6 +369,7 @@ async fn normal_exit_returns_promptly_even_with_background_child() {
         &dir.path().join("l.jsonl"),
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -345,6 +393,7 @@ async fn missing_program_reports_spawn_failure() {
         &dir.path().join("l.jsonl"),
         limits(5_000, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert!(matches!(out.exit, ExitKind::SpawnFailed(_)));
@@ -369,6 +418,7 @@ async fn dropping_the_run_future_ends_the_process_tree() {
             &log,
             limits(60_000, 60_000),
             CancellationToken::new(),
+            &ExecEnv::inherit(),
         )
         .await
     });
@@ -395,12 +445,14 @@ async fn an_outer_timeout_ends_the_process_tree() {
         serde_json::json!([{"heartbeat": hb, "every_ms": 50}, {"sleep_ms": 30_000}]),
     );
     let log = dir.path().join("l.jsonl");
+    let env = ExecEnv::inherit();
     let mut run = Box::pin(runner::run(
         spec(agent(), dir.path(), &s, ""),
         ExecutorKind::Claude,
         &log,
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &env,
     ));
     // Drive the run until the grandchild is alive, so the timeout below cuts into a real tree
     // however slow the machine is.
@@ -440,6 +492,7 @@ async fn stdout_output_keeps_the_stall_timer_from_firing() {
         &dir.path().join("l.jsonl"),
         limits(3_000, 1_200),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -459,6 +512,7 @@ async fn stderr_output_also_counts_as_activity() {
         &dir.path().join("l.jsonl"),
         limits(3_000, 1_200),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -482,6 +536,7 @@ async fn a_burst_before_exit_is_fully_drained() {
         &log,
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -513,6 +568,7 @@ async fn huge_limits_mean_no_deadline_instead_of_a_panic() {
         &dir.path().join("l.jsonl"),
         huge,
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -530,6 +586,7 @@ async fn spawn_failure_is_written_to_the_log() {
         &log,
         limits(5_000, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     let ExitKind::SpawnFailed(message) = out.exit else {
@@ -553,6 +610,7 @@ async fn the_log_is_private_to_the_user() {
         &log,
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -590,6 +648,7 @@ async fn cmd_wrapper_passes_prompt_and_paths_intact() {
         &work.join("l.jsonl"),
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
