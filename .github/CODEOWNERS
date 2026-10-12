@@ -12,6 +12,8 @@
 /crates/core/src/runner.rs         @sunkailun1992
 /crates/core/src/linear/auth.rs    @sunkailun1992
 /crates/core/src/ipc/protocol.rs   @sunkailun1992
+/crates/core/src/text.rs           @sunkailun1992
 /crates/cli/src/main.rs            @sunkailun1992
+/crates/cli/src/format.rs          @sunkailun1992
 /crates/cli/src/mcp.rs             @sunkailun1992
 /crates/cli/tests/mcp_tools.rs     @sunkailun1992

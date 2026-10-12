@@ -22,7 +22,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 | 层 | 模块 | 职责 | 可以依赖 |
 |---|---|---|---|
-| 基础 | `core::paths`、`core::config` | 位置、设置、绑定 | 无 |
+| 基础 | `core::paths`、`core::config`、`core::text` | 位置、设置、绑定；清洗要展示的外来文本 | 无 |
 | 纯逻辑 | `core::model`、`trigger`、`scheduler`、`prompt`、`executor`（拼命令）、`executor::outcome` | 判断与生成，不做 IO | 基础层 |
 | 外部接入 | `core::store`（SQLite）、`runner`（子进程）、`linear`（MCP）、`doctor`（检查命令） | 与外部世界交互 | 基础层、纯逻辑层 |
 | 编排 | `core::engine` | 唯一持有运行状态的地方 | 以上全部 |
@@ -58,6 +58,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 状态流转与编排 | `crates/core/src/engine.rs` |
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |
 | 命令行与 MCP 控制服务 | `crates/cli/src/main.rs`、`mcp.rs`、`format.rs` |
+| 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
 
 ## 6. 运行数据与配置
 
