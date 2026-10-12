@@ -219,8 +219,8 @@ issuerelay/
 - 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。Linear 的授权服务器要求回调带 RFC 9207 的 `iss` 参数，所以回调时把完整回调地址交给 rmcp 校验（M0 实测）。回环端口同时处理多个连接，只有带本次 `state` 的回调（或不带 `state` 的授权错误回调）结束等待，其余请求返回 404。
 - 令牌：存 macOS 钥匙串 / Windows 凭据管理器（`keyring` 库），不以明文写盘，自动续期。
 - 备用方式：高级设置里可以改用个人 API key（同样通过 `Authorization: Bearer` 连接 MCP）。
-- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。只有这条错误算「需求不存在」；读不懂的回复（缺 `uuid`、状态或时间，或格式变了）一律当错误处理，本轮检查失败、不改任何任务的状态，不当成「需求已消失」或「没有候选」。每次调用最长等 30 秒。候选需求按创建时间翻页（`orderBy: createdAt`），翻页途中被改动的需求不会跨页漏读。
-- 每次建立连接时先调用 `tools/list`，检查上述工具和参数是否存在；缺失时面板报「Linear 接口已变化」并暂停派活，不做猜测性调用。
+- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`（游标与上一次请求用的相同算错误，不当成翻完；空页只要还有新游标就继续翻）；项目的 `teams` 是 `{id, name, key}` 列表；链接末尾的标题 slug 可能是中文，程序只保留到 `/issue/<编号>`；查不到需求时返回工具错误「Could not find referenced Issue.」。只有这条错误算「需求不存在」；读不懂的回复（缺 `uuid`、状态或时间，或格式变了）一律当错误处理，本轮检查失败、不改任何任务的状态，不当成「需求已消失」或「没有候选」。每次调用最长等 30 秒。候选需求按创建时间翻页（`orderBy: createdAt`），翻页途中被改动的需求不会跨页漏读。
+- 每次建立连接时先调用 `tools/list`，检查上述工具和参数是否存在，以及请求的 `fields` 值是否都在该参数的取值列表里；缺失时面板报「Linear 接口已变化」并暂停派活，不做猜测性调用。
 - 第一版只连接一个 Linear 工作区。
 
 ## 8. 首次引导与环境检查
@@ -229,7 +229,7 @@ issuerelay/
 
 1. 选择界面语言。
 2. 连接 Linear（浏览器授权），显示授权人。
-3. 检查工作区：有没有 `ai-ready` 标签，以及 In Progress、In Testing、Done 这几个状态。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
+3. 检查工作区：有没有 `ai-ready` 标签；已绑定项目所属团队里有没有 In Progress、In Testing、Done（还没有绑定时检查所有团队）。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
 4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。
 5. 绑定第一个项目：选 Linear 项目 → 选本地目录 → 选执行者 → 选权限档位。首次选「完全放开」时明确提示风险（见第 14 节）。
 6. 使用说明：明确写出「需求要被自动处理，必须指派给自己、加 `ai-ready` 标签、状态为 Todo、所属项目已绑定」，并附示例。面板的「需求」页会为不满足条件的需求标出原因。

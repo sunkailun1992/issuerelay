@@ -26,7 +26,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::config::{Config, ExecutorKind, TriggerNames};
+use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor;
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
@@ -625,6 +625,9 @@ pub struct WorkspaceReport {
     pub label_ok: bool,
     /// Entries like `Demo: In Testing` (team name and missing status).
     pub missing_states: Vec<String>,
+    /// The names of the teams whose statuses were checked.
+    #[serde(default)]
+    pub teams_checked: Vec<String>,
 }
 
 impl WorkspaceReport {
@@ -634,17 +637,34 @@ impl WorkspaceReport {
     }
 }
 
-/// Looks for the trigger label and, in every team, the four statuses IssueRelay moves issues
-/// through. Names compare like everywhere else (`same_name`). Errors when Linear cannot be
-/// queried.
-pub async fn check_workspace(api: &dyn LinearApi, names: &TriggerNames) -> Result<WorkspaceReport> {
+/// Looks for the trigger label and, in the teams of the bound projects, the four statuses
+/// IssueRelay moves issues through; before any project is bound, in every team. A team that
+/// never uses IssueRelay need not have them. Names compare like everywhere else (`same_name`).
+/// Errors when Linear cannot be queried.
+pub async fn check_workspace(
+    api: &dyn LinearApi,
+    names: &TriggerNames,
+    bindings: &[Binding],
+) -> Result<WorkspaceReport> {
     let label_ok = api
         .labels()
         .await?
         .iter()
         .any(|l| same_name(l, &names.label));
+    let mut teams = api.teams().await?;
+    if !bindings.is_empty() {
+        let bound: HashSet<&str> = bindings.iter().map(|b| b.project_id.as_str()).collect();
+        let team_ids: HashSet<String> = api
+            .projects()
+            .await?
+            .into_iter()
+            .filter(|p| bound.contains(p.id.as_str()))
+            .flat_map(|p| p.team_ids)
+            .collect();
+        teams.retain(|team| team_ids.contains(&team.id));
+    }
     let mut missing_states = Vec::new();
-    for team in api.teams().await? {
+    for team in &teams {
         let statuses = api.statuses(&team.id).await?;
         for wanted in [
             &names.todo,
@@ -660,6 +680,7 @@ pub async fn check_workspace(api: &dyn LinearApi, names: &TriggerNames) -> Resul
     Ok(WorkspaceReport {
         label_ok,
         missing_states,
+        teams_checked: teams.into_iter().map(|team| team.name).collect(),
     })
 }
 

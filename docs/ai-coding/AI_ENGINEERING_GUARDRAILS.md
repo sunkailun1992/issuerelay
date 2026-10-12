@@ -39,7 +39,7 @@ AI 可以加快开发，但不能替代实机验收、用户对权限和发布�
 | 执行者 | 参数与设计 6.1 一致；提示词只在标准输入；`--permission-prompts none` 仍在；三档权限映射正确 |
 | 子进程 | 进程组 / Job Object 仍在；超时、卡住、取消都会结束整棵树，Unix 上包括已离开进程组的后代（按父进程查找、核对启动时间）；正常退出后清理进程组里的残留；父进程先退出的孤儿和执行者退出后留下的后台进程找不到，由实机验收检查 |
 | 触发与派活 | 指派给我、带标签、状态 Todo；开跑前复查；同目录一次一条；总数不超上限；只比较 Linear 的时间 |
-| Linear | 连接时检查 `REQUIRED_TOOLS` 与 `REQUIRED_ARGUMENTS`；每次调用 30 秒超时；翻页翻到底，还有下一页却没给游标算错误；只有「Could not find referenced Issue.」返回 `None`，读不懂的回复一律报错，不当成「需求已不存在」或「没有候选」 |
+| Linear | 连接时检查 `REQUIRED_TOOLS`、`REQUIRED_ARGUMENTS` 与 `REQUIRED_FIELDS`；每次调用 30 秒超时；翻页翻到底，还有下一页却没给游标、或游标与上一次请求用的相同都算错误；只有「Could not find referenced Issue.」返回 `None`，读不懂的回复一律报错，不当成「需求已不存在」或「没有候选」 |
 | IPC | 方法表不含标记完成、重试、取消；Unix 套接字目录 0700；Windows 管道拒绝远程客户端；第二个宿主拒绝启动 |
 | 凭据 | 只经 `keyring`；不出现在日志、IPC 响应和错误信息里（钥匙串错误只用 `Display`）；测试用内存钥匙串，不碰真实钥匙串；API key 只走 https |
 | 提交 | 四条验证命令；`git status --short`；`git diff --stat`；没有生成物和原始样本 |

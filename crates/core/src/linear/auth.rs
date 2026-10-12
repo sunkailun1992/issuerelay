@@ -205,7 +205,7 @@ pub async fn connect_api_key(url: &str, key: &str) -> Result<LinearClient> {
 
 /// Browser OAuth with a loopback redirect on a random port. `open_url` shows or opens the URL.
 /// Only a redirect that carries this request's `state` (or an OAuth error without any `state`)
-/// ends the wait.
+/// ends the wait, and the loopback port is closed at once, before the token is exchanged.
 pub async fn login(url: &str, open_url: impl Fn(&str)) -> Result<LinearClient> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!(
@@ -229,6 +229,9 @@ pub async fn login(url: &str, open_url: impl Fn(&str)) -> Result<LinearClient> {
         tokio::time::timeout(LOGIN_TIMEOUT, wait_for_callback(&listener, &expected_state))
             .await
             .context("timed out waiting for the browser authorization")??;
+    // The callback has arrived; nothing else should reach the loopback port while the token is
+    // exchanged.
+    drop(listener);
     if let Some(error) = oauth_error(&callback) {
         bail!("Linear authorization failed: {error}");
     }
@@ -394,18 +397,11 @@ pub fn oauth_error(callback_url: &str) -> Option<String> {
     )
 }
 
-/// Control characters, and the Unicode format and separator characters that can reorder or hide
-/// text: zero-width and direction marks, line and paragraph separators, bidi overrides and
-/// isolates, invisible operators, and the byte order mark.
+/// Control characters, and the characters that can reorder or hide text (`text::is_invisible`:
+/// zero-width and direction marks, separators, bidi controls, tag characters and the like). The
+/// joiners U+200C and U+200D stay, as everywhere else.
 fn is_unsafe_to_show(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{200B}'..='\u{200F}'
-                | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{206F}'
-                | '\u{FEFF}'
-        )
+    c.is_control() || crate::text::is_invisible(c)
 }
 
 /// The authorization URL comes from remote metadata: only open https URLs on the MCP server's own
@@ -505,6 +501,27 @@ mod tests {
         );
         let long = format!("http://127.0.0.1:1/callback?error={}", "x".repeat(1000));
         assert!(oauth_error(&long).unwrap().chars().count() <= 300);
+    }
+
+    #[test]
+    fn oauth_error_drops_the_characters_the_engine_drops_and_keeps_the_joiners() {
+        // A tag character, the Arabic letter mark, the soft hyphen and the Hangul fillers hide
+        // or reorder text like the zero-width marks do (`text::is_invisible`); the joiners stay,
+        // because emoji and Indic scripts need them.
+        let description =
+            "a\u{e0041}b\u{061c}c\u{00ad}d\u{115f}e\u{3164}f\u{ffa0}g\u{200d}h\u{200c}i";
+        let callback = url::Url::parse_with_params(
+            "http://127.0.0.1:1/callback",
+            [
+                ("error", "access_denied"),
+                ("error_description", description),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_error(callback.as_str()).as_deref(),
+            Some("access_denied: abcdefg\u{200d}h\u{200c}i")
+        );
     }
 
     #[test]

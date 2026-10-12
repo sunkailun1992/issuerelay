@@ -1,6 +1,6 @@
 //! In-memory LinearApi used by doctor and engine tests.
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -22,6 +22,12 @@ struct State {
     statuses: Vec<String>,
     /// Uuids whose `issue()` reads fail until `clear_issue_failures`.
     failing_issue_reads: HashSet<String>,
+    /// What `teams()` lists after `set_teams`; empty means the default team.
+    teams: Vec<Team>,
+    /// What `projects()` lists after `set_projects`; empty means the default project.
+    projects: Vec<Project>,
+    /// The statuses `set_team_statuses` gave single teams; the others have `statuses`.
+    team_statuses: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -96,6 +102,39 @@ impl FakeLinear {
 
     pub fn set_statuses(&self, statuses: &[&str]) {
         self.state.lock().unwrap().statuses = statuses.iter().map(|s| s.to_string()).collect();
+    }
+
+    /// Makes `teams()` list these teams, as (id, name), instead of the default `team-1`.
+    pub fn set_teams(&self, teams: &[(&str, &str)]) {
+        self.state.lock().unwrap().teams = teams
+            .iter()
+            .map(|(id, name)| Team {
+                id: id.to_string(),
+                name: name.to_string(),
+            })
+            .collect();
+    }
+
+    /// Makes `projects()` list these projects, as (uuid, name, ids of its teams), instead of
+    /// the default `proj-1`.
+    pub fn set_projects(&self, projects: &[(&str, &str, &[&str])]) {
+        self.state.lock().unwrap().projects = projects
+            .iter()
+            .map(|(id, name, team_ids)| Project {
+                id: id.to_string(),
+                name: name.to_string(),
+                team_ids: team_ids.iter().map(|team| team.to_string()).collect(),
+            })
+            .collect();
+    }
+
+    /// Gives the team `team_id` its own statuses; every other team keeps the ones `set_statuses`
+    /// sets.
+    pub fn set_team_statuses(&self, team_id: &str, statuses: &[&str]) {
+        self.state.lock().unwrap().team_statuses.insert(
+            team_id.into(),
+            statuses.iter().map(|s| s.to_string()).collect(),
+        );
     }
 
     pub fn set_state_calls(&self) -> Vec<(String, String)> {
@@ -179,9 +218,14 @@ impl LinearApi for FakeLinear {
 
     async fn projects(&self) -> Result<Vec<Project>> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        if !s.projects.is_empty() {
+            return Ok(s.projects.clone());
+        }
         Ok(vec![Project {
             id: "proj-1".into(),
             name: "Demo Project".into(),
+            team_ids: vec!["team-1".into()],
         }])
     }
 
@@ -192,14 +236,19 @@ impl LinearApi for FakeLinear {
 
     async fn teams(&self) -> Result<Vec<Team>> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        if !s.teams.is_empty() {
+            return Ok(s.teams.clone());
+        }
         Ok(vec![Team {
             id: "team-1".into(),
             name: "Demo".into(),
         }])
     }
 
-    async fn statuses(&self, _team_id: &str) -> Result<Vec<String>> {
+    async fn statuses(&self, team_id: &str) -> Result<Vec<String>> {
         self.check_failure()?;
-        Ok(self.state.lock().unwrap().statuses.clone())
+        let s = self.state.lock().unwrap();
+        Ok(s.team_statuses.get(team_id).unwrap_or(&s.statuses).clone())
     }
 }

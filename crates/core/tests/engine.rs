@@ -2505,6 +2505,25 @@ async fn doctor_reports_viewer_workspace_executors_and_bindings() {
 }
 
 #[tokio::test]
+async fn doctor_checks_only_the_teams_of_the_bound_projects() {
+    let h = Harness::new(2, false);
+    h.linear
+        .set_teams(&[("team-1", "Demo"), ("team-2", "Unrelated")]);
+    h.linear
+        .set_projects(&[("proj-1", "Demo Project", &["team-1"])]);
+    h.linear.set_team_statuses("team-2", &["Backlog"]);
+    // No binding yet: every team is looked at, and the unrelated one lacks the statuses.
+    let workspace = h.engine.doctor().await.workspace.unwrap();
+    assert_eq!(workspace.teams_checked, ["Demo", "Unrelated"]);
+    assert!(!workspace.ok(), "{workspace:?}");
+    // The binding names the project, whose team is the only one that matters.
+    h.bind("proj-1", "a");
+    let workspace = h.engine.doctor().await.workspace.unwrap();
+    assert_eq!(workspace.teams_checked, ["Demo"]);
+    assert!(workspace.ok(), "{workspace:?}");
+}
+
+#[tokio::test]
 async fn doctor_reports_a_linear_failure_and_still_checks_the_rest() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");

@@ -212,6 +212,19 @@ fn doctor(v: &Value) -> String {
                 missing.join(", ")
             )
         });
+        // Which teams the statuses were looked up in; a host from before the field existed
+        // sends none, and then nothing is said about teams.
+        if ws["teams_checked"].is_array() {
+            let teams = strings(&ws["teams_checked"]);
+            out.push(format!(
+                "Teams checked: {}",
+                if teams.is_empty() {
+                    "none".to_string()
+                } else {
+                    teams.join(", ")
+                }
+            ));
+        }
     }
     for b in v["bindings"].as_array().into_iter().flatten() {
         let mut wrong = Vec::new();
@@ -469,14 +482,16 @@ mod tests {
                 {"kind": "claude", "program": "/x/claude", "logged_in": true, "linear_mcp": true, "problems": []},
                 {"kind": "codex", "program": null, "logged_in": false, "linear_mcp": false, "problems": ["`codex` is not installed or not on PATH"]}
             ],
-            "workspace": {"label_ok": true, "missing_states": ["Demo: In Testing"]},
+            "workspace": {"label_ok": true, "missing_states": ["Demo: In Testing"], "teams_checked": ["Demo", "Other"]},
             "bindings": [{"binding_id": "p", "project_name": "Demo Project", "directory_exists": true, "executor": "claude", "executor_ready": true}]
         });
         let text = human("doctor", &v);
         assert!(text.contains("Linear: connected as Jane Doe"));
         assert!(text.contains("claude: ready"));
         assert!(text.contains("codex: not ready (`codex` is not installed or not on PATH)"));
-        assert!(text.contains("Workspace: label ok, missing statuses: Demo: In Testing"));
+        assert!(text.contains(
+            "Workspace: label ok, missing statuses: Demo: In Testing\nTeams checked: Demo, Other\n"
+        ));
         assert!(text.contains("Binding Demo Project -> claude: ok"));
         // Everything Linear or an executor can influence is untrusted text.
         let hostile = human(
@@ -486,7 +501,7 @@ mod tests {
                 "linear_error": "e\u{1b}[31m",
                 "executors": [{"kind": "codex", "program": null, "logged_in": false, "linear_mcp": false,
                     "problems": ["p\u{7}1", "p\u{1b}]52;c;eA==\u{7}2"]}],
-                "workspace": {"label_ok": false, "missing_states": ["Demo:\u{1b}x"]},
+                "workspace": {"label_ok": false, "missing_states": ["Demo:\u{1b}x"], "teams_checked": ["Te\u{1b}]52;c;eA==\u{7}am", "Se\u{202e}cond\nforged line"]},
                 "bindings": [{"binding_id": "p", "project_name": "N\u{1b}]0;t\u{7}M", "directory_exists": true, "executor": "claude", "executor_ready": true}]
             }),
         );
@@ -501,6 +516,11 @@ mod tests {
         assert!(
             hostile.contains("missing statuses: Demo: x")
                 && hostile.contains("Binding N ]0;t M -> claude: ok")
+        );
+        // Team names come from Linear as well.
+        assert!(
+            hostile.contains("Teams checked: Te ]52;c;eA== am, Second forged line"),
+            "{hostile:?}"
         );
     }
 
@@ -519,7 +539,22 @@ mod tests {
         let ok = json!({"label_ok": true, "missing_states": []});
         assert!(report(ok, none.clone()).ends_with("Workspace: label ok, statuses ok"));
         let no_label = json!({"label_ok": false, "missing_states": []});
-        assert!(report(no_label, none).ends_with("Workspace: label missing, statuses ok"));
+        assert!(report(no_label, none.clone()).ends_with("Workspace: label missing, statuses ok"));
+        // The teams the statuses were looked up in follow the verdict. A host from before the
+        // field existed sends none, and then nothing is said about teams.
+        let teams = |teams: Value| {
+            let workspace = json!({"label_ok": true, "missing_states": [], "teams_checked": teams});
+            report(workspace, none.clone())
+        };
+        assert_eq!(
+            teams(json!(["Demo"])),
+            "Linear: not connected (offline)\nWorkspace: label ok, statuses ok\nTeams checked: Demo"
+        );
+        assert!(teams(json!(["Demo", "Beta"])).ends_with("\nTeams checked: Demo, Beta"));
+        // No team at all (a bound project Linear no longer lists) is said, not left out.
+        assert!(teams(json!([])).ends_with("\nTeams checked: none"));
+        let older = json!({"label_ok": true, "missing_states": []});
+        assert!(!report(older, none).contains("Teams checked"));
         // An executor that is not ready without a reason is still not ready; each of the three
         // checks has to pass.
         let executor = |program: Value, logged_in: bool, linear_mcp: bool| {

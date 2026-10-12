@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use common::fake_linear::FakeLinear;
 use issuerelay_core::{
-    config::TriggerNames,
+    config::{Binding, TriggerNames},
     doctor::{CmdOutput, CommandRunner, SystemRunner, check_workspace},
     env::ExecEnv,
     linear::{LinearApi, Project, Team, Viewer},
@@ -17,7 +17,7 @@ use issuerelay_core::{
 
 #[tokio::test]
 async fn workspace_with_all_names_is_ok() {
-    let report = check_workspace(&FakeLinear::new("user-1"), &TriggerNames::default())
+    let report = check_workspace(&FakeLinear::new("user-1"), &TriggerNames::default(), &[])
         .await
         .unwrap();
     assert!(report.ok(), "{report:?}");
@@ -31,7 +31,7 @@ async fn missing_status_and_label_are_reported() {
         label: "robot".into(),
         ..TriggerNames::default()
     };
-    let report = check_workspace(&linear, &names).await.unwrap();
+    let report = check_workspace(&linear, &names, &[]).await.unwrap();
     assert!(!report.label_ok);
     assert_eq!(report.missing_states, ["Demo: In Testing"]);
 }
@@ -40,7 +40,7 @@ async fn missing_status_and_label_are_reported() {
 async fn names_match_ignoring_case_and_surrounding_whitespace() {
     let linear = FakeLinear::new("user-1");
     linear.set_statuses(&["todo ", "In Progress", "In Testing"]);
-    let report = check_workspace(&linear, &TriggerNames::default())
+    let report = check_workspace(&linear, &TriggerNames::default(), &[])
         .await
         .unwrap();
     assert!(report.label_ok);
@@ -51,7 +51,7 @@ async fn names_match_ignoring_case_and_surrounding_whitespace() {
         todo: "TODO".into(),
         ..TriggerNames::default()
     };
-    let report = check_workspace(&linear, &names).await.unwrap();
+    let report = check_workspace(&linear, &names, &[]).await.unwrap();
     assert!(report.label_ok);
     assert_eq!(report.missing_states, ["Demo: Done"]);
 }
@@ -60,7 +60,7 @@ async fn names_match_ignoring_case_and_surrounding_whitespace() {
 async fn a_missing_todo_status_is_reported() {
     let linear = FakeLinear::new("user-1");
     linear.set_statuses(&["In Progress", "In Testing", "Done"]);
-    let report = check_workspace(&linear, &TriggerNames::default())
+    let report = check_workspace(&linear, &TriggerNames::default(), &[])
         .await
         .unwrap();
     assert!(!report.ok());
@@ -71,7 +71,7 @@ async fn a_missing_todo_status_is_reported() {
 async fn missing_statuses_are_listed_in_workflow_order() {
     let linear = FakeLinear::new("user-1");
     linear.set_statuses(&[]);
-    let report = check_workspace(&linear, &TriggerNames::default())
+    let report = check_workspace(&linear, &TriggerNames::default(), &[])
         .await
         .unwrap();
     assert_eq!(
@@ -90,19 +90,21 @@ async fn a_failing_linear_call_is_an_error() {
     // `fail_next` makes the first call, `labels`, fail.
     let linear = FakeLinear::new("user-1");
     linear.fail_next("boom");
-    let err = check_workspace(&linear, &TriggerNames::default())
+    let err = check_workspace(&linear, &TriggerNames::default(), &[])
         .await
         .unwrap_err();
     assert!(err.to_string().contains("boom"), "{err}");
 }
 
-/// A `LinearApi` with several teams whose label, team or status call can be made to fail. Only
-/// what `check_workspace` calls is implemented.
+/// A `LinearApi` with several teams whose label, team, project or status call can be made to
+/// fail. Only what `check_workspace` calls is implemented.
 struct Workspace {
     labels: Vec<&'static str>,
     /// Team id, team name and the names of its statuses.
     teams: Vec<(&'static str, &'static str, Vec<&'static str>)>,
-    /// The call that fails: `labels`, `teams` or `statuses`.
+    /// Project id and the ids of the teams it belongs to.
+    projects: Vec<(&'static str, Vec<&'static str>)>,
+    /// The call that fails: `labels`, `teams`, `projects` or `statuses`.
     fail: Option<&'static str>,
 }
 
@@ -165,7 +167,16 @@ impl LinearApi for Workspace {
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {
-        unimplemented!("not used by check_workspace")
+        self.fail_if("projects")?;
+        Ok(self
+            .projects
+            .iter()
+            .map(|(id, teams)| Project {
+                id: id.to_string(),
+                name: format!("Project {id}"),
+                team_ids: teams.iter().map(|team| team.to_string()).collect(),
+            })
+            .collect())
     }
 }
 
@@ -180,13 +191,28 @@ fn two_teams(fail: Option<&'static str>) -> Workspace {
             ),
             ("team-2", "Beta", vec!["Todo", "Done"]),
         ],
+        projects: vec![("proj-1", vec!["team-1"]), ("proj-2", vec!["team-2"])],
         fail,
+    }
+}
+
+/// A binding of the Linear project `project_id`; the workspace check looks at nothing else of it.
+fn binding_to(project_id: &str) -> Binding {
+    Binding {
+        id: project_id.into(),
+        project_id: project_id.into(),
+        project_name: "Demo Project".into(),
+        directory: std::env::temp_dir(),
+        executor: None,
+        permission: None,
+        model: None,
+        prompt_override: None,
     }
 }
 
 #[tokio::test]
 async fn every_team_is_checked() {
-    let report = check_workspace(&two_teams(None), &TriggerNames::default())
+    let report = check_workspace(&two_teams(None), &TriggerNames::default(), &[])
         .await
         .unwrap();
     assert!(report.label_ok);
@@ -197,9 +223,119 @@ async fn every_team_is_checked() {
 }
 
 #[tokio::test]
+async fn only_the_teams_of_bound_projects_are_checked() {
+    let linear = FakeLinear::new("user-1");
+    linear.set_teams(&[("team-1", "Demo"), ("team-2", "Unrelated")]);
+    linear.set_projects(&[("proj-1", "Demo Project", &["team-1"])]);
+    linear.set_team_statuses("team-1", &["Todo", "In Progress", "In Testing", "Done"]);
+    linear.set_team_statuses("team-2", &["Backlog"]);
+    let binding = binding_to("proj-1");
+    let report = check_workspace(&linear, &TriggerNames::default(), &[binding])
+        .await
+        .unwrap();
+    assert!(
+        report.missing_states.is_empty(),
+        "{:?}",
+        report.missing_states
+    );
+    assert_eq!(report.teams_checked, ["Demo"]);
+    let all = check_workspace(&linear, &TriggerNames::default(), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        all.teams_checked,
+        ["Demo", "Unrelated"],
+        "before any binding every team is checked"
+    );
+    assert!(
+        all.missing_states
+            .iter()
+            .any(|m| m.starts_with("Unrelated: "))
+    );
+}
+
+#[tokio::test]
+async fn a_bound_project_decides_which_team_is_looked_at() {
+    let names = TriggerNames::default();
+    // Demo has every status, Beta lacks two: binding one project or the other tells them apart.
+    let demo = check_workspace(&two_teams(None), &names, &[binding_to("proj-1")])
+        .await
+        .unwrap();
+    assert_eq!(demo.teams_checked, ["Demo"]);
+    assert!(demo.ok(), "{demo:?}");
+    let beta = check_workspace(&two_teams(None), &names, &[binding_to("proj-2")])
+        .await
+        .unwrap();
+    assert_eq!(beta.teams_checked, ["Beta"]);
+    assert_eq!(
+        beta.missing_states,
+        ["Beta: In Progress", "Beta: In Testing"]
+    );
+    // Both bound: both teams, in the order Linear lists them rather than the order of binding.
+    let both = check_workspace(
+        &two_teams(None),
+        &names,
+        &[binding_to("proj-2"), binding_to("proj-1")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(both.teams_checked, ["Demo", "Beta"]);
+    assert_eq!(both.missing_states, beta.missing_states);
+    // The label does not depend on the teams.
+    assert!(both.label_ok && beta.label_ok);
+}
+
+#[tokio::test]
+async fn a_team_shared_by_projects_is_checked_once_and_a_project_of_two_teams_checks_both() {
+    let mut workspace = two_teams(None);
+    workspace.projects = vec![
+        ("proj-1", vec!["team-1"]),
+        ("proj-2", vec!["team-1"]),
+        ("proj-3", vec!["team-1", "team-2"]),
+        ("proj-4", vec![]),
+    ];
+    let names = TriggerNames::default();
+    let one_team = [binding_to("proj-1"), binding_to("proj-2")];
+    let report = check_workspace(&workspace, &names, &one_team)
+        .await
+        .unwrap();
+    assert_eq!(report.teams_checked, ["Demo"]);
+    let both = check_workspace(&workspace, &names, &[binding_to("proj-3")])
+        .await
+        .unwrap();
+    assert_eq!(both.teams_checked, ["Demo", "Beta"]);
+    assert_eq!(
+        both.missing_states,
+        ["Beta: In Progress", "Beta: In Testing"]
+    );
+    // A project that names no team, or one Linear no longer lists, adds nothing.
+    let none = [binding_to("proj-4"), binding_to("proj-gone")];
+    let report = check_workspace(&workspace, &names, &none).await.unwrap();
+    assert!(report.teams_checked.is_empty() && report.missing_states.is_empty());
+}
+
+#[tokio::test]
+async fn a_failing_project_list_is_returned_as_the_error_once_a_project_is_bound() {
+    let names = TriggerNames::default();
+    let err = check_workspace(
+        &two_teams(Some("projects")),
+        &names,
+        &[binding_to("proj-1")],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.to_string(), "projects failed");
+    // Without a binding the project list is not asked for.
+    let report = check_workspace(&two_teams(Some("projects")), &names, &[])
+        .await
+        .unwrap();
+    assert_eq!(report.teams_checked, ["Demo", "Beta"]);
+}
+
+#[tokio::test]
 async fn each_failing_linear_call_is_returned_as_the_error() {
     for call in ["labels", "teams", "statuses"] {
-        let err = check_workspace(&two_teams(Some(call)), &TriggerNames::default())
+        let err = check_workspace(&two_teams(Some(call)), &TriggerNames::default(), &[])
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), format!("{call} failed"));

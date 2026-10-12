@@ -21,6 +21,10 @@ pub struct Viewer {
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// The ids of the teams the project belongs to; the workspace check looks only at these
+    /// teams once projects are bound.
+    #[serde(default)]
+    pub team_ids: Vec<String>,
 }
 
 /// A Linear team. `id` is what `LinearApi::statuses` takes.
@@ -80,6 +84,17 @@ pub const ISSUE_FIELDS: [&str; 13] = [
     "updatedAt",
 ];
 
+/// The `fields` requested from `list_projects`.
+pub const PROJECT_FIELDS: [&str; 4] = ["id", "uuid", "name", "teams"];
+
+/// Every `fields` value this module requests, per tool. The connect check finds each in the
+/// tool's `fields` enum, so a field Linear stopped offering fails at connect time.
+pub const REQUIRED_FIELDS: &[(&str, &[&str])] = &[
+    ("list_issues", &ISSUE_FIELDS),
+    ("get_issue", &ISSUE_FIELDS),
+    ("list_projects", &PROJECT_FIELDS),
+];
+
 /// What the engine needs from Linear. `McpLinear` is the real implementation; tests use the
 /// in-memory `FakeLinear`. A reply that cannot be read is always an error, never an empty
 /// result, so the engine cannot mistake a failure for "no candidates" or "the issue is gone".
@@ -98,7 +113,7 @@ pub trait LinearApi: Send + Sync {
     async fn issue(&self, id: &str) -> Result<Option<Issue>>;
     /// Moves the issue to the status named `state`; an error when Linear rejects the change.
     async fn set_state(&self, id: &str, state: &str) -> Result<()>;
-    /// All projects, each identified by its uuid.
+    /// All projects, each identified by its uuid and carrying the ids of its teams.
     async fn projects(&self) -> Result<Vec<Project>>;
     /// The names of all issue labels.
     async fn labels(&self) -> Result<Vec<String>>;

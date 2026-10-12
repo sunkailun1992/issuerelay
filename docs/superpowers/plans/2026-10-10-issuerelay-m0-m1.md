@@ -8845,7 +8845,7 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 10.3 | 在设置里一键把 MCP 控制服务注册到 Claude Code / Codex | M2 |
 | 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 推断 F2，M2 实机验证） | M2 |
 | 8 | 执行者的代理环境：托盘程序从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY` 传给执行者，环境检查的提示点明代理（M1 验收 H1） | M2 |
-| 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2） | M2 |
+| 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2）（M2 第一部分 Task 6 已完成） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
@@ -8878,11 +8878,11 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值 | Task 16 评审 |
-| `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放 | Task 17、22 评审 |
-| `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示 | Task 17、19、21 评审 |
+| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值（M2 第一部分 Task 6：处理了其中的 `follow()` 与 `fields` 枚举两项） | Task 16 评审 |
+| `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放（M2 第一部分 Task 6：处理了回环端口一项；`RUST_LOG` 一项在 M2 第二部分 Task 3 的日志配置里） | Task 17、22 评审 |
+| `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示（M2 第一部分 Task 6） | Task 17、19、21 评审 |
 | `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |
-| `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队 | 最终评审 |
+| `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队（M2 第一部分 Task 6） | 最终评审 |
 | `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做）（M2 第一部分 Task 2 已完成，待 Windows 实机） | 最终评审 |
 | `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过） | Task 7、11 评审 |
 | `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`） | Task 12 评审 |

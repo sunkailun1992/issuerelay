@@ -96,6 +96,9 @@ pub fn validate_arguments(tool: &str, args: &Value) -> Result<(), String> {
 pub enum Reply {
     /// A successful call with exactly this text, whether it is JSON or not.
     Text(String),
+    /// Successful calls whose texts differ: the n-th call to the tool gets the n-th text, and
+    /// every call after the last one gets the last. For a list that is read page by page.
+    Pages(Vec<String>),
     /// A tool error (`isError`) with this text.
     ToolError(String),
     /// Never answers.
@@ -232,6 +235,12 @@ impl FakeLinearServer {
         let programmed = self.replies.lock().unwrap().get(tool).cloned();
         match programmed {
             Some(Reply::Text(text)) => Ok(text),
+            Some(Reply::Pages(pages)) => {
+                // The call was recorded above, so it is the `n`-th one to this tool.
+                let n = self.calls_to(tool).len();
+                let page = pages.get(n - 1).or(pages.last());
+                Ok(page.expect("Reply::Pages holds a page").clone())
+            }
             Some(Reply::ToolError(message)) => Err(message),
             Some(Reply::Hang) => std::future::pending().await,
             None => normal(),
@@ -308,7 +317,9 @@ impl FakeLinearServer {
         Parameters(args): Parameters<PageArgs>,
     ) -> Result<String, String> {
         self.answer("list_projects", &args, || {
-            let project = json!({"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project"});
+            // Linear lists a project's teams as objects, and only when `fields` asks for them.
+            let project = json!({"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project",
+                "teams": [{"id": "team-1", "name": "Demo", "key": "DEMO"}]});
             Ok(
                 json!({"projects": [pick(&project, args.fields.as_deref())], "hasNextPage": false})
                     .to_string(),
@@ -372,17 +383,38 @@ impl PartialServer {
 /// How a `DriftedServer` differs from what IssueRelay expects of Linear.
 #[derive(Clone)]
 enum Drift {
+    /// Nothing: the fake as Linear's `tools/list` describes it.
+    None,
     /// `tool` no longer lists `argument` in its input schema.
     DroppedArgument { tool: String, argument: String },
+    /// `tool` no longer offers `value` among the values its `fields` argument takes.
+    DroppedFieldValue { tool: String, value: String },
     /// `tools/list` never answers.
     HangingToolList,
 }
 
-/// The full fake, except for what `drift` changes about `tools/list`.
+/// The full fake, except for what `drift` changes about `tools/list`. The tool list is the one
+/// the fake's argument structs generate, except that a `fields` argument offers the values
+/// Linear's recorded schema lists for it: the connect check reads them there.
 #[derive(Clone)]
 struct DriftedServer {
     inner: FakeLinearServer,
     drift: Drift,
+}
+
+/// Puts the schema Linear recorded for the `fields` argument of `tool` in place of the one the
+/// fake generated, which says "array of text" and no more.
+fn offer_linears_fields(tool: &str, schema: &mut Map<String, Value>) {
+    let recorded = linear_tools()
+        .iter()
+        .find(|t| t["name"] == tool)
+        .and_then(|t| t["inputSchema"]["properties"].get("fields"));
+    if let Some(recorded) = recorded
+        && let Some(Value::Object(properties)) = schema.get_mut("properties")
+        && properties.contains_key("fields")
+    {
+        properties.insert("fields".into(), recorded.clone());
+    }
 }
 
 impl ServerHandler for DriftedServer {
@@ -395,15 +427,30 @@ impl ServerHandler for DriftedServer {
         request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let (tool, argument) = match &self.drift {
-            Drift::HangingToolList => return std::future::pending().await,
-            Drift::DroppedArgument { tool, argument } => (tool, argument),
-        };
+        if matches!(self.drift, Drift::HangingToolList) {
+            return std::future::pending().await;
+        }
         let mut listed = self.inner.list_tools(request, context).await?;
-        for offered in listed.tools.iter_mut().filter(|t| t.name == tool.as_str()) {
+        for offered in listed.tools.iter_mut() {
             let mut schema = (*offered.input_schema).clone();
-            if let Some(Value::Object(properties)) = schema.get_mut("properties") {
-                properties.remove(argument);
+            offer_linears_fields(&offered.name, &mut schema);
+            match &self.drift {
+                Drift::DroppedArgument { tool, argument } if offered.name == tool.as_str() => {
+                    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+                        properties.remove(argument);
+                    }
+                }
+                Drift::DroppedFieldValue { tool, value } if offered.name == tool.as_str() => {
+                    if let Some(Value::Array(values)) = schema
+                        .get_mut("properties")
+                        .and_then(|properties| properties.get_mut("fields"))
+                        .and_then(|fields| fields.get_mut("items"))
+                        .and_then(|items| items.get_mut("enum"))
+                    {
+                        values.retain(|listed| listed != value);
+                    }
+                }
+                _ => {}
             }
             offered.input_schema = Arc::new(schema);
         }
@@ -461,7 +508,11 @@ impl<T: Transport<RoleClient>> Transport<RoleClient> for HangingClose<T> {
 }
 
 pub async fn connect_full(server: FakeLinearServer) -> LinearClient {
-    connect(server).await
+    connect(DriftedServer {
+        inner: server,
+        drift: Drift::None,
+    })
+    .await
 }
 
 pub async fn connect_partial() -> LinearClient {
@@ -480,6 +531,19 @@ pub async fn connect_without_argument(tool: &str, argument: &str) -> LinearClien
     .await
 }
 
+/// Linear after `tool` stopped offering `value` as a `fields` value: the other tools, arguments
+/// and values are all there.
+pub async fn connect_without_field_value(tool: &str, value: &str) -> LinearClient {
+    connect(DriftedServer {
+        inner: FakeLinearServer::default(),
+        drift: Drift::DroppedFieldValue {
+            tool: tool.into(),
+            value: value.into(),
+        },
+    })
+    .await
+}
+
 /// A Linear that accepts the connection but never answers `tools/list`.
 pub async fn connect_with_hanging_tool_list() -> LinearClient {
     connect(DriftedServer {
@@ -491,7 +555,10 @@ pub async fn connect_with_hanging_tool_list() -> LinearClient {
 
 /// A Linear whose connection never finishes closing: everything works until `close`.
 pub async fn connect_with_hanging_close() -> LinearClient {
-    let (read, write) = tokio::io::split(serve_in_memory(FakeLinearServer::default()));
+    let (read, write) = tokio::io::split(serve_in_memory(DriftedServer {
+        inner: FakeLinearServer::default(),
+        drift: Drift::None,
+    }));
     ClientConfig::default()
         .serve(HangingClose(AsyncRwTransport::new_client(read, write)))
         .await

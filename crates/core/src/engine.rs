@@ -1682,7 +1682,9 @@ impl Engine {
         };
         let mut workspace = None;
         if viewer.is_some() {
-            match doctor::check_workspace(linear.as_ref(), &cfg.settings.trigger).await {
+            let checked =
+                doctor::check_workspace(linear.as_ref(), &cfg.settings.trigger, &cfg.bindings);
+            match checked.await {
                 Ok(report) => workspace = Some(report),
                 Err(e) => {
                     linear_error = Some(clean_text(&format!("workspace check failed: {e:#}")))
