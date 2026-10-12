@@ -7,6 +7,7 @@ pub mod env;
 pub mod executor;
 pub mod ipc;
 pub mod linear;
+pub mod logs;
 pub mod model;
 pub mod paths;
 pub mod prompt;

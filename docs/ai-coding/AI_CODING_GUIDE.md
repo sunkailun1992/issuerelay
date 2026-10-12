@@ -52,6 +52,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 执行者参数、权限档位 | `crates/core/src/executor/mod.rs` |
 | 最终结果识别 | `crates/core/src/executor/outcome.rs` |
 | 子进程、超时、结束进程树 | `crates/core/src/runner.rs` |
+| 日志清理 | `crates/core/src/logs.rs` |
 | Linear 工具调用与解析 | `crates/core/src/linear/mcp.rs`、`parse.rs` |
 | Linear 授权与钥匙串 | `crates/core/src/linear/auth.rs` |
 | 环境检查 | `crates/core/src/doctor.rs` |
@@ -67,7 +68,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 |---|---|---|
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名 |
 | 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite |
-| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器新建的日志在 Unix 上是 0600（已存在的文件保持原权限） |
+| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器每次打开日志都把 Unix 上的权限设为 0600（重试沿用的旧文件也一样）；单行最多保留 4 MiB，更长的被截断并记一条说明；`logs.rs` 按保留天数（`log_retention_days`，默认 30）和总大小（`log_max_total_mb`，默认 1024）清理，宿主启动时和之后每 6 小时一次，正在运行的任务的日志不删 |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」 |

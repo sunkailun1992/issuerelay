@@ -53,10 +53,19 @@ pub struct RunOutput {
     pub final_text: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Line {
     Out(String),
     Err(String),
 }
+
+/// How many output lines may wait between the pipe readers and the log writer. A full queue makes
+/// the readers wait, and with them the executor's writes, instead of growing without bound.
+const LINE_QUEUE: usize = 1024;
+
+/// The most bytes of one output line that are kept; the rest of a longer line is read and
+/// dropped, and a note in the log says so.
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long an executor that is being stopped (timeout, stall, cancel) may take to exit after
 /// SIGTERM before the rest of its tree is killed. It lets Claude Code / Codex end their own
@@ -391,6 +400,12 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// only the process group is left to end: the executor is gone, so its descendants that left the
 /// group can no longer be found through it.
 ///
+/// The output is read through a queue of `LINE_QUEUE` lines: an executor that prints faster than
+/// the log is written is slowed down instead of filling the host's memory. A line longer than
+/// `MAX_LINE_BYTES` is cut, with a stderr entry saying so. A log that cannot be written is
+/// reported once in the host's log, and the run goes on. On Unix the log is made private to the
+/// user (mode 0600) also when a retry reuses the previous attempt's file.
+///
 /// `env` supplies PATH and proxy variables on top of the host's environment and removes the
 /// nested-session markers (`env::REMOVED_VARS`). On Windows the executor starts without a console
 /// window and out of reach of a Ctrl+C in the host's console (`creation_flags`).
@@ -441,28 +456,17 @@ pub async fn run(
             let _ = stdin.shutdown().await;
         });
     }
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
     if let Some(stdout) = guard.child.stdout().take() {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            for_each_line(BufReader::new(stdout), |line| {
-                tx.send(Line::Out(line)).is_ok()
-            })
-            .await;
-        });
+        tokio::spawn(forward_lines(BufReader::new(stdout), tx.clone(), Line::Out));
     }
     if let Some(stderr) = guard.child.stderr().take() {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            for_each_line(BufReader::new(stderr), |line| {
-                tx.send(Line::Err(line)).is_ok()
-            })
-            .await;
-        });
+        tokio::spawn(forward_lines(BufReader::new(stderr), tx.clone(), Line::Err));
     }
     drop(tx);
 
     let mut tracker = FinalTextTracker::new(kind);
+    let mut log_failures = LogFailures::new(log_path);
     let started = Instant::now();
     let deadline = checked_deadline(started, limits.total);
     let mut last_output = started;
@@ -484,7 +488,7 @@ pub async fn run(
                 line = rx.recv(), if pipes_open => match line {
                     Some(line) => {
                         last_output = Instant::now();
-                        record(&mut log, &mut tracker, line).await;
+                        log_failures.note(record(&mut log, &mut tracker, line).await);
                     }
                     None => pipes_open = false,
                 },
@@ -500,9 +504,10 @@ pub async fn run(
     // Keep lines already buffered; the final result often arrives right before exit.
     let drain_until = Instant::now() + Duration::from_secs(2);
     while let Ok(Some(line)) = tokio::time::timeout_at(drain_until, rx.recv()).await {
-        record(&mut log, &mut tracker, line).await;
+        log_failures.note(record(&mut log, &mut tracker, line).await);
     }
-    let _ = log.flush().await;
+    // A tokio file reports a failed write with a later call, so the last one shows here.
+    log_failures.note(log.flush().await);
     RunOutput {
         exit,
         final_text: tracker.into_final_text(),
@@ -527,12 +532,22 @@ async fn sleep_until_opt(at: Option<Instant>) {
 }
 
 /// Creates (or truncates) the log file. It can hold anything the executor printed, so it is
-/// private to the user.
+/// private to the user, also when the file exists already: a retry reuses the previous attempt's
+/// file.
 async fn create_log(path: &Path) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     make_private(&mut options);
-    tokio::fs::OpenOptions::from(options).open(path).await
+    let file = tokio::fs::OpenOptions::from(options).open(path).await?;
+    // `mode` applies only to a file being created; a retry reuses the previous attempt's file.
+    // (Windows has no mode to set: see `make_private`.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    Ok(file)
 }
 
 /// Unix: only the owner may read or write the new file.
@@ -547,26 +562,87 @@ fn make_private(options: &mut std::fs::OpenOptions) {
 #[cfg(windows)]
 fn make_private(_options: &mut std::fs::OpenOptions) {}
 
-/// Calls `f` for each line of `reader` until end of input, a read error, or `f` returning `false`
-/// (the receiver is gone). Lines end at `\n` (a `\r` before it is dropped) and are decoded
+/// Reads one line into `buf` like `read_until(b'\n', buf)`, but keeps at most `cap` bytes of it:
+/// the rest of an overlong line is read and dropped, so one runaway line cannot use up memory.
+/// Returns how many bytes were read, newline included; 0 at the end of the input.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<usize> {
+    let mut read = 0;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(read);
+        }
+        let (chunk, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(end) => (&available[..=end], true),
+            None => (available, false),
+        };
+        let room = cap.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        let used = chunk.len();
+        reader.consume(used);
+        read += used;
+        if done {
+            return Ok(read);
+        }
+    }
+}
+
+/// Sends each line of `reader` to `tx` (wrapped by `wrap`) until the end of input, a read error,
+/// or the receiver going away. Lines end at `\n` (a `\r` before it is dropped) and are decoded
 /// lossily: one line of invalid UTF-8 must not end the stream, or every later event, including
-/// the final result, would be lost and the executor would get a broken pipe.
-async fn for_each_line<R: AsyncBufRead + Unpin>(mut reader: R, mut f: impl FnMut(String) -> bool) {
+/// the final result, would be lost and the executor would get a broken pipe. A line longer than
+/// `MAX_LINE_BYTES` is cut, followed by a stderr note saying so.
+async fn forward_lines<R: AsyncBufRead + Unpin>(
+    reader: R,
+    tx: mpsc::Sender<Line>,
+    wrap: fn(String) -> Line,
+) {
+    forward_capped(reader, tx, wrap, MAX_LINE_BYTES).await;
+}
+
+/// `forward_lines` with the length that is kept of a line as a parameter, so that tests can use a
+/// small one.
+async fn forward_capped<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    tx: mpsc::Sender<Line>,
+    wrap: fn(String) -> Line,
+    cap: usize,
+) {
     let mut buf = Vec::new();
     loop {
         buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
+        // Room for a line ending after the `cap` bytes of text, so that the text can be told from
+        // the ending: a line of exactly `cap` bytes is not cut, one byte more is, whatever ends it.
+        let read = match read_line_capped(&mut reader, &mut buf, cap.saturating_add(2)).await {
             Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
+            Ok(read) => read,
+        };
         if buf.ends_with(b"\n") {
             buf.pop();
             if buf.ends_with(b"\r") {
                 buf.pop();
             }
         }
-        if !f(String::from_utf8_lossy(&buf).into_owned()) {
+        // Whatever `read_line_capped` dropped came after these bytes, so a line is cut exactly
+        // when its text is longer than `cap`.
+        let cut = buf.len() > cap;
+        buf.truncate(cap);
+        if tx
+            .send(wrap(String::from_utf8_lossy(&buf).into_owned()))
+            .await
+            .is_err()
+        {
             return;
+        }
+        if cut {
+            let note = format!("[IssueRelay] a {read}-byte output line was cut to {cap} bytes");
+            if tx.send(Line::Err(note)).await.is_err() {
+                return;
+            }
         }
     }
 }
@@ -579,8 +655,9 @@ fn note(stream: &str, text: &str) -> String {
     entry
 }
 
-/// Writes one log line per call, in a single write so a live reader never sees half a line.
-async fn record(log: &mut File, tracker: &mut FinalTextTracker, line: Line) {
+/// Writes one log line per call, in a single write so a live reader never sees half a line. The
+/// tracker sees the line first, so a log that cannot be written does not lose the final result.
+async fn record(log: &mut File, tracker: &mut FinalTextTracker, line: Line) -> std::io::Result<()> {
     let entry = match line {
         Line::Out(mut text) => {
             tracker.observe(&text);
@@ -589,7 +666,39 @@ async fn record(log: &mut File, tracker: &mut FinalTextTracker, line: Line) {
         }
         Line::Err(text) => note("stderr", &text),
     };
-    let _ = log.write_all(entry.as_bytes()).await;
+    log.write_all(entry.as_bytes()).await
+}
+
+/// Reports the first failure to write a run's log in the host's log, and only the first: the run
+/// goes on whatever happens to its log, and a full disk would fail every later line the same way.
+struct LogFailures<'a> {
+    path: &'a Path,
+    reported: bool,
+}
+
+impl<'a> LogFailures<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            reported: false,
+        }
+    }
+
+    /// Reports `result` if it is a failure and the first one; says whether it did.
+    fn note(&mut self, result: std::io::Result<()>) -> bool {
+        let Err(e) = result else {
+            return false;
+        };
+        if std::mem::replace(&mut self.reported, true) {
+            return false;
+        }
+        tracing::warn!(
+            path = %self.path.display(),
+            error = %e,
+            "cannot write the run log; later lines may be missing"
+        );
+        true
+    }
 }
 
 #[cfg(test)]
@@ -605,7 +714,7 @@ mod tests {
         },
     };
 
-    use tokio::io::BufReader;
+    use tokio::io::{AsyncReadExt, BufReader};
 
     use super::*;
 
@@ -838,14 +947,40 @@ mod tests {
         sleep_until_opt(Some(Instant::now())).await;
     }
 
-    async fn collect(bytes: &[u8]) -> Vec<String> {
+    /// What `forward_capped` sends for `bytes` when it keeps `cap` bytes of a line. The input is
+    /// read through a buffer of `chunk` bytes, so that line ends fall on and across the
+    /// boundaries of what the reader sees at once.
+    async fn forwarded(bytes: &[u8], cap: usize, chunk: usize) -> Vec<Line> {
+        let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
+        forward_capped(BufReader::with_capacity(chunk, bytes), tx, Line::Out, cap).await;
         let mut lines = Vec::new();
-        for_each_line(BufReader::new(bytes), |line| {
+        while let Some(line) = rx.recv().await {
             lines.push(line);
-            true
-        })
-        .await;
+        }
         lines
+    }
+
+    /// The lines `forward_lines` sends for `bytes`; none of them may be a note.
+    async fn collect(bytes: &[u8]) -> Vec<String> {
+        forwarded(bytes, MAX_LINE_BYTES, 8192)
+            .await
+            .into_iter()
+            .map(|line| match line {
+                Line::Out(text) => text,
+                Line::Err(note) => panic!("unexpected note: {note}"),
+            })
+            .collect()
+    }
+
+    fn out(text: &str) -> Line {
+        Line::Out(text.into())
+    }
+
+    /// The note for a line of `read` bytes that was cut to 10.
+    fn cut_note(read: usize) -> Line {
+        Line::Err(format!(
+            "[IssueRelay] a {read}-byte output line was cut to 10 bytes"
+        ))
     }
 
     #[tokio::test]
@@ -866,13 +1001,157 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reading_stops_when_the_callback_declines() {
-        let mut seen = Vec::new();
-        for_each_line(BufReader::new(&b"a\nb\nc\n"[..]), |line| {
-            seen.push(line);
-            seen.len() < 2
-        })
-        .await;
-        assert_eq!(seen, ["a", "b"]);
+    async fn an_overlong_line_is_cut_and_the_next_line_still_arrives() {
+        let input = [vec![b'a'; 50], b"\nshort\r\nlast".to_vec()].concat();
+        let mut reader = tokio::io::BufReader::with_capacity(8, &input[..]);
+        let mut buf = Vec::new();
+        let read = read_line_capped(&mut reader, &mut buf, 10).await.unwrap();
+        assert_eq!(read, 51, "the whole line, newline included, is consumed");
+        assert_eq!(buf, vec![b'a'; 10]);
+        buf.clear();
+        assert_eq!(
+            read_line_capped(&mut reader, &mut buf, 10).await.unwrap(),
+            7
+        );
+        assert_eq!(buf, b"short\r\n");
+        buf.clear();
+        assert_eq!(
+            read_line_capped(&mut reader, &mut buf, 10).await.unwrap(),
+            4
+        );
+        assert_eq!(buf, b"last");
+        buf.clear();
+        assert_eq!(
+            read_line_capped(&mut reader, &mut buf, 10).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_line_is_followed_by_a_note_and_the_next_line_still_arrives() {
+        let input = [vec![b'a'; 50], b"\nshort\r\nlast".to_vec()].concat();
+        for chunk in [1, 3, 8, 8192] {
+            assert_eq!(
+                forwarded(&input, 10, chunk).await,
+                [out("aaaaaaaaaa"), cut_note(51), out("short"), out("last")],
+                "read through {chunk} bytes at a time"
+            );
+        }
+    }
+
+    // The line ending does not count toward the limit: a line whose text is exactly 10 bytes, or
+    // that has 10 bytes in all, is not cut, whatever ends it and wherever the buffer ends.
+    #[tokio::test]
+    async fn a_line_that_fits_the_limit_is_kept_whole_and_gets_no_note() {
+        let cases: [(&[u8], &[&str]); 6] = [
+            (b"aaaaaaaaaa\nnext", &["aaaaaaaaaa", "next"]),
+            (b"aaaaaaaaaa\r\nnext", &["aaaaaaaaaa", "next"]),
+            (b"aaaaaaaaa\r\nnext", &["aaaaaaaaa", "next"]),
+            (b"aaaaaaaa\r\nnext", &["aaaaaaaa", "next"]),
+            (b"aaaaaaaaaa", &["aaaaaaaaaa"]),
+            (b"aaaaaaaaaa\n", &["aaaaaaaaaa"]),
+        ];
+        for chunk in [1, 3, 8, 8192] {
+            for (input, texts) in cases {
+                let expected: Vec<Line> = texts.iter().map(|text| out(text)).collect();
+                assert_eq!(
+                    forwarded(input, 10, chunk).await,
+                    expected,
+                    "{:?} read through {chunk} bytes at a time",
+                    String::from_utf8_lossy(input)
+                );
+            }
+        }
+    }
+
+    // A single byte over the limit already counts as cut, with a line feed or a CRLF after it, and
+    // at the end of the input.
+    #[tokio::test]
+    async fn a_line_one_byte_over_the_limit_is_cut_and_gets_a_note() {
+        let cases: [(&[u8], &[Line]); 4] = [
+            (
+                b"aaaaaaaaaaa\nnext",
+                &[out("aaaaaaaaaa"), cut_note(12), out("next")],
+            ),
+            (
+                b"aaaaaaaaaaa\r\nnext",
+                &[out("aaaaaaaaaa"), cut_note(13), out("next")],
+            ),
+            (
+                b"aaaaaaaaaaaa\nnext",
+                &[out("aaaaaaaaaa"), cut_note(13), out("next")],
+            ),
+            (b"aaaaaaaaaaa", &[out("aaaaaaaaaa"), cut_note(11)]),
+        ];
+        for chunk in [1, 3, 8, 8192] {
+            for (input, expected) in cases {
+                assert_eq!(
+                    forwarded(input, 10, chunk).await,
+                    expected,
+                    "{:?} read through {chunk} bytes at a time",
+                    String::from_utf8_lossy(input)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_makes_the_reader_wait() {
+        const LINES: &[u8] = b"0\n1\n2\n3\n4\n5\n";
+        let (tx, mut rx) = mpsc::channel(2);
+        let reader = tokio::spawn(forward_lines(BufReader::new(LINES), tx, Line::Out));
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !reader.is_finished(),
+            "the reader went on although nobody took its lines"
+        );
+        assert_eq!(rx.len(), 2, "only what fits in the queue is waiting");
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        assert_eq!(
+            lines,
+            [out("0"), out("1"), out("2"), out("3"), out("4"), out("5")]
+        );
+        reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reading_stops_when_the_receiver_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let mut reader = BufReader::with_capacity(4, &b"a\nb\nc\nd\n"[..]);
+        forward_lines(&mut reader, tx, Line::Out).await;
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).await.unwrap();
+        assert!(
+            !rest.is_empty(),
+            "the reader went on after the receiver was gone"
+        );
+    }
+
+    // A tokio file reports a failed write with a later call: here the first failure shows at the
+    // second line and the last one at the flush. Only the first is reported.
+    #[tokio::test]
+    async fn a_log_that_cannot_be_written_is_reported_once_and_the_final_text_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("1.jsonl");
+        std::fs::write(&path, "").unwrap();
+        // Opened for reading only, so that every write fails.
+        let mut log = File::open(&path).await.unwrap();
+        let mut tracker = FinalTextTracker::new(ExecutorKind::Claude);
+        let mut failures = LogFailures::new(&path);
+        let result = r#"{"type":"result","result":"done"}"#;
+        let mut reported = 0;
+        for line in [Line::Out(result.into()), out("x"), out("y")] {
+            let written = record(&mut log, &mut tracker, line).await;
+            reported += usize::from(failures.note(written));
+        }
+        reported += usize::from(failures.note(log.flush().await));
+        assert_eq!(reported, 1, "later failures are not reported again");
+        assert_eq!(tracker.into_final_text().as_deref(), Some("done"));
     }
 }

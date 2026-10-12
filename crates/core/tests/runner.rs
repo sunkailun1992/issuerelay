@@ -627,6 +627,78 @@ async fn the_log_is_private_to_the_user() {
     }
 }
 
+// A retry reuses the log file of the previous attempt, and the file mode given at creation does
+// not apply to a file that exists: the run has to make it private itself.
+#[tokio::test]
+async fn a_reused_log_file_is_made_private_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(dir.path(), serde_json::json!([{"out": "hello"}]));
+    let log = dir.path().join("3.jsonl");
+    std::fs::write(&log, "old attempt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "log mode is {mode:o}");
+    }
+    // Windows has no mode to tighten: the file keeps the access of the per-user directory.
+    assert_eq!(log_lines(&log), ["hello"], "the old attempt is gone");
+}
+
+// One output line without an end must not use up the host's memory: the first 4 MiB of it are
+// kept, the rest is read and dropped, a note in the log says so, and the lines after it still
+// arrive, the final result included.
+#[tokio::test]
+async fn a_runaway_output_line_is_cut_and_the_run_goes_on() {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": "x".repeat(LIMIT + 1000)}, {"out": RESULT_LINE}, {"exit": 0}]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+    let lines = log_lines(&log);
+    assert_eq!(lines.len(), 3, "the long line, the note, the result");
+    assert_eq!(lines[0].len(), LIMIT);
+    let note: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+    assert_eq!(note["stream"], "stderr");
+    // The whole line was read: its text and the newline.
+    assert_eq!(
+        note["text"],
+        format!(
+            "[IssueRelay] a {}-byte output line was cut to {LIMIT} bytes",
+            LIMIT + 1001
+        )
+    );
+    assert_eq!(lines[2], RESULT_LINE);
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn cmd_wrapper_passes_prompt_and_paths_intact() {

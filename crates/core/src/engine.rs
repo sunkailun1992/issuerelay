@@ -31,6 +31,7 @@ use crate::executor::{
     outcome::{self, Report},
 };
 use crate::linear::{LinearApi, Viewer};
+use crate::logs::{self, CleanupReport};
 use crate::model::{Issue, Job, JobState};
 use crate::prompt::{self, PromptInput};
 use crate::runner::{self, ExitKind, RunLimits, RunOutput};
@@ -41,6 +42,9 @@ use crate::trigger::{self, Eligibility, WaitReason, same_name};
 
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
+
+/// How often the background loop deletes old run logs (also once when it starts).
+const LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// The pauses before the second and the third read that verifies a run's result in Linear. One
 /// failed read (a network hiccup) must not fail a run that did its work.
@@ -403,7 +407,8 @@ impl Engine {
         self.store().list_recent(limit)
     }
 
-    /// The last `lines` lines of the job's log; empty while it has none. Reads at most the last
+    /// The last `lines` lines of the job's log; empty while it has none, and also once the log
+    /// is gone: a log deleted by the cleanup reads as empty. Reads at most the last
     /// `LOG_TAIL_WINDOW` bytes of the file, so a long log is cheap to ask for again and again.
     pub fn log_tail(&self, job_id: i64, lines: usize) -> Result<Vec<String>> {
         let job = self.store().get(job_id)?;
@@ -412,7 +417,11 @@ impl Engine {
             return Ok(Vec::new());
         };
         let unreadable = || format!("cannot read {}", path.display());
-        let mut file = std::fs::File::open(&path).with_context(unreadable)?;
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(unreadable),
+        };
         let start = file
             .metadata()
             .with_context(unreadable)?
@@ -432,6 +441,35 @@ impl Engine {
             .iter()
             .map(|line| line.to_string())
             .collect())
+    }
+
+    /// Deletes run logs past the retention settings (`log_retention_days`, `log_max_total_mb`),
+    /// never the log of a run in progress. The background loop calls it when it starts and every
+    /// `LOG_CLEANUP_INTERVAL`.
+    pub async fn clean_logs(&self) -> Result<CleanupReport> {
+        let settings = self.config().settings;
+        let in_use: HashSet<PathBuf> = self
+            .store()
+            .list_by_state(&[JobState::Running])?
+            .into_iter()
+            .filter_map(|job| job.log_path)
+            .collect();
+        let dir = self.inner.logs_dir.clone();
+        let keep = Duration::from_secs(settings.log_retention_days.saturating_mul(86_400));
+        let max_total = settings.log_max_total_mb.saturating_mul(1024 * 1024);
+        let report = tokio::task::spawn_blocking(move || {
+            logs::cleanup(&dir, keep, max_total, &in_use, std::time::SystemTime::now())
+        })
+        .await
+        .context("the log cleanup stopped unexpectedly")??;
+        if report.removed > 0 {
+            tracing::info!(
+                removed = report.removed,
+                freed_bytes = report.freed_bytes,
+                "old run logs deleted"
+            );
+        }
+        Ok(report)
     }
 
     async fn viewer(&self) -> Result<Viewer> {
@@ -1200,11 +1238,21 @@ impl Engine {
             .shutdown
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown.clone());
+        let mut last_cleanup = tokio::time::Instant::now();
+        if let Err(e) = self.clean_logs().await {
+            tracing::warn!(error = %format!("{e:#}"), "log cleanup failed");
+        }
         // Checked before every cycle, not only when waiting: if the shutdown and a wake-up are
         // ready together, `select!` may pick either, and no new cycle may start runs then.
         while !shutdown.is_cancelled() {
             if let Err(e) = self.tick().await {
                 tracing::warn!(error = %format!("{e:#}"), "check failed");
+            }
+            if last_cleanup.elapsed() >= LOG_CLEANUP_INTERVAL {
+                last_cleanup = tokio::time::Instant::now();
+                if let Err(e) = self.clean_logs().await {
+                    tracing::warn!(error = %format!("{e:#}"), "log cleanup failed");
+                }
             }
             let interval = Duration::from_secs(self.config().settings.poll_interval_secs.max(5));
             tokio::select! {

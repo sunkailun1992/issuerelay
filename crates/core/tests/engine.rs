@@ -2392,7 +2392,7 @@ async fn doctor_masks_proxy_credentials_in_the_report() {
 // Logs.
 
 #[tokio::test]
-async fn logs_live_under_the_logs_directory_and_missing_ones_are_reported() {
+async fn logs_live_under_the_logs_directory_and_unreadable_ones_are_reported() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
@@ -2406,7 +2406,10 @@ async fn logs_live_under_the_logs_directory_and_missing_ones_are_reported() {
     let log = h.root.path().join("logs").join(format!("{}.jsonl", job.id));
     assert_eq!(job.log_path.as_deref(), Some(log.as_path()));
     assert!(h.engine.log_tail(9999, 10).is_err(), "no such job");
+    // A log the cleanup deleted reads as empty; one that is there but cannot be read is an error.
     std::fs::remove_file(&log).unwrap();
+    assert!(h.engine.log_tail(job.id, 10).unwrap().is_empty());
+    std::fs::create_dir(&log).unwrap();
     let err = h.engine.log_tail(job.id, 10).unwrap_err();
     assert!(format!("{err:#}").contains("cannot read"), "{err:#}");
 }
@@ -2435,6 +2438,160 @@ async fn log_tail_covers_exactly_the_last_mebibyte() {
     assert_eq!(h.engine.log_tail(job.id, 10).unwrap(), ["first", "second"]);
     assert_eq!(h.engine.log_tail(job.id, 1).unwrap(), ["second"]);
     assert!(h.engine.log_tail(job.id, 0).unwrap().is_empty());
+}
+
+// Log retention.
+
+/// Dates `path` `hours` hours back, as if it had been written then.
+fn age_file(path: &Path, hours: u64) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - Duration::from_secs(hours * 3600))
+        .unwrap();
+}
+
+/// Waits until `done` holds, letting the other tasks run in between. The wait is in real time:
+/// the cleanup runs on the blocking pool, which a paused clock does not move along.
+async fn eventually_on_the_blocking_pool(what: &str, mut done: impl FnMut() -> bool) {
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "gave up waiting for {what}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Lets the blocking pool finish what it was given, for a test that checks that nothing was
+/// deleted: a cleanup started now would be done within this time.
+async fn let_the_blocking_pool_run() {
+    let until = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < until {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn old_logs_are_cleaned_and_a_cleaned_log_reads_as_empty() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    let log_path = job.log_path.clone().expect("the run wrote a log");
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&log_path)
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now() - Duration::from_secs(40 * 86_400))
+        .unwrap();
+    let report = h.engine.clean_logs().await.unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(!log_path.exists());
+    assert_eq!(h.engine.log_tail(job.id, 10).unwrap(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn the_log_of_a_run_in_progress_is_not_cleaned() {
+    let h = Harness::new(1, true);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    // The scripted run has written its log by the time it is listed as started.
+    eventually("the run to start", || h.runner.started() == ["DEMO-1"]).await;
+    let log = h.latest("1").log_path.expect("a running job has a log");
+    age_file(&log, 40 * 24);
+    let report = h.engine.clean_logs().await.unwrap();
+    assert_eq!(report.removed, 0);
+    assert!(log.exists(), "the log of a run in progress was deleted");
+    // Once the run is over its log is like any other.
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    assert_eq!(h.engine.clean_logs().await.unwrap().removed, 1);
+    assert!(!log.exists());
+}
+
+#[tokio::test]
+async fn the_cleanup_follows_the_retention_settings() {
+    let mut cfg = Config::default();
+    cfg.settings.log_retention_days = 2;
+    cfg.settings.log_max_total_mb = 1;
+    let h = Harness::with_config(cfg, false);
+    let logs = h.root.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let write = |name: &str, kib: usize, hours: u64| {
+        let path = logs.join(name);
+        std::fs::write(&path, vec![b'x'; kib * 1024]).unwrap();
+        age_file(&path, hours);
+        path
+    };
+    // Only the age matters at first: the three logs are 801 KiB, under the 1 MiB limit.
+    let expired = write("11.jsonl", 1, 72);
+    let day_old = write("12.jsonl", 100, 24);
+    let recent = write("13.jsonl", 700, 2);
+    let report = h.engine.clean_logs().await.unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(!expired.exists() && day_old.exists() && recent.exists());
+    // Another 700 KiB bring them over the limit: the oldest go until the rest fits.
+    let newest = write("14.jsonl", 700, 1);
+    let report = h.engine.clean_logs().await.unwrap();
+    assert_eq!(report.removed, 2);
+    assert_eq!(report.freed_bytes, (100 + 700) * 1024);
+    assert!(!day_old.exists() && !recent.exists());
+    assert!(newest.exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_loop_cleans_old_logs_when_it_starts() {
+    let h = Harness::new(2, false);
+    let logs = h.root.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let old = logs.join("21.jsonl");
+    std::fs::write(&old, "x").unwrap();
+    age_file(&old, 40 * 24);
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&h.engine, &shutdown);
+    eventually_on_the_blocking_pool("the cleanup at start", || !old.exists()).await;
+    stop_loop(&shutdown, worker).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_loop_cleans_old_logs_every_six_hours() {
+    let h = Harness::new(2, false);
+    let logs = h.root.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&h.engine, &shutdown);
+    // The first check comes after the cleanup at start, so a log that is old only now is left for
+    // the timer.
+    eventually_on_the_blocking_pool("the first check", || {
+        h.engine.status().last_poll_at.is_some()
+    })
+    .await;
+    // The loop is waiting for its timer when the clock moves.
+    quiesce().await;
+    let old = logs.join("22.jsonl");
+    std::fs::write(&old, "x").unwrap();
+    age_file(&old, 40 * 24);
+    let checked = h.engine.status().last_poll_at;
+    tokio::time::advance(Duration::from_secs(6 * 3600 - 60)).await;
+    eventually_on_the_blocking_pool("a check", || h.engine.status().last_poll_at != checked).await;
+    let_the_blocking_pool_run().await;
+    assert!(old.exists(), "cleaned before six hours were over");
+    tokio::time::advance(Duration::from_secs(60)).await;
+    eventually_on_the_blocking_pool("the cleanup after six hours", || !old.exists()).await;
+    let_the_blocking_pool_run().await;
+    // The next one is six hours after this one, not at the next check.
+    let again = logs.join("23.jsonl");
+    std::fs::write(&again, "x").unwrap();
+    age_file(&again, 40 * 24);
+    let checked = h.engine.status().last_poll_at;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    eventually_on_the_blocking_pool("a check", || h.engine.status().last_poll_at != checked).await;
+    let_the_blocking_pool_run().await;
+    assert!(again.exists(), "cleaned again at the next check");
+    stop_loop(&shutdown, worker).await;
 }
 
 // One run per directory, and a user's stop or retry is never overwritten.

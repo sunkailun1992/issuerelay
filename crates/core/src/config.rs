@@ -94,6 +94,10 @@ pub struct Settings {
     pub run_timeout_mins: u64,
     /// Minutes without output before a run counts as stuck (at least 1).
     pub stall_timeout_mins: u64,
+    /// Days a run log is kept (at least 1).
+    pub log_retention_days: u64,
+    /// The most megabytes all run logs together may take before the oldest are deleted (at least 1).
+    pub log_max_total_mb: u64,
     pub default_executor: ExecutorKind,
     pub default_permission: PermissionProfile,
     pub prompt_template: String,
@@ -111,6 +115,8 @@ impl Default for Settings {
             max_concurrent: 2,
             run_timeout_mins: 60,
             stall_timeout_mins: 15,
+            log_retention_days: 30,
+            log_max_total_mb: 1024,
             default_executor: ExecutorKind::Claude,
             default_permission: PermissionProfile::Full,
             prompt_template: String::new(),
@@ -140,6 +146,14 @@ impl Settings {
         anyhow::ensure!(
             self.stall_timeout_mins >= 1,
             "stall_timeout_mins must be at least 1"
+        );
+        anyhow::ensure!(
+            self.log_retention_days >= 1,
+            "log_retention_days must be at least 1"
+        );
+        anyhow::ensure!(
+            self.log_max_total_mb >= 1,
+            "log_max_total_mb must be at least 1"
         );
         for (field, name) in [
             ("trigger.label", &self.trigger.label),
@@ -383,6 +397,26 @@ mod tests {
     }
 
     #[test]
+    fn log_retention_has_defaults_and_lower_bounds() {
+        let settings = Settings::default();
+        assert_eq!(settings.log_retention_days, 30);
+        assert_eq!(settings.log_max_total_mb, 1024);
+        for change in [
+            (|s: &mut Settings| s.log_retention_days = 0) as fn(&mut Settings),
+            |s: &mut Settings| s.log_max_total_mb = 0,
+        ] {
+            let mut bad = Settings::default();
+            change(&mut bad);
+            assert!(bad.validate().is_err());
+        }
+        let old_file: Config = toml::from_str("[settings]\npoll_interval_secs = 30\n").unwrap();
+        assert_eq!(
+            old_file.settings.log_retention_days, 30,
+            "files from M1 get the default"
+        );
+    }
+
+    #[test]
     fn missing_file_loads_defaults() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -497,6 +531,8 @@ mod tests {
             ("max_concurrent = 0", "max_concurrent"),
             ("run_timeout_mins = 0", "run_timeout_mins"),
             ("stall_timeout_mins = 0", "stall_timeout_mins"),
+            ("log_retention_days = 0", "log_retention_days"),
+            ("log_max_total_mb = 0", "log_max_total_mb"),
         ] {
             std::fs::write(&path, format!("[settings]\n{line}\n")).unwrap();
             let err = Config::load(&path).unwrap_err();
