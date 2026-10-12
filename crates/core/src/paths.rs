@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub const APP_ID: &str = "com.sunkailun.issuerelay";
-/// macOS limits Unix socket paths to 104 bytes; stay well below it.
-const UNIX_SOCKET_MAX: usize = 100;
+/// The longest Unix socket path we bind, in bytes. macOS's `sun_path` holds 104 bytes including
+/// the terminating NUL.
+pub(crate) const UNIX_SOCKET_MAX: usize = 103;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcEndpoint {
@@ -52,15 +53,15 @@ impl AppPaths {
     }
 
     /// The Unix socket (macOS) or named pipe (Windows) the CLI uses to reach the running host.
+    ///
+    /// Derived from the data directory alone: `USER` / `USERNAME` can differ between the
+    /// environment the host was started from and the one a CLI runs in, which would send them to
+    /// different endpoints. A data directory too long for a socket path falls back to a short
+    /// directory under the temporary directory, which macOS keeps per user.
     pub fn ipc_endpoint(&self) -> IpcEndpoint {
-        let user = sanitize(
-            &std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_default(),
-        );
         let tag = short_hash(&self.data_dir.to_string_lossy());
         if cfg!(windows) {
-            return IpcEndpoint::Pipe(format!(r"\\.\pipe\issuerelay-{user}-{tag}"));
+            return IpcEndpoint::Pipe(format!(r"\\.\pipe\issuerelay-{tag}"));
         }
         let preferred = self.data_dir.join("issuerelay.sock");
         if preferred.as_os_str().len() <= UNIX_SOCKET_MAX {
@@ -68,23 +69,10 @@ impl AppPaths {
         } else {
             IpcEndpoint::Unix(
                 std::env::temp_dir()
-                    .join(format!("issuerelay-{user}-{tag}"))
+                    .join(format!("issuerelay-{tag}"))
                     .join("issuerelay.sock"),
             )
         }
-    }
-}
-
-fn sanitize(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(32)
-        .collect();
-    if cleaned.is_empty() {
-        "user".into()
-    } else {
-        cleaned
     }
 }
 
@@ -124,10 +112,14 @@ mod tests {
     #[test]
     fn long_socket_path_falls_back_to_temp_dir() {
         let long = format!("/tmp/{}", "d".repeat(120));
-        match AppPaths::under(Path::new(&long)).ipc_endpoint() {
+        let paths = AppPaths::under(Path::new(&long));
+        match paths.ipc_endpoint() {
             IpcEndpoint::Unix(path) => {
                 assert!(path.starts_with(std::env::temp_dir()));
-                assert!(path.as_os_str().len() < 104 + 40);
+                assert!(path.as_os_str().len() <= UNIX_SOCKET_MAX);
+                // Only a hash of the data directory names the folder: no user name.
+                let tag = short_hash(&paths.data_dir.to_string_lossy());
+                assert!(path.ends_with(format!("issuerelay-{tag}/issuerelay.sock")));
             }
             other => panic!("expected a unix socket, got {other:?}"),
         }
@@ -136,8 +128,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_uses_a_named_pipe() {
-        match AppPaths::under(Path::new(r"C:\issuerelay-test")).ipc_endpoint() {
-            IpcEndpoint::Pipe(name) => assert!(name.starts_with(r"\\.\pipe\issuerelay-")),
+        let paths = AppPaths::under(Path::new(r"C:\issuerelay-test"));
+        match paths.ipc_endpoint() {
+            IpcEndpoint::Pipe(name) => {
+                // Only a hash of the data directory follows the prefix: no user name.
+                let tag = short_hash(&paths.data_dir.to_string_lossy());
+                assert_eq!(name, format!(r"\\.\pipe\issuerelay-{tag}"));
+            }
             other => panic!("expected a named pipe, got {other:?}"),
         }
     }
