@@ -164,6 +164,9 @@ enum Listener {
     Pipe {
         first: tokio::net::windows::named_pipe::NamedPipeServer,
         name: String,
+        /// The security descriptor every instance of the pipe is created with, kept for as long
+        /// as the server creates instances.
+        security: crate::ipc::pipe_security::PipeSecurity,
     },
 }
 
@@ -186,12 +189,16 @@ impl IpcServer {
                 })
             }
             #[cfg(windows)]
-            IpcEndpoint::Pipe(name) => Ok(Self {
-                listener: Listener::Pipe {
-                    first: bind_pipe(name)?,
-                    name: name.clone(),
-                },
-            }),
+            IpcEndpoint::Pipe(name) => {
+                let (first, security) = bind_pipe(name)?;
+                Ok(Self {
+                    listener: Listener::Pipe {
+                        first,
+                        name: name.clone(),
+                        security,
+                    },
+                })
+            }
             other => bail!("IPC endpoint {other:?} is not supported on this platform"),
         }
     }
@@ -236,7 +243,11 @@ impl IpcServer {
                 Ok(())
             }
             #[cfg(windows)]
-            Listener::Pipe { first, name } => {
+            Listener::Pipe {
+                first,
+                name,
+                security,
+            } => {
                 let mut connections = JoinSet::new();
                 // The instance that waits for the next client; `None` only while a replacement
                 // could not be created.
@@ -245,7 +256,7 @@ impl IpcServer {
                     reap_finished(&mut connections);
                     let server = match waiting.take() {
                         Some(server) => server,
-                        None => match new_pipe_instance(&name) {
+                        None => match new_pipe_instance(&name, &security) {
                             Ok(server) => server,
                             Err(e) => {
                                 tracing::warn!(error = %e, "IPC pipe instance not created; still trying");
@@ -266,7 +277,7 @@ impl IpcServer {
                     // clients nobody home ("not running") and lets a second host's
                     // `first_pipe_instance` succeed. Only when the replacement cannot be created
                     // does the name go without a listener, until the retry at the top works.
-                    let replacement = new_pipe_instance(&name);
+                    let replacement = new_pipe_instance(&name, &security);
                     let mut trouble = false;
                     match result {
                         Ok(()) => {
@@ -391,33 +402,52 @@ fn bind_error(error: std::io::Error, path: &std::path::Path) -> anyhow::Error {
     }
 }
 
-/// Creates the first pipe instance. There is no lock file on Windows: asking for the first
-/// instance makes the system refuse (access denied) when any instance of the name exists, and it
-/// does so atomically, so racing hosts are told apart by the system itself. The name goes away
-/// with its last instance, so nothing is left over to clean up either.
+/// Creates the first pipe instance and returns the security descriptor that every instance gets:
+/// only the user the host runs as, and SYSTEM, may open the pipe (`pipe_security`). There is no
+/// lock file on Windows: asking for the first instance makes the system refuse (access denied)
+/// when any instance of the name exists, and it does so atomically, so racing hosts are told
+/// apart by the system itself. The name goes away with its last instance, so nothing is left
+/// over to clean up either.
 #[cfg(windows)]
-fn bind_pipe(name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+fn bind_pipe(
+    name: &str,
+) -> Result<(
+    tokio::net::windows::named_pipe::NamedPipeServer,
+    crate::ipc::pipe_security::PipeSecurity,
+)> {
     use tokio::net::windows::named_pipe::ServerOptions;
     const ERROR_ACCESS_DENIED: i32 = 5;
-    match ServerOptions::new()
-        .first_pipe_instance(true)
-        .reject_remote_clients(true)
-        .create(name)
-    {
-        Ok(server) => Ok(server),
+    let security = crate::ipc::pipe_security::PipeSecurity::new()
+        .context("cannot build the security descriptor of IssueRelay's pipe")?;
+    // SAFETY: the attributes point at a live descriptor owned by `security`, which the server
+    // keeps for as long as it creates instances.
+    let created = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(name, security.attributes())
+    };
+    match created {
+        Ok(server) => Ok((server, security)),
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => Err(AlreadyRunning.into()),
         Err(e) => Err(e.into()),
     }
 }
 
+/// Creates another instance of the pipe, with the same security descriptor as the first.
 #[cfg(windows)]
 fn new_pipe_instance(
     name: &str,
+    security: &crate::ipc::pipe_security::PipeSecurity,
 ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
-    ServerOptions::new()
-        .reject_remote_clients(true)
-        .create(name)
+    // SAFETY: the attributes point at the live descriptor `security` owns, which outlives this
+    // call.
+    unsafe {
+        ServerOptions::new()
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(name, security.attributes())
+    }
 }
 
 /// Answers the request lines of one connection, one response per line, until the client hangs

@@ -297,6 +297,60 @@ async fn a_timed_out_check_ends_its_whole_process_group() {
     assert_eq!(std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0), size);
 }
 
+// A check command can leave a process behind that inherited its output pipe (`claude mcp list`
+// leaves stdio MCP servers). The check is done when the command itself exits: the leftover holding
+// stdout open must neither delay the result nor turn it into a timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_background_process_holding_the_output_does_not_turn_a_finished_check_into_a_timeout() {
+    let runner = SystemRunner::with_limits(Duration::from_secs(10), Duration::from_secs(10));
+    let started = Instant::now();
+    let output = runner
+        .run(Path::new("/bin/sh"), &["-c", "sleep 30 & echo done"])
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!(output.stdout, "done\n", "{output:?}");
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert!(
+        took < Duration::from_secs(5),
+        "the check waited for the background process: {took:?}"
+    );
+}
+
+// What a check command left running in its process group (Windows: its Job Object) is ended once
+// the command exits. On Windows the heartbeat child also inherits the command's pipes, so this is
+// the Windows case of the test above too.
+#[tokio::test]
+async fn a_finished_check_ends_what_it_left_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let beat = dir.path().join("beat");
+    let script = script(
+        dir.path(),
+        serde_json::json!([{"heartbeat": beat, "every_ms": 50}, {"sleep_ms": 300}, {"out": "done"}]),
+    );
+    let runner = SystemRunner::with_limits(Duration::from_secs(10), Duration::from_secs(10));
+    let started = Instant::now();
+    let output = runner.run(agent(), &[script.as_str()]).await.unwrap();
+    let took = started.elapsed();
+    assert_eq!(output.code, Some(0), "{output:?}");
+    // Windows pipes may carry `\r\n`.
+    assert_eq!(output.stdout.replace("\r\n", "\n"), "done\n", "{output:?}");
+    assert!(
+        took < Duration::from_secs(5),
+        "the check waited for the heartbeat child: {took:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let size = std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0);
+    assert!(size > 0, "the heartbeat child never ran");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        std::fs::metadata(&beat).map(|m| m.len()).unwrap_or(0),
+        size,
+        "the heartbeat child outlived the check"
+    );
+}
+
 /// Runs `script`, trying again while the OS reports it as busy: executing a script right after
 /// writing it can fail with `ETXTBSY` when another test thread forks in between.
 async fn run_script(runner: &SystemRunner, script: &Path, args: &[&str]) -> Result<CmdOutput> {

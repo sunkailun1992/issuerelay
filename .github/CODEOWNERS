@@ -13,6 +13,7 @@
 /crates/core/src/env.rs            @sunkailun1992
 /crates/core/src/linear/auth.rs    @sunkailun1992
 /crates/core/src/ipc/protocol.rs   @sunkailun1992
+/crates/core/src/ipc/pipe_security.rs @sunkailun1992
 /crates/core/src/ipc/server.rs     @sunkailun1992
 /crates/core/src/text.rs           @sunkailun1992
 /crates/cli/src/main.rs            @sunkailun1992

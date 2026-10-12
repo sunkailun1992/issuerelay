@@ -68,13 +68,25 @@ async fn exchange(endpoint: &IpcEndpoint, line: String) -> Result<String> {
     }
 }
 
+/// Opens the pipe and checks that its server runs as the same user as this process: another
+/// local user could have created a pipe of that name before the host did.
 #[cfg(windows)]
 async fn open_pipe(name: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
     use tokio::net::windows::named_pipe::ClientOptions;
     const ERROR_PIPE_BUSY: i32 = 231;
     for _ in 0..50 {
         match ClientOptions::new().open(name) {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                use std::os::windows::io::AsRawHandle;
+                match crate::ipc::pipe_security::server_runs_as_current_user(client.as_raw_handle())
+                {
+                    Ok(true) => return Ok(client),
+                    Ok(false) => bail!(
+                        "IssueRelay's pipe is served by another user's process; refusing to talk to it"
+                    ),
+                    Err(e) => bail!("cannot check who serves IssueRelay's pipe: {e}"),
+                }
+            }
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 tokio::time::sleep(Duration::from_millis(50)).await
             }

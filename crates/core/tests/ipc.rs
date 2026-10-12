@@ -598,6 +598,92 @@ async fn an_existing_socket_directory_is_made_private() {
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn the_pipe_admits_only_its_owner_and_system() {
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+        SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::under(dir.path());
+    let endpoint = paths.ipc_endpoint();
+    let IpcEndpoint::Pipe(name) = &endpoint else {
+        unreachable!("Windows uses a named pipe")
+    };
+    let _server = IpcServer::bind(&endpoint).await.unwrap();
+    let client = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(name)
+        .unwrap();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: a live pipe handle; the descriptor is freed below.
+    let status = unsafe {
+        GetSecurityInfo(
+            client.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(status, 0, "GetSecurityInfo failed");
+    let mut text: *mut u16 = null_mut();
+    // SAFETY: `descriptor` came from GetSecurityInfo; `text` is freed below.
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            null_mut(),
+        )
+    };
+    assert_ne!(ok, 0, "cannot read the DACL as SDDL");
+    // SAFETY: NUL-terminated UTF-16 from the call above.
+    let sddl = unsafe {
+        let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+    };
+    // SAFETY: both were allocated by the calls above (LocalAlloc) and are freed once.
+    unsafe {
+        LocalFree(text.cast());
+        LocalFree(descriptor);
+    }
+    assert!(sddl.contains(";;;OW)") && sddl.contains(";;;SY)"), "{sddl}");
+    assert!(
+        !sddl.contains(";;;WD)") && !sddl.contains(";;;AN)"),
+        "Everyone and Anonymous must have no access: {sddl}"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_client_checks_that_the_server_runs_as_the_same_user() {
+    use std::os::windows::io::AsRawHandle;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::under(dir.path());
+    let endpoint = paths.ipc_endpoint();
+    let IpcEndpoint::Pipe(name) = &endpoint else {
+        unreachable!("Windows uses a named pipe")
+    };
+    let _server = IpcServer::bind(&endpoint).await.unwrap();
+    let client = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(name)
+        .unwrap();
+    assert!(
+        issuerelay_core::ipc::pipe_security::server_runs_as_current_user(client.as_raw_handle())
+            .unwrap()
+    );
+}
+
 // The end of a server: the host disappears, and takes its connections with it.
 
 #[tokio::test]

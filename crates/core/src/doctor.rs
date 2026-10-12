@@ -17,7 +17,12 @@ use std::{
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    task::JoinHandle,
+    time::Instant,
+};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::config::{Config, ExecutorKind, TriggerNames};
@@ -52,6 +57,11 @@ const MCP_LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// only read local state.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How long a check's pipes are still read once the command has exited and whatever it left in
+/// its process group (Windows: Job Object) has been ended. Only a process that escaped the group
+/// (Unix: `setsid`) can hold a pipe open past that; what was read by then is the output.
+const PIPE_DRAIN: Duration = Duration::from_secs(2);
+
 /// How long `SystemReadiness` keeps an executor's check that timed out, crashed or whose output
 /// could not be read, instead of the full cache TTL: soon enough to recover from a transient
 /// failure, late enough that the engine's poll loop does not re-run a slow `claude mcp list`
@@ -67,13 +77,16 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 
 /// Runs the real check commands, each under its own time limit: by default 60 s for
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command runs in the
-/// user's home directory, in a process group of its own (Windows: a Job Object), with the shared
-/// environment (the PATH and proxy the executors will get). A command still running at its limit
-/// is killed together with everything it started (`claude mcp list` starts MCP servers of its
-/// own) and the call fails with `timed out after 20s` (the limit as `Duration` prints it). Every
-/// command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour
-/// what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip
-/// colour codes too).
+/// user's home directory, in a process group of its own (Windows: a Job Object, and without a
+/// console window, like the executors), with the shared environment (the PATH and proxy the
+/// executors will get). A check is done when the command's own process exits: whatever it left
+/// running in its group is ended then (`claude mcp list` starts stdio MCP servers of its own,
+/// which inherit its pipes), and the output is what the pipes delivered up to `PIPE_DRAIN` after
+/// that. A command still running at its limit is killed together with everything it started and
+/// the call fails with `timed out after 20s` (the limit as `Duration` prints it). Every command
+/// also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they
+/// print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour
+/// codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -124,7 +137,6 @@ impl CommandRunner for SystemRunner {
         #[cfg(unix)]
         use process_wrap::tokio::ProcessGroup;
         use process_wrap::tokio::{CommandWrap, KillOnDrop};
-        use tokio::io::AsyncReadExt;
 
         let limit = self.limit_for(args);
         let env = self
@@ -148,47 +160,91 @@ impl CommandRunner for SystemRunner {
         #[cfg(unix)]
         command.wrap(ProcessGroup::leader());
         #[cfg(windows)]
-        command.wrap(JobObject);
+        {
+            command.wrap(crate::runner::creation_flags());
+            command.wrap(JobObject);
+        }
         command.wrap(KillOnDrop);
         let mut child = command.spawn()?;
-        let stdout = child.stdout().take();
-        let stderr = child.stderr().take();
-        let collect = async {
-            // One block per pipe: `ChildStdout` and `ChildStderr` are different types.
-            let read_stdout = async move {
-                let mut bytes = Vec::new();
-                if let Some(mut pipe) = stdout {
-                    let _ = pipe.read_to_end(&mut bytes).await;
-                }
-                bytes
-            };
-            let read_stderr = async move {
-                let mut bytes = Vec::new();
-                if let Some(mut pipe) = stderr {
-                    let _ = pipe.read_to_end(&mut bytes).await;
-                }
-                bytes
-            };
-            let (out, err) = tokio::join!(read_stdout, read_stderr);
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((status, out, err))
-        };
-        match tokio::time::timeout(limit, collect).await {
-            Ok(result) => {
-                let (status, out, err) = result?;
-                Ok(CmdOutput {
-                    code: status.code(),
-                    stdout: String::from_utf8_lossy(&out).into_owned(),
-                    stderr: String::from_utf8_lossy(&err).into_owned(),
-                })
-            }
-            Err(_) => {
-                // The whole group: `claude mcp list` starts stdio MCP servers of its own.
+        // Each pipe is read by a task of its own, and the check does not wait for the pipes to
+        // end: a process the command leaves behind inherits them and can keep them open.
+        let stop_reading = CancellationToken::new();
+        // The readers stop however this call ends, also when its future is dropped.
+        let _stop_reading_on_return = stop_reading.clone().drop_guard();
+        let stdout = read_pipe(child.stdout().take(), stop_reading.clone());
+        let stderr = read_pipe(child.stderr().take(), stop_reading.clone());
+        // Wait on the command's own process, not through the process-wrap wrapper: on Windows
+        // the wrapper's wait() also waits for every other process in the Job Object, so a
+        // leftover would turn a finished check into a timeout.
+        // SAFETY: only wait() is called on the native child, so no invariant of a wrapper in the
+        // chain is bypassed; killing the rest of the tree still goes through the wrapper below.
+        let exited = match unsafe { child.try_inner_child_mut() } {
+            Some(process) => tokio::time::timeout(limit, process.wait()).await,
+            None => {
                 let _ = child.start_kill();
-                bail!("timed out after {limit:?}")
+                bail!("process wrapper hid the native child");
+            }
+        };
+        // Whatever is left in the process group (Windows: the Job Object) is ended now, after an
+        // exit as after a timeout; that also closes the pipes those processes inherited. After an
+        // exit the command is already reaped, as in `runner`: on Unix its PID, the group's id, is
+        // not handed out again while a member of the group lives.
+        let _ = child.start_kill();
+        let Ok(status) = exited else {
+            bail!("timed out after {limit:?}");
+        };
+        let status = status?;
+        let drain_until = Instant::now() + PIPE_DRAIN;
+        let (stdout, stderr) = tokio::join!(
+            collected(stdout, &stop_reading, drain_until),
+            collected(stderr, &stop_reading, drain_until),
+        );
+        Ok(CmdOutput {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
+}
+
+/// Reads one pipe of a check command, in a task of its own, until the pipe ends or `stop` fires;
+/// the task returns what it read.
+fn read_pipe<R>(pipe: Option<R>, stop: CancellationToken) -> JoinHandle<Vec<u8>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return bytes;
+        };
+        let mut chunk = [0_u8; 8192];
+        loop {
+            tokio::select! {
+                // Cancel-safe: when `stop` wins, this read has taken nothing from the pipe.
+                read = pipe.read(&mut chunk) => match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                },
+                _ = stop.cancelled() => break,
             }
         }
+        bytes
+    })
+}
+
+/// What a pipe reader collected: everything up to the end of the pipe when that comes by
+/// `deadline`, otherwise what it had read by then (`stop` ends it).
+async fn collected(
+    mut reader: JoinHandle<Vec<u8>>,
+    stop: &CancellationToken,
+    deadline: Instant,
+) -> Vec<u8> {
+    if let Ok(done) = tokio::time::timeout_at(deadline, &mut reader).await {
+        return done.unwrap_or_default();
     }
+    stop.cancel();
+    reader.await.unwrap_or_default()
 }
 
 /// Whether one executor can take jobs, and what is wrong when it cannot.
@@ -1920,6 +1976,40 @@ mod tests {
         ] {
             assert_eq!(runner.limit_for(args), Duration::from_secs(1), "{args:?}");
         }
+    }
+
+    // The far end stays open, as when a process that escaped the check's process group holds the
+    // pipe: at the drain deadline the reader stops and what it read is kept.
+    #[tokio::test]
+    async fn a_pipe_still_open_at_the_drain_deadline_gives_what_was_read_by_then() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut far_end, near_end) = tokio::io::duplex(64);
+        far_end.write_all(b"partial").await.unwrap();
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(near_end), stop.clone());
+        let bytes = collected(reader, &stop, Instant::now() + Duration::from_millis(200)).await;
+        assert_eq!(bytes, b"partial");
+        assert!(stop.is_cancelled(), "the reader was not told to stop");
+        drop(far_end);
+    }
+
+    #[tokio::test]
+    async fn a_pipe_that_ends_before_the_drain_deadline_is_read_to_its_end() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut far_end, near_end) = tokio::io::duplex(64);
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(near_end), stop.clone());
+        // More than the duplex buffer holds: the reader has to keep reading while it is written.
+        let text = "line\n".repeat(100);
+        far_end.write_all(text.as_bytes()).await.unwrap();
+        drop(far_end);
+        let bytes = collected(reader, &stop, Instant::now() + Duration::from_secs(10)).await;
+        assert_eq!(bytes, text.as_bytes());
+        assert!(!stop.is_cancelled());
+        let absent = read_pipe(None::<tokio::io::DuplexStream>, stop.clone());
+        assert!(absent.await.unwrap().is_empty());
     }
 
     #[test]

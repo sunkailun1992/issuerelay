@@ -8848,10 +8848,10 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
-| 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审） | M2 |
+| 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
 | 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审） | M2 |
 | 6.4 | 环境检查命令超时后结束整棵进程树（被杀的 `claude mcp list` 可能留下它启动的 stdio MCP 服务器），从托盘程序运行时不弹控制台窗口（Task 18 评审） | M2 |
-| 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审） | M2 |
+| 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 
 ### 评审遗留的小项（2026-10-13 整理）
@@ -8883,7 +8883,7 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 | `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示 | Task 17、19、21 评审 |
 | `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |
 | `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队 | 最终评审 |
-| `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做） | 最终评审 |
+| `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做）（M2 第一部分 Task 2 已完成，待 Windows 实机） | 最终评审 |
 | `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过） | Task 7、11 评审 |
 | `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`） | Task 12 评审 |
 | `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出 | Task 21 评审、最终评审 |

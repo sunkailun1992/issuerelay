@@ -352,6 +352,17 @@ mod descendants {
     pub(super) fn kill(_recorded: &[Proc]) {}
 }
 
+/// Windows: how executors and check commands are created. `CREATE_NO_WINDOW` keeps a console
+/// window from opening for every run when the host is the tray app (closing that window would
+/// end the run); `CREATE_NEW_PROCESS_GROUP` keeps a Ctrl+C in the devhost's console from
+/// reaching the executor, so a stopped run is recorded as stopped by the host instead of as a
+/// failure. process-wrap keeps these flags when the Job Object adds `CREATE_SUSPENDED`.
+#[cfg(windows)]
+pub(crate) fn creation_flags() -> process_wrap::tokio::CreationFlags {
+    use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+    process_wrap::tokio::CreationFlags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+}
+
 fn failed(message: String) -> RunOutput {
     RunOutput {
         exit: ExitKind::SpawnFailed(message),
@@ -381,7 +392,8 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// group can no longer be found through it.
 ///
 /// `env` supplies PATH and proxy variables on top of the host's environment and removes the
-/// nested-session markers (`env::REMOVED_VARS`).
+/// nested-session markers (`env::REMOVED_VARS`). On Windows the executor starts without a console
+/// window and out of reach of a Ctrl+C in the host's console (`creation_flags`).
 pub async fn run(
     spec: CommandSpec,
     kind: ExecutorKind,
@@ -411,7 +423,10 @@ pub async fn run(
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
-    command.wrap(JobObject);
+    {
+        command.wrap(creation_flags());
+        command.wrap(JobObject);
+    }
     command.wrap(KillOnDrop);
     // From here on the guard owns the tree: every way out of this function ends it.
     let mut guard = match command.spawn() {
@@ -779,6 +794,13 @@ mod tests {
         };
         assert!(untouched, "a PID whose start time differs was signalled");
         assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executors_start_without_a_console_window_and_out_of_reach_of_ctrl_c() {
+        // CREATE_NO_WINDOW (0x0800_0000) | CREATE_NEW_PROCESS_GROUP (0x0000_0200).
+        assert_eq!(creation_flags().0.0, 0x0800_0200);
     }
 
     #[test]
