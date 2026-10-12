@@ -1945,6 +1945,8 @@ Co-Authored-By: Claude <实际模型名> <noreply@anthropic.com>"
 
 ### Task 7: core 路径与配置
 
+> 执行说明（2026-10-12）：下面 `ipc_endpoint` 的代码是派发时的版本；Task 20 已改为只由数据目录决定端点（Windows 管道 `issuerelay-<哈希>`，Unix 套接字超过 103 字节时改放 `<临时目录>/issuerelay-<哈希>/`），并删掉了 `sanitize`。第 1 节表格里的 IPC 端点一行同理，以 `docs/ai-coding/AI_CODING_GUIDE.md` 为准。
+
 **Files:**
 - Create: `crates/core/src/paths.rs`、`crates/core/src/config.rs`
 - Modify: `crates/core/src/lib.rs`、`crates/core/Cargo.toml`
@@ -6328,6 +6330,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 19: core 引擎
 
+> 执行说明（2026-10-12）：下面的代码块是派发时的版本，已落地代码以 `fix(core): keep one run per directory and never overwrite a user's stop` 及其后续提交为准：登记运行时在运行集合锁里检查目录和总数上限，需求换了项目就改派后下一轮再调度；轮询和启动前的写入都在读状态的同一把存储锁里完成，用户的停止和重试不会被覆盖，一条需求不会有两条活动记录；派活中途暂停、改绑定或关停都会拦下启动；一条任务出错不影响其他任务；运行槽位总会释放；摘要和原因都经 `clean_text` 清理，没有结果行时保存 AI 的最后输出。测试数以提交为准。
+
 **Files:**
 - Create: `crates/core/src/engine.rs`、`crates/core/tests/common/engine_kit.rs`、`crates/core/tests/engine.rs`
 - Modify: `crates/core/src/lib.rs`、`crates/core/tests/common/mod.rs`、`crates/core/Cargo.toml`
@@ -7531,6 +7535,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 20: core 本机 IPC
+
+> 执行说明（2026-10-12）：落地时另按控制方补充要求改了 `crates/core/src/paths.rs`（端点只由数据目录决定，套接字路径上限 103 字节），一次失败的 accept / connect 不会停掉服务，`doctor` 的客户端超时为 180 秒，其余 30 秒；测试数以提交为准。
 
 **Files:**
 - Create: `crates/core/src/ipc/mod.rs`、`crates/core/src/ipc/protocol.rs`、`crates/core/src/ipc/server.rs`、`crates/core/src/ipc/client.rs`、`crates/core/tests/ipc.rs`
