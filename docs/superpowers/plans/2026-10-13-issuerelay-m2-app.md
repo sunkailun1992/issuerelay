@@ -2266,7 +2266,7 @@ export type EngineEvent = { kind: "status" } | { kind: "job"; job: Job } | { kin
 export type QuitMode = "wait" | "stop";
 ```
 
-（`ExecEnv.proxy` 的显示值由面板打码：Task 9 用 `maskCredentials`。Rust 侧 `ExecEnv` 在 `DoctorReport` 里原样带着代理值，凭据只在本机进程之间传递，不落盘、不写日志。）
+（`DoctorReport.env.proxy` 在引擎里已经打过码（M2 第一部分 Task 1 修复：`Engine::doctor` 用 `proxy_for_display()`），面板拿不到原始凭据；Task 9 的 `maskCredentials` 再打一次码作为纵深防护，规则与 Rust 的 `env::mask_credentials` 一致。）
 
 `app/src/lib/clock.ts`：
 
@@ -3256,7 +3256,7 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 
 **Files:**
 - Modify: `app/src/pages/Doctor.tsx`、`app/src/pages/Settings.tsx`、`app/src/pages/Help.tsx`
-- Create: `app/src/lib/mask.ts`（与 Rust `env::mask_credentials` 同规则）、`app/src/components/ExecutorCheck.tsx`（引导页复用）、`app/src/components/WorkspaceCheck.tsx`（引导页复用）
+- Create: `app/src/lib/mask.ts`（与 Rust `env::mask_credentials` 同规则：`://` 之前不含 `@` 和 `/` 的部分算协议头，其后到第一个 `/` 为止、最后一个 `@` 之前的用户信息换成 `***`；没有协议头时从开头算）、`app/src/components/ExecutorCheck.tsx`（引导页复用）、`app/src/components/WorkspaceCheck.tsx`（引导页复用）
 - Modify: 五个翻译文件（`doctor`、`settings`、`help` 命名空间）
 - Test: `app/src/pages/Doctor.test.tsx`、`app/src/pages/Settings.test.tsx`、`app/src/pages/Help.test.tsx`、`app/src/lib/mask.test.ts`
 
@@ -3301,6 +3301,10 @@ import { maskCredentials } from "./mask";
 
 test("credentials in proxy URLs are masked like the engine does", () => {
   expect(maskCredentials("http://jane:s3cret@proxy.example:8080")).toBe("http://***@proxy.example:8080");
+  expect(maskCredentials("jane:s3cret@proxy.example:8080")).toBe("***@proxy.example:8080");
+  expect(maskCredentials(" http://jane:s3cret@proxy.example:8080")).toBe(" http://***@proxy.example:8080");
+  expect(maskCredentials("HTTPS_PROXY=http://jane:s3cret@proxy.example:8080")).toBe("HTTPS_PROXY=http://***@proxy.example:8080");
+  expect(maskCredentials("http://jane:p@ss@proxy.example:8080")).toBe("http://***@proxy.example:8080");
   expect(maskCredentials("http://proxy.example:8080")).toBe("http://proxy.example:8080");
   expect(maskCredentials("localhost,127.0.0.1")).toBe("localhost,127.0.0.1");
 });
