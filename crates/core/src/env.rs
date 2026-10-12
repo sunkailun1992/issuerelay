@@ -157,32 +157,25 @@ impl ExecEnv {
 }
 
 /// `url` with its user-info part (`user:password@`) replaced by `***@`. The user-info ends at
-/// the last `@` before the first `/`, so a password that holds an `@` is masked whole. The
-/// scheme is optional: curl also accepts `user:password@host:port` as a proxy. Text without
-/// such an `@` is returned as it is.
+/// the last `@` before the first `/`, so a password that holds an `@` is masked whole.
+///
+/// What stands in front of the first `://` is the scheme and is kept as it is, whatever it holds
+/// (a quote, a blank, a `NAME=` prefix), unless it holds an `@` or a `/`: then the `://` belongs
+/// to a path or a query, and the value is read from its start, with no scheme (curl also accepts
+/// `user:password@host:port` as a proxy). Text without such an `@` is returned as it is. Masking
+/// a masked value changes nothing.
 pub fn mask_credentials(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
-        _ => (None, url),
+    let (prefix, rest) = match url.split_once("://") {
+        Some((before, rest)) if !before.contains(['@', '/']) => {
+            (&url[..before.len() + "://".len()], rest)
+        }
+        _ => ("", url),
     };
     let authority_end = rest.find('/').unwrap_or(rest.len());
     let Some(at) = rest[..authority_end].rfind('@') else {
         return url.to_string();
     };
-    let host = &rest[at + 1..];
-    match scheme {
-        Some(scheme) => format!("{scheme}://***@{host}"),
-        None => format!("***@{host}"),
-    }
-}
-
-/// Whether `text` can be the scheme of a URL (`http`, `socks5h`). A `://` further in, in a path or
-/// a query, does not make what comes before it a scheme.
-fn is_scheme(text: &str) -> bool {
-    text.starts_with(|c: char| c.is_ascii_alphabetic())
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    format!("{prefix}***@{}", &rest[at + 1..])
 }
 
 fn interesting(name: &str) -> bool {
@@ -769,6 +762,70 @@ mod tests {
             mask_credentials("jane:s3cret@proxy.example/redirect?to=http://other.example"),
             "***@proxy.example/redirect?to=http://other.example"
         );
+    }
+
+    #[test]
+    fn credentials_are_masked_behind_any_prefix() {
+        // Whatever stands in front of the first `://` is the scheme as far as masking goes (a
+        // quote, a blank, a `NAME=`), unless it holds an `@` or a `/`: then the `://` belongs to
+        // a path or a query and the value is read from its start.
+        for (value, masked) in [
+            (
+                " http://jane:s3cret@proxy.example:8080",
+                " http://***@proxy.example:8080",
+            ),
+            (
+                "\thttp://jane:s3cret@proxy.example:8080",
+                "\thttp://***@proxy.example:8080",
+            ),
+            (
+                "\"http://jane:s3cret@proxy.example:8080\"",
+                "\"http://***@proxy.example:8080\"",
+            ),
+            (
+                "'http://jane:s3cret@proxy.example:8080'",
+                "'http://***@proxy.example:8080'",
+            ),
+            (
+                "HTTPS_PROXY=http://jane:s3cret@proxy.example:8080",
+                "HTTPS_PROXY=http://***@proxy.example:8080",
+            ),
+            (
+                "http://jane:p@ss@proxy.example:8080",
+                "http://***@proxy.example:8080",
+            ),
+            (
+                "jane:s3cret@proxy.example/redirect?to=http://other.example",
+                "***@proxy.example/redirect?to=http://other.example",
+            ),
+        ] {
+            assert_eq!(mask_credentials(value), masked, "{value:?}");
+            assert!(!masked.contains("s3cret"));
+        }
+    }
+
+    #[test]
+    fn masking_twice_changes_nothing() {
+        for value in [
+            "http://jane:s3cret@proxy.example:8080",
+            "http://token@proxy.example:8080/path@x",
+            "http://proxy.example:8080",
+            "localhost,127.0.0.1",
+            "jane:s3cret@proxy.example:8080",
+            "jane:p@ss@proxy.example:8080",
+            "jane:s3cret@proxy.example:8080/path@x",
+            "socks5h://jane:s3cret@proxy.example:1080",
+            "proxy.example:8080/path@x",
+            "jane:s3cret@proxy.example/redirect?to=http://other.example",
+            " http://jane:s3cret@proxy.example:8080",
+            "\"http://jane:s3cret@proxy.example:8080\"",
+            "HTTPS_PROXY=http://jane:s3cret@proxy.example:8080",
+            "http://jane:p@ss@proxy.example:8080",
+            "",
+        ] {
+            let once = mask_credentials(value);
+            assert_eq!(mask_credentials(&once), once, "{value:?}");
+        }
     }
 
     #[test]
