@@ -170,7 +170,11 @@ issuerelay/
 - 输出逐行读取：原样写进日志文件，同时解析出面板显示用的时间线（AI 消息、工具调用、命令、错误）。
 - 结果：Claude 取 `type` 为 `result` 的事件的 `result` 字段；Codex 取最后一个 `item.type` 为 `agent_message` 的 `item.completed` 事件的 `item.text`。两者末行都是结果 JSON。
 - 命令行参数里不放提示词、路径或任何来自 Linear 的文本。
-- 「完全放开」档的写法已在 M0 实测通过（macOS，2026-10-10，Claude Code 2.1.285、codex-cli 0.159.2，见 `docs/gates/2026-10-11-m0-verification.md`）；「自动审查」「按个人设置」两档的参数只据帮助信息，留到 M1 验收实测；Windows 待实机。
+- 三档写法的实测结果（macOS，Claude Code 2.1.285、codex-cli 0.159.2）：
+  - 「完全放开」在 M0（2026-10-10）和 M1（2026-10-12）都跑通。
+  - 「自动审查」两个执行者都跑通；Codex 的 `--approve-for-me` 明显更慢。
+  - 「按个人设置」时，Claude 的 `dontAsk` 会拒绝用户设置里没有预先允许的一切操作，包括 Linear MCP 工具和 git 命令，只有预先允许了才能用；Codex 的行为完全取决于 `~/.codex/config.toml`。
+  - 见 `docs/gates/2026-10-11-m0-verification.md`、`docs/gates/2026-10-12-m1-acceptance.md`。Windows 待实机。
 
 ### 6.2 超时与结束
 
@@ -228,7 +232,7 @@ issuerelay/
 5. 绑定第一个项目：选 Linear 项目 → 选本地目录 → 选执行者 → 选权限档位。首次选「完全放开」时明确提示风险（见第 14 节）。
 6. 使用说明：明确写出「需求要被自动处理，必须指派给自己、加 `ai-ready` 标签、状态为 Todo、所属项目已绑定」，并附示例。面板的「需求」页会为不满足条件的需求标出原因。
 
-macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不到装在 Homebrew 或 npm 全局目录里的 `claude`、`codex`（M0 推断，M2 实机验证）。托盘程序启动时经登录 shell 读取 PATH，用它查找执行者并传给子进程；读取失败时在「环境检查」页提示。
+macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不到装在 Homebrew 或 npm 全局目录里的 `claude`、`codex`（M0 推断，M2 实机验证）。托盘程序启动时经登录 shell 读取 PATH，用它查找执行者并传给子进程；读取失败时在「环境检查」页提示。执行者还需要代理设置：Claude Code 不读 macOS 的系统代理，只认 `HTTPS_PROXY` 等环境变量（M1 实测，宿主没带这些变量时，Claude 连不上 Linear MCP）。所以托盘程序要从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`，传给执行者。
 
 ## 9. 面板与托盘
 

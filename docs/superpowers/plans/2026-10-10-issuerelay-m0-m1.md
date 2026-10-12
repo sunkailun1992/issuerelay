@@ -8844,6 +8844,8 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 11 | 日志按保留天数与总大小清理（默认 30 天、1 GB） | M2 |
 | 10.3 | 在设置里一键把 MCP 控制服务注册到 Claude Code / Codex | M2 |
 | 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 推断 F2，M2 实机验证） | M2 |
+| 8 | 执行者的代理环境：托盘程序从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY` 传给执行者，环境检查的提示点明代理（M1 验收 H1） | M2 |
+| 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审） | M2 |
