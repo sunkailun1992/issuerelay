@@ -10,11 +10,15 @@ use std::{
 };
 
 use anyhow::Result;
+#[cfg(target_os = "macos")]
+use common::orphan::Orphan;
 use common::{
     engine_kit::{FakeReadiness, Harness, Script, ScriptedRunner},
     fake_linear::FakeLinear,
     issue,
 };
+#[cfg(target_os = "macos")]
+use issuerelay_core::runner;
 use issuerelay_core::{
     config::{Binding, Config, ExecutorKind, PermissionProfile, TriggerNames},
     doctor::{ExecutorReport, ReadinessProbe},
@@ -558,6 +562,130 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
     engine.tick().await.unwrap();
     engine.wait_idle().await;
     assert_eq!(runner.started(), ["DEMO-1"]);
+}
+
+// The engine puts the executor's process, as the runner reports it, on the row of the run: the
+// record a host started after a crash uses to end what the run left behind. (The scripted runner
+// reports a made-up process; no test lets a host end it.)
+#[tokio::test]
+async fn a_started_run_records_its_executor_process() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), true));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: Arc::new(fake),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: runner.clone(),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    engine.tick().await.unwrap();
+    // The scripted runner reports the process before it counts the run as started.
+    eventually("the run to start", || !runner.started().is_empty()).await;
+    let recorded: (Option<i64>, Option<String>) = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT process_pid, process_started FROM jobs", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        recorded,
+        (Some(4242), Some("1700000000.000001".to_string()))
+    );
+    runner.gate.add_permits(1);
+    engine.wait_idle().await;
+    assert_eq!(
+        engine.list_jobs(10).unwrap()[0].state,
+        JobState::AwaitingAcceptance
+    );
+}
+
+// The loop of a host that starts after a crash ends the executor that a run of the previous host
+// left running. Only macOS records executors.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_loop_ends_an_executor_the_previous_host_left_running() {
+    let root = tempfile::tempdir().unwrap();
+    let beat = root.path().join("beat");
+    let script = root.path().join("script.json");
+    let steps = serde_json::json!([{"heartbeat": beat, "every_ms": 50}, {"sleep_ms": 30_000}]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let mut orphan = Orphan::spawn(&script);
+    let beat_len = || std::fs::metadata(&beat).map_or(0, |m| m.len());
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while beat_len() == 0 {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "the heartbeat child never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let tag = runner::process_tag(orphan.id()).expect("a live process has a start time");
+    // The previous host recorded the run as started, with its executor, and then died.
+    let db = root.path().join("state.db");
+    {
+        let store = Store::open(&db).unwrap();
+        let i = issue("1", "proj-1");
+        let job = store
+            .insert(NewJob {
+                issue: &i,
+                binding: None,
+                executor: None,
+                state: JobState::Queued,
+                reason: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .mark_started(job.id, &root.path().join("1.jsonl"))
+                .unwrap()
+        );
+        store.set_process(job.id, &tag).unwrap();
+    }
+    let linear = FakeLinear::new("user-1");
+    let engine = Engine::new(EngineDeps {
+        config_path: root.path().join("config.toml"),
+        store: Store::open(&db).unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    assert!(orphan.is_running(), "creating the engine ends nothing yet");
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&engine, &shutdown);
+    // Waited for without reaping the leader, so that the guard can still end the group if the
+    // heartbeat survived.
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while runner::process_tag(orphan.id()).as_ref() == Some(&tag) {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "the leftover executor still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = beat_len();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(beat_len(), settled, "the heartbeat child survived");
+    assert!(
+        orphan.exit_within(Duration::from_secs(10)).await.is_some(),
+        "the leftover executor was not reaped"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), worker)
+        .await
+        .expect("the loop did not stop")
+        .unwrap();
+    assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Failed);
 }
 
 #[tokio::test]
@@ -1738,7 +1866,8 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
     let script = dir.path().join("script.json");
     let result =
         r#"{"type":"result","result":"done\n{\"result\":\"in_testing\",\"summary\":\"ok\"}"}"#;
-    let steps = serde_json::json!([{ "out": result }, { "exit": 0 }]);
+    // The pause keeps the executor alive while its start is reported (below).
+    let steps = serde_json::json!([{ "out": result }, { "sleep_ms": 200 }, { "exit": 0 }]);
     std::fs::write(&script, steps.to_string()).unwrap();
     let spec = CommandSpec {
         program: PathBuf::from(env!("CARGO_BIN_EXE_fake-agent")),
@@ -1751,6 +1880,8 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
         stall: Duration::from_secs(30),
     };
     let log = dir.path().join("logs").join("1.jsonl");
+    let reported = Arc::new(Mutex::new(None));
+    let sink = reported.clone();
     let output = ProcessJobRunner::new(ExecEnv::inherit().shared())
         .run(
             spec,
@@ -1758,6 +1889,7 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
             log.clone(),
             limits,
             CancellationToken::new(),
+            Box::new(move |tag| *sink.lock().unwrap() = Some(tag)),
         )
         .await;
     assert_eq!(output.exit, ExitKind::Exited(Some(0)));
@@ -1766,6 +1898,13 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
         Some("done\n{\"result\":\"in_testing\",\"summary\":\"ok\"}")
     );
     assert!(log.exists());
+    // The executor's process reaches the hook where it is recorded: on macOS only.
+    let reported = reported.lock().unwrap().clone();
+    assert_eq!(
+        reported.is_some(),
+        cfg!(target_os = "macos"),
+        "{reported:?}"
+    );
 }
 
 // The readiness check replaces the shared environment; the runs that start afterwards get the
@@ -1801,6 +1940,7 @@ async fn the_process_runner_gives_each_run_the_current_shared_environment() {
                 log.clone(),
                 limits,
                 CancellationToken::new(),
+                Box::new(|_| {}),
             )
             .await;
         assert_eq!(output.exit, ExitKind::Exited(Some(0)));

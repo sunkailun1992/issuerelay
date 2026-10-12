@@ -2,6 +2,8 @@
 pub mod engine_kit;
 pub mod fake_linear;
 pub mod fake_server;
+#[cfg(target_os = "macos")]
+pub mod orphan;
 
 use chrono::{TimeZone, Utc};
 use issuerelay_core::model::Issue;

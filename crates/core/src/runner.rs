@@ -1,7 +1,8 @@
 //! Runs one executor process: feeds the prompt on stdin, streams stdout/stderr into a JSONL
 //! log, enforces the total and no-output limits, and always ends the whole process tree when the
 //! run ends: on Unix the process group and every descendant, including ones that left the group;
-//! on Windows the Job Object.
+//! on Windows the Job Object. On macOS it also ends, at the next start, the executors of a host
+//! that died without ending them (`end_leftover`).
 use std::{path::Path, process::Stdio, time::Duration};
 
 #[cfg(windows)]
@@ -20,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ExecutorKind;
 use crate::env::ExecEnv;
 use crate::executor::{CommandSpec, outcome::FinalTextTracker};
+use crate::model::ProcessTag;
 
 /// The time limits of one run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,15 +318,21 @@ mod descendants {
         }
     }
 
+    /// Whether `pid` may be signalled at all: not PID 0 (`kill` and `killpg` take it as the
+    /// caller's own group), launchd, this process or its process group.
+    pub(super) fn foreign(pid: libc::pid_t) -> bool {
+        // SAFETY: getpid and getpgrp have no preconditions and cannot fail.
+        let (me, my_group) = unsafe { (libc::getpid(), libc::getpgrp()) };
+        pid > 1 && pid != me && pid != my_group
+    }
+
     /// Sends SIGKILL to every recorded process whose PID still has the recorded start time, or
     /// to its whole process group when it leads one (the group includes it, and members it
     /// started after it was recorded). A PID whose start time differs belongs to another process
-    /// now and is left alone, as are this process, its process group and launchd.
+    /// now and is left alone, as are this process, its process group and launchd (`foreign`).
     pub(super) fn kill(recorded: &[Proc]) {
-        // SAFETY: getpid and getpgrp have no preconditions and cannot fail.
-        let (me, my_group) = unsafe { (libc::getpid(), libc::getpgrp()) };
         for recorded in recorded {
-            if recorded.pid <= 1 || recorded.pid == me || recorded.pid == my_group {
+            if !foreign(recorded.pid) {
                 continue;
             }
             let Some(now) = info(recorded.pid) else {
@@ -359,6 +367,91 @@ mod descendants {
     pub(super) fn record(_roots: &[Proc], _recorded: &mut Vec<Proc>) {}
 
     pub(super) fn kill(_recorded: &[Proc]) {}
+}
+
+/// Called once with the executor's process, right after it started.
+pub type SpawnHook = Box<dyn FnOnce(ProcessTag) + Send>;
+
+/// The live process `pid` with its start time, for `Store::set_process`. macOS only: Windows
+/// needs no record (the Job Object ends the whole tree when the host dies) and other Unix systems
+/// are not target platforms.
+#[cfg(target_os = "macos")]
+pub fn process_tag(pid: u32) -> Option<ProcessTag> {
+    let proc = descendants::process(libc::pid_t::try_from(pid).ok()?)?;
+    Some(ProcessTag {
+        pid,
+        started: format_started(proc.started),
+    })
+}
+
+/// Windows and other Unix systems record no process: see the macOS version.
+#[cfg(not(target_os = "macos"))]
+pub fn process_tag(_pid: u32) -> Option<ProcessTag> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn format_started((seconds, micros): (u64, u64)) -> String {
+    format!("{seconds}.{micros:06}")
+}
+
+/// Ends what a run left behind after the host that started it died without ending it. If the
+/// executor in `tag` still runs (same PID, same start time), its descendants are recorded, its
+/// process group gets SIGTERM, it gets up to `TERM_GRACE` to exit, the descendants are recorded
+/// again, and then the group (while its leader still runs) and every recorded descendant get
+/// SIGKILL, as `TreeGuard::end` does for a run that is stopped. Returns whether the executor was
+/// still running. A PID with another start time belongs to an unrelated process and is left
+/// alone, and so are this process, its process group and launchd, whatever the record says. An
+/// executor that has exited can no longer be followed to its descendants: they are out of reach,
+/// like the orphans `run` cannot find.
+#[cfg(target_os = "macos")]
+pub async fn end_leftover(tag: &ProcessTag) -> bool {
+    end_leftover_within(tag, TERM_GRACE).await
+}
+
+/// `end_leftover` with the grace period as a parameter, so that tests can use a short one.
+#[cfg(target_os = "macos")]
+async fn end_leftover_within(tag: &ProcessTag, grace: Duration) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(tag.pid) else {
+        return false;
+    };
+    if !descendants::foreign(pid) {
+        return false;
+    }
+    let Some(leader) = descendants::process(pid) else {
+        return false;
+    };
+    if format_started(leader.started) != tag.started {
+        return false;
+    }
+    let mut recorded = Vec::new();
+    descendants::record(&[leader], &mut recorded);
+    // SAFETY: a plain signal to the group of a process whose PID and start time were checked.
+    unsafe { libc::killpg(pid, libc::SIGTERM) };
+    let deadline = Instant::now() + grace;
+    while descendants::process(pid) == Some(leader) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let leader_alive = descendants::process(pid) == Some(leader);
+    let mut roots = recorded.clone();
+    if leader_alive {
+        roots.push(leader);
+    }
+    descendants::record(&roots, &mut recorded);
+    if leader_alive {
+        // SAFETY: as above; the leader still has the recorded start time.
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+    descendants::kill(&recorded);
+    true
+}
+
+/// Windows: the Job Object of a run ends with the host that created it
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), so nothing is left to end. Other Unix systems record
+/// no process.
+#[cfg(not(target_os = "macos"))]
+pub async fn end_leftover(_tag: &ProcessTag) -> bool {
+    false
 }
 
 /// Windows: how executors and check commands are created. `CREATE_NO_WINDOW` keeps a console
@@ -409,6 +502,11 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// `env` supplies PATH and proxy variables on top of the host's environment and removes the
 /// nested-session markers (`env::REMOVED_VARS`). On Windows the executor starts without a console
 /// window and out of reach of a Ctrl+C in the host's console (`creation_flags`).
+///
+/// `on_spawn` gets the executor's process (`process_tag`) right after it started, so that a host
+/// started after a crash can end what the run left behind (`end_leftover`). It is not called
+/// when the executor could not start or has already exited, nor where no process is recorded
+/// (only macOS records one).
 pub async fn run(
     spec: CommandSpec,
     kind: ExecutorKind,
@@ -416,6 +514,7 @@ pub async fn run(
     limits: RunLimits,
     cancel: CancellationToken,
     env: &ExecEnv,
+    on_spawn: Option<SpawnHook>,
 ) -> RunOutput {
     if let Some(dir) = log_path.parent()
         && let Err(e) = tokio::fs::create_dir_all(dir).await
@@ -448,6 +547,11 @@ pub async fn run(
         Ok(child) => TreeGuard::new(child),
         Err(e) => return spawn_failed(&mut log, e.to_string()).await,
     };
+    if let Some(hook) = on_spawn
+        && let Some(tag) = guard.child.id().and_then(process_tag)
+    {
+        hook(tag);
+    }
 
     if let Some(mut stdin) = guard.child.stdin().take() {
         let prompt = spec.stdin;
@@ -903,6 +1007,70 @@ mod tests {
         };
         assert!(untouched, "a PID whose start time differs was signalled");
         assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGKILL));
+    }
+
+    // The record of a run's executor must compare equal with what a later host reads for the same
+    // process, so the format is fixed: seconds, a dot and six digits of microseconds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_start_time_is_written_with_six_digits_of_microseconds() {
+        assert_eq!(format_started((1_700_000_000, 123)), "1700000000.000123");
+        assert_eq!(format_started((1_700_000_000, 0)), "1700000000.000000");
+        assert_eq!(
+            format_started((1_700_000_000, 999_999)),
+            "1700000000.999999"
+        );
+    }
+
+    // Whatever a record says, PID 0 (`kill` and `killpg` take it as the caller's own group),
+    // launchd, this process and its process group are never signalled.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_host_and_its_own_group_are_never_signalled() {
+        // SAFETY: getpid and getpgrp have no preconditions and cannot fail.
+        let (me, my_group) = unsafe { (libc::getpid(), libc::getpgrp()) };
+        for pid in [0, 1, me, my_group] {
+            assert!(!descendants::foreign(pid), "{pid} may be signalled");
+        }
+        // No PID is that high, so it is neither this process nor its group.
+        assert!(descendants::foreign(libc::pid_t::MAX));
+    }
+
+    // A leftover executor that ignores SIGTERM is killed, with its process group, once the grace
+    // period is over. Only macOS records executors (`process_tag`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_leftover_that_ignores_sigterm_is_killed_when_the_grace_period_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        // The guard is only the cleanup: it reaps the shell at the end, and ends the tree if the
+        // test fails. The leftover is ended through its record, like one a crashed host left.
+        // The loop outlives each of its children, so only a signal to the shell itself ends it.
+        let mut guard = shell_guard(
+            r#"trap '' TERM; : > "$1"; while :; do sleep 1; done"#,
+            &[&ready],
+            Duration::from_millis(300),
+        );
+        wait_for_file(&ready).await;
+        let pid = guard.leader().expect("the shell runs");
+        let tag = process_tag(u32::try_from(pid).unwrap()).expect("a live process has a tag");
+        let grace = Duration::from_millis(300);
+        let started = Instant::now();
+        assert!(end_leftover_within(&tag, grace).await);
+        let took = started.elapsed();
+        assert!(
+            took >= grace,
+            "killed before the grace period ended: {took:?}"
+        );
+        assert!(took < Duration::from_secs(10), "took {took:?}");
+        // SIGKILL is delivered asynchronously; the shell is gone, or a zombie the guard reaps.
+        let give_up = Instant::now() + Duration::from_secs(5);
+        while descendants::process(pid).is_some() {
+            assert!(Instant::now() < give_up, "the leftover still runs");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        guard.end().await;
+        assert!(guard.done, "the tree was not reaped");
     }
 
     #[cfg(windows)]

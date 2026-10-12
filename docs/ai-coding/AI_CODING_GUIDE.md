@@ -67,7 +67,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 数据 | 位置 | 说明 |
 |---|---|---|
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名 |
-| 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite |
+| 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite；表结构版本记在 `user_version`（当前 2），比当前程序新的拒绝打开；macOS 上每次运行记下执行者的进程号和启动时间，供宿主崩溃后的清扫使用 |
 | 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器每次打开日志都把 Unix 上的权限设为 0600（重试沿用的旧文件也一样）；单行最多保留 4 MiB，更长的被截断并记一条说明；`logs.rs` 按保留天数（`log_retention_days`，默认 30）和总大小（`log_max_total_mb`，默认 1024）清理，宿主启动时和之后每 6 小时一次，正在运行的任务的日志不删 |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |

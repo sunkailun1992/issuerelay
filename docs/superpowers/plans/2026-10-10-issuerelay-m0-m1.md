@@ -8849,7 +8849,7 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
 | 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
-| 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审） | M2 |
+| 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审）（M2 第一部分 Task 4 已完成） | M2 |
 | 6.4 | 环境检查命令超时后结束整棵进程树（被杀的 `claude mcp list` 可能留下它启动的 stdio MCP 服务器），从托盘程序运行时不弹控制台窗口（Task 18 评审）（M2 第一部分 Task 1、2 已完成） | M2 |
 | 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
@@ -8893,7 +8893,7 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `store` | 数据库的 `user_version` 比当前程序新时不拒绝，第一次改表结构时处理 | Task 9 评审 |
+| `store` | 数据库的 `user_version` 比当前程序新时不拒绝，第一次改表结构时处理（M2 第一部分 Task 4 已完成） | Task 9 评审 |
 | 打包 | 命令行依赖整个 `core`；`fake-agent` 是 `issuerelay-core` 的普通可执行目标，打包时会被一起构建 | Task 21 评审、最终评审 |
 | 依赖 | chrono 的默认特性（clock、wasmbind）用不到，可改成 `default-features = false` 加 `["std", "now", "serde"]` | Task 8 评审 |
 | CI | `ci.yml` 显式安装 1.99.0，和 `rust-toolchain.toml` 重复（rustup 1.28 起 `rustup show` 不再自动安装，所以要显式装）：升级工具链时两处一起改 | Task 1 评审 |

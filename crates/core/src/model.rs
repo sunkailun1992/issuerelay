@@ -114,6 +114,15 @@ pub struct Job {
     pub summary: Option<String>,
 }
 
+/// The executor process of a run, as recorded when it started: the PID and the kernel's start
+/// time, `"<seconds>.<microseconds>"` since the epoch. A later host ends the process only while
+/// that PID still has that start time; otherwise the PID belongs to someone else now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessTag {
+    pub pid: u32,
+    pub started: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

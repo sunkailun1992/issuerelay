@@ -32,9 +32,9 @@ use crate::executor::{
 };
 use crate::linear::{LinearApi, Viewer};
 use crate::logs::{self, CleanupReport};
-use crate::model::{Issue, Job, JobState};
+use crate::model::{Issue, Job, JobState, ProcessTag};
 use crate::prompt::{self, PromptInput};
-use crate::runner::{self, ExitKind, RunLimits, RunOutput};
+use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
 use crate::store::{NewJob, Store};
 use crate::text::clean_text;
@@ -55,7 +55,9 @@ const VERIFY_RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(2), Duration::fr
 pub trait JobRunner: Send + Sync {
     /// Runs `spec` and reports how it ended, with the guarantees of `runner::run`: the whole
     /// process tree has ended when this returns, and also if the future is dropped before that.
-    /// `cancel` stops the run early.
+    /// `cancel` stops the run early. `on_spawn` gets the executor's process right after it
+    /// starts, for the record a host started after a crash uses (where one is kept, see
+    /// `runner::process_tag`).
     async fn run(
         &self,
         spec: CommandSpec,
@@ -63,6 +65,7 @@ pub trait JobRunner: Send + Sync {
         log_path: PathBuf,
         limits: RunLimits,
         cancel: CancellationToken,
+        on_spawn: SpawnHook,
     ) -> RunOutput;
 }
 
@@ -86,13 +89,14 @@ impl JobRunner for ProcessJobRunner {
         log_path: PathBuf,
         limits: RunLimits,
         cancel: CancellationToken,
+        on_spawn: SpawnHook,
     ) -> RunOutput {
         let env = self
             .env
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        runner::run(spec, kind, &log_path, limits, cancel, &env).await
+        runner::run(spec, kind, &log_path, limits, cancel, &env, Some(on_spawn)).await
     }
 }
 
@@ -197,6 +201,10 @@ struct Inner {
     /// The token of the running `run_forever`: once it is cancelled nothing new starts, also in
     /// a cycle that is already in progress.
     shutdown: Mutex<Option<CancellationToken>>,
+    /// The executors that runs interrupted by the previous host may have left running, as
+    /// recorded when they started. `run_forever` takes them and ends them before anything new
+    /// starts.
+    leftovers: Mutex<Vec<ProcessTag>>,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -264,20 +272,26 @@ pub fn decide(
 }
 
 impl Engine {
-    /// Loads the configuration and marks the runs a previous shutdown interrupted as failed.
-    /// Only one engine may use a database at a time.
+    /// Loads the configuration and marks the runs a previous shutdown interrupted as failed; the
+    /// executors those runs left running are ended when `run_forever` starts. Only one engine may
+    /// use a database at a time: a second one would mark the first one's runs failed and end
+    /// their executors.
     pub fn new(deps: EngineDeps) -> Result<Self> {
         // The bytes are read before the file is loaded: if it changes in between, the first save
         // refuses instead of overwriting the newer text.
         let config_file = read_config_file(&deps.config_path)?;
         let config = Config::load(&deps.config_path)?;
-        let recovered = deps.store.recover_interrupted()?;
-        if recovered > 0 {
+        let interrupted = deps.store.recover_interrupted()?;
+        if !interrupted.is_empty() {
             tracing::warn!(
-                recovered,
+                recovered = interrupted.len(),
                 "runs interrupted by the previous shutdown were marked failed"
             );
         }
+        let leftovers = interrupted
+            .into_iter()
+            .filter_map(|run| run.process)
+            .collect();
         Ok(Self {
             inner: Arc::new(Inner {
                 config_path: deps.config_path,
@@ -295,6 +309,7 @@ impl Engine {
                 idle: Notify::new(),
                 cycle: tokio::sync::Mutex::new(()),
                 shutdown: Mutex::new(None),
+                leftovers: Mutex::new(leftovers),
             }),
         })
     }
@@ -872,12 +887,23 @@ impl Engine {
         let job_id = job.id;
         let issue_uuid = job.issue_uuid.clone();
         let identifier = job.issue_identifier.clone();
+        // The executor's process goes on the row once it runs, so that a host started after a
+        // crash can end what this run left behind.
+        let recorder = self.clone();
+        let on_spawn: SpawnHook = Box::new(move |tag| {
+            if let Err(e) = recorder.store().set_process(job_id, &tag) {
+                tracing::warn!(job_id, error = %format!("{e:#}"), "could not record the executor process");
+            }
+        });
         tokio::spawn(async move {
             // The runner gets a task of its own: if it panics, the job must still be recorded as
             // finished and give its slot back. Unwinding drops the runner's process-tree guard,
             // which ends the executor's processes. The result is still checked against Linear.
-            let run =
-                tokio::spawn(async move { runner.run(spec, kind, log_path, limits, cancel).await });
+            let run = tokio::spawn(async move {
+                runner
+                    .run(spec, kind, log_path, limits, cancel, on_spawn)
+                    .await
+            });
             let output = match run.await {
                 Ok(output) => output,
                 Err(e) => RunOutput {
@@ -1229,15 +1255,34 @@ impl Engine {
     }
 
     /// The background loop: a cycle now, then again after the poll interval or as soon as
-    /// `poll_now` is called. Returns after `shutdown` is cancelled and the running jobs were told
-    /// to stop; their results are recorded when they end (`wait_idle`). Once the shutdown is
-    /// requested nothing new starts, not even in a cycle that is already in progress.
+    /// `poll_now` is called. Before the first cycle it ends the executors that runs interrupted
+    /// by the previous host left running (`runner::end_leftover`). Returns after `shutdown` is
+    /// cancelled and the running jobs were told to stop; their results are recorded when they end
+    /// (`wait_idle`). Once the shutdown is requested nothing new starts, not even in a cycle that
+    /// is already in progress.
     pub async fn run_forever(&self, shutdown: CancellationToken) {
         *self
             .inner
             .shutdown
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown.clone());
+        // A previous host that died while runs were in progress may have left their executors
+        // running: end them before anything new starts.
+        let leftovers = std::mem::take(
+            &mut *self
+                .inner
+                .leftovers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for tag in leftovers {
+            if runner::end_leftover(&tag).await {
+                tracing::warn!(
+                    pid = tag.pid,
+                    "ended an executor the previous host left running"
+                );
+            }
+        }
         let mut last_cleanup = tokio::time::Instant::now();
         if let Err(e) = self.clean_logs().await {
             tracing::warn!(error = %format!("{e:#}"), "log cleanup failed");
