@@ -213,7 +213,7 @@ issuerelay/
 - 授权：OAuth 2.1 + 动态客户端注册 + PKCE，使用 rmcp 的 `auth` 与 `transport-streamable-http-client-reqwest` 特性；回调走本机回环地址（`http://127.0.0.1:<随机端口>/callback`）。申请读写权限，因为「标记完成」需要写。Linear 的授权服务器要求回调带 RFC 9207 的 `iss` 参数，所以回调时把完整回调地址交给 rmcp 校验（M0 实测）。回环端口同时处理多个连接，只有带本次 `state` 的回调（或不带 `state` 的授权错误回调）结束等待，其余请求返回 404。
 - 令牌：存 macOS 钥匙串 / Windows 凭据管理器（`keyring` 库），不以明文写盘，自动续期。
 - 备用方式：高级设置里可以改用个人 API key（同样通过 `Authorization: Bearer` 连接 MCP）。
-- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。只有这条错误算「需求不存在」；读不懂的回复（缺 `uuid`、状态或时间，或格式变了）一律当错误处理，本轮检查失败、不改任何任务的状态，不当成「需求已消失」或「没有候选」。每次调用最长等 30 秒。
+- 用到的工具：查询需求列表、读取单条需求、列出项目、列出标签、列出状态、读取当前用户、更新需求状态。M0 实测这些工具都在：`list_issues`、`get_issue`、`list_projects`、`list_issue_labels`、`list_issue_statuses`、`get_user`、`save_issue`，另用 `list_teams` 读团队。实测口径：需求的 `projectId` 对应项目的 `uuid`（项目的 `id` 是 `P-<团队>-N` 编号，绑定存 `uuid`）；翻页字段是 `hasNextPage` 与 `cursor`；查不到需求时返回工具错误「Could not find referenced Issue.」。只有这条错误算「需求不存在」；读不懂的回复（缺 `uuid`、状态或时间，或格式变了）一律当错误处理，本轮检查失败、不改任何任务的状态，不当成「需求已消失」或「没有候选」。每次调用最长等 30 秒。候选需求按创建时间翻页（`orderBy: createdAt`），翻页途中被改动的需求不会跨页漏读。
 - 每次建立连接时先调用 `tools/list`，检查上述工具和参数是否存在；缺失时面板报「Linear 接口已变化」并暂停派活，不做猜测性调用。
 - 第一版只连接一个 Linear 工作区。
 
@@ -289,7 +289,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ## 11. 配置与数据位置
 
-- 配置：`config.toml`（设置与绑定），放在系统的应用配置目录（macOS `~/Library/Application Support/<应用标识>/`，Windows `%APPDATA%\<应用标识>\`）。
+- 配置：`config.toml`（设置与绑定），放在系统的应用配置目录（macOS `~/Library/Application Support/<应用标识>/`，Windows `%APPDATA%\<应用标识>\`）。加载和每次保存都校验：同一项目或同一 id 只能有一条绑定，目录必须是绝对路径。宿主运行期间手改的配置不会被覆盖：下次保存前发现文件变了就拒绝保存，提示重启宿主后生效。
 - 数据：`state.db`（SQLite）和 `logs/<任务 ID>.jsonl`，放在本机的应用数据目录（Windows 用不随账户漫游的本地应用数据目录）；日志按保留天数和总大小清理（默认 30 天、1 GB）。
 - 凭据：只放在系统钥匙串 / 凭据管理器。
 - 这些文件都只在用户本机，不进代码仓库。
@@ -312,6 +312,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 | 绑定目录不存在 | 同上 |
 | 执行者退出码非 0、超时或卡住 | 结束整个进程树，标记失败，发通知，保留日志 |
 | 进程正常结束，但状态没到 In Testing | 标记失败（未完成），显示 AI 的最后输出 |
+| 运行结束后核对 Linear 状态时读取失败 | 间隔 2 秒、5 秒再读两次；仍失败才标记失败（原因写「无法核对」） |
 | 程序崩溃或重启 | 运行中的记录标为「失败（程序中断）」，不自动重跑 |
 | 日志占用过大 | 按清理策略删除旧日志 |
 

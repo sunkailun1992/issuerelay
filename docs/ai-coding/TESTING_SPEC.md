@@ -25,9 +25,9 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 
 | 假实现 | 位置 | 替代什么 |
 |---|---|---|
-| `fake-agent` | `crates/core/src/bin/fake_agent.rs` | Claude Code / Codex 进程（按脚本输出、退出码、启动孙进程） |
+| `fake-agent` | `crates/core/src/bin/fake_agent.rs` | Claude Code / Codex 进程（按脚本输出、退出码、启动孙进程，包括离开运行进程组的孙进程） |
 | `FakeLinearServer`、`PartialServer` | `crates/core/tests/common/fake_server.rs` | Linear MCP 服务端（经内存管道连接）：按 `tests/fixtures/linear-tools.json` 校验每次调用的参数，只返回请求的 `fields`，可编程返回文本、工具错误或永不应答 |
-| `FakeLinear` | `crates/core/tests/common/fake_linear.rs` | `LinearApi` 的内存版；`fail_next` 让下一次任意调用失败 |
+| `FakeLinear` | `crates/core/tests/common/fake_linear.rs` | `LinearApi` 的内存版；`fail_next` 让下一次任意调用失败，`fail_calls` 让接下来若干次调用失败 |
 | 内存钥匙串 | `crates/core/src/linear/auth.rs` 的测试模块 | 系统钥匙串（测试不碰真实钥匙串，每个测试用自己的服务名） |
 | `ScriptedRunner`、`FakeReadiness` | `crates/core/tests/common/engine_kit.rs` | 子进程运行与环境检查 |
 | `FakeRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令的输出（计数调用）；`SystemRunner` 本身用 `fake-agent` 测超时 |

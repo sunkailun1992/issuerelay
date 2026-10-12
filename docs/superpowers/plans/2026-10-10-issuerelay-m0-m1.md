@@ -8724,6 +8724,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 23: M1 实机验收
 
+> 执行说明（2026-10-12，最终评审后）：按下列调整执行，结果写进验收报告。
+> - 只在宿主停止时改 `config.toml`，每次改完（包括改回 60）都重启宿主；运行期间手改的配置会被拒绝保存。
+> - 在普通终端里启动 devhost，不在 Claude Code / Codex 会话里启动（宿主会把环境变量传给执行者）。
+> - 登录如果浏览器回调到不了本机端口，改用应用内浏览器打开授权链接，或用 `api-key`；`login` 之后不要重新编译 devhost，否则钥匙串会再次询问，弹窗时选「始终允许」。
+> - 用 `issuerelay jobs --json` 看原因、摘要和时间，判断「1 分钟内被接走」。
+> - 5b.2 改为能看见后代的检查：让 AI 在前台执行 `sleep 3600`，运行记为超时失败后 `pgrep -fl 'sleep 3600'` 必须为空；另做一次「运行中按 Ctrl+C 停掉 devhost」；正常运行、停止、超时之后都用 `ps -axo pid,ppid,pgid,command` 查残留，并检查沙箱仓库有没有遗留 `.git/index.lock`。
+> - 重点观察 M0 没实测过的两种写法：按 uuid 调 `get_issue`，以及给 `list_issues` 传 `state: "Todo"` 与 `orderBy: "createdAt"`。启动前重读时任务被取消、原因是「issue changed before the run started」，先怀疑按 uuid 查询。
+
 **Files:**
 - Create: `docs/gates/<YYYY-MM-DD>-m1-acceptance.md`
 
