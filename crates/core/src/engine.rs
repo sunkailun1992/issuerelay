@@ -514,6 +514,12 @@ impl Engine {
     }
 
     fn enqueue(store: &Store, issue: &Issue, cfg: &Config, eligibility: Eligibility) -> Result<()> {
+        // The title is Linear's text and reaches the panel, the CLI and MCP; the prompt never
+        // contains it. The store gets a cleaned copy of the issue.
+        let issue = &Issue {
+            title: clean_text(&issue.title),
+            ..issue.clone()
+        };
         let new = match &eligibility {
             Eligibility::Eligible(binding) => NewJob {
                 issue,
@@ -543,7 +549,8 @@ impl Engine {
             Eligibility::Eligible(binding) => {
                 let unchanged = job.state == JobState::Queued
                     && job.binding_id.as_deref() == Some(binding.id.as_str())
-                    && job.directory.as_deref() == Some(binding.directory.as_path());
+                    && job.directory.as_deref() == Some(binding.directory.as_path())
+                    && job.executor == Some(cfg.executor_for(&binding));
                 if !unchanged {
                     store.assign(
                         job.id,
@@ -692,12 +699,14 @@ impl Engine {
         };
         let kind = cfg.executor_for(&binding);
         // The scheduler picked this job for the folder of the binding recorded on its row. If the
-        // issue has moved to another project since (or the binding changed folder), the run
-        // would go where the scheduler did not look: record the new binding on the row and let
-        // the next cycle schedule it against the runs in progress.
+        // issue has moved to another project since (or the binding changed folder or executor),
+        // the run would go where the scheduler did not look, or the row would name an executor
+        // that does not run: record the new binding on the row and let the next cycle schedule it
+        // against the runs in progress.
         let unchanged = job.binding_id.as_deref() == Some(binding.id.as_str())
             && job.directory.as_deref().map(canonical_dir)
-                == Some(canonical_dir(&binding.directory));
+                == Some(canonical_dir(&binding.directory))
+            && job.executor == Some(kind);
         if !unchanged {
             let reassigned =
                 self.assign_if_queued(job.id, JobState::Queued, Some(&binding), Some(kind), None)?;
@@ -742,8 +751,10 @@ impl Engine {
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
         // Right before the run is registered: a pause or a changed binding that came while the
         // issue was being read means this start must not happen. The job stays queued and the
-        // next cycle starts it from the new configuration, or not at all.
+        // next cycle, which should not wait for the timer, starts it from the new configuration,
+        // or not at all.
         if self.config() != *cfg {
+            self.poll_now();
             return Ok(false);
         }
         // Register the run before marking it started, so a stop request in between finds the token.
@@ -912,22 +923,35 @@ impl Engine {
     }
 
     /// Ends a run whose task stopped before it recorded the result: the row, if it still says
-    /// running, becomes failed, then the run's place is freed. Runs from `RunSlot::drop`, so like
-    /// `end_run` it must not panic.
+    /// running, is finished as failed like any other run (so it gets its end time and keeps its
+    /// verified value), then the run's place is freed and the loop is woken for the next job in
+    /// that folder. Runs from `RunSlot::drop`, so like `end_run` it must not panic: a store error
+    /// is logged, and a poisoned lock is used as it is.
     fn abandon_run(&self, job_id: i64) {
-        let store = self
-            .inner
-            .store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _ = store.set_state_if(
-            job_id,
-            &[JobState::Running],
-            JobState::Failed,
-            Some("the run ended before its result was recorded"),
-        );
-        drop(store);
+        {
+            let store = self
+                .inner
+                .store
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Read and write under one guard, so a row that is not running is left alone.
+            let recorded = match store.get(job_id) {
+                Ok(Some(job)) if job.state == JobState::Running => store.mark_finished(
+                    job_id,
+                    JobState::Failed,
+                    Some("the run ended before its result was recorded"),
+                    None,
+                    None,
+                ),
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = recorded {
+                tracing::error!(job_id, error = %format!("{e:#}"), "could not record the abandoned run");
+            }
+        }
         self.end_run(job_id);
+        self.poll_now();
     }
 
     /// A shutdown was requested: nothing new may start.
@@ -1046,7 +1070,19 @@ impl Engine {
         }
         let done = self.config().settings.trigger.done;
         self.inner.linear.set_state(&job.issue_uuid, &done).await?;
-        self.store().set_state(job_id, JobState::Done, None)
+        // The row may have changed while Linear was being updated; it becomes Done only from
+        // awaiting acceptance.
+        let waiting = [JobState::AwaitingAcceptance];
+        if !self
+            .store()
+            .set_state_if(job_id, &waiting, JobState::Done, None)?
+        {
+            bail!(
+                "job {job_id} changed while it was being marked done; Linear has already been \
+                 updated to {done:?}"
+            );
+        }
+        Ok(())
     }
 
     /// Checks the whole setup: executors (freshly, not from the cache), the Linear connection

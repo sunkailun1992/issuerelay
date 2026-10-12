@@ -251,6 +251,11 @@ async fn mark_done_updates_linear_and_job() {
         h.engine.mark_done(job.id).await.is_err(),
         "only awaiting-acceptance jobs can be marked done"
     );
+    assert_eq!(
+        h.linear.set_state_calls().len(),
+        1,
+        "a job that is not awaiting acceptance is rejected before Linear is called"
+    );
 }
 
 #[tokio::test]
@@ -605,6 +610,8 @@ struct SpyLinear {
     fail_after_viewer: bool,
     /// Runs once, just before the first `issue()` call is answered.
     before_issue: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, just before the first `set_state()` call is answered.
+    before_set_state: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// `issue()` fails with this message for this uuid.
     fail_issue: Mutex<Option<(String, String)>>,
     /// The n-th `issue()` call (counting from 1) panics.
@@ -620,6 +627,7 @@ impl SpyLinear {
             candidates: Mutex::new(None),
             fail_after_viewer: false,
             before_issue: Mutex::new(None),
+            before_set_state: Mutex::new(None),
             fail_issue: Mutex::new(None),
             panic_on_issue_call: Mutex::new(None),
             issue_calls: AtomicUsize::new(0),
@@ -675,6 +683,10 @@ impl LinearApi for SpyLinear {
     }
 
     async fn set_state(&self, id: &str, state: &str) -> Result<()> {
+        let hook = self.before_set_state.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.inner.set_state(id, state).await
     }
 
@@ -1726,6 +1738,46 @@ async fn mark_done_waits_for_linear_and_uses_the_configured_status_name() {
     assert!(h.engine.mark_done(9999).await.is_err());
 }
 
+#[tokio::test]
+async fn mark_done_does_not_overwrite_a_row_that_changed_while_linear_was_updated() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: spy.clone(),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: Arc::new(ScriptedRunner::new(fake.clone(), false)),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+    // While Linear is being updated, something else changes the row.
+    let db_path = db.clone();
+    *spy.before_set_state.lock().unwrap() = Some(Box::new(move || {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute("UPDATE jobs SET state = 'failed'", [])
+            .unwrap();
+    }));
+    let err = engine.mark_done(job.id).await.unwrap_err();
+    assert!(
+        err.to_string().contains("Linear has already been"),
+        "the message must say that Linear was updated: {err}"
+    );
+    assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Failed);
+    assert_eq!(fake.get("1").state, "Done");
+}
+
 // Configuration, status and doctor.
 
 #[tokio::test]
@@ -2140,6 +2192,46 @@ async fn a_binding_that_moved_its_folder_is_picked_up_before_the_start() {
 }
 
 #[tokio::test]
+async fn a_binding_that_changed_its_executor_re_assigns_the_queued_job() {
+    let h = Harness::new(2, false);
+    let folder = h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").executor, Some(ExecutorKind::Claude));
+    // The binding switches to Codex while the job is queued: the row must say what will run.
+    h.engine
+        .add_binding(Binding {
+            executor: Some(ExecutorKind::Codex),
+            ..demo_binding("proj-1", &folder)
+        })
+        .unwrap();
+    h.engine.poll_once().await.unwrap();
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Queued);
+    assert_eq!(job.executor, Some(ExecutorKind::Codex));
+}
+
+#[tokio::test]
+async fn a_binding_that_changed_its_executor_is_picked_up_before_the_start() {
+    let h = Harness::new(2, false);
+    let folder = h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    h.engine
+        .add_binding(Binding {
+            executor: Some(ExecutorKind::Codex),
+            ..demo_binding("proj-1", &folder)
+        })
+        .unwrap();
+    // No poll in between: the start itself notices that the row names another executor.
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").executor, Some(ExecutorKind::Codex));
+    assert_eq!(h.engine.dispatch().await.unwrap().len(), 1);
+    h.settle().await;
+    assert_eq!(*h.runner.kinds.lock().unwrap(), [ExecutorKind::Codex]);
+}
+
+#[tokio::test]
 async fn a_stop_during_the_start_reread_is_not_undone_by_a_missing_folder() {
     let root = tempfile::tempdir().unwrap();
     let cfg = config_with_one_binding(root.path());
@@ -2535,6 +2627,41 @@ async fn a_configuration_change_during_one_start_only_delays_that_start() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_start_deferred_by_a_configuration_change_happens_right_away() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    // A binding is added while the first cycle re-reads the issue for the start.
+    let changer = engine.clone();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        changer
+            .add_binding(demo_binding("proj-3", &elsewhere))
+            .unwrap();
+    }));
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&engine, &shutdown);
+    // The clock never moves here: the deferred start itself must bring the next cycle.
+    eventually("the deferred job to start", || {
+        runner.started() == ["DEMO-1"]
+    })
+    .await;
+    stop_loop(&shutdown, worker).await;
+    engine.wait_idle().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_shutdown_requested_during_the_start_reread_starts_nothing() {
     let root = tempfile::tempdir().unwrap();
     let cfg = config_with_one_binding(root.path());
@@ -2629,9 +2756,13 @@ async fn a_panic_while_a_run_is_recorded_still_frees_its_folder() {
         .await
         .expect("wait_idle hangs after a panic while recording");
     assert_eq!(engine.status().running, 0);
-    // The row does not stay `running` for a run that is over.
+    // The row does not stay `running` for a run that is over, and it is finished like any other.
     let first = job_of(&engine, "1");
     assert_eq!(first.state, JobState::Failed);
+    assert!(
+        first.finished_at.is_some(),
+        "an abandoned run has no end time"
+    );
     assert!(
         first
             .reason
@@ -2645,6 +2776,166 @@ async fn a_panic_while_a_run_is_recorded_still_frees_its_folder() {
         .expect("wait_idle hangs");
     assert_eq!(runner.started(), ["DEMO-1", "DEMO-2"]);
     assert_eq!(job_of(&engine, "2").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_run_wakes_the_loop_for_the_next_job_in_its_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-1")); // the same folder
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    // `issue()` calls: 1 = DEMO-1's start re-read, 2 = the check of its result (panics).
+    *spy.panic_on_issue_call.lock().unwrap() = Some(2);
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&engine, &shutdown);
+    // The clock never moves here: only the abandoned run itself can bring the next cycle, which
+    // starts the job that was waiting for the folder.
+    eventually("the waiting job to start", || {
+        runner.started() == ["DEMO-1", "DEMO-2"]
+    })
+    .await;
+    stop_loop(&shutdown, worker).await;
+    engine.wait_idle().await;
+    assert_eq!(job_of(&engine, "1").state, JobState::Failed);
+    assert_eq!(job_of(&engine, "2").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
+async fn an_abandoned_retry_keeps_the_verified_value_of_the_earlier_run() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    // `issue()` calls: 1 and 2 = the first run's start and result check, 3 = the retry's start,
+    // 4 = the retry's result check (panics).
+    *spy.panic_on_issue_call.lock().unwrap() = Some(4);
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    runner.script("DEMO-1", Script::exit_code(1));
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let first = job_of(&engine, "1");
+    assert_eq!(first.state, JobState::Failed);
+    assert!(first.verified_updated_at.is_some());
+    engine.retry_job(first.id).unwrap();
+    engine.dispatch().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs after a panic while recording");
+    let retried = job_of(&engine, "1");
+    assert_eq!(retried.id, first.id, "a retry reuses the row");
+    assert_eq!(retried.state, JobState::Failed);
+    assert!(retried.finished_at.is_some());
+    assert_eq!(retried.verified_updated_at, first.verified_updated_at);
+}
+
+#[tokio::test]
+async fn a_store_error_while_abandoning_a_run_does_not_stop_it_from_freeing_the_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    fake.upsert(issue("2", "proj-1")); // the same folder
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    // `issue()` calls: 1 = DEMO-1's start re-read, 2 = the check of its result (panics).
+    *spy.panic_on_issue_call.lock().unwrap() = Some(2);
+    let runner = Arc::new(ScriptedRunner::new(fake, false));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: spy.clone(),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: runner.clone(),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    // The database refuses to store a failed run, so the abandoned run cannot be recorded.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_failed BEFORE UPDATE ON jobs \
+             WHEN NEW.state = 'failed' \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    engine.tick().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs when the abandoned run cannot be recorded");
+    assert_eq!(engine.status().running, 0);
+    // The error is logged, not raised: the folder is free and the next job in it runs.
+    engine.tick().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs");
+    assert_eq!(runner.started(), ["DEMO-1", "DEMO-2"]);
+}
+
+#[tokio::test]
+async fn an_abandoned_run_leaves_a_row_that_is_no_longer_running_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let db = root.path().join("state.db");
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    // `issue()` calls: 1 = the start re-read, 2 = the check of the result (panics).
+    *spy.panic_on_issue_call.lock().unwrap() = Some(2);
+    let runner = Arc::new(ScriptedRunner::new(fake, true));
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&db).unwrap(),
+        linear: spy.clone(),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: runner.clone(),
+        logs_dir: root.path().join("logs"),
+    })
+    .unwrap();
+    engine.tick().await.unwrap();
+    assert_eq!(engine.list_jobs(10).unwrap()[0].state, JobState::Running);
+    // While the run goes on, the row is ended by someone else.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET state = 'canceled', reason = 'stopped by the user'",
+            [],
+        )
+        .unwrap();
+    runner.gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), engine.wait_idle())
+        .await
+        .expect("wait_idle hangs after a panic while recording");
+    let job = engine.list_jobs(10).unwrap().remove(0);
+    assert_eq!(
+        job.state,
+        JobState::Canceled,
+        "the abandoned run overwrote the row"
+    );
+    assert_eq!(job.reason.as_deref(), Some("stopped by the user"));
+    assert!(job.finished_at.is_none());
+    assert_eq!(engine.status().running, 0);
 }
 
 #[tokio::test]
@@ -2707,6 +2998,24 @@ async fn text_from_linear_in_a_recorded_reason_is_cleaned() {
         h.latest("1").reason.as_deref(),
         Some("could not verify the result in Linear: Linear said no gnp")
     );
+}
+
+#[tokio::test]
+async fn issue_titles_are_stored_clean() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    let mut hostile = issue("1", "proj-1");
+    hostile.title = "Fix\u{1b}[2J\n\u{202e}login".into();
+    h.linear.upsert(hostile);
+    // A job that waits for a binding is recorded clean too.
+    let mut padded = issue("2", "proj-unbound");
+    padded.title = "  Pay\tnow\u{200b}  ".into();
+    h.linear.upsert(padded);
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    assert_eq!(h.latest("1").title, "Fix [2J login");
+    assert_eq!(h.latest("2").state, JobState::WaitingBinding);
+    assert_eq!(h.latest("2").title, "Pay now");
 }
 
 #[tokio::test]
