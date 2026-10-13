@@ -2,12 +2,12 @@
 //! or serves the MCP control tools with `issuerelay mcp`.
 use std::{
     future::Future,
-    io::{self, Write},
-    path::PathBuf,
+    io::{self, IsTerminal, Write},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use issuerelay_cli::{format, mcp};
 use issuerelay_core::{
@@ -102,6 +102,26 @@ fn parse_permission(text: &str) -> Result<PermissionProfile, String> {
         .ok_or_else(|| format!("expected `full`, `auto` or `personal`, got `{text}`"))
 }
 
+/// The folder to bind, absolute and without `.` or `..` segments, without resolving symlinks
+/// (the engine compares folders by their canonical path itself). It must exist.
+fn normalize_folder(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut normal = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            // Above the root there is nothing to leave: `/..` is `/`, and so is `C:\..`.
+            Component::ParentDir => {
+                normal.pop();
+            }
+            // The prefix and root (`C:` and `\` on Windows) are kept as they are.
+            other => normal.push(other),
+        }
+    }
+    anyhow::ensure!(normal.is_dir(), "{} is not a folder", normal.display());
+    Ok(normal)
+}
+
 /// The IPC method and parameters a subcommand stands for.
 fn request(command: &Command) -> Result<(&'static str, Value)> {
     Ok(match command {
@@ -121,16 +141,14 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
             executor,
             permission,
         }) => {
-            // The engine does not look at the directory when saving, so a typo here would
-            // otherwise give a binding whose jobs wait forever for a missing directory.
-            if !dir.is_dir() {
-                bail!("`{}` is not a directory", dir.display());
-            }
+            // `normalize_folder` also checks that the folder exists: the engine does not look at
+            // it when saving, so a typo here would otherwise give a binding whose jobs wait
+            // forever for a missing directory.
             let binding = Binding {
                 id: project_id.clone(),
                 project_id: project_id.clone(),
                 project_name: project_name.clone(),
-                directory: std::path::absolute(dir)?,
+                directory: normalize_folder(dir)?,
                 executor: *executor,
                 permission: *permission,
                 model: None,
@@ -170,11 +188,24 @@ fn fail(error: &anyhow::Error, err: &mut impl Write) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// What `command` tells the person at the terminal before it asks the engine, if anything:
+/// `doctor` runs both executors' checks, which can take up to a minute, and a silent command
+/// looks hung. It goes to stderr and only when stderr is a terminal, so neither a captured
+/// stdout (the `--json` result included) nor a captured stderr ever holds it.
+fn waiting_notice(command: &Command, stderr_is_terminal: bool) -> Option<&'static str> {
+    (matches!(command, Command::Doctor) && stderr_is_terminal)
+        .then_some("Checking Linear, Claude Code and Codex… (this can take up to a minute)")
+}
+
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     let endpoint = AppPaths::system()?.ipc_endpoint();
     if matches!(cli.command, Command::Mcp) {
         return mcp::serve(endpoint).await;
+    }
+    if let Some(notice) = waiting_notice(&cli.command, io::stderr().is_terminal()) {
+        // Nobody to tell if stderr is gone; the check goes on.
+        let _ = write_line(&mut io::stderr().lock(), notice);
     }
     let text = execute(&cli, |method, params| {
         client::call(&endpoint, method, params)
@@ -357,7 +388,7 @@ mod tests {
         let error = request(&bind_add(&missing)).unwrap_err();
         assert_eq!(
             error.to_string(),
-            format!("`{}` is not a directory", missing.display())
+            format!("{} is not a folder", missing.display())
         );
         // A file is no directory either.
         let file = root.path().join("notes.txt");
@@ -366,7 +397,7 @@ mod tests {
             request(&bind_add(&file))
                 .unwrap_err()
                 .to_string()
-                .ends_with("is not a directory")
+                .ends_with("is not a folder")
         );
     }
 
@@ -382,6 +413,105 @@ mod tests {
         let sent = PathBuf::from(binding["directory"].as_str().unwrap());
         assert_eq!(sent, std::path::absolute(".").unwrap());
         assert!(sent.is_absolute());
+    }
+
+    #[test]
+    fn bound_folders_are_stored_without_dot_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a");
+        std::fs::create_dir(&nested).unwrap();
+        let messy = nested.join("..").join("a").join(".");
+        assert_eq!(
+            normalize_folder(&messy).unwrap(),
+            std::path::absolute(&nested).unwrap()
+        );
+        assert!(normalize_folder(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn the_stored_folder_text_has_no_dot_segments_or_trailing_separator() {
+        // `Path` equality ignores `.` and a trailing separator, but the text that is stored and
+        // shown does not, so compare the text.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a");
+        std::fs::create_dir(&nested).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let spellings = [
+            format!("{}{sep}", nested.display()),
+            format!("{}{sep}.", nested.display()),
+            format!("{}{sep}..{sep}a{sep}.{sep}", nested.display()),
+            format!("{}{sep}.{sep}", dir.path().join("a").display()),
+        ];
+        for spelling in spellings {
+            let normal = normalize_folder(Path::new(&spelling)).unwrap();
+            assert_eq!(normal.to_str(), nested.to_str(), "{spelling:?}");
+        }
+    }
+
+    #[test]
+    fn dot_dot_cannot_climb_above_the_root() {
+        let temp = std::env::temp_dir();
+        let root = temp.ancestors().last().unwrap();
+        // More `..` than the path has folders.
+        let too_far = temp
+            .components()
+            .fold(temp.clone(), |path, _| path.join(".."))
+            .join("..");
+        assert_eq!(normalize_folder(&too_far).unwrap(), root);
+    }
+
+    #[test]
+    fn a_file_is_not_a_folder_to_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        let error = normalize_folder(&file).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{} is not a folder", file.display())
+        );
+    }
+
+    #[test]
+    fn bind_add_sends_the_folder_without_dot_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a");
+        std::fs::create_dir(&nested).unwrap();
+        let messy = nested.join("..").join("a").join(".");
+        let (method, params) = request(&bind_add(&messy)).unwrap();
+        assert_eq!(method, "bindings.add");
+        assert_eq!(params["binding"]["directory"].as_str(), nested.to_str());
+    }
+
+    #[test]
+    fn only_doctor_on_a_terminal_says_it_is_waiting() {
+        let notice = waiting_notice(&Command::Doctor, true).expect("doctor can take a minute");
+        assert!(
+            notice.starts_with("Checking Linear, Claude Code and Codex"),
+            "{notice}"
+        );
+        assert!(notice.contains("up to a minute"), "{notice}");
+        assert_eq!(
+            waiting_notice(&Command::Doctor, false),
+            None,
+            "a script that captures stderr gets nothing extra"
+        );
+        let quick = [
+            Command::Status,
+            Command::Pause,
+            Command::Resume,
+            Command::Poll,
+            Command::Jobs { limit: 5 },
+            Command::Logs {
+                job_id: 1,
+                lines: 5,
+            },
+            Command::Bind(BindCommand::List),
+            Command::Mcp,
+        ];
+        for command in quick {
+            assert_eq!(waiting_notice(&command, true), None);
+        }
     }
 
     #[test]
@@ -431,12 +561,7 @@ mod tests {
             .chain(["--dir", missing.to_str().unwrap()])
             .collect();
         let (printed, sent) = run_command(&args, json!({})).await;
-        assert!(
-            printed
-                .unwrap_err()
-                .to_string()
-                .contains("is not a directory")
-        );
+        assert!(printed.unwrap_err().to_string().contains("is not a folder"));
         assert!(sent.is_empty());
     }
 

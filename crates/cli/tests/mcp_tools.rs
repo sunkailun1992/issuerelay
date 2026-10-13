@@ -177,3 +177,58 @@ async fn read_only_tools_are_marked_and_the_limit_has_a_maximum() {
     );
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn control_tools_say_they_change_state_harmlessly_and_repeatably() {
+    let (server, _) = recording_server(|_| Ok(json!({})));
+    let client = connect(server).await;
+    let tools = client.list_all_tools().await.unwrap();
+    for name in ["pause", "resume", "poll_now"] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        let annotations = tool.annotations.as_ref().expect("annotated");
+        assert_eq!(annotations.read_only_hint, Some(false), "{name}");
+        assert_eq!(annotations.destructive_hint, Some(false), "{name}");
+        assert_eq!(annotations.idempotent_hint, Some(true), "{name}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn tool_output_carries_no_invisible_characters() {
+    let (server, _) = recording_server(|_| Ok(json!({"last_error": "boom\u{202e}gnp.exe"})));
+    let client = connect(server).await;
+    let reply = text_of(&call(&client, "status", None).await);
+    assert!(!reply.contains('\u{202e}'), "{reply:?}");
+    assert_eq!(reply, json!({"last_error": "boomgnp.exe"}).to_string());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn every_tool_drops_what_shows_nothing_and_keeps_the_joiners() {
+    // A zero-width space, a direction override, a line separator, the byte order mark, a tag
+    // character (outside the basic plane) and the soft hyphen.
+    let hostile = "a\u{200b}b\u{202e}c\u{2028}d\u{feff}e\u{e0041}f\u{00ad}g";
+    // The zero-width joiner is part of how an emoji sequence reads, and it cannot reorder text.
+    let family = "\u{1f469}\u{200d}\u{1f4bb}";
+    let (server, _) =
+        recording_server(move |_| Ok(json!({"text": hostile, "list": [hostile], "emoji": family})));
+    let client = connect(server).await;
+    let expected = json!({"text": "abcdefg", "list": ["abcdefg"], "emoji": family}).to_string();
+    for tool in ["status", "list_jobs", "pause", "resume", "poll_now"] {
+        let result = call(&client, tool, None).await;
+        assert_eq!(text_of(&result), expected, "{tool}");
+        assert_ne!(result.is_error, Some(true), "{tool}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failure_text_carries_no_invisible_characters_either() {
+    let (server, _) =
+        recording_server(|_| Err(anyhow!("denied\u{202e}gnp").context("outer\u{200b}")));
+    let client = connect(server).await;
+    let result = call(&client, "pause", None).await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(text_of(&result), "error: outer: deniedgnp");
+    client.cancel().await.unwrap();
+}

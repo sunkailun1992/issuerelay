@@ -18,7 +18,7 @@ use common::{
     issue,
 };
 use issuerelay_core::{
-    config::{Binding, Config, ExecutorKind, PermissionProfile, TriggerNames},
+    config::{Binding, Config, ExecutorKind, PermissionProfile, Settings, TriggerNames},
     doctor::{ExecutorReport, ReadinessProbe},
     engine::{
         Engine, EngineDeps, EngineEvent, IssueStatus, IssueView, JobRunner, ProcessJobRunner,
@@ -2452,6 +2452,109 @@ async fn an_unreadable_configuration_stops_the_engine_from_starting() {
     assert!(format!("{err:#}").contains("config.toml"), "{err:#}");
 }
 
+/// Every `warn` or `error` event the current thread logs while `f` runs, one string per event:
+/// the message, then `name=value` for each field.
+fn logged_warnings<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use std::fmt::{Debug, Write as _};
+    use tracing::{Event, Level, Metadata, Subscriber, field::Visit, span};
+
+    struct Capture(Arc<Mutex<Vec<String>>>);
+
+    struct Fields(String);
+
+    impl Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            if field.name() == "message" {
+                write!(self.0, "{value:?}").unwrap();
+            } else {
+                write!(self.0, "{}={value:?}", field.name()).unwrap();
+            }
+        }
+    }
+
+    impl Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() <= Level::WARN
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+
+        fn enter(&self, _: &span::Id) {}
+
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let result = tracing::subscriber::with_default(Capture(events.clone()), f);
+    let events = events.lock().unwrap().clone();
+    (result, events)
+}
+
+#[test]
+fn starting_with_config_keys_this_version_does_not_know_warns_naming_only_the_keys() {
+    let start = |text: Option<&str>| {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.toml");
+        if let Some(text) = text {
+            std::fs::write(&config_path, text).unwrap();
+        }
+        let linear = FakeLinear::new("user-1");
+        let (engine, warnings) = logged_warnings(|| {
+            Engine::new(EngineDeps {
+                config_path,
+                store: Store::open_in_memory().unwrap(),
+                linear: Arc::new(linear.clone()),
+                readiness: Arc::new(FakeReadiness),
+                job_runner: Arc::new(ScriptedRunner::new(linear, false)),
+                logs_dir: root.path().join("logs"),
+            })
+        });
+        engine.expect("the file loads, unknown keys and all");
+        warnings
+    };
+    // A value next to a misspelt key may be anything, a pasted key included: only names are logged.
+    let warnings = start(Some(
+        "api_key = \"secret-value\"\n[settings]\npol_interval = 5\npoll_interval_secs = 10\n",
+    ));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    for named in [
+        "api_key",
+        "settings.pol_interval",
+        "dropped on the next save",
+    ] {
+        assert!(warnings[0].contains(named), "{named}: {warnings:?}");
+    }
+    assert!(!warnings[0].contains("secret-value"), "{warnings:?}");
+    assert!(
+        !warnings[0].contains("poll_interval_secs"),
+        "a known key is not named: {warnings:?}"
+    );
+    // Nothing to say about a file this version knows completely, a partial one, or no file.
+    let known = toml::to_string_pretty(&Config::default()).unwrap();
+    for text in [
+        Some(known.as_str()),
+        Some("[settings]\npoll_interval_secs = 10\n"),
+        None,
+    ] {
+        assert_eq!(start(text), Vec::<String>::new(), "{text:?}");
+    }
+}
+
 #[tokio::test]
 async fn status_reports_viewer_poll_time_and_waiting_jobs() {
     let h = Harness::new(1, true);
@@ -4085,6 +4188,34 @@ async fn saving_settings_validates_them_and_keeps_the_pause_switch() {
         h.engine.settings().max_concurrent,
         1,
         "a refused change changes nothing"
+    );
+}
+
+#[tokio::test]
+async fn the_panels_own_settings_are_saved_like_the_others() {
+    let h = Harness::new(1, false);
+    let before = h.engine.settings();
+    assert!(before.auto_update && before.notifications.failed);
+    assert!(!before.onboarding_completed && !before.full_access_acknowledged);
+    let mut settings = before.clone();
+    settings.notifications.run_started = false;
+    settings.notifications.failed = false;
+    settings.auto_update = false;
+    settings.onboarding_completed = true;
+    settings.full_access_acknowledged = true;
+    h.engine.update_settings(settings.clone()).unwrap();
+    assert_eq!(h.engine.settings(), settings);
+    // They are in the file, so a restarted host sees them, and a pause leaves them alone.
+    h.engine.pause().unwrap();
+    let on_disk = Config::load(&h.root.path().join("config.toml"))
+        .unwrap()
+        .settings;
+    assert_eq!(
+        on_disk,
+        Settings {
+            paused: true,
+            ..settings
+        }
     );
 }
 

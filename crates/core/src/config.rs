@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,27 @@ impl Default for TriggerNames {
     }
 }
 
+/// Which system notifications are shown (design section 9.5); each can be switched off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationSettings {
+    pub run_started: bool,
+    pub awaiting_acceptance: bool,
+    pub needs_info: bool,
+    pub failed: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            run_started: true,
+            awaiting_acceptance: true,
+            needs_info: true,
+            failed: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -105,6 +127,13 @@ pub struct Settings {
     pub comment_language: String,
     pub paused: bool,
     pub trigger: TriggerNames,
+    pub notifications: NotificationSettings,
+    /// Check for and install updates automatically (from M3).
+    pub auto_update: bool,
+    /// The desktop panel's first-run guide was finished.
+    pub onboarding_completed: bool,
+    /// The user confirmed the full-access warning (design section 14) once.
+    pub full_access_acknowledged: bool,
 }
 
 impl Default for Settings {
@@ -123,6 +152,10 @@ impl Default for Settings {
             comment_language: "follow-ui".into(),
             paused: false,
             trigger: TriggerNames::default(),
+            notifications: NotificationSettings::default(),
+            auto_update: true,
+            onboarding_completed: false,
+            full_access_acknowledged: false,
         }
     }
 }
@@ -167,13 +200,21 @@ impl Settings {
                 "{field} must be a non-empty single-line name without quotes, got {name:?}"
             );
         }
+        // The comment language is written into the prompt, and so is the UI language while the
+        // comment language follows it: a value that only looks like a language tag (`en` plus
+        // U+2028, a zero-width space inside `zh-CN`) is refused.
+        let plain_value = |value: &str| {
+            !value.trim().is_empty()
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() || crate::text::is_invisible(c))
+        };
         anyhow::ensure!(
-            !self.comment_language.trim().is_empty()
-                && !self.comment_language.chars().any(char::is_control),
+            plain_value(&self.comment_language),
             "comment_language must be a non-empty single-line value"
         );
         anyhow::ensure!(
-            !self.language.trim().is_empty() && !self.language.chars().any(char::is_control),
+            plain_value(&self.language),
             "language must be a non-empty single-line value (\"system\" or a language tag)"
         );
         Ok(())
@@ -312,8 +353,10 @@ impl Config {
     /// Writes atomically: the text goes to a temporary file in the same directory (unique per
     /// call), is flushed to disk, then renamed over the target. Callers still serialize writes
     /// (the engine saves under its config lock); the unique name only keeps overlapping
-    /// writers from clobbering each other's temporary files.
+    /// writers from clobbering each other's temporary files. Temporary files that an earlier
+    /// save left behind by crashing are deleted first (`sweep_stale_temp_files`).
     pub fn save(&self, path: &Path) -> Result<()> {
+        sweep_stale_temp_files(path);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -351,6 +394,63 @@ impl Config {
     }
 }
 
+/// The keys in a config file's text that this version does not know, such as `settings.foo` or
+/// `bindings[1].bar`, in no particular order. They are ignored on load and lost on the next
+/// save, so the host warns about them. Text that does not parse gives none (loading reports
+/// that).
+pub fn unknown_keys(text: &str) -> Vec<String> {
+    let Ok(file) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    // Every key this version writes: the defaults, plus a binding with every optional field set
+    // (a new field of `Binding` makes this literal fail to compile until it is listed here).
+    let mut sample = Config::default();
+    sample.bindings.push(Binding {
+        id: "x".into(),
+        project_id: "x".into(),
+        project_name: "x".into(),
+        directory: PathBuf::from("/x"),
+        executor: Some(ExecutorKind::Claude),
+        permission: Some(PermissionProfile::Full),
+        model: Some("x".into()),
+        prompt_override: Some("x".into()),
+    });
+    let known = toml::Table::try_from(&sample).expect("the config serializes");
+    let mut unknown = Vec::new();
+    collect_unknown(&file, &known, "", &mut unknown);
+    unknown
+}
+
+/// Adds to `out` the dotted path of every key in `file` that `known` (a table of the same shape,
+/// with every key this version writes) does not have. A table or an array of tables is searched
+/// as far as `known` goes; the keys inside an unknown table are not listed one by one.
+fn collect_unknown(file: &toml::Table, known: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+    for (key, value) in file {
+        let name = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match (value, known.get(key)) {
+            (_, None) => out.push(name),
+            (toml::Value::Table(inner), Some(toml::Value::Table(known_inner))) => {
+                collect_unknown(inner, known_inner, &name, out);
+            }
+            (toml::Value::Array(items), Some(toml::Value::Array(known_items))) => {
+                let Some(toml::Value::Table(template)) = known_items.first() else {
+                    continue;
+                };
+                for (i, item) in items.iter().enumerate() {
+                    if let toml::Value::Table(item) = item {
+                        collect_unknown(item, template, &format!("{name}[{i}]"), out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// `<path>.<pid>.<n>.tmp` next to `path`, different for every call in this process.
 fn temp_path(path: &Path) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -358,6 +458,55 @@ fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.{n}.tmp", std::process::id()));
     path.with_file_name(name)
+}
+
+/// Temp files older than this next to the config file are leftovers of a save that crashed.
+const STALE_TEMP_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// Deletes `<file name>.<pid>.<n>.tmp` files next to `path` older than `STALE_TEMP_AGE`: a save
+/// that crashed between writing and renaming leaves one behind. Recent ones may belong to a
+/// save in progress and are left alone; errors are ignored (this is housekeeping).
+fn sweep_stale_temp_files(path: &Path) {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    // A bare file name lives in the working directory.
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(middle) = file_name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        // `<pid>.<n>`, the two numbers `temp_path` writes.
+        let is_temp = middle.split_once('.').is_some_and(|(pid, n)| {
+            [pid, n]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        });
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| {
+                now.duration_since(modified).unwrap_or_default() > STALE_TEMP_AGE
+            });
+        if is_temp && stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -772,6 +921,205 @@ mod tests {
         );
         let err = load_error(&text);
         assert!(err.contains("bindings[1].directory"), "{err}");
+    }
+
+    #[test]
+    fn notification_and_update_switches_default_on() {
+        let settings = Settings::default();
+        assert!(settings.notifications.run_started && settings.notifications.awaiting_acceptance);
+        assert!(settings.notifications.needs_info && settings.notifications.failed);
+        assert!(settings.auto_update);
+        assert!(
+            !settings.onboarding_completed,
+            "a new install starts with the guide"
+        );
+        assert!(
+            !settings.full_access_acknowledged,
+            "the full-access warning has not been shown yet"
+        );
+        let partial: Config = toml::from_str("[settings.notifications]\nfailed = false\n").unwrap();
+        assert!(!partial.settings.notifications.failed);
+        assert!(
+            partial.settings.notifications.run_started,
+            "unnamed switches keep their default"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_named() {
+        let text = "typo = 1\n[settings]\npoll_interval_secs = 30\npol_interval = 5\n[settings.trigger]\nlabel = \"ai-ready\"\ncolour = \"red\"\n[[bindings]]\nid = \"proj-1\"\nproject_id = \"proj-1\"\nproject_name = \"Demo Project\"\ndirectory = \"/tmp/demo\"\nfolder = \"x\"\n";
+        let mut found = unknown_keys(text);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "bindings[0].folder",
+                "settings.pol_interval",
+                "settings.trigger.colour",
+                "typo"
+            ]
+        );
+        assert!(unknown_keys(&toml::to_string_pretty(&Config::default()).unwrap()).is_empty());
+        assert!(
+            unknown_keys("not toml [").is_empty(),
+            "a file that does not parse fails elsewhere"
+        );
+    }
+
+    #[test]
+    fn every_key_a_save_writes_is_known() {
+        // A binding with every optional field set, and a setting changed from its default: if
+        // `unknown_keys` did not know a key that `save` writes, each save would be followed by a
+        // warning about the host's own file.
+        let mut config = Config::default();
+        config.settings.notifications.failed = false;
+        config.settings.auto_update = false;
+        config.settings.onboarding_completed = true;
+        config.settings.full_access_acknowledged = true;
+        config.bindings.push(Binding {
+            id: "proj-1".into(),
+            project_id: "proj-1".into(),
+            project_name: "Demo Project".into(),
+            directory: std::env::temp_dir().join("demo"),
+            executor: Some(ExecutorKind::Codex),
+            permission: Some(PermissionProfile::Personal),
+            model: Some("gpt-5.5".into()),
+            prompt_override: Some("Be brief.".into()),
+        });
+        let text = toml::to_string_pretty(&config).unwrap();
+        for key in ["executor", "permission", "model", "prompt_override"] {
+            assert!(
+                text.contains(&format!("\n{key} = ")),
+                "the sample sets {key}: {text}"
+            );
+        }
+        assert_eq!(unknown_keys(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_later_binding_or_an_unknown_table_is_named_once() {
+        let binding = |id: &str, extra: &str| {
+            format!(
+                "[[bindings]]\nid = \"{id}\"\nproject_id = \"{id}\"\nproject_name = \"Demo Project\"\n\
+                 directory = \"/tmp/demo\"\n{extra}"
+            )
+        };
+        let text = format!(
+            "{}{}[extras]\nfirst = 1\nsecond = 2\n[settings.notifications]\nbeep = true\nfailed = false\n",
+            binding("proj-1", ""),
+            binding("proj-2", "model = \"gpt-5.5\"\nnote = \"x\"\n"),
+        );
+        let mut found = unknown_keys(&text);
+        found.sort();
+        assert_eq!(
+            found,
+            ["bindings[1].note", "extras", "settings.notifications.beep"]
+        );
+    }
+
+    #[test]
+    fn language_values_reject_invisible_characters() {
+        for bad in ["zh\u{200b}-CN", "en\u{2028}", "\u{202e}ja"] {
+            let language = Settings {
+                language: bad.into(),
+                ..Settings::default()
+            };
+            let err = language.validate().unwrap_err();
+            assert!(
+                err.to_string().starts_with("language must"),
+                "{bad:?}: {err}"
+            );
+            let comment_language = Settings {
+                comment_language: bad.into(),
+                ..Settings::default()
+            };
+            let err = comment_language.validate().unwrap_err();
+            assert!(
+                err.to_string().starts_with("comment_language must"),
+                "{bad:?}: {err}"
+            );
+        }
+        // Language tags, and the two words that stand for "the system's" and "the panel's".
+        for good in [
+            "system",
+            "follow-ui",
+            "zh-CN",
+            "zh-Hant-TW",
+            "en",
+            "ja",
+            "한국어",
+        ] {
+            let settings = Settings {
+                language: good.into(),
+                comment_language: good.into(),
+                ..Settings::default()
+            };
+            settings
+                .validate()
+                .unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_save_sweeps_temp_files_left_by_a_crashed_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let stale = dir.path().join("config.toml.99999.0.tmp");
+        let fresh = dir.path().join("config.toml.99999.1.tmp");
+        let unrelated = dir.path().join("notes.tmp");
+        for file in [&stale, &fresh, &unrelated] {
+            std::fs::write(file, "x").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        Config::default().save(&path).unwrap();
+        assert!(!stale.exists(), "an hour-old temp file is a leftover");
+        assert!(
+            fresh.exists(),
+            "a recent one may belong to a save in progress"
+        );
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn the_sweep_only_removes_this_files_own_temp_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let ours_name = "config.toml.4242.7.tmp";
+        let ours = dir.path().join(ours_name);
+        let others = [
+            // Another file's temp file, and names that are not `<name>.<pid>.<n>.tmp`.
+            "other.toml.4242.7.tmp",
+            "config.toml.tmp",
+            "config.toml.4242.tmp",
+            "config.toml.4242.7.8.tmp",
+            "config.toml.abc.7.tmp",
+            "config.toml.4242..tmp",
+            "config.toml.4242.7.tmp.bak",
+            "config.toml.bak",
+            "4242.7.tmp",
+        ];
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+        for name in others.iter().copied().chain([ours_name]) {
+            let file = dir.path().join(name);
+            std::fs::write(&file, "x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        Config::default().save(&path).unwrap();
+        assert!(!ours.exists());
+        for name in others {
+            assert!(dir.path().join(name).exists(), "{name} is not ours");
+        }
+        assert!(Config::load(&path).is_ok());
     }
 
     #[test]

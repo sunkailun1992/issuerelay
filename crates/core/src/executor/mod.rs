@@ -39,9 +39,11 @@ pub fn resolve_program_in(kind: ExecutorKind, path: Option<&str>) -> Result<Path
     found.with_context(|| format!("`{name}` was not found on PATH"))
 }
 
-/// Whether `dir` is a git checkout: it has a `.git` directory, or a `.git` file as worktrees do.
+/// Whether `dir` is inside a git checkout: it, or a folder above it, has a `.git` directory or
+/// file (worktrees use a file). A folder that cannot be read counts as not a checkout, which only
+/// adds Codex's `--skip-git-repo-check`.
 pub fn is_git_repo(dir: &Path) -> bool {
-    dir.join(".git").exists()
+    dir.ancestors().any(|folder| folder.join(".git").exists())
 }
 
 /// Builds the command for one run. The arguments are fixed strings plus the model name (only
@@ -246,6 +248,45 @@ mod tests {
         assert!(!is_git_repo(dir.path()));
         std::fs::write(dir.path().join(".git"), "gitdir: elsewhere").unwrap();
         assert!(is_git_repo(dir.path()));
+    }
+
+    #[test]
+    fn a_folder_inside_a_repository_counts_as_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(is_git_repo(&nested));
+        let outside = tempfile::tempdir().unwrap();
+        assert!(!is_git_repo(outside.path()));
+    }
+
+    #[test]
+    fn codex_keeps_its_repo_check_in_a_repository_subfolder() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        let nested = repo.path().join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        let args = build(
+            ExecutorKind::Codex,
+            PathBuf::from("codex"),
+            PermissionProfile::Personal,
+            None,
+            &nested,
+            "p".into(),
+        )
+        .args;
+        assert_eq!(args, ["exec", "--json", "-"]);
+    }
+
+    #[test]
+    fn a_git_file_in_a_folder_above_counts_too() {
+        // A worktree or a submodule has a `.git` file, not a directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "gitdir: elsewhere").unwrap();
+        let nested = dir.path().join("src");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(is_git_repo(&nested));
     }
 
     #[test]

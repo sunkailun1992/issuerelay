@@ -399,6 +399,13 @@ impl Engine {
         // The bytes are read before the file is loaded: if it changes in between, the first save
         // refuses instead of overwriting the newer text.
         let config_file = read_config_file(&deps.config_path)?;
+        if let Some(bytes) = &config_file {
+            // Only the names are logged, never the values next to them.
+            let unknown = crate::config::unknown_keys(&String::from_utf8_lossy(bytes));
+            if !unknown.is_empty() {
+                tracing::warn!(keys = ?unknown, "config.toml has keys this version does not know; they are ignored and dropped on the next save");
+            }
+        }
         let config = Config::load(&deps.config_path)?;
         let interrupted = deps.store.recover_interrupted()?;
         if !interrupted.is_empty() {

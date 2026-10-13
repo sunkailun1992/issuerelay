@@ -8884,9 +8884,9 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 | `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |
 | `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队（M2 第一部分 Task 6） | 最终评审 |
 | `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做）（M2 第一部分 Task 2 已完成，待 Windows 实机） | 最终评审 |
-| `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过） | Task 7、11 评审 |
-| `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`） | Task 12 评审 |
-| `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出 | Task 21 评审、最终评审 |
+| `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过）（M2 第一部分 Task 7：处理了未知键警告、临时文件清扫，以及语言值里的不可见字符；语言标签格式的校验没有做） | Task 7、11 评审 |
+| `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`）（M2 第一部分 Task 7：`is_git_repo` 改为向上找，不可读目录仍按「不是仓库」处理；`resolve_program_in` 已在 M2 第一部分 Task 1 加上） | Task 12 评审 |
+| `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出（M2 第一部分 Task 7） | Task 21 评审、最终评审 |
 | 面板 | 「默认模型」存 `None`，不存空字符串；带 `[ ]` 的模型名（例如 `sonnet[1m]`）按设计会被拒绝，面板说明要写明 | Task 12 评审 |
 
 **M3**
