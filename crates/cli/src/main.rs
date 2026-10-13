@@ -188,13 +188,16 @@ fn fail(error: &anyhow::Error, err: &mut impl Write) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// What `command` tells the person at the terminal before it asks the engine, if anything:
+/// Tells the person at the terminal what `command` is about to wait for, if it is slow:
 /// `doctor` runs both executors' checks, which can take up to a minute, and a silent command
-/// looks hung. It goes to stderr and only when stderr is a terminal, so neither a captured
-/// stdout (the `--json` result included) nor a captured stderr ever holds it.
-fn waiting_notice(command: &Command, stderr_is_terminal: bool) -> Option<&'static str> {
-    (matches!(command, Command::Doctor) && stderr_is_terminal)
-        .then_some("Checking Linear, Claude Code and Codex… (this can take up to a minute)")
+/// looks hung. The line goes to `to` (the caller passes stderr) and only when `is_terminal`, so
+/// neither a captured stdout (the `--json` result included) nor a captured stderr ever holds it.
+/// If `to` is gone there is nobody to tell, and the command goes on.
+fn announce_wait(command: &Command, to: &mut impl Write, is_terminal: bool) {
+    if is_terminal && matches!(command, Command::Doctor) {
+        let notice = "Checking Linear, Claude Code and Codex… (this can take up to a minute)";
+        let _ = write_line(to, notice);
+    }
 }
 
 async fn run() -> Result<()> {
@@ -203,10 +206,8 @@ async fn run() -> Result<()> {
     if matches!(cli.command, Command::Mcp) {
         return mcp::serve(endpoint).await;
     }
-    if let Some(notice) = waiting_notice(&cli.command, io::stderr().is_terminal()) {
-        // Nobody to tell if stderr is gone; the check goes on.
-        let _ = write_line(&mut io::stderr().lock(), notice);
-    }
+    let stderr_is_terminal = io::stderr().is_terminal();
+    announce_wait(&cli.command, &mut io::stderr().lock(), stderr_is_terminal);
     let text = execute(&cli, |method, params| {
         client::call(&endpoint, method, params)
     })
@@ -484,18 +485,19 @@ mod tests {
     }
 
     #[test]
-    fn only_doctor_on_a_terminal_says_it_is_waiting() {
-        let notice = waiting_notice(&Command::Doctor, true).expect("doctor can take a minute");
-        assert!(
-            notice.starts_with("Checking Linear, Claude Code and Codex"),
-            "{notice}"
-        );
-        assert!(notice.contains("up to a minute"), "{notice}");
+    fn doctor_tells_a_terminal_it_is_waiting_and_nothing_else_does() {
+        let said = |command: &Command, is_terminal: bool| {
+            let mut shown = Vec::new();
+            announce_wait(command, &mut shown, is_terminal);
+            String::from_utf8(shown).unwrap()
+        };
+        // On a terminal the line goes to the writer it is given (the caller passes stderr).
         assert_eq!(
-            waiting_notice(&Command::Doctor, false),
-            None,
-            "a script that captures stderr gets nothing extra"
+            said(&Command::Doctor, true),
+            "Checking Linear, Claude Code and Codex… (this can take up to a minute)\n"
         );
+        // A script that captures the stream gets nothing extra.
+        assert_eq!(said(&Command::Doctor, false), "");
         let quick = [
             Command::Status,
             Command::Pause,
@@ -509,8 +511,14 @@ mod tests {
             Command::Bind(BindCommand::List),
             Command::Mcp,
         ];
-        for command in quick {
-            assert_eq!(waiting_notice(&command, true), None);
+        for command in &quick {
+            for is_terminal in [true, false] {
+                assert_eq!(said(command, is_terminal), "");
+            }
+        }
+        // A stderr that is gone leaves nobody to tell, and the check goes on.
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::PermissionDenied] {
+            announce_wait(&Command::Doctor, &mut Failing(kind), true);
         }
     }
 

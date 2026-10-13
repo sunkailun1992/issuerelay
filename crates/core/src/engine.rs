@@ -143,7 +143,7 @@ pub struct StatusSnapshot {
     pub paused: bool,
     /// The last check of Linear worked.
     pub linear_ok: bool,
-    /// The Linear user, once a check has worked.
+    /// The Linear user, once a check has worked; the name is cleaned (`clean_text`).
     pub viewer: Option<Viewer>,
     /// When Linear was last checked, whether or not that worked. A paused engine makes no check.
     pub last_poll_at: Option<DateTime<Utc>>,
@@ -347,8 +347,8 @@ fn display_issue(issue: Issue) -> Issue {
     }
 }
 
-/// The authorized user as the doctor report shows them: the name is Linear's text and goes
-/// through `clean_text`; the id stays as it is.
+/// The authorized user as the status line and the doctor report show them: the name is
+/// Linear's text and goes through `clean_text`; the id stays as it is.
 fn display_viewer(viewer: Viewer) -> Viewer {
     Viewer {
         name: clean_text(&viewer.name),
@@ -810,9 +810,10 @@ impl Engine {
         Ok(views)
     }
 
-    /// The user `linear` is authorized as. The cache only answers for the connection that filled
-    /// it, so a cycle that took its connection before `set_linear` replaced it keeps to that one
-    /// connection, and the answer of a replaced connection is never kept.
+    /// The user `linear` is authorized as, with the name cleaned (`display_viewer`). The cache
+    /// only answers for the connection that filled it, so a cycle that took its connection before
+    /// `set_linear` replaced it keeps to that one connection, and the answer of a replaced
+    /// connection is never kept.
     async fn viewer(&self, linear: &Arc<dyn LinearApi>) -> Result<Viewer> {
         let cached = self.inner.viewer.lock().expect("viewer lock").clone();
         if let Some((owner, viewer)) = cached
@@ -820,7 +821,9 @@ impl Engine {
         {
             return Ok(viewer);
         }
-        let viewer = linear.viewer().await?;
+        // The cache is what `status` hands to the panel, the CLI and MCP, so the name is cleaned
+        // before it is kept; the id, which the trigger compares, stays as Linear sent it.
+        let viewer = display_viewer(linear.viewer().await?);
         // Checked under the cache's lock: `set_linear` replaces the connection before it empties
         // the cache under this lock, so a connection replaced meanwhile cannot fill it.
         let mut cache = self.inner.viewer.lock().expect("viewer lock");

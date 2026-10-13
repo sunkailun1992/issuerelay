@@ -2583,6 +2583,31 @@ async fn status_reports_viewer_poll_time_and_waiting_jobs() {
 }
 
 #[tokio::test]
+async fn status_hands_out_the_viewers_name_cleaned() {
+    // The name is Linear's text. The status line, `issuerelay status`, the MCP `status` tool and
+    // the panel all read it from the engine's cache, so it is cleaned where the cache is filled.
+    let h = Harness::new(1, false);
+    h.linear
+        .set_viewer_name("Jane\u{1b}]52;c;ZXZpbA==\u{7}\u{202e}Doe\n");
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let viewer = h.engine.status().viewer;
+    assert_eq!(
+        viewer,
+        Some(Viewer {
+            id: "user-1".into(),
+            name: "Jane ]52;c;ZXZpbA== Doe".into()
+        })
+    );
+    // The doctor report shows the same name, and only the text was cleaned: the issue assigned
+    // to the user's id was still picked up and ran.
+    assert_eq!(h.engine.doctor().await.viewer, viewer);
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
 async fn doctor_reports_viewer_workspace_executors_and_bindings() {
     let h = Harness::new(2, false);
     let dir = h.bind("proj-1", "a");

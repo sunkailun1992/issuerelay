@@ -6,6 +6,8 @@ use issuerelay_core::{ipc::client, paths::IpcEndpoint};
 use rmcp::{ServiceExt, handler::server::wrapper::Parameters, transport::stdio};
 use serde_json::{Value, json};
 
+use crate::format;
+
 type CallFuture = Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>;
 
 /// How the server reaches the engine host: it sends `(method, params)` and gets the result.
@@ -50,22 +52,21 @@ impl ControlServer {
     /// The engine's result as JSON text. A failure (host not running, no answer in time, or an
     /// error the engine reported) is `error: <cause chain>` as the tool's error, which sets
     /// `isError` for the client; the cause stays in the text so the AI can tell a stopped app
-    /// from a failed request. Both texts lose their invisible characters (`is_invisible`:
-    /// zero-width, direction-changing and the like): JSON escapes control characters itself, and
-    /// these are what is left to make a title or an error read differently from what it says.
+    /// from a failed request.
+    ///
+    /// Both texts go through [`format::clean`] before they leave, as the CLI's output does:
+    /// control characters become spaces, zero-width and direction-changing characters are
+    /// dropped, and nothing is cut. serde_json escapes only U+0000..=U+001F inside strings, so
+    /// DEL and the C1 controls (U+009B is a one-byte CSI) would pass raw, and so would a
+    /// direction override; the failure text is no JSON at all, so an OSC 52 sequence in it would
+    /// reach a terminal-based client untouched. The result stays valid JSON: only characters
+    /// inside strings change.
     async fn forward(&self, method: &str, params: Value) -> Result<String, String> {
         match (self.transport)(method.to_string(), params).await {
-            Ok(value) => Ok(visible(&value.to_string())),
-            Err(e) => Err(visible(&format!("error: {e:#}"))),
+            Ok(value) => Ok(format::clean(&value.to_string())),
+            Err(e) => Err(format::clean(&format!("error: {e:#}"))),
         }
     }
-}
-
-/// `text` without the characters that show nothing yet change how it reads.
-fn visible(text: &str) -> String {
-    text.chars()
-        .filter(|c| !issuerelay_core::text::is_invisible(*c))
-        .collect()
 }
 
 #[rmcp::tool_router]

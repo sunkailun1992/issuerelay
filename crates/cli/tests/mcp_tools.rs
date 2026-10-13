@@ -195,11 +195,28 @@ async fn control_tools_say_they_change_state_harmlessly_and_repeatably() {
 
 #[tokio::test]
 async fn tool_output_carries_no_invisible_characters() {
-    let (server, _) = recording_server(|_| Ok(json!({"last_error": "boom\u{202e}gnp.exe"})));
+    // serde_json escapes U+0000..=U+001F inside strings. A direction override, DEL and the C1
+    // controls pass raw, and U+009B is a one-byte CSI that a terminal-based client could read as
+    // an escape sequence.
+    let hostile = "boom\u{202e}gnp.exe\u{9b}31m\u{7f}!";
+    let (server, _) = recording_server(move |_| Ok(json!({"last_error": hostile, "running": 1})));
     let client = connect(server).await;
     let reply = text_of(&call(&client, "status", None).await);
-    assert!(!reply.contains('\u{202e}'), "{reply:?}");
-    assert_eq!(reply, json!({"last_error": "boomgnp.exe"}).to_string());
+    for hidden in ['\u{202e}', '\u{9b}', '\u{7f}'] {
+        assert!(
+            !reply.contains(hidden),
+            "U+{:04X} in {reply:?}",
+            hidden as u32
+        );
+    }
+    assert!(!reply.chars().any(char::is_control), "{reply:?}");
+    // Still JSON with the keys it came with: only text inside a string changed, and nothing was
+    // cut.
+    let parsed: Value = serde_json::from_str(&reply).expect("the reply stays JSON");
+    assert_eq!(
+        parsed,
+        json!({"last_error": "boomgnp.exe 31m !", "running": 1})
+    );
     client.cancel().await.unwrap();
 }
 
@@ -224,11 +241,26 @@ async fn every_tool_drops_what_shows_nothing_and_keeps_the_joiners() {
 
 #[tokio::test]
 async fn a_failure_text_carries_no_invisible_characters_either() {
-    let (server, _) =
-        recording_server(|_| Err(anyhow!("denied\u{202e}gnp").context("outer\u{200b}")));
+    // The failure text is no JSON, so nothing escaped it: an OSC 52 sequence (a clipboard write
+    // for a terminal-based client) and line breaks would reach the client as they are.
+    let (server, _) = recording_server(|method| match method {
+        "pause" => Err(anyhow!("denied\u{202e}gnp").context("outer\u{200b}")),
+        "resume" => Err(anyhow!("copied\u{1b}]52;c;ZGVtbw==\u{7} done")),
+        _ => Err(anyhow!("inner\nline\u{9b}2J").context("outer\ttab")),
+    });
     let client = connect(server).await;
     let result = call(&client, "pause", None).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(text_of(&result), "error: outer: deniedgnp");
+    let text = text_of(&call(&client, "resume", None).await);
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{7}'),
+        "{text:?}"
+    );
+    assert_eq!(text, "error: copied ]52;c;ZGVtbw==  done");
+    // Every control character becomes a space, and the cause chain stays whole.
+    let text = text_of(&call(&client, "poll_now", None).await);
+    assert!(!text.chars().any(char::is_control), "{text:?}");
+    assert_eq!(text, "error: outer tab: inner line 2J");
     client.cancel().await.unwrap();
 }

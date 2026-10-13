@@ -197,7 +197,8 @@ impl Settings {
         ] {
             anyhow::ensure!(
                 is_plain_name(name),
-                "{field} must be a non-empty single-line name without quotes, got {name:?}"
+                "{field} must be a non-empty single-line name without quotes or invisible characters, \
+                 got {name:?}"
             );
         }
         // The comment language is written into the prompt, and so is the UI language while the
@@ -238,9 +239,14 @@ impl Settings {
 }
 
 /// Trigger names go inside quotes in the prompt's fixed rules, so each must be one non-empty
-/// line without quotes or control characters.
+/// line without quotes, control characters or invisible ones (`text::is_invisible`: a
+/// zero-width space inside `"Done"` or a direction override would make the rule read differently
+/// from what the file says).
 fn is_plain_name(name: &str) -> bool {
-    !name.trim().is_empty() && !name.chars().any(|c| c.is_control() || c == '"')
+    !name.trim().is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == '"' || crate::text::is_invisible(c))
 }
 
 /// A model name is passed to the executor as one argument, so it must be 1–100 ASCII letters,
@@ -402,8 +408,13 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     let Ok(file) = text.parse::<toml::Table>() else {
         return Vec::new();
     };
-    // Every key this version writes: the defaults, plus a binding with every optional field set
-    // (a new field of `Binding` makes this literal fail to compile until it is listed here).
+    // The known keys are the ones serializing this sample writes: the defaults, plus a binding
+    // with every optional field set (a new field of `Binding` makes this literal fail to compile
+    // until it is listed here). That is complete only while the defaults write every `Settings`
+    // field. An `Option` field with `skip_serializing_if` is left out while it is `None`, so a
+    // file that sets it, which a save writes, would be reported as holding an unknown key at
+    // every start. When adding one, set it on `sample.settings` below and in
+    // `every_key_a_save_writes_is_known`, which fails until the sample knows the key.
     let mut sample = Config::default();
     sample.bindings.push(Binding {
         id: "x".into(),
@@ -753,6 +764,46 @@ mod tests {
     }
 
     #[test]
+    fn trigger_names_reject_invisible_characters() {
+        // The names go into the prompt's fixed rules between quotes: a zero-width space hides
+        // inside `"Done"`, and a direction override reorders what follows it.
+        type NameOf = fn(&mut TriggerNames) -> &mut String;
+        let fields: [(&str, NameOf); 5] = [
+            ("trigger.label", |names| &mut names.label),
+            ("trigger.todo", |names| &mut names.todo),
+            ("trigger.in_progress", |names| &mut names.in_progress),
+            ("trigger.in_testing", |names| &mut names.in_testing),
+            ("trigger.done", |names| &mut names.done),
+        ];
+        for (field, name_of) in fields {
+            for bad in [
+                "Do\u{200b}ne",
+                "\u{202e}Done",
+                "Done\u{2028}",
+                "\u{feff}Done",
+            ] {
+                let mut settings = Settings::default();
+                *name_of(&mut settings.trigger) = bad.into();
+                let err = settings.validate().unwrap_err();
+                assert!(err.to_string().starts_with(field), "{field} {bad:?}: {err}");
+            }
+            // Other scripts, and the joiners emoji and Persian need, are fine in a name.
+            for good in [
+                "待办",
+                "In Progress",
+                "می\u{200c}خواهم",
+                "Ready \u{1f469}\u{200d}\u{1f4bb}",
+            ] {
+                let mut settings = Settings::default();
+                *name_of(&mut settings.trigger) = good.into();
+                settings
+                    .validate()
+                    .unwrap_or_else(|e| panic!("{field} {good:?}: {e}"));
+            }
+        }
+    }
+
+    #[test]
     fn binding_model_names_are_checked_on_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -970,7 +1021,8 @@ mod tests {
     fn every_key_a_save_writes_is_known() {
         // A binding with every optional field set, and a setting changed from its default: if
         // `unknown_keys` did not know a key that `save` writes, each save would be followed by a
-        // warning about the host's own file.
+        // warning about the host's own file. An `Option` field added to `Settings` later (one
+        // that is not written while it is `None`) has to be set here too, or this cannot see it.
         let mut config = Config::default();
         config.settings.notifications.failed = false;
         config.settings.auto_update = false;
@@ -1120,6 +1172,46 @@ mod tests {
             assert!(dir.path().join(name).exists(), "{name} is not ours");
         }
         assert!(Config::load(&path).is_ok());
+    }
+
+    #[test]
+    fn the_sweep_follows_the_way_a_save_names_its_temp_file() {
+        // `temp_path` names the file a save writes while it works, so a save that crashed leaves
+        // exactly such a file. The names in the other sweep tests are spelled out; this one takes
+        // the real ones, so the two cannot drift apart.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let leftovers = [temp_path(&path), temp_path(&path)];
+        assert_ne!(leftovers[0], leftovers[1]);
+        let pid = std::process::id();
+        // Names a save never writes, though they look close.
+        let lookalikes = [
+            format!("config.toml.{pid}.0.tmp.bak"),
+            format!("config.toml.{pid}x.0.tmp"),
+            format!("config.toml.{pid}.tmp"),
+            format!("other.toml.{pid}.0.tmp"),
+        ];
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        let all = leftovers
+            .iter()
+            .cloned()
+            .chain(lookalikes.iter().map(|name| dir.path().join(name)));
+        for file in all {
+            std::fs::write(&file, "x").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        Config::default().save(&path).unwrap();
+        for leftover in &leftovers {
+            assert!(!leftover.exists(), "{} was left", leftover.display());
+        }
+        for name in &lookalikes {
+            assert!(dir.path().join(name).exists(), "{name} is not a temp file");
+        }
     }
 
     #[test]
