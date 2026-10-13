@@ -45,6 +45,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 |---|---|---|
 | `app/src/lib/clean-cases.json` | `clean.test.ts`（`cleanDisplayText`） | `app/src-tauri/src/commands.rs` 的测试，对照 core 的 `clean_text`（`ansi: true` 的转义序列用例只在面板） |
 | `app/src/lib/model-name-cases.json` | `model-name.test.ts`（`isValidModelName`） | `commands.rs` 的测试，对照 `config::is_valid_model_name` |
+| `app/src/lib/mask-cases.json` | `mask.test.ts`（`maskCredentials`） | `commands.rs` 的测试，对照 `env::mask_credentials` |
 | `app/src/lib/problem-cases.json` | `problem.test.ts`（侧栏的「需要处理」） | `app/src-tauri/src/tray.rs` 的测试（托盘图标） |
 | `app/src/i18n/language-cases.json` | `i18n.test.ts`（`resolveLanguage`） | `app/src-tauri/src/i18n.rs` 的测试（`resolve_language`） |
 | `app/src/lib/trigger-defaults.json` | `useTriggerNames`、假后端的默认设置 | `commands.rs` 的测试，对照 `TriggerNames::default()` |
@@ -74,8 +75,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 真实样本放在 `docs/gates/samples/<里程碑>/`，测试需要时复制到 `crates/<crate>/tests/fixtures/`。
 - 提交前替换：姓名改为 `Jane Doe`，邮箱改为 `jane@example.com`，需求标识改为 `DEMO-N`，UUID 改为 `00000000-0000-0000-0000-00000000000N`，项目改为 `Demo Project`，团队改为 `Demo`，URL 改为 `https://linear.app/demo/issue/DEMO-N`，路径改为 `~/…`，会话 ID 改为全零。字段名与结构保持原样。
 - 不为了让测试通过去手改真实样本；需要别的形态就另写一份虚构夹具。
-- 前端测试需要同样的样本时直接读 `crates/core/tests/fixtures/`，不复制一份（例如 `app/src/lib/timeline.test.ts` 以 `?raw` 导入两份执行者输出）；`vite.config.ts` 只在测试运行时允许读仓库根目录。
-- 面板与 core（或托盘）必须同规则的函数，各有一张两边共读的用例表，不复制：显示文本清洗 `app/src/lib/clean-cases.json`、「需要处理」判定 `problem-cases.json`、模型名 `model-name-cases.json`、代理打码 `mask-cases.json`、语言解析 `app/src/i18n/language-cases.json`；TS 测试和 Rust 一侧对照 core 的测试（`app/src-tauri/src/commands.rs` 等）读同一个文件，改规则时两边一起改。
+- 面板与 core（或托盘）必须同规则的函数，规则写进上文「面板与 core 共用的用例表」那张表里的共读文件，不复制；新增这类规则时在表里加一行。
 
 ## 实机验收规则
 
