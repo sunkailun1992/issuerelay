@@ -1,0 +1,68 @@
+{
+  "app": { "name": "IssueRelay", "tagline": "把 Linear 需求交给 Claude Code 和 Codex 去完成" },
+  "nav": {
+    "overview": "概览",
+    "issues": "需求",
+    "runs": "运行记录",
+    "bindings": "项目绑定",
+    "doctor": "环境检查",
+    "settings": "设置",
+    "help": "使用说明"
+  },
+  "state": {
+    "waiting_binding": "等待绑定",
+    "queued": "排队中",
+    "running": "运行中",
+    "awaiting_acceptance": "待验收",
+    "needs_info": "待补充信息",
+    "done": "已完成",
+    "failed": "失败",
+    "canceled": "已取消"
+  },
+  "common": {
+    "loading": "加载中…",
+    "refresh": "刷新",
+    "retry": "重试",
+    "save": "保存",
+    "saved": "已保存",
+    "cancel": "取消",
+    "close": "关闭",
+    "copy": "复制",
+    "copied": "已复制",
+    "error_title": "出错了",
+    "unknown": "未知",
+    "never": "从未"
+  },
+  "tray": {
+    "starting": "正在启动…",
+    "status_counts": "运行中 {{running}} 条 · 排队 {{queued}} 条",
+    "status_paused": "已暂停监控",
+    "status_problem": "需要处理",
+    "pause": "暂停监控",
+    "resume": "恢复监控",
+    "poll_now": "立即检查一次",
+    "open_panel": "打开面板",
+    "quit": "退出 IssueRelay"
+  },
+  "notify": {
+    "run_started": "已开始运行。",
+    "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
+    "needs_info": "AI 在需求下提了问题。补充信息后，请重新加上 ai-ready 标签。",
+    "failed": "运行失败，原因见面板。"
+  },
+  "quit": {
+    "title": "仍有任务在运行",
+    "body": "有 {{count}} 个任务正在运行。要等它们运行完毕，还是现在停止？",
+    "wait": "等待完成",
+    "stop": "立即停止",
+    "cancel": "继续运行",
+    "waiting": "正在等待任务运行完毕，完成后 IssueRelay 会自动退出。"
+  },
+  "startup": {
+    "failed_title": "IssueRelay 无法启动",
+    "already_running": "当前用户已有另一个 IssueRelay 在运行（托盘程序或开发宿主）。请先退出它。",
+    "store_unavailable": "IssueRelay 无法打开运行记录",
+    "other": "出现问题，IssueRelay 无法启动",
+    "quit": "退出"
+  }
+}

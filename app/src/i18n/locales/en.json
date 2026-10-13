@@ -1,0 +1,68 @@
+{
+  "app": { "name": "IssueRelay", "tagline": "Hands your Linear issues to Claude Code and Codex" },
+  "nav": {
+    "overview": "Overview",
+    "issues": "Issues",
+    "runs": "Runs",
+    "bindings": "Bindings",
+    "doctor": "Environment",
+    "settings": "Settings",
+    "help": "Help"
+  },
+  "state": {
+    "waiting_binding": "Waiting for setup",
+    "queued": "Queued",
+    "running": "Running",
+    "awaiting_acceptance": "Awaiting acceptance",
+    "needs_info": "Needs information",
+    "done": "Done",
+    "failed": "Failed",
+    "canceled": "Canceled"
+  },
+  "common": {
+    "loading": "Loading…",
+    "refresh": "Refresh",
+    "retry": "Try again",
+    "save": "Save",
+    "saved": "Saved",
+    "cancel": "Cancel",
+    "close": "Close",
+    "copy": "Copy",
+    "copied": "Copied",
+    "error_title": "Something went wrong",
+    "unknown": "Unknown",
+    "never": "Never"
+  },
+  "tray": {
+    "starting": "Starting…",
+    "status_counts": "Running {{running}} · Queued {{queued}}",
+    "status_paused": "Monitoring paused",
+    "status_problem": "Needs attention",
+    "pause": "Pause monitoring",
+    "resume": "Resume monitoring",
+    "poll_now": "Check now",
+    "open_panel": "Open panel",
+    "quit": "Quit IssueRelay"
+  },
+  "notify": {
+    "run_started": "The run has started.",
+    "awaiting_acceptance": "Ready for you to accept: it is in testing now.",
+    "needs_info": "The AI asked a question on the issue; add the details and label it ai-ready again.",
+    "failed": "The run failed. The panel shows why."
+  },
+  "quit": {
+    "title": "Runs are still in progress",
+    "body": "{{count}} run(s) are in progress. Wait for them to finish, or stop them now?",
+    "wait": "Wait for completion",
+    "stop": "Stop now",
+    "cancel": "Keep running",
+    "waiting": "Waiting for the runs to finish, then IssueRelay quits."
+  },
+  "startup": {
+    "failed_title": "IssueRelay could not start",
+    "already_running": "Another IssueRelay is already running for this user (the tray app or a development host). Quit it first.",
+    "store_unavailable": "IssueRelay could not open its run records",
+    "other": "Something stopped IssueRelay from starting",
+    "quit": "Quit"
+  }
+}

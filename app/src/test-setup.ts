@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { setFixedClock } from "@/lib/clock";
+import { initI18n } from "@/i18n";
 
 // Radix (Select, Switch, ScrollArea, Dialog, RadioGroup) measures elements, captures the pointer
 // and scrolls options into view; jsdom implements none of these.
@@ -34,4 +35,13 @@ afterEach(() => {
   // A test that fixed the clock (the mock backend does) never leaks it into the next one, even
   // when its assertions failed.
   setFixedClock(null);
+});
+
+// Every test runs with i18next started once: a `t()` key that English lacks fails the test
+// instead of showing the key. (Missing in another language only is caught by i18n.test.ts.)
+await initI18n("en", {
+  saveMissing: true,
+  missingKeyHandler: (_languages, _namespace, key) => {
+    throw new Error(`missing translation key: ${key}`);
+  },
 });

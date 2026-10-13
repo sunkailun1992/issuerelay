@@ -1,0 +1,68 @@
+{
+  "app": { "name": "IssueRelay", "tagline": "Linear の課題を Claude Code と Codex に任せる" },
+  "nav": {
+    "overview": "概要",
+    "issues": "課題",
+    "runs": "実行履歴",
+    "bindings": "プロジェクト紐付け",
+    "doctor": "環境チェック",
+    "settings": "設定",
+    "help": "ヘルプ"
+  },
+  "state": {
+    "waiting_binding": "セットアップ待ち",
+    "queued": "待機中",
+    "running": "実行中",
+    "awaiting_acceptance": "確認待ち",
+    "needs_info": "追加情報待ち",
+    "done": "完了",
+    "failed": "失敗",
+    "canceled": "キャンセル済み"
+  },
+  "common": {
+    "loading": "読み込み中…",
+    "refresh": "更新",
+    "retry": "再試行",
+    "save": "保存",
+    "saved": "保存しました",
+    "cancel": "キャンセル",
+    "close": "閉じる",
+    "copy": "コピー",
+    "copied": "コピーしました",
+    "error_title": "問題が発生しました",
+    "unknown": "不明",
+    "never": "なし"
+  },
+  "tray": {
+    "starting": "起動中…",
+    "status_counts": "実行中 {{running}} 件 · 待機中 {{queued}} 件",
+    "status_paused": "監視を一時停止中",
+    "status_problem": "対応が必要です",
+    "pause": "監視を一時停止",
+    "resume": "監視を再開",
+    "poll_now": "今すぐチェック",
+    "open_panel": "パネルを開く",
+    "quit": "IssueRelay を終了"
+  },
+  "notify": {
+    "run_started": "実行を開始しました。",
+    "awaiting_acceptance": "確認をお願いします。課題はテスト中になりました。",
+    "needs_info": "AI が課題に質問を残しました。内容を補足して、もう一度 ai-ready ラベルを付けてください。",
+    "failed": "実行に失敗しました。原因はパネルで確認できます。"
+  },
+  "quit": {
+    "title": "実行中のタスクがあります",
+    "body": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
+    "wait": "完了を待つ",
+    "stop": "今すぐ停止",
+    "cancel": "実行を続ける",
+    "waiting": "タスクの完了を待っています。完了後に IssueRelay を終了します。"
+  },
+  "startup": {
+    "failed_title": "IssueRelay を起動できませんでした",
+    "already_running": "このユーザーでは、すでに別の IssueRelay が動作しています（トレイアプリまたは開発用ホスト）。先にそちらを終了してください。",
+    "store_unavailable": "IssueRelay が実行記録を開けませんでした",
+    "other": "問題が発生したため、IssueRelay を起動できませんでした",
+    "quit": "終了"
+  }
+}

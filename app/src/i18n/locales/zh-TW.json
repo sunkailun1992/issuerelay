@@ -1,0 +1,68 @@
+{
+  "app": { "name": "IssueRelay", "tagline": "把 Linear 需求交給 Claude Code 與 Codex 處理" },
+  "nav": {
+    "overview": "總覽",
+    "issues": "需求",
+    "runs": "執行紀錄",
+    "bindings": "專案綁定",
+    "doctor": "環境檢查",
+    "settings": "設定",
+    "help": "使用說明"
+  },
+  "state": {
+    "waiting_binding": "等待綁定",
+    "queued": "排隊中",
+    "running": "執行中",
+    "awaiting_acceptance": "待驗收",
+    "needs_info": "待補充資訊",
+    "done": "已完成",
+    "failed": "失敗",
+    "canceled": "已取消"
+  },
+  "common": {
+    "loading": "載入中…",
+    "refresh": "重新整理",
+    "retry": "重試",
+    "save": "儲存",
+    "saved": "已儲存",
+    "cancel": "取消",
+    "close": "關閉",
+    "copy": "複製",
+    "copied": "已複製",
+    "error_title": "發生錯誤",
+    "unknown": "未知",
+    "never": "從未"
+  },
+  "tray": {
+    "starting": "正在啟動…",
+    "status_counts": "執行中 {{running}} 項 · 排隊 {{queued}} 項",
+    "status_paused": "已暫停監控",
+    "status_problem": "需要處理",
+    "pause": "暫停監控",
+    "resume": "繼續監控",
+    "poll_now": "立即檢查一次",
+    "open_panel": "開啟面板",
+    "quit": "結束 IssueRelay"
+  },
+  "notify": {
+    "run_started": "已開始執行。",
+    "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
+    "needs_info": "AI 在需求下提出了問題。補充資訊後，請重新加上 ai-ready 標籤。",
+    "failed": "執行失敗，原因請見面板。"
+  },
+  "quit": {
+    "title": "仍有任務正在執行",
+    "body": "有 {{count}} 項任務正在執行。要等它們執行完畢，還是現在停止？",
+    "wait": "等待完成",
+    "stop": "立即停止",
+    "cancel": "繼續執行",
+    "waiting": "正在等待任務執行完畢，完成後 IssueRelay 會自動結束。"
+  },
+  "startup": {
+    "failed_title": "IssueRelay 無法啟動",
+    "already_running": "此使用者已有另一個 IssueRelay 正在執行（常駐程式或開發用的宿主程式）。請先結束它。",
+    "store_unavailable": "IssueRelay 無法開啟執行紀錄",
+    "other": "發生問題，IssueRelay 無法啟動",
+    "quit": "結束"
+  }
+}
