@@ -31,6 +31,7 @@
 - macOS：套接字所在目录权限 0700；启动前检测是否已有宿主在运行，只有残留的套接字文件才删除。
 - Windows：命名管道设 `reject_remote_clients(true)`；用 `first_pipe_instance(true)` 保证只有一个宿主；安全描述符按宿主所在用户的 SID 生成（`ipc::pipe_security::pipe_sddl`）：属主是这个用户，只有它和 SYSTEM 有访问权；不用 `OW`（属主权限），因为提权宿主的默认属主常是 Administrators 组，会挡住同一用户未提权的命令行、放进所有提权的管理员进程；客户端连接后核对管道服务端进程的用户，与自己不同就拒绝通信。
 - 只提供 `METHODS` 列出的方法；「标记完成」「重试」「取消」只在面板（进程内）提供。
+- 桌面面板（网页视图）只能调本程序自己的命令，Tauri 自带的接口只开放事件的 `listen` 与 `unlisten`：`app/src-tauri/build.rs` 在应用清单（`AppManifest`）里登记全部命令，Tauri 因此也按能力文件检查本程序的命令；`capabilities/default.json` 只给主窗口（本地内容）每条命令一个 `allow-<命令>` 和这两条事件权限，不给任何插件权限或其他核心权限。打开链接（只开 Linear 的 `https` 链接）、选目录、通知、开机自启都在 Rust 侧的命令里做。`app/src-tauri/src/lib.rs` 的测试在命令表、应用清单与能力文件不一致，或多出任何权限时失败；`app/src/lib/api.test.ts` 在面板绕过 `api.ts` 直接用 Tauri、或调了能力文件没给的命令时失败。
 
 ## 6. 日志与数据
 

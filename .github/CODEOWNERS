@@ -25,4 +25,6 @@
 /crates/cli/tests/mcp_tools.rs     @sunkailun1992
 /crates/devhost/src/main.rs        @sunkailun1992
 /app/src-tauri/src/                @sunkailun1992
+/app/src-tauri/build.rs            @sunkailun1992
+/app/src-tauri/capabilities/       @sunkailun1992
 /app/src/lib/clean.ts              @sunkailun1992

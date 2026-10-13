@@ -71,6 +71,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
 | 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
 | 面板命令（含仅面板可用的标记完成、重试、停止） | `app/src-tauri/src/commands.rs` |
+| 面板能调什么（应用清单、能力文件） | `app/src-tauri/build.rs`、`app/src-tauri/capabilities/default.json` |
 | 前端数据层、假后端与虚构数据 | `app/src/lib/` |
 
 ## 6. 运行数据与配置
@@ -94,6 +95,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
 - **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
+- **面板命令**：增删命令要同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json`（`allow-<命令>`，下划线写成连字符）和前端的 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 与 `api.test.ts` 的测试拦住不一致。面板要用 Tauri 自带的其他接口（窗口、路径等）时，只在能力文件里加用到的那一条权限，并在提交说明里写明理由；插件权限不给，插件只在 Rust 侧用。
 
 ## 8. 外部事实与夹具
 

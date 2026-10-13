@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import capability from "../../src-tauri/capabilities/default.json";
 
 afterEach(() => {
   // Also after a failed assertion: the next test must not think it runs inside Tauri.
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   vi.doUnmock("@tauri-apps/api/core");
+  vi.doUnmock("@tauri-apps/api/event");
 });
 
 describe("backend selection", () => {
@@ -34,5 +36,49 @@ describe("backend selection", () => {
     expect(refused).toMatchObject({ code: "not_a_linear_link" });
     const cancelled = await backend.linearLogin().catch((error: unknown) => error);
     expect(cancelled).toMatchObject({ code: "login_cancelled" });
+  });
+});
+
+/** Every module of the panel as text, except the tests (they mock `@tauri-apps/api`). */
+const SOURCES = import.meta.glob<string>(["/src/**/*.{ts,tsx}", "!/src/**/*.test.{ts,tsx}"], {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+// The panel's window may call only what app/src-tauri/capabilities/default.json grants; the
+// Rust test in app/src-tauri/src/lib.rs holds that file to the commands the app registers.
+describe("the webview boundary", () => {
+  test("only api.ts reaches Tauri, through invoke and listen", () => {
+    const reaching = Object.entries(SOURCES).filter(([, source]) => source.includes("@tauri-apps/api"));
+    expect(reaching.map(([path]) => path)).toEqual(["/src/lib/api.ts"]);
+    const imports = [...reaching[0][1].matchAll(/import\s*\{([^}]*)\}\s*from\s*"@tauri-apps\/api\/([^"]+)"/g)].map(
+      ([, names, module]) => `${module}: ${names.trim()}`,
+    );
+    expect(imports).toEqual(["core: invoke", "event: listen"]);
+  });
+
+  test("the panel calls exactly the commands its capability allows, and nothing else of Tauri's but listen", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(null);
+    const listen = vi.fn().mockResolvedValue(() => {});
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen }));
+    const { tauriBackend } = await import("./api");
+    // Every method once; the mocked calls ignore what they are given.
+    for (const method of Object.values(tauriBackend)) {
+      await (method as (argument: unknown) => Promise<unknown>)(() => {});
+    }
+    const called = new Set(invoke.mock.calls.map(([command]) => command as string));
+    const granted = capability.permissions
+      .filter((permission) => permission.startsWith("allow-"))
+      .map((permission) => permission.slice("allow-".length).replaceAll("-", "_"));
+    expect(called).toEqual(new Set(granted));
+    expect(listen).toHaveBeenCalledTimes(4);
+    // `listen` and the function it returns need exactly these two; nothing else of Tauri's own.
+    expect(capability.permissions.filter((permission) => !permission.startsWith("allow-"))).toEqual([
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
+    ]);
   });
 });
