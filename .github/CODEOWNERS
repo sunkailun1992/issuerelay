@@ -9,6 +9,7 @@
 /crates/core/src/config.rs         @sunkailun1992
 /crates/core/src/engine.rs         @sunkailun1992
 /crates/core/src/executor/         @sunkailun1992
+/crates/core/src/setup.rs          @sunkailun1992
 /crates/core/src/runner.rs         @sunkailun1992
 /crates/core/src/env.rs            @sunkailun1992
 /crates/core/src/linear/auth.rs    @sunkailun1992

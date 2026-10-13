@@ -13,6 +13,7 @@ pub mod paths;
 pub mod prompt;
 pub mod runner;
 pub mod scheduler;
+pub mod setup;
 pub mod store;
 pub mod text;
 pub mod trigger;

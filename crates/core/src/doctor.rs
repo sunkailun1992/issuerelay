@@ -47,6 +47,19 @@ pub trait CommandRunner: Send + Sync {
     /// `Err` means the command could not run to completion (it did not start, timed out, or what
     /// it printed could not be read); a command that ran and exited non-zero is an `Ok`.
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput>;
+
+    /// `run` with an explicit time limit instead of the runner's own choice (the setup commands:
+    /// a login waits for the user in the browser). The default ignores `limit`; `SystemRunner`
+    /// honours it.
+    async fn run_limited(
+        &self,
+        program: &Path,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<CmdOutput> {
+        let _ = limit;
+        self.run(program, args).await
+    }
 }
 
 /// Default limit for `mcp list`. `claude mcp list` health-checks every configured MCP server,
@@ -134,13 +147,21 @@ impl SystemRunner {
 #[async_trait::async_trait]
 impl CommandRunner for SystemRunner {
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput> {
+        self.run_limited(program, args, self.limit_for(args)).await
+    }
+
+    async fn run_limited(
+        &self,
+        program: &Path,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<CmdOutput> {
         #[cfg(windows)]
         use process_wrap::tokio::JobObject;
         #[cfg(unix)]
         use process_wrap::tokio::ProcessGroup;
         use process_wrap::tokio::{CommandWrap, KillOnDrop};
 
-        let limit = self.limit_for(args);
         let env = self
             .env
             .read()

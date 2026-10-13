@@ -57,6 +57,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | Linear 工具调用与解析 | `crates/core/src/linear/mcp.rs`、`parse.rs` |
 | Linear 授权与钥匙串 | `crates/core/src/linear/auth.rs` |
 | 环境检查 | `crates/core/src/doctor.rs` |
+| 一键配置命令（Linear MCP、控制服务注册） | `crates/core/src/setup.rs` |
 | 执行者环境（PATH、代理） | `crates/core/src/env.rs` |
 | 状态流转与编排 | `crates/core/src/engine.rs` |
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |

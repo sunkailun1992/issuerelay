@@ -230,7 +230,7 @@ issuerelay/
 1. 选择界面语言。
 2. 连接 Linear（浏览器授权），显示授权人。
 3. 检查工作区：有没有 `ai-ready` 标签；已绑定项目所属团队里有没有 In Progress、In Testing、Done（还没有绑定、或已绑定的项目没有给出团队时，检查所有团队）。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
-4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。
+4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。授权命令为 `claude mcp login linear-server`、`codex mcp login linear`（会打开浏览器，程序最多等 5 分钟）。
 5. 绑定第一个项目：选 Linear 项目 → 选本地目录 → 选执行者 → 选权限档位。首次选「完全放开」时明确提示风险（见第 14 节）。
 6. 使用说明：明确写出「需求要被自动处理，必须指派给自己、加 `ai-ready` 标签、状态为 Todo、所属项目已绑定」，并附示例。面板的「需求」页会为不满足条件的需求标出原因。
 
@@ -291,7 +291,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ### 10.3 MCP 服务
 
-`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除。
+`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除。注册命令为 `claude mcp add --scope user issuerelay -- <命令行程序> mcp`、`codex mcp add issuerelay -- <命令行程序> mcp`；是否已注册看 `mcp get issuerelay` 的退出码。
 
 ## 11. 配置与数据位置
 
