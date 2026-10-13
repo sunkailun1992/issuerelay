@@ -1386,7 +1386,6 @@ dependencies = [
  "issuerelay-core",
  "open",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

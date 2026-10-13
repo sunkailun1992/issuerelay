@@ -280,15 +280,40 @@ pub fn clear_credentials() -> Result<()> {
 fn clear_credentials_in(service: &str) -> Result<()> {
     let mut first_failure = None;
     for account in [OAUTH_ACCOUNT, API_KEY_ACCOUNT] {
-        let cleared = entry(service, account).and_then(|item| match item.delete_credential() {
-            Err(keyring::Error::NoEntry) => Ok(()),
-            other => other,
-        });
-        if let Err(error) = cleared {
-            first_failure.get_or_insert_with(|| keychain_error(error));
+        if let Err(error) = clear_account_in(service, account) {
+            first_failure.get_or_insert(error);
         }
     }
     first_failure.map_or(Ok(()), Err)
+}
+
+/// Deletes the saved OAuth credentials only (switching to an API key). Blocks; see
+/// `clear_credentials`.
+pub fn clear_oauth_credentials() -> Result<()> {
+    clear_oauth_credentials_in(APP_ID)
+}
+
+fn clear_oauth_credentials_in(service: &str) -> Result<()> {
+    clear_account_in(service, OAUTH_ACCOUNT)
+}
+
+/// Deletes the saved API key only (switching to OAuth). Blocks; see `clear_credentials`.
+pub fn clear_api_key() -> Result<()> {
+    clear_api_key_in(APP_ID)
+}
+
+fn clear_api_key_in(service: &str) -> Result<()> {
+    clear_account_in(service, API_KEY_ACCOUNT)
+}
+
+/// Deletes one keychain entry; one that does not exist is fine.
+fn clear_account_in(service: &str, account: &str) -> Result<()> {
+    entry(service, account)
+        .and_then(|item| match item.delete_credential() {
+            Err(keyring::Error::NoEntry) => Ok(()),
+            other => other,
+        })
+        .map_err(keychain_error)
 }
 
 /// Waits for the browser's redirect and returns its full URL. Every accepted connection is served
@@ -1045,6 +1070,61 @@ mod tests {
             let error = clear_credentials_in(&service).unwrap_err();
             assert!(error.to_string().contains("keychain is locked"), "{error}");
             assert_eq!(load_api_key_in(&service).unwrap(), None);
+        }
+
+        #[test]
+        fn each_kind_of_credential_can_be_cleared_on_its_own() {
+            let service = service("clear-one");
+            save_api_key_in(&service, "lin_api_demo").unwrap();
+            entry(&service, OAUTH_ACCOUNT)
+                .unwrap()
+                .set_password("{\"token\":\"demo\"}")
+                .unwrap();
+            clear_account_in(&service, OAUTH_ACCOUNT).unwrap();
+            assert_eq!(
+                load_api_key_in(&service).unwrap().as_deref(),
+                Some("lin_api_demo")
+            );
+            assert!(matches!(
+                entry(&service, OAUTH_ACCOUNT).unwrap().get_password(),
+                Err(keyring::Error::NoEntry)
+            ));
+            clear_account_in(&service, API_KEY_ACCOUNT).unwrap();
+            assert_eq!(load_api_key_in(&service).unwrap(), None);
+            // Nothing left to delete is not a failure.
+            clear_account_in(&service, API_KEY_ACCOUNT).unwrap();
+        }
+
+        // Swapped, `clear_api_key` would wipe the OAuth credentials a login has just saved.
+        #[test]
+        fn switching_the_login_method_clears_only_the_one_it_replaces() {
+            let service = service("clear-kind");
+            let save_both = || {
+                save_api_key_in(&service, "lin_api_demo").unwrap();
+                entry(&service, OAUTH_ACCOUNT)
+                    .unwrap()
+                    .set_password("{\"token\":\"demo\"}")
+                    .unwrap();
+            };
+            let oauth_is_saved = || {
+                entry(&service, OAUTH_ACCOUNT)
+                    .unwrap()
+                    .get_password()
+                    .is_ok()
+            };
+
+            save_both();
+            clear_oauth_credentials_in(&service).unwrap();
+            assert!(!oauth_is_saved());
+            assert_eq!(
+                load_api_key_in(&service).unwrap().as_deref(),
+                Some("lin_api_demo")
+            );
+
+            save_both();
+            clear_api_key_in(&service).unwrap();
+            assert_eq!(load_api_key_in(&service).unwrap(), None);
+            assert!(oauth_is_saved());
         }
 
         #[tokio::test]

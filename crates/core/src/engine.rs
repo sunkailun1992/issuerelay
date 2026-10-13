@@ -347,9 +347,9 @@ fn display_issue(issue: Issue) -> Issue {
     }
 }
 
-/// The authorized user as the status line and the doctor report show them: the name is
-/// Linear's text and goes through `clean_text`; the id stays as it is.
-fn display_viewer(viewer: Viewer) -> Viewer {
+/// The authorized user as the status line, the doctor report and the host's login show them: the
+/// name is Linear's text and goes through `clean_text`; the id stays as it is.
+pub(crate) fn display_viewer(viewer: Viewer) -> Viewer {
     Viewer {
         name: clean_text(&viewer.name),
         ..viewer

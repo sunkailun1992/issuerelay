@@ -8868,7 +8868,7 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 | `engine` | 队首任务启动前的重读一直失败时，`max_concurrent = 1` 或同一目录下的其他任务一直轮不到（M2 第一部分 Task 5） | Task 19 评审 |
 | `engine` | 严格解析的取舍（读不懂的回复一律报错）：一条读不懂的需求会让这一轮不派活、挡住所有排队任务，错误会指明是哪条；面板要把这个错误显示清楚 | 最终评审 |
 | `engine` | 状态为 `waiting_binding` 的新任务，日志也写成 `job queued`（M2 第一部分 Task 5） | 最终修复复审 |
-| `engine`、面板 | `MissingArguments` 要和 `MissingTools` 一样转成用户看得懂的提示（设计 §7）；`list()` 的错误用 `{:#}` 显示（Task 5 没有处理：Linear 接口变化归为「接口已变化」由 M2 第一部分 Task 9 做，面板上的提示文案在 M2 第二部分） | Task 16 评审 |
+| `engine`、面板 | `MissingArguments` 要和 `MissingTools` 一样转成用户看得懂的提示（设计 §7）；`list()` 的错误用 `{:#}` 显示（M2 第一部分 Task 9 做了归类：`Host` 把 `MissingTools` 与 `MissingArguments` 都归为 `LinearSetup::InterfaceChanged`，宿主照常启动、检查报出原因；面板上的提示文案在 M2 第二部分） | Task 16 评审 |
 | `runner` | 离开进程组的后代只收到 SIGKILL，没有先收到 SIGTERM；停止最多多等 5 秒；执行者在 SIGTERM 处理里新起的独立进程，如果它在宽限期内退出，会成为找不到的孤儿（M1 验收 H6 看到会话结束钩子几秒内自行退出）；对已回收的进程组 id 调 `killpg`（影响可忽略） | 最终修复、复审 |
 | `runner` | 失控输出：通道没有上限，单行也没有长度上限（M2 第一部分 Task 3 已完成） | Task 15 评审 |
 | `runner` | 运行日志：写入失败要能上报（有日志系统后）；重试会覆盖上一次的 `{job.id}.jsonl`（目前有意为之并已注明），做日志页时决定是否保留；0600 只对新建的日志文件生效（写入失败告警和 0600 已在 M2 第一部分 Task 3 完成，重试覆盖日志的取舍仍待做日志页时决定） | Task 15 评审 |

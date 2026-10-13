@@ -42,7 +42,7 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ```bash
 cargo test --workspace
-cargo run -p issuerelay-devhost -- --help   # 开发用无界面宿主（不发布）
+cargo run -p issuerelay-devhost -- --help   # 开发用无界面宿主（不发布）；没有登录时也会启动，并提示先登录
 cargo run -p issuerelay-cli -- --help       # 命令行
 ```
 

@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod engine;
 pub mod env;
 pub mod executor;
+pub mod host;
 pub mod ipc;
 pub mod linear;
 pub mod logs;

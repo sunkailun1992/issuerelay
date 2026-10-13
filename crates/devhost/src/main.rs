@@ -1,28 +1,22 @@
-//! Development-only headless host for the IssueRelay engine. Not shipped; the M2 tray app
-//! embeds the engine the same way.
+//! Development-only headless host for the IssueRelay engine. Not shipped; the M2 tray app runs
+//! the same `core::host::Host`.
 use std::{
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     sync::Arc,
-    time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use issuerelay_core::{
-    doctor::SystemReadiness,
-    engine::{Engine, EngineDeps, ProcessJobRunner},
-    ipc::server::IpcServer,
+    host::{Host, HostParts, LinearSetup, StopMode, SystemConnector},
     linear::{
         LinearApi, auth,
         mcp::{LinearClient, McpLinear},
     },
     paths::AppPaths,
-    store::Store,
     text::{clean_text, is_invisible},
 };
-use tokio::task::JoinError;
-use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
 #[derive(Parser)]
@@ -193,47 +187,6 @@ async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
-/// Runs the engine and the IPC server until the host is asked to stop, then waits for the runs in
-/// progress to end. A second stop signal in the meantime returns at once, and so does an engine
-/// task that panicked (nobody has told the runs to stop then). Either way the runtime shuts down
-/// after `main` returns, and the guard of each run ends its process tree.
-async fn serve(engine: Engine, server: IpcServer) -> Result<()> {
-    let shutdown = CancellationToken::new();
-    let ipc = tokio::spawn(server.run(engine.clone(), shutdown.clone()));
-    let worker = {
-        let engine = engine.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move { engine.run_forever(shutdown).await })
-    };
-    tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
-    shutdown_signal()
-        .await
-        .context("cannot listen for stop signals")?;
-    tracing::info!(
-        "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
-    );
-    shutdown.cancel();
-    let drain = async {
-        // `run_forever` tells the running jobs to stop on its way out. If it panicked nobody did,
-        // and `wait_idle` would wait for them to finish on their own.
-        worker.await?;
-        let _ = ipc.await;
-        engine.wait_idle().await;
-        Ok::<(), JoinError>(())
-    };
-    tokio::select! {
-        drained = drain => drained.map_err(|error| {
-            tracing::error!(%error, "the engine task failed; the runs still going end with the host");
-            anyhow!("the engine task failed: {error}")
-        }),
-        second = shutdown_signal() => {
-            second.context("cannot listen for a second stop signal")?;
-            tracing::warn!("second stop signal: ending the remaining runs now");
-            Ok(())
-        }
-    }
-}
-
 /// Runs one subcommand. The viewer's name and the projects' ids and names come from Linear, whose
 /// content is untrusted and may carry terminal escape sequences, so they are printed through
 /// `clean_text`.
@@ -293,19 +246,40 @@ async fn run(command: Command) -> Result<()> {
             linear.close().await
         }
         Command::Run => {
-            let paths = AppPaths::system()?;
-            let server = IpcServer::bind(&paths.ipc_endpoint()).await?;
-            let linear = Arc::new(McpLinear::new(connect().await?).await?);
-            let env = issuerelay_core::env::resolve().await.shared();
-            let engine = Engine::new(EngineDeps {
-                config_path: paths.config_file(),
-                store: Store::open(&paths.state_db())?,
-                linear,
-                readiness: Arc::new(SystemReadiness::new(Duration::from_secs(300), env.clone())),
-                job_runner: Arc::new(ProcessJobRunner::new(env)),
-                logs_dir: paths.logs_dir(),
-            })?;
-            serve(engine, server).await
+            let host = Host::start(
+                AppPaths::system()?,
+                Arc::new(SystemConnector),
+                HostParts::default(),
+            )
+            .await?;
+            match host.linear_setup() {
+                LinearSetup::Connected { .. } => {}
+                LinearSetup::NotConfigured => tracing::warn!(
+                    "not logged in to Linear: run `issuerelay-devhost login` (or `api-key`) and start the devhost again; checks fail until then"
+                ),
+                LinearSetup::InterfaceChanged { message }
+                | LinearSetup::ConnectFailed { message } => {
+                    tracing::warn!(%message, "not connected to Linear")
+                }
+            }
+            tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
+            shutdown_signal()
+                .await
+                .context("cannot listen for stop signals")?;
+            tracing::info!(
+                "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
+            );
+            // The first signal stops the runs and waits until their results are recorded. A second
+            // one returns at once: the runtime shuts down after `main` returns, and the guard of
+            // each run ends its process tree.
+            tokio::select! {
+                () = host.stop(StopMode::StopRuns) => Ok(()),
+                second = shutdown_signal() => {
+                    second.context("cannot listen for a second stop signal")?;
+                    tracing::warn!("second stop signal: ending the remaining runs now");
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -332,6 +306,8 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+
     use super::*;
 
     /// What `CleanLines` passes on when `text` is written to it in one go.

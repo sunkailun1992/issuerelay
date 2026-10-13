@@ -30,6 +30,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `FakeLinear` | `crates/core/tests/common/fake_linear.rs` | `LinearApi` 的内存版；`fail_next` 让下一次任意调用失败，`fail_calls` 让接下来若干次调用失败，`fail_issue_reads` 让某条需求的单条读取一直失败（直到 `clear_issue_failures`）；`set_teams`、`set_projects`（含项目所属团队）、`set_team_statuses` 设置团队、项目和按团队的状态，不设置时是默认的 `team-1` 与 `proj-1`；`set_viewer_name` 改查看者的名字（默认 `Jane Doe`） |
 | 内存钥匙串 | `crates/core/src/linear/auth.rs` 的测试模块 | 系统钥匙串（测试不碰真实钥匙串，每个测试用自己的服务名） |
 | `ScriptedRunner`、`FakeReadiness` | `crates/core/tests/common/engine_kit.rs` | 子进程运行与环境检查（`ScriptedRunner` 报告的进程号是虚构的，只进存储，不能让宿主去清扫） |
+| `FakeConnector`、`LingeringRunner`、`PanickingReadiness` | `crates/core/tests/host.rs` | 宿主的 Linear 连接（按次序给出已存凭据的结果，可让 `stored()` 等到放行）、被告知停止后仍不结束的运行、会在引擎循环里 panic 的环境检查 |
 | `Orphan` | `crates/core/tests/common/orphan.rs` | 宿主崩溃后留下的执行者（macOS：领着自己进程组的 `fake-agent`）；测试结束时没被回收就整组结束并回收 |
 | `FakeRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令的输出（计数调用）；`SystemRunner` 本身用 `fake-agent` 测超时 |
 
