@@ -6,6 +6,8 @@ use issuerelay_core::{ipc::client, paths::IpcEndpoint};
 use rmcp::{ServiceExt, handler::server::wrapper::Parameters, transport::stdio};
 use serde_json::{Value, json};
 
+use crate::format;
+
 type CallFuture = Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>;
 
 /// How the server reaches the engine host: it sends `(method, params)` and gets the result.
@@ -51,10 +53,18 @@ impl ControlServer {
     /// error the engine reported) is `error: <cause chain>` as the tool's error, which sets
     /// `isError` for the client; the cause stays in the text so the AI can tell a stopped app
     /// from a failed request.
+    ///
+    /// Both texts go through [`format::clean`] before they leave, as the CLI's output does:
+    /// control characters become spaces, zero-width and direction-changing characters are
+    /// dropped, and nothing is cut. serde_json escapes only U+0000..=U+001F inside strings, so
+    /// DEL and the C1 controls (U+009B is a one-byte CSI) would pass raw, and so would a
+    /// direction override; the failure text is no JSON at all, so an OSC 52 sequence in it would
+    /// reach a terminal-based client untouched. The result stays valid JSON: only characters
+    /// inside strings change.
     async fn forward(&self, method: &str, params: Value) -> Result<String, String> {
         match (self.transport)(method.to_string(), params).await {
-            Ok(value) => Ok(value.to_string()),
-            Err(e) => Err(format!("error: {e:#}")),
+            Ok(value) => Ok(format::clean(&value.to_string())),
+            Err(e) => Err(format::clean(&format!("error: {e:#}"))),
         }
     }
 }
@@ -78,17 +88,38 @@ impl ControlServer {
             .await
     }
 
-    #[rmcp::tool(description = "Pause monitoring; runs already in progress continue")]
+    #[rmcp::tool(
+        description = "Pause monitoring; runs already in progress continue",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
     async fn pause(&self) -> Result<String, String> {
         self.forward("pause", json!({})).await
     }
 
-    #[rmcp::tool(description = "Resume monitoring")]
+    #[rmcp::tool(
+        description = "Resume monitoring",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
     async fn resume(&self) -> Result<String, String> {
         self.forward("resume", json!({})).await
     }
 
-    #[rmcp::tool(description = "Check Linear for new issues now")]
+    #[rmcp::tool(
+        description = "Check Linear for new issues now",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
     async fn poll_now(&self) -> Result<String, String> {
         self.forward("poll_now", json!({})).await
     }

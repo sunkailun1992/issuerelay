@@ -2,25 +2,34 @@
 //! does the Linear workspace have the label and statuses IssueRelay relies on; are bindings usable.
 
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
+    future::Future,
+    io,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    task::JoinHandle,
+    time::Instant,
+};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::config::{Config, ExecutorKind, TriggerNames};
+use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
+use crate::env::{ExecEnv, SharedEnv, Sources};
 use crate::executor;
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
+use crate::text::{is_invisible, strip_ansi};
 use crate::trigger::same_name;
 
 /// What a finished check command printed and how it exited.
@@ -35,9 +44,22 @@ pub struct CmdOutput {
 /// Runs one check command. `SystemRunner` is the real implementation; tests use a fake.
 #[async_trait::async_trait]
 pub trait CommandRunner: Send + Sync {
-    /// `Err` means the command could not run to completion (it did not start, or timed out); a
-    /// command that ran and exited non-zero is an `Ok`.
+    /// `Err` means the command could not run to completion (it did not start, timed out, or what
+    /// it printed could not be read); a command that ran and exited non-zero is an `Ok`.
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput>;
+
+    /// `run` with an explicit time limit instead of the runner's own choice (the setup commands:
+    /// a login waits for the user in the browser). The default ignores `limit`; `SystemRunner`
+    /// honours it.
+    async fn run_limited(
+        &self,
+        program: &Path,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<CmdOutput> {
+        let _ = limit;
+        self.run(program, args).await
+    }
 }
 
 /// Default limit for `mcp list`. `claude mcp list` health-checks every configured MCP server,
@@ -48,6 +70,11 @@ const MCP_LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Default limit for every other check (`--version`, `auth status`, `login status`), which
 /// only read local state.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a check's pipes are still read once the command has exited and whatever it left in
+/// its process group (Windows: Job Object) has been ended. Only a process that escaped the group
+/// (Unix: `setsid`) can hold a pipe open past that; what was read by then is the output.
+const PIPE_DRAIN: Duration = Duration::from_secs(2);
 
 /// How long `SystemReadiness` keeps an executor's check that timed out, crashed or whose output
 /// could not be read, instead of the full cache TTL: soon enough to recover from a transient
@@ -63,29 +90,49 @@ const MAX_PROBLEM_TEXT: usize = 200;
 const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 
 /// Runs the real check commands, each under its own time limit: by default 60 s for
-/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command still
-/// running at its limit has its process killed and the call fails with `timed out after 20s`
-/// (the limit as `Duration` prints it); processes it started itself may outlive it. Every
-/// command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour
-/// what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip
-/// colour codes too).
+/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
+/// the limit from its caller instead, which the one-click setup commands do (a login waits up to
+/// five minutes for the browser). A command runs in the user's home directory, in a process
+/// group of its own (Windows: a Job Object, and without a console window, like the executors),
+/// with the shared environment (the PATH and proxy the executors will get). A check is done when
+/// the command's own process exits: whatever it left running in its group is ended then
+/// (`claude mcp list` starts stdio MCP servers of its own, which inherit its pipes), and the
+/// output is what the pipes delivered up to `PIPE_DRAIN` after that. A pipe that cannot be read
+/// fails the call: half of an `mcp list` must not pass for the whole answer. A command still
+/// running at its limit is killed together with everything it started and the call fails with
+/// `timed out after 20s` (the limit as `Duration` prints it). Every command also gets
+/// `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they print
+/// into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
+    env: SharedEnv,
 }
 
 impl Default for SystemRunner {
     fn default() -> Self {
-        Self::with_limits(CHECK_TIMEOUT, MCP_LIST_TIMEOUT)
+        Self::with_env(ExecEnv::inherit().shared())
     }
 }
 
 impl SystemRunner {
+    /// Runs check commands with `env` (the PATH and proxy the executors will get) and the default
+    /// limits.
+    pub fn with_env(env: SharedEnv) -> Self {
+        Self {
+            check_timeout: CHECK_TIMEOUT,
+            mcp_list_timeout: MCP_LIST_TIMEOUT,
+            env,
+        }
+    }
+
     /// For tests: `check` limits every command except `mcp list`, `mcp_list` limits that one.
+    /// The environment is the host's own.
     pub fn with_limits(check: Duration, mcp_list: Duration) -> Self {
         Self {
             check_timeout: check,
             mcp_list_timeout: mcp_list,
+            env: ExecEnv::inherit().shared(),
         }
     }
 
@@ -101,21 +148,140 @@ impl SystemRunner {
 #[async_trait::async_trait]
 impl CommandRunner for SystemRunner {
     async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput> {
-        let limit = self.limit_for(args);
-        let child = tokio::process::Command::new(program)
-            .args(args)
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output();
-        let output = tokio::time::timeout(limit, child)
-            .await
-            .map_err(|_| anyhow!("timed out after {limit:?}"))??;
+        self.run_limited(program, args, self.limit_for(args)).await
+    }
+
+    async fn run_limited(
+        &self,
+        program: &Path,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<CmdOutput> {
+        #[cfg(windows)]
+        use process_wrap::tokio::JobObject;
+        #[cfg(unix)]
+        use process_wrap::tokio::ProcessGroup;
+        use process_wrap::tokio::{CommandWrap, KillOnDrop};
+
+        let env = self
+            .env
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut command = CommandWrap::with_new(program, |c| {
+            c.args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            // `claude mcp list` answers per directory, and a host started from Finder starts in
+            // `/`. The home directory matches the user-level registration (`--scope user`).
+            if let Some(home) = dirs::home_dir() {
+                c.current_dir(home);
+            }
+            env.apply(c);
+            c.env("NO_COLOR", "1");
+        });
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        {
+            command.wrap(crate::runner::creation_flags());
+            command.wrap(JobObject);
+        }
+        command.wrap(KillOnDrop);
+        let mut child = command.spawn()?;
+        // Each pipe is read by a task of its own, and the check does not wait for the pipes to
+        // end: a process the command leaves behind inherits them and can keep them open.
+        let stop_reading = CancellationToken::new();
+        // The readers stop however this call ends, also when its future is dropped.
+        let _stop_reading_on_return = stop_reading.clone().drop_guard();
+        let stdout = read_pipe(child.stdout().take(), stop_reading.clone());
+        let stderr = read_pipe(child.stderr().take(), stop_reading.clone());
+        // Wait on the command's own process, not through the process-wrap wrapper: on Windows
+        // the wrapper's wait() also waits for every other process in the Job Object, so a
+        // leftover would turn a finished check into a timeout.
+        // SAFETY: only wait() is called on the native child, so no invariant of a wrapper in the
+        // chain is bypassed; killing the rest of the tree still goes through the wrapper below.
+        let exited = match unsafe { child.try_inner_child_mut() } {
+            Some(process) => tokio::time::timeout(limit, process.wait()).await,
+            None => {
+                let _ = child.start_kill();
+                bail!("process wrapper hid the native child");
+            }
+        };
+        // Whatever is left in the process group (Windows: the Job Object) is ended now, after an
+        // exit as after a timeout; that also closes the pipes those processes inherited. After an
+        // exit the command is already reaped, as in `runner`: on Unix its PID, the group's id, is
+        // not handed out again while a member of the group lives.
+        let _ = child.start_kill();
+        let Ok(status) = exited else {
+            bail!("timed out after {limit:?}");
+        };
+        let status = status?;
+        let drain_until = Instant::now() + PIPE_DRAIN;
+        let (stdout, stderr) = tokio::join!(
+            collected(stdout, &stop_reading, drain_until, "stdout"),
+            collected(stderr, &stop_reading, drain_until, "stderr"),
+        );
         Ok(CmdOutput {
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: status.code(),
+            stdout: stdout?,
+            stderr: stderr?,
         })
+    }
+}
+
+/// Reads one pipe of a check command, in a task of its own, until the pipe ends or `stop` fires.
+/// The task returns what it read, or the error that ended the reading; an interrupted read is
+/// tried again.
+fn read_pipe<R>(pipe: Option<R>, stop: CancellationToken) -> JoinHandle<io::Result<Vec<u8>>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return Ok(bytes);
+        };
+        let mut chunk = [0_u8; 8192];
+        loop {
+            tokio::select! {
+                // Cancel-safe: when `stop` wins, this read has taken nothing from the pipe.
+                read = pipe.read(&mut chunk) => match read {
+                    Ok(0) => return Ok(bytes),
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                },
+                // The drain deadline passed (`collected`), or the check is over: what was read
+                // so far stands.
+                _ = stop.cancelled() => return Ok(bytes),
+            }
+        }
+    })
+}
+
+/// What one pipe of a check delivered, as text: everything up to the end of the pipe when that
+/// comes by `deadline`, otherwise what was read by then (`stop` ends the reader). A read error,
+/// or a reader task that failed, is an error naming `stream`: half of an `mcp list` that exited
+/// 0 would otherwise read as "Linear is not configured" and be cached as a verdict.
+async fn collected(
+    mut reader: JoinHandle<io::Result<Vec<u8>>>,
+    stop: &CancellationToken,
+    deadline: Instant,
+    stream: &str,
+) -> Result<String> {
+    let joined = match tokio::time::timeout_at(deadline, &mut reader).await {
+        Ok(joined) => joined,
+        Err(_) => {
+            stop.cancel();
+            reader.await
+        }
+    };
+    match joined {
+        Ok(Ok(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Ok(Err(e)) => bail!("cannot read its {stream}: {e}"),
+        Err(e) => bail!("the reader of its {stream} failed: {e}"),
     }
 }
 
@@ -125,7 +291,8 @@ pub struct ExecutorReport {
     pub kind: ExecutorKind,
     /// Where the executable was found; `None` when it is not installed.
     pub program: Option<PathBuf>,
-    /// First line of `--version`, when that ran.
+    /// The first line of `--version` that shows anything, cleaned like the problems, when that
+    /// ran.
     pub version: Option<String>,
     pub logged_in: bool,
     /// Linear's MCP server is configured, authorized and connected in this executor.
@@ -156,10 +323,11 @@ pub async fn check_executor(
 }
 
 /// `check_executor`, plus whether every check gave a usable answer. A check gives none when its
-/// command could not run (it timed out or did not start), when the login check's output cannot
-/// be read, or when `mcp list` exited non-zero without showing any Linear line (it crashed). A
-/// negative answer that can be read ("not logged in", no Linear server) is usable.
-/// `SystemReadiness` retries an incomplete result sooner.
+/// command could not run (it timed out or did not start, or what it printed could not be read),
+/// when the login check's output cannot be understood, or when `mcp list` exited non-zero
+/// without showing any Linear line (it crashed). A negative answer that can be read ("not
+/// logged in", no Linear server) is usable. `SystemReadiness` retries an incomplete result
+/// sooner.
 async fn check_executor_detailed(
     kind: ExecutorKind,
     program: Option<PathBuf>,
@@ -191,11 +359,9 @@ async fn check_executor_detailed(
     );
     let mut complete = true;
     match version {
+        // Cleaned like the problems: the version reaches IPC, `--json` and the panel too.
         Ok(o) if o.code == Some(0) => {
-            report.version = strip_ansi(&o.stdout)
-                .lines()
-                .next()
-                .map(|l| l.trim().to_string())
+            report.version = Some(first_line(&o.stdout)).filter(|line| !line.is_empty())
         }
         Ok(o) => report.problems.push(with_detail(
             format!("`{name} --version` failed"),
@@ -412,57 +578,24 @@ fn exit_code_text(code: Option<i32>) -> String {
     code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
 }
 
-/// `text` without ANSI CSI sequences: `ESC [`, parameter bytes (`0`-`?`), intermediate bytes
-/// (space-`/`) and one final byte (`@`-`~`). A CLI may colour what it prints into a pipe when
-/// colour is forced (`FORCE_COLOR`), which would hide the words and URLs the parsers look for.
-/// Anything that is not a complete CSI sequence stays as it is.
-fn strip_ansi(text: &str) -> Cow<'_, str> {
-    if !text.contains('\u{1b}') {
-        return Cow::Borrowed(text);
-    }
-    let mut stripped = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("\u{1b}[") {
-        stripped.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let bytes = after.as_bytes();
-        let mut end = 0;
-        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
-            end += 1;
-        }
-        while end < bytes.len() && matches!(bytes[end], 0x20..=0x2f) {
-            end += 1;
-        }
-        if end < bytes.len() && matches!(bytes[end], 0x40..=0x7e) {
-            // Every byte up to and including the final one is ASCII, so this is a char boundary.
-            rest = &after[end + 1..];
-        } else {
-            stripped.push_str("\u{1b}[");
-            rest = after;
-        }
-    }
-    stripped.push_str(rest);
-    Cow::Owned(stripped)
-}
-
-/// Command output as a problem may show it: colour codes and other control characters
-/// dropped, at most `MAX_PROBLEM_TEXT` characters.
+/// Command output as a problem or the version may show it: colour codes, other control
+/// characters and the characters that reorder or hide text (`text::is_invisible`) dropped, at
+/// most `MAX_PROBLEM_TEXT` characters.
 fn clean(text: &str) -> String {
     let text: String = strip_ansi(text)
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible(*c))
         .collect();
     text.trim().chars().take(MAX_PROBLEM_TEXT).collect()
 }
 
-/// The first non-empty line of command output, `clean`ed; empty when there is none. Colour
-/// codes go first, so a line that holds only those does not count.
+/// The first line of command output that still shows something once `clean`ed, cleaned; empty
+/// when there is none. A line that holds only colour codes, control or invisible characters
+/// does not count. (No colour code spans two lines: a CSI sequence cannot hold a line break.)
 fn first_line(text: &str) -> String {
-    strip_ansi(text)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+    text.lines()
         .map(clean)
+        .find(|line| !line.is_empty())
         .unwrap_or_default()
 }
 
@@ -481,6 +614,9 @@ pub struct WorkspaceReport {
     pub label_ok: bool,
     /// Entries like `Demo: In Testing` (team name and missing status).
     pub missing_states: Vec<String>,
+    /// The names of the teams whose statuses were checked.
+    #[serde(default)]
+    pub teams_checked: Vec<String>,
 }
 
 impl WorkspaceReport {
@@ -490,17 +626,40 @@ impl WorkspaceReport {
     }
 }
 
-/// Looks for the trigger label and, in every team, the four statuses IssueRelay moves issues
-/// through. Names compare like everywhere else (`same_name`). Errors when Linear cannot be
-/// queried.
-pub async fn check_workspace(api: &dyn LinearApi, names: &TriggerNames) -> Result<WorkspaceReport> {
+/// Looks for the trigger label and, in the teams of the bound projects, the four statuses
+/// IssueRelay moves issues through. A team that never uses IssueRelay need not have them. Every
+/// team is looked at before any project is bound, and also when no bound project names a team
+/// that Linear lists (Linear sent `teams` as null or empty, no longer lists the project, or no
+/// longer lists its teams, as it leaves out archived ones): with nothing to narrow the check down
+/// to, no team at all would report a workspace with missing statuses as fine. Names compare like
+/// everywhere else (`same_name`). Errors when Linear cannot be queried.
+pub async fn check_workspace(
+    api: &dyn LinearApi,
+    names: &TriggerNames,
+    bindings: &[Binding],
+) -> Result<WorkspaceReport> {
     let label_ok = api
         .labels()
         .await?
         .iter()
         .any(|l| same_name(l, &names.label));
+    let mut teams = api.teams().await?;
+    if !bindings.is_empty() {
+        let bound: HashSet<&str> = bindings.iter().map(|b| b.project_id.as_str()).collect();
+        let team_ids: HashSet<String> = api
+            .projects()
+            .await?
+            .into_iter()
+            .filter(|p| bound.contains(p.id.as_str()))
+            .flat_map(|p| p.team_ids)
+            .collect();
+        // Narrowed only when that leaves a team to check.
+        if teams.iter().any(|team| team_ids.contains(&team.id)) {
+            teams.retain(|team| team_ids.contains(&team.id));
+        }
+    }
     let mut missing_states = Vec::new();
-    for team in api.teams().await? {
+    for team in &teams {
         let statuses = api.statuses(&team.id).await?;
         for wanted in [
             &names.todo,
@@ -516,6 +675,7 @@ pub async fn check_workspace(api: &dyn LinearApi, names: &TriggerNames) -> Resul
     Ok(WorkspaceReport {
         label_ok,
         missing_states,
+        teams_checked: teams.into_iter().map(|team| team.name).collect(),
     })
 }
 
@@ -558,6 +718,10 @@ pub struct DoctorReport {
     /// `None` when the workspace could not be checked.
     pub workspace: Option<WorkspaceReport>,
     pub bindings: Vec<BindingReport>,
+    /// The PATH and proxy executors get, with any user name and password in a proxy URL masked
+    /// (`ExecEnv::proxy_for_display`); `None` when the probe does not resolve one.
+    #[serde(default)]
+    pub env: Option<ExecEnv>,
 }
 
 /// Where the engine gets its executor reports. `SystemReadiness` is the real implementation;
@@ -569,6 +733,12 @@ pub trait ReadinessProbe: Send + Sync {
     /// recorded after the call was made. A `fresh` caller that waited behind a running check
     /// therefore uses that check's result instead of running the commands a second time.
     async fn executor_reports(&self, fresh: bool) -> Vec<ExecutorReport>;
+
+    /// The environment executors are found and run with, when this probe resolves one. The proxy
+    /// values are the real ones; `Engine::doctor` masks them for the report.
+    fn env(&self) -> Option<ExecEnv> {
+        None
+    }
 }
 
 /// One executor's last check as `SystemReadiness` keeps it.
@@ -582,6 +752,12 @@ struct CachedCheck {
     refresh: u64,
 }
 
+/// Finds where an executor is installed; `None` when it is not.
+type FindProgram = Arc<dyn Fn(ExecutorKind) -> Option<PathBuf> + Send + Sync>;
+
+/// Reads the sources of the executors' environment again (`env::read_sources`).
+type RefreshEnv = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Sources> + Send>> + Send + Sync>;
+
 /// Checks the real `claude` / `codex` on PATH and caches what it finds, one entry per executor.
 /// An entry whose checks all gave a usable answer is reused for `ttl`; one with a check that
 /// timed out, did not start, crashed or could not be read for at most `FAILED_CHECK_TTL`, so it is
@@ -590,7 +766,10 @@ struct CachedCheck {
 /// caller that arrives meanwhile waits and then uses what the refresh recorded.
 pub struct SystemReadiness {
     runner: Arc<dyn CommandRunner>,
-    resolve: fn(ExecutorKind) -> Option<PathBuf>,
+    resolve: FindProgram,
+    /// Shared with the job runner; executors are looked up on its PATH.
+    env: SharedEnv,
+    refresh_env: RefreshEnv,
     ttl: Duration,
     failed_ttl: Duration,
     /// How many refreshes have been recorded. A `fresh` caller reads it before it waits for the
@@ -602,26 +781,49 @@ pub struct SystemReadiness {
 
 impl SystemReadiness {
     /// `ttl` is how long `executor_reports(false)` reuses a check whose answers were all usable.
-    pub fn new(ttl: Duration) -> Self {
+    /// `env` is shared with the job runner: executors are looked up on its PATH, check commands
+    /// run with it, and every fresh check resolves it again first.
+    pub fn new(ttl: Duration, env: SharedEnv) -> Self {
+        Self::with_refresh(ttl, env, Arc::new(|| Box::pin(crate::env::read_sources())))
+    }
+
+    /// `new` with another way to read the sources of the environment again; the tests use it so
+    /// that no login shell runs. The check commands and the lookup of the executables are wired
+    /// as `new` does.
+    fn with_refresh(ttl: Duration, env: SharedEnv, refresh_env: RefreshEnv) -> Self {
+        let lookup = env.clone();
         Self::with_parts(
             ttl,
             FAILED_CHECK_TTL,
-            Arc::new(SystemRunner::default()),
-            |kind| executor::resolve_program(kind).ok(),
+            Arc::new(SystemRunner::with_env(env.clone())),
+            Arc::new(move |kind| {
+                let path = lookup
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .path
+                    .clone();
+                executor::resolve_program_in(kind, path.as_deref()).ok()
+            }),
+            env,
+            refresh_env,
         )
     }
 
-    /// The seams the unit tests use: both lifetimes, the command runner and where to find the
-    /// executables.
+    /// The seams the unit tests use: both lifetimes, the command runner, where to find the
+    /// executables, the shared environment and how to resolve it again.
     fn with_parts(
         ttl: Duration,
         failed_ttl: Duration,
         runner: Arc<dyn CommandRunner>,
-        resolve: fn(ExecutorKind) -> Option<PathBuf>,
+        resolve: FindProgram,
+        env: SharedEnv,
+        refresh_env: RefreshEnv,
     ) -> Self {
         Self {
             runner,
             resolve,
+            env,
+            refresh_env,
             ttl,
             failed_ttl,
             refreshes: AtomicU64::new(0),
@@ -663,6 +865,17 @@ impl ReadinessProbe for SystemReadiness {
         // The lock stays held while checking, so a caller that arrives meanwhile waits for the
         // refresh instead of starting a second round of commands.
         let mut cache = self.cache.lock().await;
+        // A fresh check looks at the PATH and proxy again too, before the executors are found:
+        // installing `claude` or changing the proxy shows up without restarting the host (Unix:
+        // the login shell is read again; Windows: the registry). A source that cannot be read
+        // this time keeps what it gave before (`env::combine`), so a slow rc file does not make
+        // a good environment worse.
+        if fresh {
+            let sources = (self.refresh_env)().await;
+            let mut env = self.env.write().unwrap_or_else(PoisonError::into_inner);
+            let resolved = crate::env::combine(&sources, Some(&env));
+            *env = resolved;
+        }
         let now = Instant::now();
         let due = |kind: ExecutorKind| match cache.get(&kind) {
             None => true,
@@ -696,6 +909,15 @@ impl ReadinessProbe for SystemReadiness {
             .iter()
             .map(|kind| cache[kind].report.clone())
             .collect()
+    }
+
+    fn env(&self) -> Option<ExecEnv> {
+        Some(
+            self.env
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
     }
 }
 
@@ -863,6 +1085,33 @@ mod tests {
         assert!(report.ready(), "{report:?}");
         assert_eq!(report.version.as_deref(), Some("2.1.285 (Claude Code)"));
         assert!(report.problems.is_empty());
+    }
+
+    // The version reaches IPC, `--json` and the panel like the problems do, so it is cleaned the
+    // same way: a control character or a direction override must not come through.
+    #[tokio::test]
+    async fn the_version_is_cleaned_like_the_problems() {
+        let replies = |version: &str| {
+            [
+                ("--version", out(0, version)),
+                ("auth status", out(0, r#"{"loggedIn": true}"#)),
+                ("mcp list", out(0, CLAUDE_OK)),
+            ]
+        };
+        let (report, _) = detailed(
+            ExecutorKind::Claude,
+            &replies("2.1.285\u{7}\u{202e} (Claude\u{200b} Code)\nsecond line\n"),
+        )
+        .await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285 (Claude Code)"));
+        // The first line that shows anything is the version; nothing at all is no version.
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\n\u{1b}[0m\n2.1.285\n")).await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285"));
+        // A line that shows nothing once cleaned is passed over too.
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\u{202e}\n2.1.285\n")).await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285"));
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\u{202e}\n")).await;
+        assert_eq!(report.version, None);
     }
 
     #[tokio::test]
@@ -1144,6 +1393,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_registration_hint_is_the_setup_command_for_every_directory() {
+        // The hint is the command a user types by hand, and the one `setup` runs: they must agree.
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let args = crate::setup::arguments(crate::setup::SetupAction::AddLinearMcp(kind), None)
+                .unwrap();
+            assert_eq!(
+                register_linear_command(kind),
+                format!("{} {}", kind.program_name(), args.join(" "))
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_status_in_a_problem_is_one_clean_short_line() {
         // A bell and a tab are control characters; the rest is far longer than the limit.
@@ -1170,38 +1432,12 @@ mod tests {
     }
 
     #[test]
-    fn ansi_csi_sequences_are_stripped_and_nothing_else() {
-        // Text without an escape is returned as it is, without a copy.
-        assert!(matches!(
-            strip_ansi("plain ✔ text"),
-            Cow::Borrowed("plain ✔ text")
-        ));
-        assert_eq!(strip_ansi("\u{1b}[36mhttps://x\u{1b}[39m"), "https://x");
-        // Several parameters, no parameter, other final bytes, a private marker, an intermediate
-        // byte, and multi-byte text right next to a sequence.
-        assert_eq!(strip_ansi("\u{1b}[1;31mred\u{1b}[0m"), "red");
-        assert_eq!(strip_ansi("a\u{1b}[mb"), "ab");
-        assert_eq!(strip_ansi("a\u{1b}[2Kb\u{1b}[?25lc\u{1b}[~d"), "abcd");
-        assert_eq!(strip_ansi("a\u{1b}[2 qb"), "ab");
-        // The final byte may be any of `@` to `~`, and nothing outside that range.
-        assert_eq!(strip_ansi("a\u{1b}[3@b"), "ab");
-        assert_eq!(strip_ansi("a\u{1b}[3\u{7f}b"), "a\u{1b}[3\u{7f}b");
-        assert_eq!(strip_ansi("\u{1b}[32m✔ Connected\u{1b}[39m"), "✔ Connected");
-        // Not a complete CSI sequence: left alone, and it does not hide a good one after it.
-        assert_eq!(strip_ansi("a\u{1b}[32"), "a\u{1b}[32");
-        assert_eq!(strip_ansi("a\u{1b}[ ✔"), "a\u{1b}[ ✔");
-        assert_eq!(strip_ansi("a\u{1b}[\u{7}b"), "a\u{1b}[\u{7}b");
-        assert_eq!(strip_ansi("\u{1b}[ \u{1b}[32mok\u{1b}[0m"), "\u{1b}[ ok");
-        // Escapes that are not CSI are not touched here.
-        assert_eq!(strip_ansi("a\u{1b}]8;;x\u{7}b"), "a\u{1b}]8;;x\u{7}b");
-        assert_eq!(strip_ansi("a\u{1b}Mb"), "a\u{1b}Mb");
-    }
-
-    #[test]
     fn command_output_in_problems_is_trimmed_clean_and_limited() {
         // A colour code goes away whole; any other control character is dropped on its own.
         assert_eq!(clean("  a\u{1b}[31mb\tc\r  "), "abc");
         assert_eq!(clean("a\u{1b}xb"), "axb");
+        // So are the characters that reorder or hide text (`text::is_invisible`).
+        assert_eq!(clean("a\u{202e}b\u{200b}c\u{2066}d"), "abcd");
         assert_eq!(clean(&"x".repeat(300)).chars().count(), 200);
         // The limit counts characters, not bytes.
         assert_eq!(clean(&"—".repeat(300)).chars().count(), 200);
@@ -1213,6 +1449,9 @@ mod tests {
             first_line("\u{1b}[0m\n\u{1b}[31mboom\u{1b}[0m\nsecond"),
             "boom"
         );
+        // So is a line of control or invisible characters only.
+        assert_eq!(first_line("\u{7}\t\nboom"), "boom");
+        assert_eq!(first_line("\u{202e}\u{200b}\n2.1.285"), "2.1.285");
     }
 
     #[tokio::test]
@@ -1802,6 +2041,118 @@ mod tests {
         }
     }
 
+    // The far end stays open, as when a process that escaped the check's process group holds the
+    // pipe: at the drain deadline the reader stops and what it read is kept.
+    #[tokio::test]
+    async fn a_pipe_still_open_at_the_drain_deadline_gives_what_was_read_by_then() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut far_end, near_end) = tokio::io::duplex(64);
+        far_end.write_all(b"partial").await.unwrap();
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(near_end), stop.clone());
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let text = collected(reader, &stop, deadline, "stdout").await.unwrap();
+        assert_eq!(text, "partial");
+        assert!(stop.is_cancelled(), "the reader was not told to stop");
+        drop(far_end);
+    }
+
+    #[tokio::test]
+    async fn a_pipe_that_ends_before_the_drain_deadline_is_read_to_its_end() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut far_end, near_end) = tokio::io::duplex(64);
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(near_end), stop.clone());
+        // More than the duplex buffer holds: the reader has to keep reading while it is written.
+        let text = "line\n".repeat(100);
+        far_end.write_all(text.as_bytes()).await.unwrap();
+        drop(far_end);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert_eq!(
+            collected(reader, &stop, deadline, "stdout").await.unwrap(),
+            text
+        );
+        assert!(!stop.is_cancelled());
+        let absent = read_pipe(None::<tokio::io::DuplexStream>, stop.clone());
+        assert!(absent.await.unwrap().unwrap().is_empty());
+    }
+
+    /// A pipe that hands out one scripted step per read: bytes or an error, and the end of input
+    /// once the steps run out.
+    struct ScriptedPipe(std::collections::VecDeque<io::Result<Vec<u8>>>);
+
+    impl AsyncRead for ScriptedPipe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(match self.0.pop_front() {
+                Some(Ok(bytes)) => {
+                    buf.put_slice(&bytes);
+                    Ok(())
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(()),
+            })
+        }
+    }
+
+    // Half of an `mcp list` that exited 0 would read as "Linear is not configured" and be cached
+    // for the full TTL; as an error the check counts as incomplete and is retried soon.
+    #[tokio::test]
+    async fn a_pipe_that_fails_half_way_is_an_error_not_the_end_of_the_output() {
+        let pipe = ScriptedPipe(
+            [
+                Ok(b"half of the list".to_vec()),
+                Err(io::Error::other("boom")),
+            ]
+            .into(),
+        );
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(pipe), stop.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let err = collected(reader, &stop, deadline, "stdout")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "cannot read its stdout: boom");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_read_is_tried_again() {
+        let pipe = ScriptedPipe(
+            [
+                Ok(b"one ".to_vec()),
+                Err(io::ErrorKind::Interrupted.into()),
+                Ok(b"two".to_vec()),
+            ]
+            .into(),
+        );
+        let stop = CancellationToken::new();
+        let reader = read_pipe(Some(pipe), stop.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let text = collected(reader, &stop, deadline, "stdout").await.unwrap();
+        assert_eq!(text, "one two");
+    }
+
+    #[tokio::test]
+    async fn a_reader_task_that_failed_is_an_error() {
+        let reader: JoinHandle<io::Result<Vec<u8>>> = tokio::spawn(std::future::pending());
+        reader.abort();
+        let stop = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let err = collected(reader, &stop, deadline, "stderr")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("the reader of its stderr failed: "),
+            "{err}"
+        );
+    }
+
     #[test]
     fn the_default_limits_are_20_and_60_seconds() {
         let runner = SystemRunner::default();
@@ -1818,9 +2169,30 @@ mod tests {
 
     /// A `SystemReadiness` over `runner` that finds an executable named like the executor.
     fn readiness<R: CommandRunner + 'static>(runner: &Arc<R>, ttl: Duration) -> SystemReadiness {
-        SystemReadiness::with_parts(ttl, FAILED_CHECK_TTL, runner.clone(), |kind| {
-            Some(PathBuf::from(kind.program_name()))
-        })
+        SystemReadiness::with_parts(
+            ttl,
+            FAILED_CHECK_TTL,
+            runner.clone(),
+            Arc::new(|kind| Some(PathBuf::from(kind.program_name()))),
+            ExecEnv::inherit().shared(),
+            inherited(),
+        )
+    }
+
+    /// What a read of the environment's sources finds when the login shell gives `shell` and
+    /// nothing else is set.
+    fn read_with_shell(shell: Result<crate::env::Vars, String>) -> Sources {
+        Sources {
+            host: crate::env::Vars::new(),
+            shell,
+            system_proxy: Ok(Vec::new()),
+            system_path: Ok((None, None)),
+        }
+    }
+
+    /// A `refresh_env` that finds nothing beyond the host's own environment.
+    fn inherited() -> RefreshEnv {
+        Arc::new(|| Box::pin(async { read_with_shell(Ok(crate::env::Vars::new())) }))
     }
 
     fn kinds(reports: &[ExecutorReport]) -> Vec<ExecutorKind> {
@@ -1829,7 +2201,7 @@ mod tests {
 
     #[test]
     fn the_real_probe_keeps_the_ttl_and_retries_failed_checks_after_a_minute() {
-        let probe = SystemReadiness::new(TTL);
+        let probe = SystemReadiness::new(TTL, ExecEnv::inherit().shared());
         assert_eq!(probe.ttl, TTL);
         assert_eq!(probe.failed_ttl, Duration::from_secs(60));
     }
@@ -2007,12 +2379,220 @@ mod tests {
         assert!(reports.iter().all(|r| r.ready()), "{reports:?}");
     }
 
+    #[tokio::test]
+    async fn a_fresh_check_resolves_the_environment_and_reports_it() {
+        use crate::env::EnvSource;
+
+        let env = ExecEnv::inherit().shared();
+        let readiness = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            Arc::new(runner(&[])),
+            Arc::new(|_| None),
+            env.clone(),
+            Arc::new(|| {
+                Box::pin(async {
+                    read_with_shell(Ok([("PATH".to_string(), "/opt/demo/bin".to_string())]
+                        .into_iter()
+                        .collect()))
+                })
+            }),
+        );
+        assert_eq!(
+            readiness.env().unwrap().path,
+            None,
+            "nothing resolved before the first fresh check"
+        );
+        readiness.executor_reports(false).await;
+        assert_eq!(
+            readiness.env().unwrap().path,
+            None,
+            "a cached check does not re-resolve"
+        );
+        readiness.executor_reports(true).await;
+        assert_eq!(
+            readiness.env().unwrap().path.as_deref(),
+            Some("/opt/demo/bin")
+        );
+        assert_eq!(readiness.env().unwrap().path_source, EnvSource::LoginShell);
+        assert_eq!(
+            env.read().unwrap().path.as_deref(),
+            Some("/opt/demo/bin"),
+            "the job runner sees it too"
+        );
+    }
+
+    // One slow rc file during a re-check must not swap a good login-shell PATH for the host's
+    // own (launchd's minimal one for an app started from Finder): the executors would read as not
+    // installed, and that complete answer would be cached for the whole TTL.
+    #[tokio::test]
+    async fn a_source_that_fails_on_a_later_check_keeps_what_it_gave_before() {
+        use crate::env::EnvSource;
+        use std::sync::atomic::AtomicUsize;
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let readiness = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            Arc::new(runner(&[])),
+            Arc::new(|_| None),
+            ExecEnv::inherit().shared(),
+            Arc::new(move || {
+                let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+                Box::pin(async move {
+                    read_with_shell(if first {
+                        Ok([
+                            ("PATH".to_string(), "/opt/demo/bin".to_string()),
+                            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
+                        ]
+                        .into_iter()
+                        .collect())
+                    } else {
+                        Err("/bin/zsh did not finish within 10s".to_string())
+                    })
+                })
+            }),
+        );
+        readiness.executor_reports(true).await;
+        let first = readiness.env().unwrap();
+        assert_eq!(first.path.as_deref(), Some("/opt/demo/bin"));
+        assert!(first.problems.is_empty(), "{:?}", first.problems);
+
+        readiness.executor_reports(true).await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "each fresh check reads again"
+        );
+        let second = readiness.env().unwrap();
+        assert_eq!(second.path, first.path, "the earlier PATH is kept");
+        assert_eq!(second.path_source, EnvSource::LoginShell);
+        assert_eq!(second.proxy, first.proxy, "and the earlier proxy");
+        assert!(
+            second
+                .problems
+                .iter()
+                .any(|p| p.contains("login shell") && p.contains("did not finish within 10s")),
+            "the failure is still reported: {:?}",
+            second.problems
+        );
+    }
+
+    #[tokio::test]
+    async fn executors_are_looked_up_on_the_shared_environments_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        };
+        let program = dir.path().join(name);
+        std::fs::write(&program, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = ExecEnv::inherit().shared();
+        let probe = SystemReadiness::new(TTL, env.clone());
+        // The path is set after the probe exists and replaces the host's PATH, so a `claude` or
+        // `codex` installed on the machine running the test cannot be the one that is found.
+        env.write().unwrap().path = Some(dir.path().to_string_lossy().into_owned());
+        let reports = probe.executor_reports(false).await;
+        assert_eq!(reports[0].program, Some(program));
+        assert_eq!(reports[1].program, None);
+    }
+
+    // H1 depends on this wiring: `claude` is a node launcher that needs the resolved PATH, and it
+    // reaches Linear only with the resolved proxy. A fresh check resolves the environment first;
+    // `with_refresh` replaces only that step, so no login shell runs and everything else is wired
+    // as in `new`. Unix only because the fake `claude` is a shell script; the same hand-over of the
+    // shared environment to a `.cmd` check command is tested in tests/doctor.rs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fresh_check_runs_the_executor_found_on_the_resolved_path_with_the_resolved_proxy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        // `--version` shows what reached the command; the other commands print nothing.
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"fake-claude $HTTPS_PROXY\"; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // What the login shell gives: the folder with the fake `claude` and a proxy. The host's
+        // own variables are left out, so a proxy the machine running the test sets cannot win.
+        let shell: crate::env::Vars = [
+            (
+                "PATH".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+            ),
+            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let probe = SystemReadiness::with_refresh(
+            TTL,
+            ExecEnv::inherit().shared(),
+            Arc::new(move || {
+                let shell = shell.clone();
+                Box::pin(async move { read_with_shell(Ok(shell)) })
+            }),
+        );
+        // Executing a script right after writing it can fail with `ETXTBSY` when another test
+        // thread forks in between (`tests/doctor.rs::run_script` does the same): try again.
+        let mut reports = Vec::new();
+        for _ in 0..5 {
+            reports = probe.executor_reports(true).await;
+            if reports[0].version.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            reports[0].version.as_deref(),
+            Some("fake-claude http://127.0.0.1:9"),
+            "{reports:?}"
+        );
+        assert_eq!(reports[0].program, Some(claude));
+        assert_eq!(reports[1].program, None, "{reports:?}");
+    }
+
+    #[test]
+    fn a_doctor_report_does_not_print_proxy_credentials_in_its_debug_output() {
+        let report = DoctorReport {
+            viewer: None,
+            linear_error: None,
+            executors: Vec::new(),
+            workspace: None,
+            bindings: Vec::new(),
+            env: Some(ExecEnv {
+                proxy: vec![(
+                    "HTTPS_PROXY".into(),
+                    "http://jane:s3cret@proxy.example:8080".into(),
+                )],
+                ..ExecEnv::inherit()
+            }),
+        };
+        let text = format!("{report:?}");
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(text.contains("http://***@proxy.example:8080"), "{text}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_executor_that_is_not_installed_is_reported_without_running_commands() {
         let fake = Arc::new(both_ready());
-        let probe = SystemReadiness::with_parts(TTL, FAILED_CHECK_TTL, fake.clone(), |kind| {
-            (kind == ExecutorKind::Claude).then(|| PathBuf::from("claude"))
-        });
+        let probe = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            fake.clone(),
+            Arc::new(|kind| (kind == ExecutorKind::Claude).then(|| PathBuf::from("claude"))),
+            ExecEnv::inherit().shared(),
+            inherited(),
+        );
         let reports = probe.executor_reports(false).await;
         assert_eq!(kinds(&reports), [ExecutorKind::Claude, ExecutorKind::Codex]);
         assert!(reports[0].ready());

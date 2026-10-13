@@ -10,7 +10,8 @@ use rmcp::{
 use serde_json::{Value, json};
 
 use super::{
-    ISSUE_FIELDS, LinearApi, Project, REQUIRED_ARGUMENTS, REQUIRED_TOOLS, Team, Viewer, parse,
+    ISSUE_FIELDS, LinearApi, PROJECT_FIELDS, Project, REQUIRED_ARGUMENTS, REQUIRED_FIELDS,
+    REQUIRED_TOOLS, Team, Viewer, parse,
 };
 use crate::model::Issue;
 
@@ -31,7 +32,8 @@ pub enum LinearError {
     /// Linear no longer offers tools IssueRelay calls; holds their names.
     #[error("Linear MCP is missing required tools: {0:?}")]
     MissingTools(Vec<String>),
-    /// Linear's tools no longer accept arguments IssueRelay sends; holds `tool.argument` pairs.
+    /// Linear's tools no longer accept arguments IssueRelay sends; holds `tool.argument` pairs,
+    /// and `tool.fields: value` for each `fields` value a tool no longer offers.
     #[error("Linear MCP no longer accepts arguments IssueRelay sends: {0:?}")]
     MissingArguments(Vec<String>),
     /// The tool ran and answered with an error (`isError`); `message` is Linear's text.
@@ -58,9 +60,12 @@ fn is_not_found(error: &anyhow::Error) -> bool {
     }
 }
 
-/// The `tool.argument` pairs of `REQUIRED_ARGUMENTS` that the offered tools' input schemas do
-/// not list under `properties`, in `REQUIRED_ARGUMENTS` order. A tool that is not offered at
-/// all has every one of its arguments reported.
+/// What the offered tools' input schemas lack of what IssueRelay sends: first the `tool.argument`
+/// pairs of `REQUIRED_ARGUMENTS` that are not listed under `properties`, in that order, then a
+/// `tool.fields: value` for each value of `REQUIRED_FIELDS` that is not in the tool's `fields`
+/// enum (`properties.fields.items.enum`). A tool that is not offered at all has every one of its
+/// arguments reported, and no `fields` values: `MissingTools` already names the tool. A tool whose
+/// `fields` argument or enum is gone has every value reported, as nothing says it is offered.
 fn missing_arguments(tools: &[Tool]) -> Vec<String> {
     let mut missing = Vec::new();
     for (tool, arguments) in REQUIRED_ARGUMENTS {
@@ -75,13 +80,31 @@ fn missing_arguments(tools: &[Tool]) -> Vec<String> {
             }
         }
     }
+    for (tool, fields) in REQUIRED_FIELDS {
+        let Some(offered) = tools.iter().find(|t| t.name == *tool) else {
+            continue;
+        };
+        let allowed = offered
+            .input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("fields"))
+            .and_then(|argument| argument.get("items"))
+            .and_then(|items| items.get("enum"))
+            .and_then(Value::as_array);
+        for field in *fields {
+            if !allowed.is_some_and(|values| values.iter().any(|v| v.as_str() == Some(*field))) {
+                missing.push(format!("{tool}.fields: {field}"));
+            }
+        }
+    }
     missing
 }
 
 impl McpLinear {
-    /// Checks with `tools/list` that Linear still offers the tools IssueRelay calls and accepts
-    /// the arguments it sends them (design section 7). Fails with `LinearError::MissingTools`,
-    /// then `LinearError::MissingArguments`. The listing is bounded by `CALL_TIMEOUT`.
+    /// Checks with `tools/list` that Linear still offers the tools IssueRelay calls, accepts
+    /// the arguments it sends them and offers the `fields` values it asks for (design section
+    /// 7). Fails with `LinearError::MissingTools`, then `LinearError::MissingArguments`. The
+    /// listing is bounded by `CALL_TIMEOUT`.
     pub async fn new(client: LinearClient) -> Result<Self> {
         let tools = tokio::time::timeout(CALL_TIMEOUT, client.list_all_tools())
             .await
@@ -162,9 +185,10 @@ impl McpLinear {
         let mut last: Option<String> = None;
         for _ in 0..MAX_PAGES {
             let page = parse_page(&self.call(tool, args.clone()).await?)?;
-            let empty = page.items.is_empty();
             items.extend(page.items);
-            match follow(empty, page.next_cursor, last.as_deref()) {
+            match follow(page.next_cursor, last.as_deref())
+                .with_context(|| format!("reading `{tool}`"))?
+            {
                 Some(cursor) => {
                     args["cursor"] = json!(cursor);
                     last = Some(cursor);
@@ -176,10 +200,16 @@ impl McpLinear {
     }
 }
 
-/// The cursor to request next. M0 never observed the last page of `list_issues`, so besides a
-/// missing cursor, an empty page or a cursor that did not advance also ends the walk.
-fn follow(page_was_empty: bool, next: Option<String>, last: Option<&str>) -> Option<String> {
-    next.filter(|cursor| !page_was_empty && Some(cursor.as_str()) != last)
+/// The cursor to request next, or `None` after the last page (Linear's last page has
+/// `hasNextPage: false` and no cursor; M1 acceptance 5b.5). A page may be empty and still have
+/// a next one. A cursor that repeats the one just used would loop forever, so it is an error.
+fn follow(next: Option<String>, last: Option<&str>) -> Result<Option<String>> {
+    match next {
+        Some(cursor) if Some(cursor.as_str()) == last => {
+            Err(anyhow!("Linear repeated the page cursor {cursor:?}"))
+        }
+        next => Ok(next),
+    }
 }
 
 #[async_trait::async_trait]
@@ -195,6 +225,13 @@ impl LinearApi for McpLinear {
         let args = json!({"assignee": "me", "label": label, "state": state, "limit": 50, "orderBy": "createdAt", "fields": ISSUE_FIELDS});
         self.all_pages("list_issues", args, parse::parse_issue_page)
             .await
+    }
+
+    async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>> {
+        // One page, the most recently updated first: the panel lists recent work, not every
+        // issue that ever carried the label.
+        let args = json!({"assignee": "me", "label": label, "limit": 50, "orderBy": "updatedAt", "fields": ISSUE_FIELDS});
+        Ok(parse::parse_issue_page(&self.call("list_issues", args).await?)?.items)
     }
 
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
@@ -216,10 +253,11 @@ impl LinearApi for McpLinear {
 
     async fn projects(&self) -> Result<Vec<Project>> {
         // 50 is the most `list_projects` accepts (M0 tools/list; the other lists allow 250).
-        // `fields` names `uuid` explicitly: issues refer to a project by it.
+        // `fields` names `uuid` explicitly (issues refer to a project by it) and `teams` (the
+        // workspace check looks only at the teams of bound projects).
         self.all_pages(
             "list_projects",
-            json!({"limit": 50, "fields": ["id", "uuid", "name"]}),
+            json!({"limit": 50, "fields": PROJECT_FIELDS}),
             parse::parse_projects,
         )
         .await
@@ -280,14 +318,19 @@ mod tests {
     }
 
     #[test]
-    fn paging_stops_on_empty_pages_and_repeated_cursors() {
+    fn paging_follows_every_new_cursor_and_rejects_a_repeated_one() {
         assert_eq!(
-            follow(false, Some("c2".into()), None).as_deref(),
+            follow(Some("c2".into()), None).unwrap().as_deref(),
             Some("c2")
         );
-        assert_eq!(follow(false, None, Some("c1")), None);
-        assert_eq!(follow(true, Some("c3".into()), Some("c2")), None);
-        assert_eq!(follow(false, Some("c2".into()), Some("c2")), None);
+        assert_eq!(follow(None, Some("c1")).unwrap(), None);
+        assert_eq!(
+            follow(Some("c3".into()), Some("c2")).unwrap().as_deref(),
+            Some("c3"),
+            "an empty page with a new cursor is followed: later pages may still hold issues"
+        );
+        let error = follow(Some("c2".into()), Some("c2")).unwrap_err();
+        assert!(error.to_string().contains("repeated"), "{error}");
     }
 
     #[test]
@@ -327,10 +370,10 @@ mod tests {
         let properties = list_issues["inputSchema"]["properties"]
             .as_object_mut()
             .unwrap();
-        assert!(properties.remove("fields").is_some());
+        assert!(properties.remove("orderBy").is_some());
         assert_eq!(
             missing_arguments(&read_as_tools(tools)),
-            ["list_issues.fields"]
+            ["list_issues.orderBy"]
         );
     }
 
@@ -356,10 +399,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("properties");
-        assert_eq!(
-            missing_arguments(&read_as_tools(tools)),
-            ["get_issue.id", "get_issue.fields"]
-        );
+        // No argument is accepted, so no `fields` value is either.
+        let mut expected = vec!["get_issue.id".to_string(), "get_issue.fields".to_string()];
+        expected.extend(every_field_of("get_issue"));
+        assert_eq!(missing_arguments(&read_as_tools(tools)), expected);
     }
 
     #[test]
@@ -367,6 +410,140 @@ mod tests {
         let mut tools = m0_tools_json();
         tools.retain(|t| t["name"] != "get_user");
         assert_eq!(missing_arguments(&read_as_tools(tools)), ["get_user.query"]);
+    }
+
+    /// What `missing_arguments` says when a tool offers none of the `fields` values it must.
+    fn every_field_of(tool: &str) -> Vec<String> {
+        let (_, fields) = REQUIRED_FIELDS
+            .iter()
+            .find(|(name, _)| *name == tool)
+            .expect("a tool with required fields");
+        fields
+            .iter()
+            .map(|field| format!("{tool}.fields: {field}"))
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_fields_value_fails_the_connect_check() {
+        let mut tools = m0_tools_json();
+        let projects = tools
+            .iter_mut()
+            .find(|t| t["name"] == "list_projects")
+            .unwrap();
+        let fields = projects["inputSchema"]["properties"]["fields"]["items"]["enum"]
+            .as_array_mut()
+            .unwrap();
+        fields.retain(|f| f != "teams");
+        let missing = missing_arguments(&read_as_tools(tools));
+        assert_eq!(missing, ["list_projects.fields: teams"]);
+        assert!(
+            missing_arguments(&m0_tools()).is_empty(),
+            "the real M0 list has every field"
+        );
+    }
+
+    #[test]
+    fn missing_fields_values_follow_the_argument_names_in_list_order() {
+        let mut tools = m0_tools_json();
+        for (tool, value) in [
+            ("list_projects", "teams"),
+            ("list_issues", "uuid"),
+            ("get_issue", "projectId"),
+            ("get_issue", "url"),
+        ] {
+            let t = tools.iter_mut().find(|t| t["name"] == tool).unwrap();
+            let offered = t["inputSchema"]["properties"]["fields"]["items"]["enum"]
+                .as_array_mut()
+                .unwrap();
+            offered.retain(|f| f != value);
+        }
+        let t = tools
+            .iter_mut()
+            .find(|t| t["name"] == "save_issue")
+            .unwrap();
+        let properties = t["inputSchema"]["properties"].as_object_mut().unwrap();
+        assert!(properties.remove("state").is_some());
+        assert_eq!(
+            missing_arguments(&read_as_tools(tools)),
+            [
+                "save_issue.state",
+                "list_issues.fields: uuid",
+                "get_issue.fields: url",
+                "get_issue.fields: projectId",
+                "list_projects.fields: teams",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_that_offers_no_fields_list_has_every_field_reported() {
+        // The `fields` argument is gone altogether: the argument is reported, and with it every
+        // value, because nothing is left to ask for them with.
+        let mut tools = m0_tools_json();
+        let t = tools
+            .iter_mut()
+            .find(|t| t["name"] == "list_projects")
+            .unwrap();
+        let properties = t["inputSchema"]["properties"].as_object_mut().unwrap();
+        assert!(properties.remove("fields").is_some());
+        let mut expected = vec!["list_projects.fields".to_string()];
+        expected.extend(every_field_of("list_projects"));
+        assert_eq!(missing_arguments(&read_as_tools(tools)), expected);
+        // The argument is there but names no values (free text, or an enum Linear dropped):
+        // nothing says the fields are offered, so none is taken for granted.
+        let mut tools = m0_tools_json();
+        let t = tools.iter_mut().find(|t| t["name"] == "get_issue").unwrap();
+        let items = t["inputSchema"]["properties"]["fields"]["items"]
+            .as_object_mut()
+            .unwrap();
+        assert!(items.remove("enum").is_some());
+        assert_eq!(
+            missing_arguments(&read_as_tools(tools)),
+            every_field_of("get_issue")
+        );
+    }
+
+    #[test]
+    fn a_tool_that_is_gone_is_reported_by_its_arguments_only() {
+        // `MissingTools` names the tool; its fields are not listed value by value as well.
+        let mut tools = m0_tools_json();
+        tools.retain(|t| t["name"] != "list_projects");
+        assert_eq!(
+            missing_arguments(&read_as_tools(tools)),
+            [
+                "list_projects.limit",
+                "list_projects.fields",
+                "list_projects.cursor"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_tool_sent_fields_is_checked_for_them() {
+        for (tool, fields) in REQUIRED_FIELDS {
+            assert!(
+                REQUIRED_TOOLS.contains(tool),
+                "{tool} is not a required tool"
+            );
+            assert!(!fields.is_empty(), "{tool} lists no fields");
+            let (_, arguments) = REQUIRED_ARGUMENTS
+                .iter()
+                .find(|(name, _)| name == tool)
+                .unwrap_or_else(|| panic!("{tool} has no entry in REQUIRED_ARGUMENTS"));
+            assert!(
+                arguments.contains(&"fields"),
+                "{tool} has required fields but `fields` is not one of its arguments"
+            );
+        }
+        for (tool, arguments) in REQUIRED_ARGUMENTS {
+            if arguments.contains(&"fields") {
+                assert!(
+                    REQUIRED_FIELDS.iter().any(|(name, _)| name == tool),
+                    "{tool} is sent `fields` but their values are not checked at connect time"
+                );
+            }
+        }
     }
 
     #[test]

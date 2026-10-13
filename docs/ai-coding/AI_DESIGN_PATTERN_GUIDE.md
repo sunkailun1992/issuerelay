@@ -22,11 +22,11 @@
 - 全局可变单例、`static mut`。
 - 在纯逻辑层读文件、看系统时间、发网络请求。
 - 持有 `std::sync::Mutex` 守卫时 `.await`；在 `match` / `for` 的表达式里加锁，又在分支里再加锁（会死锁）。先把查询结果绑定到局部变量。
-- 把外部文本（需求内容、路径、用户输入）拼进子进程参数或 shell 命令。
+- 把外部文本（需求内容、路径、用户输入）拼进子进程参数或 shell 命令。仅有两处例外：① 一键配置命令（`setup.rs`）唯一的可变参数是 IssueRelay 自身命令行程序的绝对路径，放在 `--` 之后；② 读取执行者环境（`env.rs`）时运行用户的登录 shell（`$SHELL -l -i -c` 加一段固定脚本，不含任何外部文本），它在自己的会话里运行，读到结束标记或满 10 秒即被结束。
 - 吞掉错误：`let _ =` 只用于清理路径（结束进程、删除临时文件、写日志）。
 
 ## 4. 扩展指引
 
 - **新增执行者**：`ExecutorKind` 加变体 → `executor::build` 加参数 → `outcome::observe` 识别最终消息 → `doctor::check_executor` 加检查 → 各自的测试 → 实机验收。
 - **新增 IPC 方法**：`METHODS` → `server` 的分发 → 调用方（命令行 / MCP）→ 测试。
-- **新增 Linear 工具**：先用 M0 探针取真实样本（包括 `tools/list` 的参数表）→ `REQUIRED_TOOLS` 与 `REQUIRED_ARGUMENTS` → `parse.rs`（读不懂就报错，不跳过）→ `McpLinear` → 更新 `crates/core/tests/fixtures/linear-tools.json`，假服务端按它校验每次调用 → 测试。
+- **新增 Linear 工具**：先用 M0 探针取真实样本（包括 `tools/list` 的参数表）→ `REQUIRED_TOOLS` 与 `REQUIRED_ARGUMENTS`（用到 `fields` 的再加 `REQUIRED_FIELDS`）→ `parse.rs`（读不懂就报错，不跳过）→ `McpLinear` → 更新 `crates/core/tests/fixtures/linear-tools.json`，假服务端按它校验每次调用 → 测试。

@@ -21,6 +21,10 @@ pub struct Viewer {
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// The ids of the teams the project belongs to; the workspace check looks only at these
+    /// teams once projects are bound.
+    #[serde(default)]
+    pub team_ids: Vec<String>,
 }
 
 /// A Linear team. `id` is what `LinearApi::statuses` takes.
@@ -80,6 +84,17 @@ pub const ISSUE_FIELDS: [&str; 13] = [
     "updatedAt",
 ];
 
+/// The `fields` requested from `list_projects`.
+pub const PROJECT_FIELDS: [&str; 4] = ["id", "uuid", "name", "teams"];
+
+/// Every `fields` value this module requests, per tool. The connect check finds each in the
+/// tool's `fields` enum, so a field Linear stopped offering fails at connect time.
+pub const REQUIRED_FIELDS: &[(&str, &[&str])] = &[
+    ("list_issues", &ISSUE_FIELDS),
+    ("get_issue", &ISSUE_FIELDS),
+    ("list_projects", &PROJECT_FIELDS),
+];
+
 /// What the engine needs from Linear. `McpLinear` is the real implementation; tests use the
 /// in-memory `FakeLinear`. A reply that cannot be read is always an error, never an empty
 /// result, so the engine cannot mistake a failure for "no candidates" or "the issue is gone".
@@ -90,12 +105,15 @@ pub trait LinearApi: Send + Sync {
     /// Issues assigned to the authorized user with `label` in status `state`, all pages.
     /// Fails if any issue cannot be read, so a poll never silently leaves one out.
     async fn candidate_issues(&self, label: &str, state: &str) -> Result<Vec<Issue>>;
+    /// The 50 most recently updated issues assigned to the authorized user with `label`, in any
+    /// status: the panel's issue list. Fails if any issue cannot be read.
+    async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>>;
     /// One issue by identifier or uuid. `None` only when Linear reports that the issue does
     /// not exist; a reply that cannot be read is an error.
     async fn issue(&self, id: &str) -> Result<Option<Issue>>;
     /// Moves the issue to the status named `state`; an error when Linear rejects the change.
     async fn set_state(&self, id: &str, state: &str) -> Result<()>;
-    /// All projects, each identified by its uuid.
+    /// All projects, each identified by its uuid and carrying the ids of its teams.
     async fn projects(&self) -> Result<Vec<Project>>;
     /// The names of all issue labels.
     async fn labels(&self) -> Result<Vec<String>>;
@@ -103,4 +121,81 @@ pub trait LinearApi: Send + Sync {
     async fn teams(&self) -> Result<Vec<Team>>;
     /// The names of the statuses of the team with id `team_id`.
     async fn statuses(&self, team_id: &str) -> Result<Vec<String>>;
+}
+
+/// Stands in for Linear while there is no usable connection (not logged in yet, or connecting
+/// failed): every call fails with `reason`. The host keeps running and the engine's checks fail
+/// visibly, instead of the host refusing to start.
+pub struct Disconnected {
+    reason: String,
+}
+
+impl Disconnected {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    fn fail<T>(&self) -> Result<T> {
+        Err(anyhow::anyhow!("{}", self.reason))
+    }
+}
+
+#[async_trait::async_trait]
+impl LinearApi for Disconnected {
+    async fn viewer(&self) -> Result<Viewer> {
+        self.fail()
+    }
+    async fn candidate_issues(&self, _label: &str, _state: &str) -> Result<Vec<Issue>> {
+        self.fail()
+    }
+    async fn labeled_issues(&self, _label: &str) -> Result<Vec<Issue>> {
+        self.fail()
+    }
+    async fn issue(&self, _id: &str) -> Result<Option<Issue>> {
+        self.fail()
+    }
+    async fn set_state(&self, _id: &str, _state: &str) -> Result<()> {
+        self.fail()
+    }
+    async fn projects(&self) -> Result<Vec<Project>> {
+        self.fail()
+    }
+    async fn labels(&self) -> Result<Vec<String>> {
+        self.fail()
+    }
+    async fn teams(&self) -> Result<Vec<Team>> {
+        self.fail()
+    }
+    async fn statuses(&self, _team_id: &str) -> Result<Vec<String>> {
+        self.fail()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_stand_in_fails_every_call_with_its_reason() {
+        let linear = Disconnected::new("not logged in to Linear");
+        let errors = [
+            linear.viewer().await.err(),
+            linear.candidate_issues("ai-ready", "Todo").await.err(),
+            linear.labeled_issues("ai-ready").await.err(),
+            linear.issue("DEMO-1").await.err(),
+            linear.set_state("DEMO-1", "Done").await.err(),
+            linear.projects().await.err(),
+            linear.labels().await.err(),
+            linear.teams().await.err(),
+            linear.statuses("team-1").await.err(),
+        ];
+        for error in errors {
+            assert_eq!(
+                error.expect("the call failed").to_string(),
+                "not logged in to Linear"
+            );
+        }
+    }
 }

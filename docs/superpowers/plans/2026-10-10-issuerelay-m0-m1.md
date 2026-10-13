@@ -8841,17 +8841,17 @@ M1 到此结束。M2（桌面应用）的计划在 M1 验收报告确认后另�
 | 9 | 托盘菜单、面板全部页面、外观、多语言、系统通知 | M2 |
 | 5.6 | 面板上的「标记完成」按钮（引擎接口 `Engine::mark_done` 已在 Task 19 完成） | M2 |
 | 6.2 | 退出托盘程序时询问「等待完成 / 立即停止」 | M2 |
-| 11 | 日志按保留天数与总大小清理（默认 30 天、1 GB） | M2 |
+| 11 | 日志按保留天数与总大小清理（默认 30 天、1 GB）（M2 第一部分 Task 3 已完成） | M2 |
 | 10.3 | 在设置里一键把 MCP 控制服务注册到 Claude Code / Codex | M2 |
 | 8 | 图形程序启动时经登录 shell 读取 PATH，用它查找执行者（M0 推断 F2，M2 实机验证） | M2 |
 | 8 | 执行者的代理环境：托盘程序从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY` 传给执行者，环境检查的提示点明代理（M1 验收 H1） | M2 |
-| 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2） | M2 |
+| 7 | 中文标题的 Linear 链接带非 ASCII slug，`safe_url` 会把它丢掉：保留到编号为止的链接，或做百分号编码（M1 验收 H2）（M2 第一部分 Task 6 已完成） | M2 |
 | 18 | 按绑定的精简运行方式：只加载 Linear MCP（M0 发现 F3） | M2 |
 | 9.6 | 应用图标与托盘图标（两到三套方案由用户选定） | M2 |
-| 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审） | M2 |
-| 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审） | M2 |
-| 6.4 | 环境检查命令超时后结束整棵进程树（被杀的 `claude mcp list` 可能留下它启动的 stdio MCP 服务器），从托盘程序运行时不弹控制台窗口（Task 18 评审） | M2 |
-| 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审） | M2 |
+| 6.2 | Windows 上从托盘程序启动执行者时加 `CREATE_NO_WINDOW`（经 process-wrap 的 `CreationFlags`，不能直接设，`JobObject` 会覆盖），避免弹出控制台窗口、用户关窗即中断运行（Task 15 评审）；同时加 `CREATE_NEW_PROCESS_GROUP`，让开发宿主所在控制台的 Ctrl+C 不直接打到执行者，被停止的运行记为「已停止」而不是「失败」（Task 22 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
+| 6.2 | 宿主崩溃后的残留进程：记录每次运行的进程组 / Job，启动时清扫（Task 15 评审）（M2 第一部分 Task 4 已完成） | M2 |
+| 6.4 | 环境检查命令超时后结束整棵进程树（被杀的 `claude mcp list` 可能留下它启动的 stdio MCP 服务器），从托盘程序运行时不弹控制台窗口（Task 18 评审）（M2 第一部分 Task 1、2 已完成，Windows 部分待实机） | M2 |
+| 10.2 | Windows 命名管道改用只允许当前用户的安全描述符：默认描述符让其他用户能读、不能写请求（Task 20 评审）（M2 第一部分 Task 2 已完成，待 Windows 实机） | M2 |
 | 12 | 安装包、自动更新、发布流程、代码签名 | M3 |
 
 ### 评审遗留的小项（2026-10-13 整理）
@@ -8862,38 +8862,38 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `engine` | 重新授权后要重建引擎：`viewer` 在引擎的整个生命周期里只取一次 | Task 19 评审 |
-| `engine` | `count()` 读存储出错时返回 0，错误被吞掉 | Task 19 评审 |
-| `engine` | 退出时的「等待完成」需要能持久的暂停（现在的停止标志只在进程内）；第一次停止信号要等当前这轮检查结束（最长约 60 秒）才通知运行停止 | Task 19 评审、最终评审 |
-| `engine` | 队首任务启动前的重读一直失败时，`max_concurrent = 1` 或同一目录下的其他任务一直轮不到 | Task 19 评审 |
+| `engine` | 重新授权后要重建引擎：`viewer` 在引擎的整个生命周期里只取一次（M2 第一部分 Task 5） | Task 19 评审 |
+| `engine` | `count()` 读存储出错时返回 0，错误被吞掉（M2 第一部分 Task 5） | Task 19 评审 |
+| `engine` | 退出时的「等待完成」需要能持久的暂停（现在的停止标志只在进程内）；第一次停止信号要等当前这轮检查结束（最长约 60 秒）才通知运行停止（M2 第一部分 Task 5：加了只在内存里的「等待完成」开关 `set_draining`，有意不保存，随宿主结束；停止也不再等正在进行的检查，当前这轮在它等待的地方放弃） | Task 19 评审、最终评审 |
+| `engine` | 队首任务启动前的重读一直失败时，`max_concurrent = 1` 或同一目录下的其他任务一直轮不到（M2 第一部分 Task 5） | Task 19 评审 |
 | `engine` | 严格解析的取舍（读不懂的回复一律报错）：一条读不懂的需求会让这一轮不派活、挡住所有排队任务，错误会指明是哪条；面板要把这个错误显示清楚 | 最终评审 |
-| `engine` | 状态为 `waiting_binding` 的新任务，日志也写成 `job queued` | 最终修复复审 |
-| `engine`、面板 | `MissingArguments` 要和 `MissingTools` 一样转成用户看得懂的提示（设计 §7）；`list()` 的错误用 `{:#}` 显示 | Task 16 评审 |
+| `engine` | 状态为 `waiting_binding` 的新任务，日志也写成 `job queued`（M2 第一部分 Task 5） | 最终修复复审 |
+| `engine`、面板 | `MissingArguments` 要和 `MissingTools` 一样转成用户看得懂的提示（设计 §7）；`list()` 的错误用 `{:#}` 显示（M2 第一部分 Task 9 做了归类：`Host` 把 `MissingTools` 与 `MissingArguments` 都归为 `LinearSetup::InterfaceChanged`，宿主照常启动、检查报出原因；面板上的提示文案在 M2 第二部分） | Task 16 评审 |
 | `runner` | 离开进程组的后代只收到 SIGKILL，没有先收到 SIGTERM；停止最多多等 5 秒；执行者在 SIGTERM 处理里新起的独立进程，如果它在宽限期内退出，会成为找不到的孤儿（M1 验收 H6 看到会话结束钩子几秒内自行退出）；对已回收的进程组 id 调 `killpg`（影响可忽略） | 最终修复、复审 |
-| `runner` | 失控输出：通道没有上限，单行也没有长度上限 | Task 15 评审 |
-| `runner` | 运行日志：写入失败要能上报（有日志系统后）；重试会覆盖上一次的 `{job.id}.jsonl`（目前有意为之并已注明），做日志页时决定是否保留；0600 只对新建的日志文件生效 | Task 15 评审 |
+| `runner` | 失控输出：通道没有上限，单行也没有长度上限（M2 第一部分 Task 3 已完成） | Task 15 评审 |
+| `runner` | 运行日志：写入失败要能上报（有日志系统后）；重试会覆盖上一次的 `{job.id}.jsonl`（目前有意为之并已注明），做日志页时决定是否保留；0600 只对新建的日志文件生效（写入失败告警和 0600 已在 M2 第一部分 Task 3 完成，重试覆盖日志的取舍仍待做日志页时决定） | Task 15 评审 |
 | 设计 | 超时和卡住判定用的单调时钟，在系统睡眠期间是否计时因平台而异，写进设计 | Task 15 评审 |
 
 **M2：Linear、环境检查、IPC、命令行与面板**
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值 | Task 16 评审 |
-| `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放 | Task 17、22 评审 |
-| `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示 | Task 17、19、21 评审 |
+| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值（M2 第一部分 Task 6：处理了其中的 `follow()` 与 `fields` 枚举两项；`limit` 的上限仍不在连接时检查） | Task 16 评审 |
+| `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放（M2 第一部分 Task 6：处理了回环端口一项；`RUST_LOG` 一项在 M2 第二部分 Task 3 的日志配置里） | Task 17、22 评审 |
+| `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示（M2 第一部分 Task 6） | Task 17、19、21 评审 |
 | `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |
-| `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队 | 最终评审 |
-| `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做） | 最终评审 |
-| `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过） | Task 7、11 评审 |
-| `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`） | Task 12 评审 |
-| `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出 | Task 21 评审、最终评审 |
+| `doctor` | 工作区检查覆盖所有团队，多团队工作区里不用 IssueRelay 的团队也会报缺状态：只查已绑定项目所属的团队（M2 第一部分 Task 6） | 最终评审 |
+| `ipc` | Windows：客户端连接时校验管道服务端的属主 SID，防止其他本地用户抢先建同名管道（和上表 10.2 一起做）（M2 第一部分 Task 2 已完成，待 Windows 实机） | 最终评审 |
+| `config` | 保存时静默丢弃未知配置项，有日志后至少警告一次；保存中途崩溃会留下 `config.toml.<pid>.<n>.tmp`，没有清扫；`comment_language` / `language` 可加语言标签格式的校验（U+2028、U+200B 和任意单行文本目前都能通过）（M2 第一部分 Task 7：处理了未知键警告、临时文件清扫，以及语言值里的不可见字符；语言标签格式的校验没有做） | Task 7、11 评审 |
+| `executor` | `resolve_program` 没有测试，可加带 PATH 参数的 `resolve_program_in`（用 `which_in`）；`is_git_repo` 在仓库子目录和不可读目录里返回 false（后果只是多加 `--skip-git-repo-check`）（M2 第一部分 Task 7：`is_git_repo` 改为向上找，不可读目录仍按「不是仓库」处理；`resolve_program_in` 已在 M2 第一部分 Task 1 加上） | Task 12 评审 |
+| `cli` | MCP 工具返回的文本没有清洗（使用者是 AI，说明里已写明是数据）（M2 第一部分 Task 7：成功的结果和失败信息都过命令行用的 `format::clean`，控制字符（含 DEL 和 C1，serde_json 只转义 U+001F 以下的）变空格，不可见字符去掉，不截断，JSON 仍然有效）；`pause`、`resume`、`poll_now` 缺工具注解（`destructiveHint: false`、`idempotentHint`）；`bind add` 不规范化路径（引擎派活时会规范化）；`doctor` 等待期间没有任何输出（M2 第一部分 Task 7） | Task 21 评审、最终评审 |
 | 面板 | 「默认模型」存 `None`，不存空字符串；带 `[ ]` 的模型名（例如 `sonnet[1m]`）按设计会被拒绝，面板说明要写明 | Task 12 评审 |
 
 **M3**
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `store` | 数据库的 `user_version` 比当前程序新时不拒绝，第一次改表结构时处理 | Task 9 评审 |
+| `store` | 数据库的 `user_version` 比当前程序新时不拒绝，第一次改表结构时处理（M2 第一部分 Task 4 已完成） | Task 9 评审 |
 | 打包 | 命令行依赖整个 `core`；`fake-agent` 是 `issuerelay-core` 的普通可执行目标，打包时会被一起构建 | Task 21 评审、最终评审 |
 | 依赖 | chrono 的默认特性（clock、wasmbind）用不到，可改成 `default-features = false` 加 `["std", "now", "serde"]` | Task 8 评审 |
 | CI | `ci.yml` 显式安装 1.99.0，和 `rust-toolchain.toml` 重复（rustup 1.28 起 `rustup show` 不再自动安装，所以要显式装）：升级工具链时两处一起改 | Task 1 评审 |

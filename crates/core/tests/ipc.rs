@@ -598,6 +598,156 @@ async fn an_existing_socket_directory_is_made_private() {
     );
 }
 
+/// The current user's SID as `whoami` reports it, so the test does not take it from the code it
+/// checks.
+#[cfg(windows)]
+fn whoami_sid() -> String {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .expect("run whoami");
+    assert!(output.status.success(), "whoami failed: {output:?}");
+    // One line: "<domain>\<user>","S-1-5-…"
+    let text = String::from_utf8_lossy(&output.stdout);
+    let sid = text
+        .trim()
+        .rsplit(',')
+        .next()
+        .unwrap_or_default()
+        .trim_matches('"');
+    assert!(sid.starts_with("S-1-"), "unexpected whoami output: {text}");
+    sid.to_string()
+}
+
+/// `sid` in its `S-1-…` form, without the abbreviations SDDL text would use.
+///
+/// # Safety
+///
+/// `sid` points at a valid SID.
+#[cfg(windows)]
+unsafe fn sid_text(sid: windows_sys::Win32::Security::PSID) -> String {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the caller passes a valid SID; `text` is freed below.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &mut text) };
+    assert_ne!(ok, 0, "ConvertSidToStringSidW failed");
+    // SAFETY: NUL-terminated UTF-16 from the call above, freed once.
+    unsafe {
+        let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        sid
+    }
+}
+
+/// The owner of the object behind `handle` and the SIDs its DACL allows, each in its `S-1-…`
+/// form. Fails the test when there is no DACL or when it holds anything but allow entries.
+#[cfg(windows)]
+fn owner_and_allowed_sids(
+    handle: std::os::windows::io::BorrowedHandle<'_>,
+) -> (String, Vec<String>) {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, GetAce, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID,
+    };
+    // winnt.h; windows-sys keeps it behind a feature this crate does not need otherwise.
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    let mut owner: PSID = null_mut();
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `handle` is open while it is borrowed; `owner` and `dacl` point into `descriptor`,
+    // which is freed below.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(status, 0, "GetSecurityInfo failed");
+    assert!(!dacl.is_null(), "no DACL at all lets everyone in");
+    // SAFETY: `owner` and `dacl` point into the live `descriptor`; GetAce hands out entries of
+    // `dacl`, and the SID of an allow entry starts at its `SidStart`.
+    let read = unsafe {
+        let owner = sid_text(owner);
+        let allowed: Vec<String> = (0..u32::from((*dacl).AceCount))
+            .map(|index| {
+                let mut ace: *mut c_void = null_mut();
+                assert_ne!(GetAce(dacl, index, &mut ace), 0, "GetAce failed");
+                let ace = ace.cast::<ACCESS_ALLOWED_ACE>();
+                assert_eq!(
+                    (*ace).Header.AceType,
+                    ACCESS_ALLOWED_ACE_TYPE,
+                    "entry {index} is not an allow entry"
+                );
+                sid_text((&raw mut (*ace).SidStart).cast())
+            })
+            .collect();
+        (owner, allowed)
+    };
+    // SAFETY: allocated by GetSecurityInfo and freed once; nothing points into it any more.
+    unsafe { LocalFree(descriptor) };
+    read
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn the_pipe_belongs_to_its_user_and_admits_only_that_user_and_system() {
+    use std::os::windows::io::AsHandle;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::under(dir.path());
+    let endpoint = paths.ipc_endpoint();
+    let IpcEndpoint::Pipe(name) = &endpoint else {
+        unreachable!("Windows uses a named pipe")
+    };
+    let _server = IpcServer::bind(&endpoint).await.unwrap();
+    let client = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(name)
+        .unwrap();
+    let (owner, mut allowed) = owner_and_allowed_sids(client.as_handle());
+    let me = whoami_sid();
+    assert_eq!(owner, me, "the pipe's owner");
+    // Exactly the user and SYSTEM (S-1-5-18, `SY`): no Everyone (S-1-1-0, `WD`), Anonymous
+    // (S-1-5-7, `AN`) or Owner Rights (S-1-3-4, `OW`) entry.
+    allowed.sort_unstable();
+    let mut expected = vec![me, "S-1-5-18".to_string()];
+    expected.sort_unstable();
+    assert_eq!(allowed, expected, "the SIDs the pipe lets in");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_client_checks_that_the_server_runs_as_the_same_user() {
+    use std::os::windows::io::AsHandle;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = AppPaths::under(dir.path());
+    let endpoint = paths.ipc_endpoint();
+    let IpcEndpoint::Pipe(name) = &endpoint else {
+        unreachable!("Windows uses a named pipe")
+    };
+    let _server = IpcServer::bind(&endpoint).await.unwrap();
+    let client = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(name)
+        .unwrap();
+    assert!(
+        issuerelay_core::ipc::pipe_security::server_runs_as_current_user(client.as_handle())
+            .unwrap()
+    );
+}
+
 // The end of a server: the host disappears, and takes its connections with it.
 
 #[tokio::test]

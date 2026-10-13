@@ -1,5 +1,5 @@
-//! Development-only headless host for the IssueRelay engine. Not shipped; the M2 tray app
-//! embeds the engine the same way.
+//! Development-only headless host for the IssueRelay engine. Not shipped; the M2 tray app runs
+//! the same `core::host::Host`.
 use std::{
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
@@ -10,19 +10,14 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use issuerelay_core::{
-    doctor::SystemReadiness,
-    engine::{Engine, EngineDeps, ProcessJobRunner},
-    ipc::server::IpcServer,
+    host::{Connector, Host, HostParts, LinearSetup, StopMode, SystemConnector},
     linear::{
         LinearApi, auth,
         mcp::{LinearClient, McpLinear},
     },
     paths::AppPaths,
-    store::Store,
     text::{clean_text, is_invisible},
 };
-use tokio::task::JoinError;
-use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
 #[derive(Parser)]
@@ -193,44 +188,65 @@ async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
-/// Runs the engine and the IPC server until the host is asked to stop, then waits for the runs in
-/// progress to end. A second stop signal in the meantime returns at once, and so does an engine
-/// task that panicked (nobody has told the runs to stop then). Either way the runtime shuts down
-/// after `main` returns, and the guard of each run ends its process tree.
-async fn serve(engine: Engine, server: IpcServer) -> Result<()> {
-    let shutdown = CancellationToken::new();
-    let ipc = tokio::spawn(server.run(engine.clone(), shutdown.clone()));
-    let worker = {
-        let engine = engine.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move { engine.run_forever(shutdown).await })
-    };
-    tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
-    shutdown_signal()
-        .await
-        .context("cannot listen for stop signals")?;
-    tracing::info!(
-        "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
-    );
-    shutdown.cancel();
-    let drain = async {
-        // `run_forever` tells the running jobs to stop on its way out. If it panicked nobody did,
-        // and `wait_idle` would wait for them to finish on their own.
-        worker.await?;
-        let _ = ipc.await;
-        engine.wait_idle().await;
-        Ok::<(), JoinError>(())
-    };
-    tokio::select! {
-        drained = drain => drained.map_err(|error| {
-            tracing::error!(%error, "the engine task failed; the runs still going end with the host");
-            anyhow!("the engine task failed: {error}")
-        }),
-        second = shutdown_signal() => {
-            second.context("cannot listen for a second stop signal")?;
-            tracing::warn!("second stop signal: ending the remaining runs now");
-            Ok(())
+/// How often `wait_for_first_connection` looks at the host.
+const CONNECTION_POLL: Duration = Duration::from_millis(100);
+
+/// How long the first connection to Linear may take before the devhost says it is still going.
+const STILL_CONNECTING_AFTER: Duration = Duration::from_secs(10);
+
+/// Waits until `setup` stops saying `Connecting` (`Host::start` does not wait for Linear) and
+/// returns what it says then. `still_connecting` is called once if that takes longer than
+/// `slow_after`.
+async fn wait_for_first_connection(
+    setup: impl Fn() -> LinearSetup,
+    poll: Duration,
+    slow_after: Duration,
+    still_connecting: impl FnOnce(),
+) -> LinearSetup {
+    let began = tokio::time::Instant::now();
+    let mut still_connecting = Some(still_connecting);
+    loop {
+        let now = setup();
+        if now != LinearSetup::Connecting {
+            return now;
         }
+        if began.elapsed() >= slow_after
+            && let Some(say) = still_connecting.take()
+        {
+            say();
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Logs how the host's first connection to Linear ended: the devhost is already running by then.
+async fn report_first_connection(host: Host) {
+    let ended = wait_for_first_connection(
+        || host.linear_setup(),
+        CONNECTION_POLL,
+        STILL_CONNECTING_AFTER,
+        || tracing::info!("still connecting to Linear"),
+    )
+    .await;
+    match ended {
+        LinearSetup::Connected { method } => tracing::info!(?method, "connected to Linear"),
+        LinearSetup::NotConfigured => tracing::warn!(
+            "not logged in to Linear: run `issuerelay-devhost login` (or `api-key`) and start the devhost again; checks fail until then"
+        ),
+        LinearSetup::InterfaceChanged { message } | LinearSetup::ConnectFailed { message } => {
+            tracing::warn!(%message, "not connected to Linear")
+        }
+        // `wait_for_first_connection` returns only once the connection is no longer under way.
+        LinearSetup::Connecting => {}
+    }
+}
+
+/// What the devhost ends with once the host has stopped: a failure if the engine's task died
+/// (nothing polled Linear or started runs after that), as it was before the host was shared.
+fn engine_outcome(failure: Option<String>) -> Result<()> {
+    match failure {
+        Some(why) => Err(anyhow!("the engine task failed: {why}")),
+        None => Ok(()),
     }
 }
 
@@ -239,21 +255,24 @@ async fn serve(engine: Engine, server: IpcServer) -> Result<()> {
 /// `clean_text`.
 async fn run(command: Command) -> Result<()> {
     match command {
+        // `login` and `api-key` go through the connector, like the host's own: it deletes the
+        // other kind of saved credential, which would otherwise be left in the keychain (the
+        // OAuth credentials are tried first at every start, so an old login would win over a key).
         Command::Login => {
-            let client = auth::login(auth::LINEAR_MCP_URL, |url| {
-                // Not passed through `clean_text`: rmcp serializes the URL with `url::Url`, so it
-                // holds no control characters, and `clean_text` would cut a long one.
-                let _ = print_line(&format!("Open this URL to authorize IssueRelay:\n{url}"));
-                let _ = open::that_detached(url);
-            })
-            .await?;
-            let linear = McpLinear::new(client).await?;
+            let linear = SystemConnector
+                .login(Box::new(|url| {
+                    // Not passed through `clean_text`: rmcp serializes the URL with `url::Url`, so
+                    // it holds no control characters, and `clean_text` would cut a long one.
+                    let _ = print_line(&format!("Open this URL to authorize IssueRelay:\n{url}"));
+                    let _ = open::that_detached(url);
+                }))
+                .await?;
             let viewer = linear.viewer().await?;
             print_line(&format!(
                 "Logged in to Linear as {}",
                 clean_text(&viewer.name)
             ))?;
-            linear.close().await
+            Ok(())
         }
         Command::ApiKey => {
             if io::stdin().is_terminal() {
@@ -265,12 +284,10 @@ async fn run(command: Command) -> Result<()> {
             if key.is_empty() {
                 bail!("no API key on stdin");
             }
-            let linear =
-                McpLinear::new(auth::connect_api_key(auth::LINEAR_MCP_URL, key).await?).await?;
+            let linear = SystemConnector.api_key(key).await?;
             let viewer = linear.viewer().await?;
             print_line(&format!("API key works for {}", clean_text(&viewer.name)))?;
-            auth::save_api_key(key)?;
-            linear.close().await
+            Ok(())
         }
         Command::Logout => {
             auth::clear_credentials()?;
@@ -293,27 +310,66 @@ async fn run(command: Command) -> Result<()> {
             linear.close().await
         }
         Command::Run => {
-            let paths = AppPaths::system()?;
-            let server = IpcServer::bind(&paths.ipc_endpoint()).await?;
-            let linear = Arc::new(McpLinear::new(connect().await?).await?);
-            let engine = Engine::new(EngineDeps {
-                config_path: paths.config_file(),
-                store: Store::open(&paths.state_db())?,
-                linear,
-                readiness: Arc::new(SystemReadiness::new(Duration::from_secs(300))),
-                job_runner: Arc::new(ProcessJobRunner),
-                logs_dir: paths.logs_dir(),
-            })?;
-            serve(engine, server).await
+            let host = Host::start(
+                AppPaths::system()?,
+                Arc::new(SystemConnector),
+                HostParts::default(),
+            )
+            .await?;
+            tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
+            // `start` does not wait for Linear: the outcome of the first connection is logged
+            // when it comes.
+            tokio::spawn(report_first_connection(host.clone()));
+            shutdown_signal()
+                .await
+                .context("cannot listen for stop signals")?;
+            tracing::info!(
+                "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
+            );
+            // The first signal stops the runs and waits until their results are recorded. A second
+            // one returns at once: the runtime shuts down after `run` returns, the guard of each
+            // run ends its process tree, and a blocked keychain call is not waited for
+            // (`block_on_bounded`). Either way an engine that had died is a failure.
+            tokio::select! {
+                () = host.stop(StopMode::StopRuns) => engine_outcome(host.engine_failure()),
+                second = shutdown_signal() => {
+                    second.context("cannot listen for a second stop signal")?;
+                    tracing::warn!("second stop signal: ending the remaining runs now");
+                    engine_outcome(host.engine_failure())
+                }
+            }
         }
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// How long the runtime may take to shut down once `run` has returned. Dropping the tasks is
+/// quick (each run's guard ends its process tree as it is dropped); what is still running on the
+/// blocking pool after this is left behind, and ends with the process.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
+
+/// Runs `future` on a new multi-threaded runtime and shuts the runtime down, waiting at most
+/// `shutdown` for its blocking pool. A dropped runtime would wait for every blocking call still
+/// running, and a keychain read can wait for a macOS prompt nobody answers: the devhost would not
+/// end after Ctrl+C.
+fn block_on_bounded<F: std::future::Future>(
+    future: F,
+    shutdown: Duration,
+) -> io::Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let output = runtime.block_on(future);
+    runtime.shutdown_timeout(shutdown);
+    Ok(output)
+}
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(default_filter(&cli.command));
-    match run(cli.command).await {
+    let outcome = block_on_bounded(run(cli.command), RUNTIME_SHUTDOWN)
+        .context("cannot start the async runtime")
+        .and_then(|outcome| outcome);
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // One line with the whole cause chain. The chain can carry Linear's text, so it is
@@ -331,6 +387,8 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use issuerelay_core::host::AuthMethod;
+
     use super::*;
 
     /// What `CleanLines` passes on when `text` is written to it in one go.
@@ -416,6 +474,113 @@ mod tests {
         ] {
             assert_eq!(default_filter(&command), "warn");
         }
+    }
+
+    #[tokio::test]
+    async fn the_first_connection_is_waited_for_and_only_a_slow_one_is_announced() {
+        use std::cell::Cell;
+
+        let tick = Duration::from_millis(1);
+        // Ends after three looks.
+        let looks = Cell::new(0);
+        let quick = || {
+            looks.set(looks.get() + 1);
+            if looks.get() <= 3 {
+                LinearSetup::Connecting
+            } else {
+                LinearSetup::NotConfigured
+            }
+        };
+        let announced = Cell::new(0);
+        let ended = wait_for_first_connection(quick, tick, Duration::from_secs(60), || {
+            announced.set(announced.get() + 1)
+        })
+        .await;
+        assert_eq!(ended, LinearSetup::NotConfigured);
+        assert_eq!(announced.get(), 0, "a quick connection is not announced");
+
+        // Ends after sixty looks, much later than the announcement is due.
+        let looks = Cell::new(0);
+        let slow = || {
+            looks.set(looks.get() + 1);
+            if looks.get() <= 60 {
+                LinearSetup::Connecting
+            } else {
+                LinearSetup::Connected {
+                    method: AuthMethod::OAuth,
+                }
+            }
+        };
+        let ended = wait_for_first_connection(slow, tick, Duration::from_millis(5), || {
+            announced.set(announced.get() + 1)
+        })
+        .await;
+        assert_eq!(
+            ended,
+            LinearSetup::Connected {
+                method: AuthMethod::OAuth
+            }
+        );
+        assert_eq!(announced.get(), 1, "a slow one is announced once");
+    }
+
+    #[test]
+    fn a_dead_engine_task_makes_the_devhost_fail() {
+        assert!(engine_outcome(None).is_ok());
+        let error = engine_outcome(Some("task 3 panicked".into())).unwrap_err();
+        assert_eq!(error.to_string(), "the engine task failed: task 3 panicked");
+    }
+
+    // `login` and `api-key` must go through `SystemConnector`, which deletes the other kind of
+    // saved credential. Saving the key or the OAuth credentials directly would leave the old ones
+    // in the keychain, where the OAuth credentials win at the next start.
+    #[test]
+    fn the_login_commands_go_through_the_connector() {
+        let source = include_str!("main.rs");
+        let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+        // However rustfmt breaks the lines.
+        let production: String = production.split_whitespace().collect();
+        assert!(production.contains("SystemConnector.login("));
+        assert!(production.contains("SystemConnector.api_key("));
+        for call in ["auth::login(", "auth::save_api_key("] {
+            assert!(
+                !production.contains(call),
+                "the devhost must not call `{call}` itself"
+            );
+        }
+    }
+
+    // A keychain read blocked on the blocking pool (a macOS prompt nobody answers) must not keep
+    // the devhost alive once `run` has returned: the runtime gives up on it after a short while.
+    #[test]
+    fn a_blocked_keychain_call_does_not_keep_the_devhost_alive() {
+        use std::sync::mpsc;
+
+        let (release, blocked) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = block_on_bounded(
+                async move {
+                    let (started, running) = tokio::sync::oneshot::channel();
+                    // Stands for the keychain call: it waits until the test lets it go.
+                    tokio::task::spawn_blocking(move || {
+                        let _ = started.send(());
+                        let _ = blocked.recv();
+                    });
+                    running.await.expect("the blocking call started");
+                    7
+                },
+                Duration::from_millis(100),
+            );
+            let _ = done.send(outcome.map_err(|e| e.to_string()));
+        });
+        let outcome = finished.recv_timeout(Duration::from_secs(10));
+        // Lets the blocked call end either way, so no thread is left behind.
+        drop(release);
+        assert_eq!(
+            outcome.expect("the runtime waited for the blocked call"),
+            Ok(7)
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 外部接入 | `core::store`（SQLite）、`runner`（子进程）、`linear`（MCP）、`doctor`（检查命令） | 与外部世界交互 | 基础层、纯逻辑层 |
 | 编排 | `core::engine` | 唯一持有运行状态的地方 | 以上全部 |
 | 通信 | `core::ipc` | 本机 JSON-RPC，薄层 | `engine` |
-| 入口 | `crates/cli`、`crates/devhost`、（M2）`app/` | 用户与 AI 的入口 | `core` |
+| 入口 | `core::host`（宿主组装）、`crates/cli`、`crates/devhost`、（M2）`app/` | 用户与 AI 的入口 | `core`；`core::host` 在 `core` 内，依赖以上全部 |
 
 规则：纯逻辑层不读文件、不看系统时间、不发请求（例外：`trigger::evaluate` 检查绑定目录是否存在）；运行状态只在 `engine`；命令行只经 IPC 访问引擎。
 
@@ -40,6 +40,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 5. 开跑前重新读取需求，不再满足条件就取消。
 6. `prompt::render` 与 `executor::build` 生成命令，`runner::run` 启动并记录日志。
 7. 结束后再次读取需求，`engine::decide` 结合退出码、Linear 状态和 AI 的报告决定结果，写回 `store`。
+8. 任务每次变化、每次检查结束、配置每次保存，引擎都经 `Engine::subscribe` 发出 `EngineEvent`；面板（M2）在进程内订阅它刷新界面，落后太多（`Lagged`）时重新读取全部状态。
 
 ## 5. 关键文件索引
 
@@ -52,10 +53,14 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 执行者参数、权限档位 | `crates/core/src/executor/mod.rs` |
 | 最终结果识别 | `crates/core/src/executor/outcome.rs` |
 | 子进程、超时、结束进程树 | `crates/core/src/runner.rs` |
+| 日志清理 | `crates/core/src/logs.rs` |
 | Linear 工具调用与解析 | `crates/core/src/linear/mcp.rs`、`parse.rs` |
 | Linear 授权与钥匙串 | `crates/core/src/linear/auth.rs` |
 | 环境检查 | `crates/core/src/doctor.rs` |
+| 一键配置命令（Linear MCP、控制服务注册） | `crates/core/src/setup.rs` |
+| 执行者环境（PATH、代理） | `crates/core/src/env.rs` |
 | 状态流转与编排 | `crates/core/src/engine.rs` |
+| 宿主组装（IPC、后台循环、Linear 连接切换；启动不等 Linear，首次连接在后台） | `crates/core/src/host.rs` |
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |
 | 命令行与 MCP 控制服务 | `crates/cli/src/main.rs`、`mcp.rs`、`format.rs` |
 | 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
@@ -64,18 +69,18 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 | 数据 | 位置 | 说明 |
 |---|---|---|
-| 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名 |
-| 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite |
-| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器新建的日志在 Unix 上是 0600（已存在的文件保持原权限） |
-| Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘 |
+| 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名；每次保存前清扫同目录下超过 10 分钟的残留临时文件（`config.toml.<pid>.<n>.tmp`，保存中途崩溃留下的）；加载时对本版本不认识的配置键在日志里警告一次（只记键名，不记值），下次保存会丢掉它们 |
+| 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite；表结构版本记在 `user_version`（当前 2），比当前程序新的拒绝打开，没记版本的旧库（版本 0）按实际缺的列补齐；macOS 上每次运行记下执行者的进程号和启动时间，运行正常结束时清除，宿主崩溃后留到下次启动清扫处理完才清除 |
+| 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器每次打开日志都把 Unix 上的权限设为 0600（重试沿用的旧文件也一样）；单行最多保留 4 MiB，更长的被截断并记一条说明；`logs.rs` 按保留天数（`log_retention_days`，默认 30）和总大小（`log_max_total_mb`，默认 1024）清理，宿主启动时和之后每 6 小时一次，正在运行的任务的日志不删 |
+| Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘；改用 API key 时清掉 OAuth 凭据，OAuth 登录时清掉 API key（`auth::clear_oauth_credentials`、`clear_api_key`） |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
-| 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」 |
+| 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 
 ## 7. 外部接口变更规则
 
-- **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
+- **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`（`fields` 的取值同步 `REQUIRED_FIELDS`）、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
 

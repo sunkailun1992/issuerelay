@@ -1,5 +1,8 @@
 //! In-memory LinearApi used by doctor and engine tests.
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, anyhow};
 use chrono::Duration;
@@ -12,11 +15,21 @@ use issuerelay_core::{
 #[derive(Default)]
 struct State {
     me: String,
+    /// The name `viewer()` reports after `set_viewer_name`; `Jane Doe` otherwise.
+    viewer_name: Option<String>,
     issues: Vec<Issue>,
     /// The message the next calls fail with, and how many calls are left to fail.
     fail_next: Option<(String, usize)>,
     set_state_calls: Vec<(String, String)>,
     statuses: Vec<String>,
+    /// Uuids whose `issue()` reads fail until `clear_issue_failures`.
+    failing_issue_reads: HashSet<String>,
+    /// What `teams()` lists after `set_teams`; empty means the default team.
+    teams: Vec<Team>,
+    /// What `projects()` lists after `set_projects`; empty means the default project.
+    projects: Vec<Project>,
+    /// The statuses `set_team_statuses` gave single teams; the others have `statuses`.
+    team_statuses: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -35,6 +48,11 @@ impl FakeLinear {
                 .to_vec();
         }
         fake
+    }
+
+    /// Makes `viewer()` report this name instead of `Jane Doe`.
+    pub fn set_viewer_name(&self, name: &str) {
+        self.state.lock().unwrap().viewer_name = Some(name.into());
     }
 
     pub fn upsert(&self, issue: Issue) {
@@ -76,8 +94,54 @@ impl FakeLinear {
         self.state.lock().unwrap().fail_next = (calls > 0).then(|| (message.into(), calls));
     }
 
+    /// Makes every `issue(uuid)` read fail until `clear_issue_failures`.
+    pub fn fail_issue_reads(&self, uuid: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .failing_issue_reads
+            .insert(uuid.into());
+    }
+
+    pub fn clear_issue_failures(&self) {
+        self.state.lock().unwrap().failing_issue_reads.clear();
+    }
+
     pub fn set_statuses(&self, statuses: &[&str]) {
         self.state.lock().unwrap().statuses = statuses.iter().map(|s| s.to_string()).collect();
+    }
+
+    /// Makes `teams()` list these teams, as (id, name), instead of the default `team-1`.
+    pub fn set_teams(&self, teams: &[(&str, &str)]) {
+        self.state.lock().unwrap().teams = teams
+            .iter()
+            .map(|(id, name)| Team {
+                id: id.to_string(),
+                name: name.to_string(),
+            })
+            .collect();
+    }
+
+    /// Makes `projects()` list these projects, as (uuid, name, ids of its teams), instead of
+    /// the default `proj-1`.
+    pub fn set_projects(&self, projects: &[(&str, &str, &[&str])]) {
+        self.state.lock().unwrap().projects = projects
+            .iter()
+            .map(|(id, name, team_ids)| Project {
+                id: id.to_string(),
+                name: name.to_string(),
+                team_ids: team_ids.iter().map(|team| team.to_string()).collect(),
+            })
+            .collect();
+    }
+
+    /// Gives the team `team_id` its own statuses; every other team keeps the ones `set_statuses`
+    /// sets.
+    pub fn set_team_statuses(&self, team_id: &str, statuses: &[&str]) {
+        self.state.lock().unwrap().team_statuses.insert(
+            team_id.into(),
+            statuses.iter().map(|s| s.to_string()).collect(),
+        );
     }
 
     pub fn set_state_calls(&self) -> Vec<(String, String)> {
@@ -102,9 +166,10 @@ impl FakeLinear {
 impl LinearApi for FakeLinear {
     async fn viewer(&self) -> Result<Viewer> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
         Ok(Viewer {
-            id: self.state.lock().unwrap().me.clone(),
-            name: "Jane Doe".into(),
+            id: s.me.clone(),
+            name: s.viewer_name.clone().unwrap_or_else(|| "Jane Doe".into()),
         })
     }
 
@@ -119,16 +184,33 @@ impl LinearApi for FakeLinear {
             .collect())
     }
 
-    async fn issue(&self, id: &str) -> Result<Option<Issue>> {
+    async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>> {
         self.check_failure()?;
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
+        let s = self.state.lock().unwrap();
+        let mut issues: Vec<Issue> = s
             .issues
             .iter()
-            .find(|i| i.uuid == id || i.identifier == id)
-            .cloned())
+            .filter(|i| {
+                i.labels.iter().any(|l| same_name(l, label))
+                    && i.assignee_id.as_deref() == Some(s.me.as_str())
+            })
+            .cloned()
+            .collect();
+        issues.sort_by_key(|i| std::cmp::Reverse(i.updated_at));
+        issues.truncate(50);
+        Ok(issues)
+    }
+
+    async fn issue(&self, id: &str) -> Result<Option<Issue>> {
+        self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        let found = s.issues.iter().find(|i| i.uuid == id || i.identifier == id);
+        // A read by identifier fails like a read by uuid.
+        let uuid = found.map_or(id, |i| i.uuid.as_str());
+        if s.failing_issue_reads.contains(uuid) {
+            return Err(anyhow!("Linear is unreachable"));
+        }
+        Ok(found.cloned())
     }
 
     async fn set_state(&self, id: &str, state: &str) -> Result<()> {
@@ -144,9 +226,14 @@ impl LinearApi for FakeLinear {
 
     async fn projects(&self) -> Result<Vec<Project>> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        if !s.projects.is_empty() {
+            return Ok(s.projects.clone());
+        }
         Ok(vec![Project {
             id: "proj-1".into(),
             name: "Demo Project".into(),
+            team_ids: vec!["team-1".into()],
         }])
     }
 
@@ -157,14 +244,19 @@ impl LinearApi for FakeLinear {
 
     async fn teams(&self) -> Result<Vec<Team>> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        if !s.teams.is_empty() {
+            return Ok(s.teams.clone());
+        }
         Ok(vec![Team {
             id: "team-1".into(),
             name: "Demo".into(),
         }])
     }
 
-    async fn statuses(&self, _team_id: &str) -> Result<Vec<String>> {
+    async fn statuses(&self, team_id: &str) -> Result<Vec<String>> {
         self.check_failure()?;
-        Ok(self.state.lock().unwrap().statuses.clone())
+        let s = self.state.lock().unwrap();
+        Ok(s.team_statuses.get(team_id).unwrap_or(&s.statuses).clone())
     }
 }

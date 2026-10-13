@@ -1,11 +1,18 @@
+#[cfg(target_os = "macos")]
+mod common;
+
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use common::orphan::Orphan;
 use issuerelay_core::{
     config::ExecutorKind,
+    env::ExecEnv,
     executor::CommandSpec,
+    model::ProcessTag,
     runner::{self, ExitKind, RunLimits},
 };
 use tokio_util::sync::CancellationToken;
@@ -103,6 +110,8 @@ async fn exits_zero_captures_final_text_and_prompt() {
         &log,
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -131,10 +140,49 @@ async fn nonzero_exit_code_is_reported() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(3)));
     assert_eq!(out.final_text, None);
+}
+
+// The proxy variable is set on the child only, through `env`; this process never sets it. The
+// nested-session marker comes from the environment of whoever runs the tests (set when the tests
+// run inside a Claude Code session) and must not reach the child either way.
+#[tokio::test]
+async fn the_run_gets_the_resolved_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"print_env": "ISSUERELAY_TEST_PROXY"}, {"print_env": "CLAUDECODE"}]),
+    );
+    let log = dir.path().join("1.jsonl");
+    let env = ExecEnv {
+        proxy: vec![("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:9".into())],
+        ..ExecEnv::inherit()
+    };
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &env,
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let lines = log_lines(&log);
+    assert!(
+        lines.contains(&"ISSUERELAY_TEST_PROXY=http://127.0.0.1:9".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"CLAUDECODE=<unset>".to_string()),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -151,6 +199,8 @@ async fn stalled_run_is_stopped() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 400),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Stalled);
@@ -170,6 +220,8 @@ async fn chatty_run_hits_total_timeout() {
         &dir.path().join("l.jsonl"),
         limits(600, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -191,6 +243,8 @@ async fn cancel_stops_the_run() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         token,
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Canceled);
@@ -219,6 +273,8 @@ async fn kill_reaches_grandchildren() {
         &dir.path().join("l.jsonl"),
         limits(30_000, 30_000),
         token,
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Canceled);
@@ -239,12 +295,15 @@ async fn an_escaped_grandchild_is_ended_on_timeout() {
     let hb = dir.path().join("hb.txt");
     let s = escaped_heartbeat_script(dir.path(), &hb);
     let log = dir.path().join("l.jsonl");
+    let env = ExecEnv::inherit();
     let mut run = Box::pin(runner::run(
         spec(agent(), dir.path(), &s, ""),
         ExecutorKind::Claude,
         &log,
         limits(5_000, 60_000),
         CancellationToken::new(),
+        &env,
+        None,
     ));
     // The total limit must cut into a grandchild that is really running, however slowly the
     // machine starts processes.
@@ -276,6 +335,8 @@ async fn an_escaped_grandchild_is_ended_on_cancel() {
         &dir.path().join("l.jsonl"),
         limits(60_000, 60_000),
         token,
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert!(started.await.unwrap(), "heartbeat child never ran");
@@ -298,6 +359,8 @@ async fn an_escaped_grandchild_is_ended_when_the_run_is_dropped() {
             &log,
             limits(60_000, 60_000),
             CancellationToken::new(),
+            &ExecEnv::inherit(),
+            None,
         )
         .await
     });
@@ -322,6 +385,8 @@ async fn normal_exit_returns_promptly_even_with_background_child() {
         &dir.path().join("l.jsonl"),
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -345,6 +410,8 @@ async fn missing_program_reports_spawn_failure() {
         &dir.path().join("l.jsonl"),
         limits(5_000, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert!(matches!(out.exit, ExitKind::SpawnFailed(_)));
@@ -369,6 +436,8 @@ async fn dropping_the_run_future_ends_the_process_tree() {
             &log,
             limits(60_000, 60_000),
             CancellationToken::new(),
+            &ExecEnv::inherit(),
+            None,
         )
         .await
     });
@@ -395,12 +464,15 @@ async fn an_outer_timeout_ends_the_process_tree() {
         serde_json::json!([{"heartbeat": hb, "every_ms": 50}, {"sleep_ms": 30_000}]),
     );
     let log = dir.path().join("l.jsonl");
+    let env = ExecEnv::inherit();
     let mut run = Box::pin(runner::run(
         spec(agent(), dir.path(), &s, ""),
         ExecutorKind::Claude,
         &log,
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &env,
+        None,
     ));
     // Drive the run until the grandchild is alive, so the timeout below cuts into a real tree
     // however slow the machine is.
@@ -440,6 +512,8 @@ async fn stdout_output_keeps_the_stall_timer_from_firing() {
         &dir.path().join("l.jsonl"),
         limits(3_000, 1_200),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -459,6 +533,8 @@ async fn stderr_output_also_counts_as_activity() {
         &dir.path().join("l.jsonl"),
         limits(3_000, 1_200),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::TimedOut);
@@ -482,6 +558,8 @@ async fn a_burst_before_exit_is_fully_drained() {
         &log,
         limits(60_000, 60_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -513,6 +591,8 @@ async fn huge_limits_mean_no_deadline_instead_of_a_panic() {
         &dir.path().join("l.jsonl"),
         huge,
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -530,6 +610,8 @@ async fn spawn_failure_is_written_to_the_log() {
         &log,
         limits(5_000, 5_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     let ExitKind::SpawnFailed(message) = out.exit else {
@@ -553,6 +635,8 @@ async fn the_log_is_private_to_the_user() {
         &log,
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
@@ -566,6 +650,256 @@ async fn the_log_is_private_to_the_user() {
     {
         // Windows keeps the default access of the per-user directory the log lives in.
         assert_eq!(log_lines(&log), ["x"]);
+    }
+}
+
+// A retry reuses the log file of the previous attempt, and the file mode given at creation does
+// not apply to a file that exists: the run has to make it private itself.
+#[tokio::test]
+async fn a_reused_log_file_is_made_private_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(dir.path(), serde_json::json!([{"out": "hello"}]));
+    let log = dir.path().join("3.jsonl");
+    std::fs::write(&log, "old attempt\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "log mode is {mode:o}");
+    }
+    // Windows has no mode to tighten: the file keeps the access of the per-user directory.
+    assert_eq!(log_lines(&log), ["hello"], "the old attempt is gone");
+}
+
+// One output line without an end must not use up the host's memory: the first 4 MiB of it are
+// kept, the rest is read and dropped, a note in the log says so, and the lines after it still
+// arrive, the final result included.
+#[tokio::test]
+async fn a_runaway_output_line_is_cut_and_the_run_goes_on() {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": "x".repeat(LIMIT + 1000)}, {"out": RESULT_LINE}, {"exit": 0}]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+    let lines = log_lines(&log);
+    assert_eq!(lines.len(), 3, "the long line, the note, the result");
+    assert_eq!(lines[0].len(), LIMIT);
+    let note: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+    assert_eq!(note["stream"], "stderr");
+    // The whole line was read: its text and the newline.
+    assert_eq!(
+        note["text"],
+        format!(
+            "[IssueRelay] a {}-byte output line was cut to {LIMIT} bytes",
+            LIMIT + 1001
+        )
+    );
+    assert_eq!(lines[2], RESULT_LINE);
+}
+
+/// Seconds since the epoch on the wall clock, the clock process start times are kept in.
+#[cfg(target_os = "macos")]
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+// On macOS the run reports its executor's PID and start time right after the start: the record a
+// host started after a crash uses to end what the run left behind.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_run_reports_its_executor_process_when_it_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    // The executor stays a moment, so that it surely still runs when the hook looks at it.
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": "hi"}, {"sleep_ms": 300}]),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let hook: runner::SpawnHook = Box::new(move |tag| {
+        let live = runner::process_tag(tag.pid);
+        tx.send((tag, live)).unwrap();
+    });
+    let before = unix_seconds();
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("1.jsonl"),
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        Some(hook),
+    )
+    .await;
+    let after = unix_seconds();
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let (tag, live) = rx.try_recv().expect("the hook ran");
+    assert!(tag.pid > 1);
+    assert_eq!(live.as_ref(), Some(&tag), "the PID had another start time");
+    let (secs, micros) = tag.started.split_once('.').expect("seconds.microseconds");
+    let secs: u64 = secs.parse().unwrap();
+    assert!(
+        (before.saturating_sub(1)..=after + 1).contains(&secs),
+        "{} is not between {before} and {after}",
+        tag.started
+    );
+    assert_eq!(micros.len(), 6, "{}", tag.started);
+    assert!(
+        micros.bytes().all(|b| b.is_ascii_digit()),
+        "{}",
+        tag.started
+    );
+}
+
+// Elsewhere nothing is recorded and the sweep has nothing to end: on Windows the Job Object ends
+// the whole tree with the host that created it, and other Unix systems are not target platforms.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn no_executor_process_is_recorded_where_the_tree_ends_with_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": "hi"}, {"sleep_ms": 300}]),
+    );
+    let (tx, rx) = std::sync::mpsc::channel::<ProcessTag>();
+    let hook: runner::SpawnHook = Box::new(move |tag| tx.send(tag).unwrap());
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("1.jsonl"),
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        Some(hook),
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert!(rx.try_recv().is_err(), "a process was recorded");
+    assert_eq!(runner::process_tag(std::process::id()), None);
+    let tag = ProcessTag {
+        pid: u32::MAX - 7,
+        started: "1.000001".into(),
+    };
+    assert!(!runner::end_leftover(&tag).await);
+}
+
+/// Starts `steps` as an executor that a crashed host left behind (see `Orphan`) and returns once
+/// every file in `beats` has content, that is once its heartbeat children run.
+#[cfg(target_os = "macos")]
+async fn leftover(dir: &Path, steps: serde_json::Value, beats: &[&Path]) -> Orphan {
+    let orphan = Orphan::spawn(&script(dir, steps));
+    for beat in beats {
+        assert!(
+            wait_for_content(beat).await,
+            "{} never got a heartbeat",
+            beat.display()
+        );
+    }
+    orphan
+}
+
+// A host started after a crash ends the executor a run left behind the way `TreeGuard` ends a
+// stopped run: its process group, and its descendants that left the group.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_leftover_executor_tree_is_ended_on_the_next_start() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (beat, escaped) = (dir.path().join("beat"), dir.path().join("escaped"));
+    let steps = serde_json::json!([
+        {"heartbeat": beat, "every_ms": 50},
+        {"escaped_heartbeat": escaped, "every_ms": 50},
+        {"sleep_ms": 30_000}
+    ]);
+    let mut orphan = leftover(dir.path(), steps, &[&beat, &escaped]).await;
+    let tag = runner::process_tag(orphan.id()).expect("a live process has a start time");
+    assert!(runner::end_leftover(&tag).await);
+    // Checked before the leader is reaped, so that the guard can still end the group if a
+    // heartbeat survived.
+    tokio::join!(
+        assert_stops_growing(
+            &beat,
+            "the heartbeat child in the executor's group survived"
+        ),
+        assert_stops_growing(&escaped, "the heartbeat child that left the group survived"),
+    );
+    let status = orphan
+        .exit_within(Duration::from_secs(10))
+        .await
+        .expect("the leftover executor still runs");
+    // fake-agent does not ignore SIGTERM, so it ended before the grace period was over.
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+}
+
+// A PID whose start time differs from the record belongs to an unrelated process now: it and its
+// children are left alone, also when only the microseconds differ. A PID that cannot exist is not
+// an error either.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_pid_with_another_start_time_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let beat = dir.path().join("beat");
+    let steps = serde_json::json!([{"heartbeat": beat, "every_ms": 50}, {"sleep_ms": 30_000}]);
+    let mut orphan = leftover(dir.path(), steps, &[&beat]).await;
+    let real = runner::process_tag(orphan.id()).unwrap();
+    let (secs, micros) = real.started.split_once('.').unwrap();
+    let next_micro = (micros.parse::<u32>().unwrap() + 1) % 1_000_000;
+    for started in ["1.000001".to_string(), format!("{secs}.{next_micro:06}")] {
+        let tag = ProcessTag {
+            pid: real.pid,
+            started,
+        };
+        assert!(!runner::end_leftover(&tag).await, "{tag:?}");
+    }
+    let before = file_len(&beat);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        orphan.is_running(),
+        "an unrelated process must keep running"
+    );
+    assert!(
+        file_len(&beat) > before,
+        "the child of an unrelated process must keep running"
+    );
+    for pid in [u32::MAX - 7, 99_999_999] {
+        let gone = ProcessTag {
+            pid,
+            started: "1.000001".into(),
+        };
+        assert!(!runner::end_leftover(&gone).await, "{pid}");
     }
 }
 
@@ -590,6 +924,8 @@ async fn cmd_wrapper_passes_prompt_and_paths_intact() {
         &work.join("l.jsonl"),
         limits(30_000, 30_000),
         CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
     )
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));

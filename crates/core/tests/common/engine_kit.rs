@@ -10,7 +10,8 @@ use issuerelay_core::{
     doctor::{ExecutorReport, ReadinessProbe},
     engine::{Engine, EngineDeps, JobRunner},
     executor::CommandSpec,
-    runner::{ExitKind, RunLimits, RunOutput},
+    model::ProcessTag,
+    runner::{ExitKind, RunLimits, RunOutput, SpawnHook},
     store::Store,
 };
 use tokio::sync::Semaphore;
@@ -131,7 +132,15 @@ impl JobRunner for ScriptedRunner {
         log_path: PathBuf,
         limits: RunLimits,
         cancel: CancellationToken,
+        on_spawn: SpawnHook,
     ) -> RunOutput {
+        // A made-up process, reported before the run counts as started. It only goes into the
+        // store: no test may let a host end it (`runner::end_leftover`), as the PID may belong to
+        // anything on the machine running the tests.
+        on_spawn(ProcessTag {
+            pid: 4242,
+            started: "1700000000.000001".into(),
+        });
         let id = identifier_in(&spec.stdin);
         self.started.lock().unwrap().push(id.clone());
         self.specs.lock().unwrap().push(spec);

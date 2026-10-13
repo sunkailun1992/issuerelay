@@ -10,7 +10,7 @@ use rusqlite::{
 };
 
 use crate::config::{Binding, ExecutorKind};
-use crate::model::{Issue, Job, JobState};
+use crate::model::{Issue, Job, JobState, ProcessTag};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS jobs (
@@ -31,13 +31,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     finished_at TEXT,
     log_path TEXT,
-    summary TEXT
+    summary TEXT,
+    process_pid INTEGER,
+    process_started TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// The columns schema 2 added to the M1 table, with their types.
+const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
+    [("process_pid", "INTEGER"), ("process_started", "TEXT")];
 
 const COLUMNS: &str = "id, issue_uuid, issue_identifier, title, binding_id, directory, executor, \
     state, reason, priority, issue_created_at, discovered_updated_at, verified_updated_at, \
@@ -56,6 +62,22 @@ pub struct NewJob<'a> {
 /// The run records in SQLite. One connection: callers serialize access.
 pub struct Store {
     conn: Connection,
+}
+
+/// A run still marked running when the host started: the previous host stopped without
+/// recording its end. `process` is what was recorded about its executor, if anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedRun {
+    pub job_id: i64,
+    pub process: Option<ProcessTag>,
+}
+
+/// A run that is over while its executor may still be running: a previous host stopped in the
+/// middle of it (`recover_interrupted`), and the executor recorded for it was not swept yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    pub job_id: i64,
+    pub process: ProcessTag,
 }
 
 /// Variable width (AutoSi keeps Linear's precision), so never compare or
@@ -108,7 +130,8 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
 
 impl Store {
     /// Opens or creates the database at `path`, creating parent directories, enabling WAL and
-    /// recording the schema version.
+    /// bringing the layout up to the current schema version. A database from a newer release
+    /// (a higher schema version) is refused.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -127,12 +150,34 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
-        // Records the layout above so later releases can migrate; 0 means a fresh database.
+        // 0 for a fresh database, and for one whose version was never recorded (see below).
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == 0 {
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        anyhow::ensure!(
+            version <= SCHEMA_VERSION,
+            "the run records were written by a newer IssueRelay (schema {version}; this build \
+             knows up to {SCHEMA_VERSION}); install that release or a newer one"
+        );
+        // One transaction: a migration that stops halfway must not leave a half-changed table.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        if version < SCHEMA_VERSION {
+            // Below the current version the version does not tell which columns exist: an M1
+            // database whose first start stopped before it recorded the version, and a database
+            // restored from `sqlite3 .dump`, keep the table of their release under version 0.
+            // So the columns of schema 2 are added where they are missing, whatever the version.
+            let present: Vec<String> = tx
+                .prepare("SELECT name FROM pragma_table_info('jobs')")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (column, kind) in ADDED_IN_SCHEMA_2 {
+                // Column names in SQLite ignore ASCII case.
+                if !present.iter().any(|name| name.eq_ignore_ascii_case(column)) {
+                    tx.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {column} {kind};"))?;
+                }
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        tx.commit()?;
         Ok(Self { conn })
     }
 
@@ -270,12 +315,14 @@ impl Store {
         Ok(self.conn.execute(&sql, params_from_iter(values))? == 1)
     }
 
-    /// Moves a queued job to `running` and records its log file. Returns `false`, changing
+    /// Moves a queued job to `running` and records its log file. A new run does not inherit the
+    /// executor process of a previous one: that record is cleared. Returns `false`, changing
     /// nothing, when the job is no longer queued (for example the user stopped it while the
     /// issue was being re-read); the engine then does not start the run.
     pub fn mark_started(&self, id: i64, log_path: &Path) -> Result<bool> {
         let changed = self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, log_path = ?4 \
+            "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, log_path = ?4, \
+             process_pid = NULL, process_started = NULL \
              WHERE id = ?1 AND state = ?5",
             params![
                 id,
@@ -288,9 +335,20 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Records the executor process of a running job, so that a host started after a crash can
+    /// end what the run left behind. Rows that are not running are left alone.
+    pub fn set_process(&self, id: i64, process: &ProcessTag) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET process_pid = ?2, process_started = ?3 WHERE id = ?1 AND state = ?4",
+            params![id, process.pid, process.started, JobState::Running.as_str()],
+        )?;
+        Ok(())
+    }
+
     /// Records how a run ended. `verified_updated_at` is Linear's `updatedAt` read when the
     /// result was verified (Linear's clock, the value the requeue rule compares); `None` keeps
-    /// whatever value the row already has.
+    /// whatever value the row already has. The record of the executor goes: its runner ended the
+    /// whole process tree, so a later host has nothing to sweep for this run.
     pub fn mark_finished(
         &self,
         id: i64,
@@ -300,7 +358,8 @@ impl Store {
         verified_updated_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = ?3, summary = ?4, verified_updated_at = COALESCE(?5, verified_updated_at), finished_at = ?6 WHERE id = ?1",
+            "UPDATE jobs SET state = ?2, reason = ?3, summary = ?4, verified_updated_at = COALESCE(?5, verified_updated_at), finished_at = ?6, \
+             process_pid = NULL, process_started = NULL WHERE id = ?1",
             params![id, state.as_str(), reason, summary, verified_updated_at.map(fmt), fmt(Utc::now())],
         )?;
         Ok(())
@@ -318,13 +377,80 @@ impl Store {
     }
 
     /// Only the single running host may call this, at startup, before any run starts: a second
-    /// instance would mark the first one's runs as failed. Interrupted runs keep their verified
-    /// value and are not retried.
-    pub fn recover_interrupted(&self) -> Result<usize> {
-        Ok(self.conn.execute(
+    /// instance would mark the first one's runs as failed. Marks every run still marked running
+    /// as failed (interrupted runs keep their verified value and are not retried) and returns
+    /// them, oldest first, with the executor process recorded for each. The records stay on the
+    /// rows until the sweep has dealt with them (`leftovers`, `clear_process`).
+    pub fn recover_interrupted(&self) -> Result<Vec<InterruptedRun>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let runs = {
+            let mut statement = tx.prepare(
+                "SELECT id, process_pid, process_started FROM jobs WHERE state = ?1 ORDER BY id",
+            )?;
+            let rows = statement.query_map(params![JobState::Running.as_str()], |row| {
+                let pid: Option<i64> = row.get(1)?;
+                let started: Option<String> = row.get(2)?;
+                // A value that is no PID counts as no record: nothing is ended for it.
+                let process = match (pid.and_then(|pid| u32::try_from(pid).ok()), started) {
+                    (Some(pid), Some(started)) => Some(ProcessTag { pid, started }),
+                    _ => None,
+                };
+                Ok(InterruptedRun {
+                    job_id: row.get(0)?,
+                    process,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute(
             "UPDATE jobs SET state = ?2, reason = 'interrupted: IssueRelay stopped while the run was in progress', finished_at = ?1 WHERE state = ?3",
             params![fmt(Utc::now()), JobState::Failed.as_str(), JobState::Running.as_str()],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(runs)
+    }
+
+    /// The runs that are not running but still carry the record of their executor, oldest
+    /// first: runs a previous host stopped in the middle of, whose executors were not swept yet.
+    /// A run that finished has no record (`mark_finished`), and the sweep clears the record of
+    /// each run it dealt with (`clear_process`), so a host that stops before its sweep is done
+    /// finds the rest again at its next start.
+    pub fn leftovers(&self) -> Result<Vec<Leftover>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, process_pid, process_started FROM jobs \
+             WHERE state != ?1 AND process_pid IS NOT NULL AND process_started IS NOT NULL \
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![JobState::Running.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut leftovers = Vec::new();
+        for row in rows {
+            let (job_id, pid, started) = row?;
+            // A value that is no PID counts as no record: nothing is ended for it.
+            if let Ok(pid) = u32::try_from(pid) {
+                leftovers.push(Leftover {
+                    job_id,
+                    process: ProcessTag { pid, started },
+                });
+            }
+        }
+        Ok(leftovers)
+    }
+
+    /// Forgets the record of a run's executor once the sweep has dealt with it, but only while
+    /// the row still holds that record: one the row got since (a retry that started) stays.
+    pub fn clear_process(&self, id: i64, process: &ProcessTag) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET process_pid = NULL, process_started = NULL \
+             WHERE id = ?1 AND process_pid = ?2 AND process_started = ?3",
+            params![id, process.pid, process.started],
+        )?;
+        Ok(())
     }
 }
 
@@ -332,7 +458,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::config::{Binding, ExecutorKind};
-    use crate::model::{Issue, JobState};
+    use crate::model::{Issue, JobState, ProcessTag};
     use chrono::{Duration, TimeZone, Utc};
     use std::path::{Path, PathBuf};
 
@@ -506,11 +632,11 @@ mod tests {
         let job = queued(&store, "1");
         store.mark_started(job.id, Path::new("x.jsonl")).unwrap();
         queued(&store, "2");
-        assert_eq!(store.recover_interrupted().unwrap(), 1);
+        assert_eq!(store.recover_interrupted().unwrap().len(), 1);
         let recovered = store.get(job.id).unwrap().unwrap();
         assert_eq!(recovered.state, JobState::Failed);
         assert!(recovered.reason.unwrap().contains("interrupted"));
-        assert_eq!(store.recover_interrupted().unwrap(), 0);
+        assert!(store.recover_interrupted().unwrap().is_empty());
     }
 
     #[test]
@@ -675,7 +801,7 @@ mod tests {
         store.requeue(job.id).unwrap();
         assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
         let untouched = queued(&store, "2");
-        assert_eq!(store.recover_interrupted().unwrap(), 1);
+        assert_eq!(store.recover_interrupted().unwrap().len(), 1);
         let recovered = store.get(job.id).unwrap().unwrap();
         assert_eq!(recovered.state, JobState::Failed);
         assert!(
@@ -769,7 +895,7 @@ mod tests {
         let version: i64 = raw
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -840,20 +966,373 @@ mod tests {
         );
     }
 
+    /// The M1 layout (schema 1), with one running row.
+    const SCHEMA_V1: &str = "CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, issue_uuid TEXT NOT NULL, issue_identifier TEXT NOT NULL,
+        title TEXT NOT NULL, binding_id TEXT, directory TEXT, executor TEXT, state TEXT NOT NULL,
+        reason TEXT, priority INTEGER NOT NULL, issue_created_at TEXT NOT NULL,
+        discovered_updated_at TEXT NOT NULL, verified_updated_at TEXT, created_at TEXT NOT NULL,
+        started_at TEXT, finished_at TEXT, log_path TEXT, summary TEXT);
+        INSERT INTO jobs (issue_uuid, issue_identifier, title, state, priority, issue_created_at,
+            discovered_updated_at, created_at)
+        VALUES ('u-1', 'DEMO-1', 'Demo', 'running', 0, '2026-10-01T08:00:00Z',
+            '2026-10-01T08:00:00Z', '2026-10-01T08:00:00Z');
+        PRAGMA user_version = 1;";
+
     #[test]
-    fn an_existing_schema_version_is_kept() {
+    fn an_m1_database_is_migrated_to_schema_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(SCHEMA_V1)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let interrupted = store.recover_interrupted().unwrap();
+        assert_eq!(
+            interrupted,
+            vec![InterruptedRun {
+                job_id: 1,
+                process: None
+            }]
+        );
+        assert_eq!(store.get(1).unwrap().unwrap().state, JobState::Failed);
+    }
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    /// The names of the `jobs` table's columns, or of the database's indexes.
+    fn names(conn: &Connection, sql: &str) -> Vec<String> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    const COLUMNS_SQL: &str = "SELECT name FROM pragma_table_info('jobs')";
+    const INDEXES_SQL: &str =
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'jobs_by_%'";
+
+    // An M1 database whose version was never recorded (M1's first start stopped between creating
+    // the table and recording the version) has the M1 table under version 0.
+    #[test]
+    fn an_m1_database_without_its_version_is_migrated_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let unversioned = SCHEMA_V1.replace("PRAGMA user_version = 1;", "");
+        assert_ne!(unversioned, SCHEMA_V1);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&unversioned)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn), 2);
+        let columns = names(&store.conn, COLUMNS_SQL);
+        for column in ["process_pid", "process_started"] {
+            assert!(columns.iter().any(|c| c == column), "{columns:?}");
+        }
+        let interrupted = store.recover_interrupted().unwrap();
+        assert_eq!(
+            interrupted,
+            vec![InterruptedRun {
+                job_id: 1,
+                process: None
+            }]
+        );
+        assert_eq!(store.get(1).unwrap().unwrap().state, JobState::Failed);
+    }
+
+    // A database restored from a dump starts at version 0 too, with every column of its release:
+    // nothing is added twice, and the record of its runs survives.
+    #[test]
+    fn a_restored_database_that_lost_its_version_keeps_working() {
+        let (_dir, path, store) = file_store();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        let tag = ProcessTag {
+            pid: 4242,
+            started: "1700000000.000123".into(),
+        };
+        store.set_process(job.id, &tag).unwrap();
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 0)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(
+            store.recover_interrupted().unwrap(),
+            vec![InterruptedRun {
+                job_id: job.id,
+                process: Some(tag)
+            }]
+        );
+    }
+
+    // SQLite compares column names without regard to ASCII case, and so does the migration.
+    #[test]
+    fn a_column_of_schema_2_in_other_letter_case_is_not_added_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let renamed = SCHEMA_V1
+            .replacen(
+                "summary TEXT);",
+                "summary TEXT, PROCESS_PID INTEGER, Process_Started TEXT);",
+                1,
+            )
+            .replace("PRAGMA user_version = 1;", "");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&renamed)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(names(&store.conn, COLUMNS_SQL).len(), 20);
+    }
+
+    /// The most columns a table may have in this build of SQLite: 2000, unless SQLite was built
+    /// with another `SQLITE_MAX_COLUMN`.
+    fn column_limit() -> usize {
+        let conn = Connection::open_in_memory().unwrap();
+        let fits = |count: usize| {
+            let columns: Vec<String> = (0..count).map(|i| format!("c{i}")).collect();
+            let sql = format!(
+                "CREATE TABLE probe ({}); DROP TABLE probe;",
+                columns.join(", ")
+            );
+            conn.execute_batch(&sql).is_ok()
+        };
+        // `low` columns fit and `high` do not: SQLite never allows more than 32767.
+        let (mut low, mut high) = (1, 32_768);
+        while high - low > 1 {
+            let middle = (low + high) / 2;
+            if fits(middle) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    // The M1 table has one column less than SQLite allows, so the migration's first column fits
+    // and its second is refused. The transaction must take everything back: still schema 1,
+    // neither new column, and not the indexes the migration created before it altered the table.
+    #[test]
+    fn a_migration_that_fails_halfway_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // SCHEMA_V1 has 18 columns and no index.
+        let fillers: Vec<String> = (0..column_limit() - 1 - 18)
+            .map(|i| format!("filler_{i} TEXT"))
+            .collect();
+        let crowded = SCHEMA_V1.replacen(
+            "summary TEXT);",
+            &format!("summary TEXT, {});", fillers.join(", ")),
+            1,
+        );
+        assert_ne!(crowded, SCHEMA_V1);
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(&crowded).unwrap();
+        assert_eq!(names(&raw, COLUMNS_SQL).len(), column_limit() - 1);
+        drop(raw);
+        let error = Store::open(&path)
+            .err()
+            .expect("the second column must not fit");
+        assert!(
+            format!("{error:#}").contains("too many columns"),
+            "{error:#}"
+        );
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(user_version(&raw), 1);
+        let columns = names(&raw, COLUMNS_SQL);
+        assert!(
+            !columns.iter().any(|c| c.starts_with("process_")),
+            "{columns:?}"
+        );
+        assert_eq!(names(&raw, INDEXES_SQL), Vec::<String>::new());
+    }
+
+    // The sweep after a crash reads what is left to end from the rows, so a host that stops before
+    // the sweep is done leaves the record for the next one; only the sweep clears it.
+    #[test]
+    fn an_interrupted_run_keeps_its_process_until_the_sweep_clears_it() {
+        let store = Store::open_in_memory().unwrap();
+        let interrupted = queued(&store, "1");
+        let finished = queued(&store, "2");
+        let tag = ProcessTag {
+            pid: 4242,
+            started: "1700000000.000123".into(),
+        };
+        for job in [&interrupted, &finished] {
+            assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+            store.set_process(job.id, &tag).unwrap();
+        }
+        store
+            .mark_finished(finished.id, JobState::Failed, Some("boom"), None, None)
+            .unwrap();
+        let leftover = Leftover {
+            job_id: interrupted.id,
+            process: tag.clone(),
+        };
+        assert!(
+            store.leftovers().unwrap().is_empty(),
+            "a running row is not left over"
+        );
+        assert_eq!(store.recover_interrupted().unwrap().len(), 1);
+        assert_eq!(store.leftovers().unwrap(), std::slice::from_ref(&leftover));
+        // A later start that recovers nothing still finds it.
+        assert!(store.recover_interrupted().unwrap().is_empty());
+        assert_eq!(store.leftovers().unwrap(), std::slice::from_ref(&leftover));
+        // Only the record that was swept is cleared, not one the row got since.
+        let other = ProcessTag {
+            pid: 4242,
+            started: "1700000000.000124".into(),
+        };
+        store.clear_process(interrupted.id, &other).unwrap();
+        assert_eq!(store.leftovers().unwrap(), [leftover]);
+        store.clear_process(interrupted.id, &tag).unwrap();
+        assert!(store.leftovers().unwrap().is_empty());
+    }
+
+    // A run that finished was ended by its runner, process tree and all: nothing is left to sweep.
+    #[test]
+    fn a_finished_run_forgets_its_process() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        let tag = ProcessTag {
+            pid: 4242,
+            started: "1700000000.000123".into(),
+        };
+        store.set_process(job.id, &tag).unwrap();
+        store
+            .mark_finished(job.id, JobState::AwaitingAcceptance, None, None, None)
+            .unwrap();
+        let recorded: (Option<i64>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT process_pid, process_started FROM jobs WHERE id = ?1",
+                params![job.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recorded, (None, None));
+    }
+
+    #[test]
+    fn a_database_from_a_newer_release_is_refused() {
         let (_dir, path, store) = file_store();
         drop(store);
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 7)
+            .pragma_update(None, "user_version", 3)
             .unwrap();
-        let _reopened = Store::open(&path).unwrap();
-        let version: i64 = Connection::open(&path)
-            .unwrap()
-            .pragma_query_value(None, "user_version", |row| row.get(0))
+        let error = Store::open(&path)
+            .err()
+            .expect("a newer schema must be refused");
+        assert!(
+            format!("{error:#}").contains("newer IssueRelay"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn interrupted_runs_come_back_with_their_process() {
+        let store = Store::open_in_memory().unwrap();
+        let tagged = queued(&store, "1");
+        let untagged = queued(&store, "2");
+        let finished = queued(&store, "3");
+        for job in [&tagged, &untagged, &finished] {
+            assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        }
+        let tag = ProcessTag {
+            pid: 4242,
+            started: "1700000000.000123".into(),
+        };
+        store.set_process(tagged.id, &tag).unwrap();
+        store.set_process(finished.id, &tag).unwrap();
+        store
+            .mark_finished(finished.id, JobState::AwaitingAcceptance, None, None, None)
             .unwrap();
-        assert_eq!(version, 7);
+        let interrupted = store.recover_interrupted().unwrap();
+        assert_eq!(
+            interrupted,
+            vec![
+                InterruptedRun {
+                    job_id: tagged.id,
+                    process: Some(tag.clone())
+                },
+                InterruptedRun {
+                    job_id: untagged.id,
+                    process: None
+                },
+            ]
+        );
+        assert!(
+            store.recover_interrupted().unwrap().is_empty(),
+            "they are no longer running"
+        );
+    }
+
+    #[test]
+    fn a_restarted_run_forgets_the_previous_process() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        store
+            .set_process(
+                job.id,
+                &ProcessTag {
+                    pid: 1,
+                    started: "1.000001".into(),
+                },
+            )
+            .unwrap();
+        store
+            .mark_finished(job.id, JobState::Failed, Some("boom"), None, None)
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        assert_eq!(store.recover_interrupted().unwrap()[0].process, None);
+    }
+
+    #[test]
+    fn set_process_only_touches_running_rows() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        store
+            .set_process(
+                job.id,
+                &ProcessTag {
+                    pid: 7,
+                    started: "1.000001".into(),
+                },
+            )
+            .unwrap();
+        // Read before `mark_started`, which clears the columns anyway.
+        let recorded: (Option<i64>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT process_pid, process_started FROM jobs WHERE id = ?1",
+                params![job.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recorded, (None, None), "a queued row got a process");
+        assert!(store.mark_started(job.id, Path::new("x.jsonl")).unwrap());
+        assert_eq!(store.recover_interrupted().unwrap()[0].process, None);
     }
 
     #[test]

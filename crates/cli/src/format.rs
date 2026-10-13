@@ -5,7 +5,10 @@
 //! in the JSON or in the error line.
 use std::fmt::Write as _;
 
-use issuerelay_core::text::is_invisible;
+use issuerelay_core::{
+    env::{EnvSource, mask_credentials},
+    text::is_invisible,
+};
 use serde_json::Value;
 
 /// What `issuerelay` prints for a result: the JSON itself with `--json`, otherwise the summary
@@ -101,13 +104,19 @@ fn strings(value: &Value) -> Vec<String> {
 
 fn status(v: &Value) -> String {
     let monitoring = if v["paused"] == true { "paused" } else { "on" };
+    // Only while the host waits for its runs before it exits; older hosts send no such field.
+    let draining = if v["draining"] == true {
+        "\nDraining: finishing runs, starting nothing new"
+    } else {
+        ""
+    };
     let linear = if v["linear_ok"] == true {
         format!("connected as {}", text(&v["viewer"], "name"))
     } else {
         format!("not connected ({})", text(v, "last_error"))
     };
     let mut out = format!(
-        "Monitoring: {monitoring}\nLinear: {linear}\nRunning: {}  Queued: {}  Waiting for binding: {}\nLast check: {}",
+        "Monitoring: {monitoring}{draining}\nLinear: {linear}\nRunning: {}  Queued: {}  Waiting for binding: {}\nLast check: {}",
         v["running"],
         v["queued"],
         v["waiting"],
@@ -185,6 +194,9 @@ fn doctor(v: &Value) -> String {
         };
         out.push(format!("{}: {detail}", text(e, "kind")));
     }
+    if let Some(env) = v.get("env").filter(|x| x.is_object()) {
+        out.extend(environment(env));
+    }
     if let Some(ws) = v.get("workspace").filter(|x| !x.is_null()) {
         let label = if ws["label_ok"] == true {
             "label ok"
@@ -200,6 +212,19 @@ fn doctor(v: &Value) -> String {
                 missing.join(", ")
             )
         });
+        // Which teams the statuses were looked up in; a host from before the field existed
+        // sends none, and then nothing is said about teams.
+        if ws["teams_checked"].is_array() {
+            let teams = strings(&ws["teams_checked"]);
+            out.push(format!(
+                "Teams checked: {}",
+                if teams.is_empty() {
+                    "none".to_string()
+                } else {
+                    teams.join(", ")
+                }
+            ));
+        }
     }
     for b in v["bindings"].as_array().into_iter().flatten() {
         let mut wrong = Vec::new();
@@ -221,6 +246,44 @@ fn doctor(v: &Value) -> String {
         ));
     }
     out.join("\n")
+}
+
+/// The lines for the environment executors get: where the PATH and the proxy come from, the
+/// proxy variables with any user name and password in a URL masked, and what could not be read.
+fn environment(env: &Value) -> Vec<String> {
+    let mut lines = vec![
+        format!("PATH: {}", source_label(&env["path_source"])),
+        format!("Proxy: {}", source_label(&env["proxy_source"])),
+    ];
+    for pair in env["proxy"].as_array().into_iter().flatten() {
+        if let Some([name, value]) = pair.as_array().map(Vec::as_slice)
+            && let (Some(name), Some(value)) = (name.as_str(), value.as_str())
+        {
+            lines.push(format!(
+                "  {}={}",
+                clean(name),
+                clean(&mask_credentials(value))
+            ));
+        }
+    }
+    lines.extend(
+        strings(&env["problems"])
+            .into_iter()
+            .map(|p| format!("  ! {p}")),
+    );
+    lines
+}
+
+/// What an `EnvSource` as the engine sent it means; a value this version does not know is not
+/// echoed.
+fn source_label(value: &Value) -> &'static str {
+    match serde_json::from_value::<EnvSource>(value.clone()) {
+        Ok(EnvSource::Host) => "inherited from the host",
+        Ok(EnvSource::LoginShell) => "login shell",
+        Ok(EnvSource::SystemSettings) => "system settings",
+        Ok(EnvSource::None) => "none",
+        Err(_) => "unknown",
+    }
 }
 
 fn bindings(v: &Value) -> String {
@@ -258,6 +321,10 @@ fn logs(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use issuerelay_core::{
+        engine::StatusSnapshot,
+        env::{EnvSource, ExecEnv},
+    };
     use serde_json::json;
 
     #[test]
@@ -293,6 +360,28 @@ mod tests {
             !text.chars().any(|c| c.is_control() && c != '\n'),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn status_says_when_the_host_is_draining() {
+        let draining = StatusSnapshot {
+            draining: true,
+            ..StatusSnapshot::default()
+        };
+        let text = human("status", &serde_json::to_value(draining).unwrap());
+        assert!(
+            text.contains("Monitoring: on\nDraining: finishing runs, starting nothing new\n"),
+            "{text}"
+        );
+        let text = human(
+            "status",
+            &serde_json::to_value(StatusSnapshot::default()).unwrap(),
+        );
+        assert!(!text.contains("Draining"), "{text}");
+        // A host from before `draining` existed sends no such field.
+        let older =
+            json!({"paused": false, "linear_ok": false, "running": 0, "queued": 0, "waiting": 0});
+        assert!(!human("status", &older).contains("Draining"));
     }
 
     #[test]
@@ -393,14 +482,16 @@ mod tests {
                 {"kind": "claude", "program": "/x/claude", "logged_in": true, "linear_mcp": true, "problems": []},
                 {"kind": "codex", "program": null, "logged_in": false, "linear_mcp": false, "problems": ["`codex` is not installed or not on PATH"]}
             ],
-            "workspace": {"label_ok": true, "missing_states": ["Demo: In Testing"]},
+            "workspace": {"label_ok": true, "missing_states": ["Demo: In Testing"], "teams_checked": ["Demo", "Other"]},
             "bindings": [{"binding_id": "p", "project_name": "Demo Project", "directory_exists": true, "executor": "claude", "executor_ready": true}]
         });
         let text = human("doctor", &v);
         assert!(text.contains("Linear: connected as Jane Doe"));
         assert!(text.contains("claude: ready"));
         assert!(text.contains("codex: not ready (`codex` is not installed or not on PATH)"));
-        assert!(text.contains("Workspace: label ok, missing statuses: Demo: In Testing"));
+        assert!(text.contains(
+            "Workspace: label ok, missing statuses: Demo: In Testing\nTeams checked: Demo, Other\n"
+        ));
         assert!(text.contains("Binding Demo Project -> claude: ok"));
         // Everything Linear or an executor can influence is untrusted text.
         let hostile = human(
@@ -410,7 +501,7 @@ mod tests {
                 "linear_error": "e\u{1b}[31m",
                 "executors": [{"kind": "codex", "program": null, "logged_in": false, "linear_mcp": false,
                     "problems": ["p\u{7}1", "p\u{1b}]52;c;eA==\u{7}2"]}],
-                "workspace": {"label_ok": false, "missing_states": ["Demo:\u{1b}x"]},
+                "workspace": {"label_ok": false, "missing_states": ["Demo:\u{1b}x"], "teams_checked": ["Te\u{1b}]52;c;eA==\u{7}am", "Se\u{202e}cond\nforged line"]},
                 "bindings": [{"binding_id": "p", "project_name": "N\u{1b}]0;t\u{7}M", "directory_exists": true, "executor": "claude", "executor_ready": true}]
             }),
         );
@@ -425,6 +516,11 @@ mod tests {
         assert!(
             hostile.contains("missing statuses: Demo: x")
                 && hostile.contains("Binding N ]0;t M -> claude: ok")
+        );
+        // Team names come from Linear as well.
+        assert!(
+            hostile.contains("Teams checked: Te ]52;c;eA== am, Second forged line"),
+            "{hostile:?}"
         );
     }
 
@@ -443,7 +539,22 @@ mod tests {
         let ok = json!({"label_ok": true, "missing_states": []});
         assert!(report(ok, none.clone()).ends_with("Workspace: label ok, statuses ok"));
         let no_label = json!({"label_ok": false, "missing_states": []});
-        assert!(report(no_label, none).ends_with("Workspace: label missing, statuses ok"));
+        assert!(report(no_label, none.clone()).ends_with("Workspace: label missing, statuses ok"));
+        // The teams the statuses were looked up in follow the verdict. A host from before the
+        // field existed sends none, and then nothing is said about teams.
+        let teams = |teams: Value| {
+            let workspace = json!({"label_ok": true, "missing_states": [], "teams_checked": teams});
+            report(workspace, none.clone())
+        };
+        assert_eq!(
+            teams(json!(["Demo"])),
+            "Linear: not connected (offline)\nWorkspace: label ok, statuses ok\nTeams checked: Demo"
+        );
+        assert!(teams(json!(["Demo", "Beta"])).ends_with("\nTeams checked: Demo, Beta"));
+        // No team at all (a workspace without one) is said, not left out.
+        assert!(teams(json!([])).ends_with("\nTeams checked: none"));
+        let older = json!({"label_ok": true, "missing_states": []});
+        assert!(!report(older, none).contains("Teams checked"));
         // An executor that is not ready without a reason is still not ready; each of the three
         // checks has to pass.
         let executor = |program: Value, logged_in: bool, linear_mcp: bool| {
@@ -455,6 +566,101 @@ mod tests {
         assert_eq!(executor(json!("/x/codex"), true, false), "codex: not ready");
         assert_eq!(executor(json!("/x/codex"), false, true), "codex: not ready");
         assert_eq!(executor(Value::Null, true, true), "codex: not ready");
+    }
+
+    /// A `doctor` result whose environment is `env`, as it arrives over IPC.
+    fn doctor_with_env(env: &ExecEnv) -> Value {
+        json!({"viewer": null, "linear_error": "offline", "executors": [], "workspace": null,
+            "bindings": [], "env": serde_json::to_value(env).unwrap()})
+    }
+
+    #[test]
+    fn doctor_shows_where_path_and_proxy_come_from_with_credentials_masked() {
+        let report = doctor_with_env(&ExecEnv {
+            path: Some("/opt/demo/bin:/usr/bin".into()),
+            path_source: EnvSource::LoginShell,
+            proxy: vec![(
+                "HTTPS_PROXY".into(),
+                "http://jane:s3cret@proxy.example:8080".into(),
+            )],
+            proxy_source: EnvSource::SystemSettings,
+            problems: vec!["could not read the login shell's environment: timed out".into()],
+        });
+        let text = human("doctor", &report);
+        assert!(text.contains("PATH: login shell"), "{text}");
+        assert!(text.contains("Proxy: system settings"), "{text}");
+        assert!(
+            text.contains("HTTPS_PROXY=http://***@proxy.example:8080"),
+            "{text}"
+        );
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(text.contains("timed out"), "{text}");
+    }
+
+    #[test]
+    fn doctor_names_every_source_and_stays_quiet_without_an_environment() {
+        let source = |path_source, proxy_source| {
+            let report = doctor_with_env(&ExecEnv {
+                path_source,
+                proxy_source,
+                ..ExecEnv::inherit()
+            });
+            let text = human("doctor", &report);
+            text.lines()
+                .filter(|line| line.starts_with("PATH:") || line.starts_with("Proxy:"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        assert_eq!(
+            source(EnvSource::Host, EnvSource::None),
+            "PATH: inherited from the host | Proxy: none"
+        );
+        assert_eq!(
+            source(EnvSource::SystemSettings, EnvSource::LoginShell),
+            "PATH: system settings | Proxy: login shell"
+        );
+        // The probe has no environment, or an older engine does not send one: nothing is shown.
+        for env in [json!(null), json!("odd")] {
+            let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+                "workspace": null, "bindings": [], "env": env});
+            assert_eq!(human("doctor", &report), "Linear: not connected (offline)");
+        }
+        // A source this version does not know is not echoed.
+        let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+            "workspace": null, "bindings": [],
+            "env": {"path_source": "from\u{1b}[2Jsomewhere", "proxy_source": 3, "proxy": [], "problems": []}});
+        let text = human("doctor", &report);
+        assert!(text.contains("PATH: unknown\nProxy: unknown"), "{text}");
+    }
+
+    #[test]
+    fn the_environment_of_a_doctor_result_is_cleaned_like_everything_else() {
+        // The proxy and the problems come from the host's environment, a login shell and the
+        // system settings; none of that may move the cursor or forge a line.
+        let report = doctor_with_env(&ExecEnv {
+            proxy: vec![(
+                "HTTPS_PROXY".into(),
+                "http://jane:s3cret@proxy.example\u{1b}[2J:8080".into(),
+            )],
+            proxy_source: EnvSource::LoginShell,
+            problems: vec!["bad\u{1b}]52;c;ZXZpbA==\u{7}\nforged line".into()],
+            ..ExecEnv::inherit()
+        });
+        let text = human("doctor", &report);
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(!text.contains("s3cret"), "{text}");
+        assert!(
+            text.contains("  HTTPS_PROXY=http://***@proxy.example [2J:8080"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  ! bad ]52;c;ZXZpbA==  forged line"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 5, "{text}");
     }
 
     #[test]
