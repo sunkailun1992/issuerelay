@@ -33,7 +33,10 @@ pub fn clean_text(text: &str) -> String {
 /// line and paragraph separators, bidi overrides and isolates, invisible operators, the byte
 /// order mark, the soft hyphen, the Arabic letter mark, Hangul fillers and the tag characters.
 /// `char::is_control` lets them through. The zero-width joiner and non-joiner (U+200C, U+200D)
-/// are kept: emoji sequences and Indic scripts need them, and they cannot reorder text.
+/// are kept: emoji sequences and Indic scripts need them, and they cannot reorder text. Removing
+/// the tag characters has a price: the flags of England, Scotland and Wales are a black flag
+/// followed by tag characters, so they become a plain black flag. That is accepted, because tag
+/// characters can also carry hidden text.
 pub fn is_invisible(c: char) -> bool {
     matches!(
         c,
@@ -117,5 +120,15 @@ mod tests {
         // The non-joiner keeps its place too, in Persian for one.
         let persian = "می\u{200c}خواهم";
         assert_eq!(clean_text(persian), persian);
+    }
+
+    #[test]
+    fn the_flags_of_england_scotland_and_wales_lose_their_tag_characters() {
+        // Such a flag is a black flag followed by tag characters that spell the region and end
+        // with U+E007F. They are removed like any tag character, which can carry hidden text, so
+        // the plain black flag is what is left. That loss is accepted.
+        let england = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+        assert_eq!(clean_text(england), "\u{1f3f4}");
+        assert_eq!(clean_text(&format!("a{england}b")), "a\u{1f3f4}b");
     }
 }

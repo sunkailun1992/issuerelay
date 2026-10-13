@@ -551,7 +551,7 @@ mod tests {
             "Linear: not connected (offline)\nWorkspace: label ok, statuses ok\nTeams checked: Demo"
         );
         assert!(teams(json!(["Demo", "Beta"])).ends_with("\nTeams checked: Demo, Beta"));
-        // No team at all (a bound project Linear no longer lists) is said, not left out.
+        // No team at all (a workspace without one) is said, not left out.
         assert!(teams(json!([])).ends_with("\nTeams checked: none"));
         let older = json!({"label_ok": true, "missing_states": []});
         assert!(!report(older, none).contains("Teams checked"));

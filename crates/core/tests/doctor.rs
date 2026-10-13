@@ -308,10 +308,71 @@ async fn a_team_shared_by_projects_is_checked_once_and_a_project_of_two_teams_ch
         both.missing_states,
         ["Beta: In Progress", "Beta: In Testing"]
     );
-    // A project that names no team, or one Linear no longer lists, adds nothing.
-    let none = [binding_to("proj-4"), binding_to("proj-gone")];
-    let report = check_workspace(&workspace, &names, &none).await.unwrap();
-    assert!(report.teams_checked.is_empty() && report.missing_states.is_empty());
+    // A project that names no team, or one Linear no longer lists, adds nothing to the teams the
+    // others name.
+    let mixed = [
+        binding_to("proj-1"),
+        binding_to("proj-4"),
+        binding_to("proj-gone"),
+    ];
+    let report = check_workspace(&workspace, &names, &mixed).await.unwrap();
+    assert_eq!(report.teams_checked, ["Demo"]);
+    assert!(report.ok(), "{report:?}");
+}
+
+#[tokio::test]
+async fn bound_projects_that_name_no_team_leave_every_team_checked() {
+    // Linear sent `teams` as null, left it out or sent []: nothing narrows the check down, and
+    // checking no team would report a workspace with missing statuses as fine.
+    let mut workspace = two_teams(None);
+    workspace.projects = vec![("proj-1", vec![]), ("proj-2", vec![])];
+    let names = TriggerNames::default();
+    for bound in [
+        vec![binding_to("proj-1")],
+        vec![binding_to("proj-1"), binding_to("proj-2")],
+    ] {
+        let report = check_workspace(&workspace, &names, &bound).await.unwrap();
+        assert_eq!(report.teams_checked, ["Demo", "Beta"]);
+        assert_eq!(
+            report.missing_states,
+            ["Beta: In Progress", "Beta: In Testing"]
+        );
+        assert!(!report.ok(), "{report:?}");
+    }
+    // A single team that is named brings the narrowing back, even next to a project without one.
+    workspace.projects = vec![("proj-1", vec![]), ("proj-2", vec!["team-2"])];
+    let both = [binding_to("proj-1"), binding_to("proj-2")];
+    let report = check_workspace(&workspace, &names, &both).await.unwrap();
+    assert_eq!(report.teams_checked, ["Beta"]);
+}
+
+#[tokio::test]
+async fn bound_projects_that_linear_no_longer_lists_leave_every_team_checked() {
+    let names = TriggerNames::default();
+    let gone = [binding_to("proj-gone"), binding_to("proj-also-gone")];
+    let report = check_workspace(&two_teams(None), &names, &gone)
+        .await
+        .unwrap();
+    assert_eq!(report.teams_checked, ["Demo", "Beta"]);
+    assert_eq!(
+        report.missing_states,
+        ["Beta: In Progress", "Beta: In Testing"]
+    );
+    // Through the in-memory Linear as well, where the project is listed with no team.
+    let linear = FakeLinear::new("user-1");
+    linear.set_teams(&[("team-1", "Demo"), ("team-2", "Unrelated")]);
+    linear.set_projects(&[("proj-1", "Demo Project", &[])]);
+    linear.set_team_statuses("team-2", &["Backlog"]);
+    let report = check_workspace(&linear, &names, &[binding_to("proj-1")])
+        .await
+        .unwrap();
+    assert_eq!(report.teams_checked, ["Demo", "Unrelated"]);
+    assert!(
+        report
+            .missing_states
+            .iter()
+            .any(|m| m.starts_with("Unrelated: "))
+    );
 }
 
 #[tokio::test]

@@ -37,7 +37,7 @@ use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Binding, Config, ExecutorKind, Settings, TriggerNames};
-use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe};
+use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe, WorkspaceReport};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor::{
     self, CommandSpec,
@@ -344,6 +344,33 @@ fn display_issue(issue: Issue) -> Issue {
         project_name: issue.project_name.as_deref().map(clean_text),
         parent_identifier: issue.parent_identifier.as_deref().map(clean_text),
         ..issue
+    }
+}
+
+/// The authorized user as the doctor report shows them: the name is Linear's text and goes
+/// through `clean_text`; the id stays as it is.
+fn display_viewer(viewer: Viewer) -> Viewer {
+    Viewer {
+        name: clean_text(&viewer.name),
+        ..viewer
+    }
+}
+
+/// The workspace report as the doctor report shows it: the team names it carries (in
+/// `missing_states` and `teams_checked`) are Linear's text and go through `clean_text`.
+fn display_workspace(report: WorkspaceReport) -> WorkspaceReport {
+    WorkspaceReport {
+        missing_states: report
+            .missing_states
+            .iter()
+            .map(|state| clean_text(state))
+            .collect(),
+        teams_checked: report
+            .teams_checked
+            .iter()
+            .map(|team| clean_text(team))
+            .collect(),
+        ..report
     }
 }
 
@@ -1678,13 +1705,15 @@ impl Engine {
     /// Checks the whole setup: executors (freshly, not from the cache), the Linear connection
     /// and workspace, and every binding. The report also carries the PATH and proxy the
     /// executors get, when the readiness probe resolves them; the proxy URLs are masked there.
+    /// Linear's text in it (the user's name, the team names) is cleaned, as everywhere the
+    /// engine hands such text on.
     pub async fn doctor(&self) -> DoctorReport {
         let cfg = self.config();
         let executors = self.inner.readiness.executor_reports(true).await;
         let ready = doctor::ready_set(&executors);
         let linear = self.linear();
         let (viewer, mut linear_error) = match linear.viewer().await {
-            Ok(viewer) => (Some(viewer), None),
+            Ok(viewer) => (Some(display_viewer(viewer)), None),
             Err(e) => (None, Some(clean_text(&format!("{e:#}")))),
         };
         let mut workspace = None;
@@ -1692,7 +1721,7 @@ impl Engine {
             let checked =
                 doctor::check_workspace(linear.as_ref(), &cfg.settings.trigger, &cfg.bindings);
             match checked.await {
-                Ok(report) => workspace = Some(report),
+                Ok(report) => workspace = Some(display_workspace(report)),
                 Err(e) => {
                     linear_error = Some(clean_text(&format!("workspace check failed: {e:#}")))
                 }

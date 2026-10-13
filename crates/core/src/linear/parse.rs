@@ -71,9 +71,11 @@ fn is_issue_identifier(text: &str) -> bool {
 }
 
 /// An `https://` URL made only of printable ASCII, or nothing. A URL with other characters
-/// (Linear adds the title as a slug, which can be Chinese) is cut after `/issue/<identifier>`,
-/// which Linear resolves the same way; without that part nothing is kept. The URL reaches the
-/// prompt, so it must hold nothing that is not plainly an address.
+/// (Linear adds the title as a slug, which can be Chinese) is cut after `/issue/<identifier>`;
+/// without that part nothing is kept. Linear is expected to open the slug-less link on the same
+/// issue: that was proposed in the M1 acceptance of 2026-10-12 (H2) and is not confirmed on a
+/// real machine yet (the M2 acceptance checks it). The URL reaches the prompt, so it must hold
+/// nothing that is not plainly an address.
 fn safe_url(text: Option<String>, identifier: &str) -> String {
     let Some(url) = text else {
         return String::new();

@@ -15,6 +15,8 @@ use issuerelay_core::{
 #[derive(Default)]
 struct State {
     me: String,
+    /// The name `viewer()` reports after `set_viewer_name`; `Jane Doe` otherwise.
+    viewer_name: Option<String>,
     issues: Vec<Issue>,
     /// The message the next calls fail with, and how many calls are left to fail.
     fail_next: Option<(String, usize)>,
@@ -46,6 +48,11 @@ impl FakeLinear {
                 .to_vec();
         }
         fake
+    }
+
+    /// Makes `viewer()` report this name instead of `Jane Doe`.
+    pub fn set_viewer_name(&self, name: &str) {
+        self.state.lock().unwrap().viewer_name = Some(name.into());
     }
 
     pub fn upsert(&self, issue: Issue) {
@@ -159,9 +166,10 @@ impl FakeLinear {
 impl LinearApi for FakeLinear {
     async fn viewer(&self) -> Result<Viewer> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
         Ok(Viewer {
-            id: self.state.lock().unwrap().me.clone(),
-            name: "Jane Doe".into(),
+            id: s.me.clone(),
+            name: s.viewer_name.clone().unwrap_or_else(|| "Jane Doe".into()),
         })
     }
 

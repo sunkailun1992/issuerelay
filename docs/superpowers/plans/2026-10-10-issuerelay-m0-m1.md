@@ -8878,7 +8878,7 @@ M0–M1 的任务评审和最终评审里决定以后处理的小项。按最终
 
 | 模块 | 内容 | 来源 |
 |---|---|---|
-| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值（M2 第一部分 Task 6：处理了其中的 `follow()` 与 `fields` 枚举两项） | Task 16 评审 |
+| `linear::mcp` | 改用 rmcp 自带的请求超时与取消；空页却 `hasNextPage: true`、或游标重复时 `follow()` 的处理；`ToolFailed` 的原文在显示处要转义；连接时只查工具名和参数名，不查 `fields` 枚举和上限；可选字段缺失时静默取默认值（M2 第一部分 Task 6：处理了其中的 `follow()` 与 `fields` 枚举两项；`limit` 的上限仍不在连接时检查） | Task 16 评审 |
 | `linear::auth` | 用户把 `RUST_LOG` 设到 rmcp 的 debug 级别时，rmcp 会把 OAuth 授权码写进日志，配置日志时要压住；`login` 换令牌期间仍占着回环端口，拿到回调后就该释放（M2 第一部分 Task 6：处理了回环端口一项；`RUST_LOG` 一项在 M2 第二部分 Task 3 的日志配置里） | Task 17、22 评审 |
 | `text` | `clean_text` / `is_invisible` 和 `oauth_error` 放过了标签字符 U+E0000–E007F、U+061C、U+00AD 和韩文填充字符；另外去掉 ZWJ / ZWNJ 会影响 emoji 和印度系文字的显示（M2 第一部分 Task 6） | Task 17、19、21 评审 |
 | `doctor` | 就绪检查在宿主的当前目录跑 `claude mcp list`，结果随目录变（local / project 作用域、`.mcp.json`），而运行在绑定目录：改为按绑定目录检查，或在提示里写明必须用 `--scope user` 注册 | 最终评审 |

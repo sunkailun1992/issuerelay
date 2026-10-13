@@ -2627,6 +2627,31 @@ async fn doctor_checks_only_the_teams_of_the_bound_projects() {
 }
 
 #[tokio::test]
+async fn doctor_cleans_the_names_it_took_from_linear() {
+    // Linear's user and team names reach the panel and `doctor --json` as the engine hands them
+    // over: an escape sequence, a direction override or a line break may not.
+    let h = Harness::new(2, false);
+    let hostile = "Te\u{1b}[2Jam\u{202e}\nforged line";
+    h.linear
+        .set_viewer_name("Jane\u{1b}]52;c;ZXZpbA==\u{7}\u{202e}Doe\n");
+    h.linear
+        .set_teams(&[("team-1", hostile), ("team-2", "Beta")]);
+    // In Testing is missing from both teams.
+    h.linear.set_statuses(&["Todo", "In Progress", "Done"]);
+    let report = h.engine.doctor().await;
+    let workspace = report.workspace.unwrap();
+    assert_eq!(workspace.teams_checked, ["Te [2Jam forged line", "Beta"]);
+    assert_eq!(
+        workspace.missing_states,
+        ["Te [2Jam forged line: In Testing", "Beta: In Testing"]
+    );
+    assert_eq!(
+        report.viewer.map(|viewer| viewer.name),
+        Some("Jane ]52;c;ZXZpbA== Doe".to_string())
+    );
+}
+
+#[tokio::test]
 async fn doctor_reports_a_linear_failure_and_still_checks_the_rest() {
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");

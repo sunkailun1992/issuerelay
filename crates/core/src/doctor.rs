@@ -638,9 +638,11 @@ impl WorkspaceReport {
 }
 
 /// Looks for the trigger label and, in the teams of the bound projects, the four statuses
-/// IssueRelay moves issues through; before any project is bound, in every team. A team that
-/// never uses IssueRelay need not have them. Names compare like everywhere else (`same_name`).
-/// Errors when Linear cannot be queried.
+/// IssueRelay moves issues through. A team that never uses IssueRelay need not have them. Every
+/// team is looked at before any project is bound, and also when no bound project names a team
+/// (Linear sent `teams` as null or empty, or no longer lists the project): with nothing to narrow
+/// the check down to, no team at all would report a workspace with missing statuses as fine.
+/// Names compare like everywhere else (`same_name`). Errors when Linear cannot be queried.
 pub async fn check_workspace(
     api: &dyn LinearApi,
     names: &TriggerNames,
@@ -661,7 +663,9 @@ pub async fn check_workspace(
             .filter(|p| bound.contains(p.id.as_str()))
             .flat_map(|p| p.team_ids)
             .collect();
-        teams.retain(|team| team_ids.contains(&team.id));
+        if !team_ids.is_empty() {
+            teams.retain(|team| team_ids.contains(&team.id));
+        }
     }
     let mut missing_states = Vec::new();
     for team in &teams {
