@@ -19,5 +19,7 @@ export default defineConfig({
     // Only the component and unit tests: Task 12's Playwright spec (tests/*.spec.ts) is not Vitest's.
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
+    // Vitest turns every CSS file into an empty string; styles.test.ts reads the design tokens as text.
+    css: { include: [/styles\.css\?raw/] },
   },
 });

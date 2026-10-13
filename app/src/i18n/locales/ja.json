@@ -17,7 +17,8 @@
     "needs_info": "追加情報待ち",
     "done": "完了",
     "failed": "失敗",
-    "canceled": "キャンセル済み"
+    "canceled": "キャンセル済み",
+    "retrying_at": "{{time}} に再試行します"
   },
   "common": {
     "loading": "読み込み中…",
@@ -64,5 +65,59 @@
     "store_unavailable": "IssueRelay が実行記録を開けませんでした",
     "other": "問題が発生したため、IssueRelay を起動できませんでした",
     "quit": "終了"
+  },
+  "shell": {
+    "monitoring": "監視中",
+    "paused": "一時停止中",
+    "draining": "実行の完了を待っています",
+    "problem": "対応が必要です",
+    "connecting": "Linear に接続中…",
+    "version": "バージョン {{version}}"
+  },
+  "format": {
+    "just_now": "たった今",
+    "minutes_ago_one": "{{count}} 分前",
+    "minutes_ago_other": "{{count}} 分前",
+    "hours_ago_one": "{{count}} 時間前",
+    "hours_ago_other": "{{count}} 時間前",
+    "days_ago_one": "{{count}} 日前",
+    "days_ago_other": "{{count}} 日前",
+    "duration_s": "{{s}} 秒",
+    "duration_ms": "{{m}} 分 {{s}} 秒",
+    "duration_hm": "{{h}} 時間 {{m}} 分"
+  },
+  "executor": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "default": "デフォルト（{{name}}）"
+  },
+  "permission": {
+    "full": "フルアクセス",
+    "auto": "自動レビュー",
+    "personal": "個人設定に従う",
+    "default": "デフォルト（{{name}}）"
+  },
+  "actions": {
+    "failed": {
+      "pause": "監視を一時停止できませんでした",
+      "resume": "監視を再開できませんでした",
+      "poll_now": "チェックを開始できませんでした",
+      "cancel": "実行を停止できませんでした",
+      "retry": "もう一度実行できませんでした",
+      "mark_done": "完了にできませんでした",
+      "save_binding": "紐付けを保存できませんでした",
+      "remove_binding": "紐付けを削除できませんでした",
+      "save_settings": "設定を保存できませんでした",
+      "linear_login": "Linear にログインできませんでした",
+      "linear_api_key": "API キーを使用できませんでした",
+      "linear_logout": "Linear からログアウトできませんでした",
+      "linear_reconnect": "Linear に再接続できませんでした",
+      "setup_action": "セットアップコマンドが失敗しました",
+      "set_autostart": "ログイン時の自動起動を変更できませんでした"
+    }
+  },
+  "errors": {
+    "not_a_linear_link": "IssueRelay は Linear 自身のページしか開きません",
+    "login_cancelled": "ブラウザでのログインをキャンセルしました"
   }
 }

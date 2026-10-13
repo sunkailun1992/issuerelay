@@ -17,7 +17,8 @@
     "needs_info": "待补充信息",
     "done": "已完成",
     "failed": "失败",
-    "canceled": "已取消"
+    "canceled": "已取消",
+    "retrying_at": "将于 {{time}} 重试"
   },
   "common": {
     "loading": "加载中…",
@@ -64,5 +65,59 @@
     "store_unavailable": "IssueRelay 无法打开运行记录",
     "other": "出现问题，IssueRelay 无法启动",
     "quit": "退出"
+  },
+  "shell": {
+    "monitoring": "监控中",
+    "paused": "已暂停",
+    "draining": "等待运行完毕",
+    "problem": "需要处理",
+    "connecting": "正在连接 Linear…",
+    "version": "版本 {{version}}"
+  },
+  "format": {
+    "just_now": "刚刚",
+    "minutes_ago_one": "{{count}} 分钟前",
+    "minutes_ago_other": "{{count}} 分钟前",
+    "hours_ago_one": "{{count}} 小时前",
+    "hours_ago_other": "{{count}} 小时前",
+    "days_ago_one": "{{count}} 天前",
+    "days_ago_other": "{{count}} 天前",
+    "duration_s": "{{s}} 秒",
+    "duration_ms": "{{m}} 分 {{s}} 秒",
+    "duration_hm": "{{h}} 小时 {{m}} 分"
+  },
+  "executor": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "default": "默认（{{name}}）"
+  },
+  "permission": {
+    "full": "完全放开",
+    "auto": "自动审查",
+    "personal": "按个人设置",
+    "default": "默认（{{name}}）"
+  },
+  "actions": {
+    "failed": {
+      "pause": "无法暂停监控",
+      "resume": "无法恢复监控",
+      "poll_now": "无法开始检查",
+      "cancel": "无法停止这次运行",
+      "retry": "无法重新运行",
+      "mark_done": "无法标记为完成",
+      "save_binding": "无法保存绑定",
+      "remove_binding": "无法移除绑定",
+      "save_settings": "无法保存设置",
+      "linear_login": "无法登录 Linear",
+      "linear_api_key": "无法使用这个 API key",
+      "linear_logout": "无法退出 Linear 登录",
+      "linear_reconnect": "无法重新连接 Linear",
+      "setup_action": "配置命令执行失败",
+      "set_autostart": "无法更改开机自启设置"
+    }
+  },
+  "errors": {
+    "not_a_linear_link": "IssueRelay 只会打开 Linear 自己的页面",
+    "login_cancelled": "已取消浏览器登录"
   }
 }

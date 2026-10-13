@@ -1,7 +1,94 @@
-export default function App() {
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { HashRouter, Navigate, Route, Routes } from "react-router";
+import { EngineEventsBridge } from "@/components/EngineEventsBridge";
+import { FirstRunGate } from "@/components/FirstRunGate";
+import { AppShell } from "@/components/layout/AppShell";
+import { QuitDialog } from "@/components/QuitDialog";
+import { StartupGate } from "@/components/StartupGate";
+import { Toaster } from "@/components/ui/sonner";
+import { useAppInfo, useSettings } from "@/hooks/queries";
+import { resolveLanguage, setLanguage } from "@/i18n";
+import type { Backend } from "@/lib/backend";
+import { BackendProvider } from "@/lib/backend-context";
+import { useSystemTheme } from "@/lib/theme";
+import Bindings from "@/pages/Bindings";
+import Doctor from "@/pages/Doctor";
+import Help from "@/pages/Help";
+import Issues from "@/pages/Issues";
+import Onboarding from "@/pages/onboarding/Onboarding";
+import Overview from "@/pages/Overview";
+import RunDetail from "@/pages/RunDetail";
+import Runs from "@/pages/Runs";
+import Settings from "@/pages/Settings";
+
+/** Follows the system's light or dark appearance. */
+function ThemeSync() {
+  useSystemTheme();
+  return null;
+}
+
+/**
+ * Switches the interface to the language the settings ask for. The panel starts in the system
+ * language (main.tsx, from the locale Rust reports); a language chosen in the settings is followed
+ * once they have been read, and again whenever they change.
+ */
+function LanguageSync() {
+  const { i18n } = useTranslation();
+  const info = useAppInfo();
+  const settings = useSettings();
+  const wanted = info.data && settings.data ? resolveLanguage(settings.data.language, info.data.system_locale ?? undefined) : null;
+  useEffect(() => {
+    if (wanted !== null && wanted !== i18n.language) void setLanguage(wanted);
+  }, [wanted, i18n.language]);
+  return null;
+}
+
+/**
+ * The panel: the backend it talks to, the data cache, the engine's events, the pages inside the
+ * shell and, outside the shell, the first-run guide. The start-failure page replaces the pages
+ * (not the quit prompt and the toasts, which also work then).
+ */
+export default function App({ backend }: { backend: Backend }) {
+  // The backend is local: a failed call fails the same way again, so nothing is retried behind
+  // the user's back, and the data is kept in step by the engine's events (useEngineEvents), not
+  // by reading it all again whenever the window gets focus.
+  const [client] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false }, mutations: { retry: false } },
+      }),
+  );
   return (
-    <main className="flex h-screen items-center justify-center bg-background text-foreground">
-      <h1 className="text-2xl font-semibold">IssueRelay</h1>
-    </main>
+    <BackendProvider backend={backend}>
+      <QueryClientProvider client={client}>
+        <EngineEventsBridge />
+        <ThemeSync />
+        <LanguageSync />
+        <StartupGate>
+          <HashRouter>
+            <Routes>
+              <Route path="/onboarding" element={<Onboarding />} />
+              <Route element={<FirstRunGate />}>
+                <Route element={<AppShell />}>
+                  <Route index element={<Overview />} />
+                  <Route path="issues" element={<Issues />} />
+                  <Route path="runs" element={<Runs />} />
+                  <Route path="runs/:id" element={<RunDetail />} />
+                  <Route path="bindings" element={<Bindings />} />
+                  <Route path="doctor" element={<Doctor />} />
+                  <Route path="settings" element={<Settings />} />
+                  <Route path="help" element={<Help />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Route>
+              </Route>
+            </Routes>
+          </HashRouter>
+        </StartupGate>
+        <QuitDialog />
+        <Toaster />
+      </QueryClientProvider>
+    </BackendProvider>
   );
 }

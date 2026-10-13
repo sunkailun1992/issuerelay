@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { toast } from "sonner";
 import { setFixedClock } from "@/lib/clock";
 import { initI18n } from "@/i18n";
 
@@ -35,6 +36,10 @@ afterEach(() => {
   // A test that fixed the clock (the mock backend does) never leaks it into the next one, even
   // when its assertions failed.
   setFixedClock(null);
+  // sonner keeps its toasts in a store of its own, outside React, and replays the ones still
+  // active to the next Toaster that mounts: without this a failure toast of one test shows up in
+  // the next test's page.
+  toast.dismiss();
 });
 
 // Every test runs with i18next started once: a `t()` key that English lacks fails the test

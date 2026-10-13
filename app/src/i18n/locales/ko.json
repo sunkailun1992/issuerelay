@@ -17,7 +17,8 @@
     "needs_info": "추가 정보 필요",
     "done": "완료",
     "failed": "실패",
-    "canceled": "취소됨"
+    "canceled": "취소됨",
+    "retrying_at": "{{time}}에 다시 시도합니다"
   },
   "common": {
     "loading": "불러오는 중…",
@@ -64,5 +65,59 @@
     "store_unavailable": "IssueRelay가 실행 기록을 열지 못했습니다",
     "other": "문제가 생겨 IssueRelay를 시작할 수 없습니다",
     "quit": "종료"
+  },
+  "shell": {
+    "monitoring": "모니터링 중",
+    "paused": "일시 중지됨",
+    "draining": "실행이 끝나기를 기다리는 중",
+    "problem": "확인이 필요합니다",
+    "connecting": "Linear에 연결하는 중…",
+    "version": "버전 {{version}}"
+  },
+  "format": {
+    "just_now": "방금",
+    "minutes_ago_one": "{{count}}분 전",
+    "minutes_ago_other": "{{count}}분 전",
+    "hours_ago_one": "{{count}}시간 전",
+    "hours_ago_other": "{{count}}시간 전",
+    "days_ago_one": "{{count}}일 전",
+    "days_ago_other": "{{count}}일 전",
+    "duration_s": "{{s}}초",
+    "duration_ms": "{{m}}분 {{s}}초",
+    "duration_hm": "{{h}}시간 {{m}}분"
+  },
+  "executor": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "default": "기본값({{name}})"
+  },
+  "permission": {
+    "full": "전체 권한",
+    "auto": "자동 검토",
+    "personal": "개인 설정에 따름",
+    "default": "기본값({{name}})"
+  },
+  "actions": {
+    "failed": {
+      "pause": "모니터링을 일시 중지하지 못했습니다",
+      "resume": "모니터링을 다시 시작하지 못했습니다",
+      "poll_now": "확인을 시작하지 못했습니다",
+      "cancel": "실행을 중지하지 못했습니다",
+      "retry": "다시 실행하지 못했습니다",
+      "mark_done": "완료로 표시하지 못했습니다",
+      "save_binding": "프로젝트 연결을 저장하지 못했습니다",
+      "remove_binding": "프로젝트 연결을 삭제하지 못했습니다",
+      "save_settings": "설정을 저장하지 못했습니다",
+      "linear_login": "Linear에 로그인하지 못했습니다",
+      "linear_api_key": "API 키를 사용하지 못했습니다",
+      "linear_logout": "Linear에서 로그아웃하지 못했습니다",
+      "linear_reconnect": "Linear에 다시 연결하지 못했습니다",
+      "setup_action": "설정 명령이 실패했습니다",
+      "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다"
+    }
+  },
+  "errors": {
+    "not_a_linear_link": "IssueRelay는 Linear의 페이지만 엽니다",
+    "login_cancelled": "브라우저 로그인이 취소되었습니다"
   }
 }

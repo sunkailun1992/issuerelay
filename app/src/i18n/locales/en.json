@@ -17,7 +17,8 @@
     "needs_info": "Needs information",
     "done": "Done",
     "failed": "Failed",
-    "canceled": "Canceled"
+    "canceled": "Canceled",
+    "retrying_at": "Retrying at {{time}}"
   },
   "common": {
     "loading": "Loading…",
@@ -64,5 +65,59 @@
     "store_unavailable": "IssueRelay could not open its run records",
     "other": "Something stopped IssueRelay from starting",
     "quit": "Quit"
+  },
+  "shell": {
+    "monitoring": "Monitoring",
+    "paused": "Paused",
+    "draining": "Waiting for runs to finish",
+    "problem": "Needs attention",
+    "connecting": "Connecting to Linear…",
+    "version": "Version {{version}}"
+  },
+  "format": {
+    "just_now": "Just now",
+    "minutes_ago_one": "{{count}} minute ago",
+    "minutes_ago_other": "{{count}} minutes ago",
+    "hours_ago_one": "{{count}} hour ago",
+    "hours_ago_other": "{{count}} hours ago",
+    "days_ago_one": "{{count}} day ago",
+    "days_ago_other": "{{count}} days ago",
+    "duration_s": "{{s}} s",
+    "duration_ms": "{{m}} min {{s}} s",
+    "duration_hm": "{{h}} h {{m}} min"
+  },
+  "executor": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "default": "Default ({{name}})"
+  },
+  "permission": {
+    "full": "Full access",
+    "auto": "Automatic review",
+    "personal": "Personal settings",
+    "default": "Default ({{name}})"
+  },
+  "actions": {
+    "failed": {
+      "pause": "Could not pause monitoring",
+      "resume": "Could not resume monitoring",
+      "poll_now": "Could not start a check",
+      "cancel": "Could not stop the run",
+      "retry": "Could not run it again",
+      "mark_done": "Could not mark it done",
+      "save_binding": "Could not save the binding",
+      "remove_binding": "Could not remove the binding",
+      "save_settings": "Could not save the settings",
+      "linear_login": "Could not log in to Linear",
+      "linear_api_key": "Could not use the API key",
+      "linear_logout": "Could not log out of Linear",
+      "linear_reconnect": "Could not reconnect to Linear",
+      "setup_action": "The setup command failed",
+      "set_autostart": "Could not change start at login"
+    }
+  },
+  "errors": {
+    "not_a_linear_link": "IssueRelay only opens Linear's own pages",
+    "login_cancelled": "The browser login was cancelled"
   }
 }

@@ -17,7 +17,8 @@
     "needs_info": "待補充資訊",
     "done": "已完成",
     "failed": "失敗",
-    "canceled": "已取消"
+    "canceled": "已取消",
+    "retrying_at": "將於 {{time}} 重試"
   },
   "common": {
     "loading": "載入中…",
@@ -64,5 +65,59 @@
     "store_unavailable": "IssueRelay 無法開啟執行紀錄",
     "other": "發生問題，IssueRelay 無法啟動",
     "quit": "結束"
+  },
+  "shell": {
+    "monitoring": "監控中",
+    "paused": "已暫停",
+    "draining": "等待執行完畢",
+    "problem": "需要處理",
+    "connecting": "正在連線至 Linear…",
+    "version": "版本 {{version}}"
+  },
+  "format": {
+    "just_now": "剛剛",
+    "minutes_ago_one": "{{count}} 分鐘前",
+    "minutes_ago_other": "{{count}} 分鐘前",
+    "hours_ago_one": "{{count}} 小時前",
+    "hours_ago_other": "{{count}} 小時前",
+    "days_ago_one": "{{count}} 天前",
+    "days_ago_other": "{{count}} 天前",
+    "duration_s": "{{s}} 秒",
+    "duration_ms": "{{m}} 分 {{s}} 秒",
+    "duration_hm": "{{h}} 小時 {{m}} 分"
+  },
+  "executor": {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "default": "預設（{{name}}）"
+  },
+  "permission": {
+    "full": "完全放開",
+    "auto": "自動審查",
+    "personal": "依個人設定",
+    "default": "預設（{{name}}）"
+  },
+  "actions": {
+    "failed": {
+      "pause": "無法暫停監控",
+      "resume": "無法繼續監控",
+      "poll_now": "無法開始檢查",
+      "cancel": "無法停止這次執行",
+      "retry": "無法重新執行",
+      "mark_done": "無法標記為完成",
+      "save_binding": "無法儲存綁定",
+      "remove_binding": "無法移除綁定",
+      "save_settings": "無法儲存設定",
+      "linear_login": "無法登入 Linear",
+      "linear_api_key": "無法使用這個 API key",
+      "linear_logout": "無法登出 Linear",
+      "linear_reconnect": "無法重新連線至 Linear",
+      "setup_action": "設定指令執行失敗",
+      "set_autostart": "無法變更開機自動啟動的設定"
+    }
+  },
+  "errors": {
+    "not_a_linear_link": "IssueRelay 只會開啟 Linear 自己的頁面",
+    "login_cancelled": "已取消瀏覽器登入"
   }
 }
