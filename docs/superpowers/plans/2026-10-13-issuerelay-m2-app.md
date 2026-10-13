@@ -15,8 +15,8 @@
 - 第一部分的全部全局约束继续有效（硬规则、两平台、测试不碰网络与真实钥匙串、虚构测试数据、公开仓库红线、英文注释中文文档、四条验证命令、英文 Conventional Commits 与 `Co-Authored-By` 写实际模型、分支与 PR、禁止强推）。
 - 验证命令扩展为六条（设计第 16 节）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`pnpm --dir app lint`、`pnpm --dir app test`、`bash scripts/check-secrets.sh --strict`（无输出）。
 - 「标记完成」「重新运行」「停止」只经本程序的 Tauri 命令在进程内调用引擎（`Engine::mark_done`、`retry_job`、`cancel_job`）；IPC 方法表、命令行、MCP 控制服务保持不提供。
-- 前端不拿任何插件权限：`capabilities/default.json` 只给 `core:default`；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。只打开 `https://linear.app/` 开头的链接。
-- 来自 Linear 与 AI 的文本只作为 React 文本节点渲染（自动转义），不用 `dangerouslySetInnerHTML`。执行者与 AI 的显示文本（时间线、原始日志、摘要）一律经 `cleanDisplayText`（Task 4）：去掉 ANSI 转义序列（CSI、以 BEL 或 ST 结尾的 OSC、两字符 ESC 序列），其余控制字符变空格，去掉 core `text::is_invisible` 去掉的字符；用例表 `app/src/lib/clean-cases.json` 由 Rust 与 TypeScript 两边的测试共同核对。
+- 前端不拿任何插件权限：`capabilities/default.json` 只给 `core:default`；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。浏览器只打开 Linear 的链接：用 `url::Url` 解析后，协议必须是 `https`、主机必须是 `linear.app` 或它的子域名（例如 OAuth 授权页所在的 `mcp.linear.app`）；`open_linear` 命令与 Linear 登录时打开授权页的回调共用这一个检查（Task 4 的 `is_linear_url`），其他链接一律拒绝并记日志。
+- 来自 Linear 与 AI 的文本只作为 React 文本节点渲染（自动转义），不用 `dangerouslySetInnerHTML`。执行者与 AI 的显示文本（时间线、原始日志、摘要）一律经 `cleanDisplayText`（Task 4）：去掉 ANSI 转义序列（CSI、以 BEL 或 ST 结尾的 OSC、两字符 ESC 序列），其余控制字符变空格，去掉 core `text::is_invisible` 去掉的字符；用例表 `app/src/lib/clean-cases.json` 由 Rust（对照 core 的 `clean_text`，字符规则在 core 里只有 `text::strip_control` 一份实现）与 TypeScript 两边的测试共同核对；用例里的不可见字符一律写成转义。
 - 引擎给的英文原文（任务原因、`last_error`、环境检查的 `problems`、`LinearSetup` 的说明、命令返回的错误链）从不单独出现：每处都先显示一条由结构化数据（状态、代码、布尔值）得出的已翻译标题，原文清洗后作为次要的细节行放在下面（Task 5 的 `describeError`、`DetailLine`）。系统通知只带已翻译的标题加需求编号与标题，从不带引擎原文。需求页的等待原因按代码翻译（Task 4 的 `WaitReasonView`）。
 - 面板与托盘的每段文案都走翻译键；五种语言（`zh-CN`、`zh-TW`、`en`、`ja`、`ko`）的键必须一一对应（CI 检查），组件里用到而 `en` 没有的键让测试失败（Task 2 的缺键守卫）。默认跟随系统语言：系统语言一律取 Rust 侧 `sys_locale` 报告的值（面板经 `AppInfo.system_locale` 拿到），托盘、通知与面板因此总是同一种语言；设置里随时切换并立即生效（含托盘菜单与通知）。
 - 跟随系统浅色 / 深色；颜色、间距、字号、圆角统一用设计变量（含布局常量 `--sidebar-width`、`--content-max-width`、`--page-padding` 与状态色 `--state-*`，页面规格里不写死像素）；任务状态用固定的颜色和图标（见 Task 5）；每个页面的规格都写明加载、空、错误三种状态，每个页面至少有一个用失败的假后端调用驱动的错误状态测试；不出现裸露的报错文本。
@@ -29,7 +29,7 @@
 
 ## Review Focus
 
-1. 宿主还没起来（启动要几秒）时面板就发命令：命令要等宿主就绪；启动状态可以查询（`startup_state` 命令，`AppState` 里的 `StartupState`），不只靠一次性事件，所以晚打开的面板也知道启动失败了；任何一种启动失败（另一个宿主已在运行、运行记录打不开、其他）面板都显示按代码翻译的标题、清洗过的细节和「退出」按钮（Task 3 的 `state`/`startup` 测试、Task 5 的 `App` 与 `StartupError` 测试）。
+1. 宿主还没起来（启动要几秒）时面板就发命令：命令要等宿主就绪（「就绪」指 `Host::start` 已返回：它不再等 Linear，首次连接在后台进行，期间 `LinearSetup` 为 `connecting`，面板显示「正在连接 Linear…」、托盘不算出问题，见第一部分 Task 9 的 AR51）；启动状态可以查询（`startup_state` 命令，`AppState` 里的 `StartupState`），不只靠一次性事件，所以晚打开的面板也知道启动失败了；任何一种启动失败（另一个宿主已在运行、运行记录打不开、其他）面板都显示按代码翻译的标题、清洗过的细节和「退出」按钮（Task 3 的 `state`/`startup` 测试、Task 5 的 `App` 与 `StartupError` 测试）。
 2. 有任务在跑时退出（托盘「退出」、Cmd+Q、系统要求退出）：必须先问「等待完成 / 立即停止」，选了等待以后仍能改为立即停止（Rust 侧在等待中的 `Host::stop(WaitForRuns)` 还没返回时调 `Host::stop(StopRuns)`，两者都返回），窗口关掉也不能让程序在任务没收尾时退出（Task 3 的退出状态机测试、Task 13 第 4 步实机）。
 3. 引擎事件来得比面板处理快（大量任务同时变化）：事件丢失时面板要整体刷新，不能停在旧状态（Task 3 的 `forward` 测试：落后的接收端只发一次 `engine-resync` 并继续转发；Task 5 的事件桥测试）。
 4. 第一次用、什么都没配：没有登录、没有绑定、执行者没装时，每个页面都要给出下一步该做什么，而不是空白或报错；后端调用失败时每个页面都有错误状态（Task 5–10 的空状态与错误状态测试）。
@@ -46,7 +46,7 @@
 | `app/src-tauri/Cargo.toml`、`build.rs`、`tauri.conf.json`、`capabilities/default.json` | Tauri crate 与配置 | 1 |
 | `.github/dependabot.yml` | `/app` 的 npm 依赖检查 | 1 |
 | `app/src/i18n/`（含 `language-cases.json`）、`app/src-tauri/src/i18n.rs` | 五种语言的翻译文件与语言解析用例表；前端与 Rust 共用 | 2 |
-| `crates/core/src/logscrub.rs`、`crates/devhost/src/main.rs` | 日志逐行清洗：从 devhost 移进 core，devhost 与桌面应用共用 | 3 |
+| `crates/core/src/text.rs`、`crates/core/src/logscrub.rs`、`crates/devhost/src/main.rs` | 字符规则的唯一实现 `text::strip_control`（`clean_text` 建在它上面）与日志逐行清洗：从 devhost 移进 core，devhost 与桌面应用共用 | 3 |
 | `app/src-tauri/src/{lib,main,state,startup,window,quit,logging,events,notify,tray,test_support}.rs`、`app/src-tauri/icons/tray/` | 宿主接入、启动状态、窗口、退出状态机、日志、事件转发、通知、托盘、测试辅助 | 3 |
 | `app/src/lib/problem-cases.json` | 托盘与面板共用的「需要处理」判定用例表 | 3、5 |
 | `app/src-tauri/src/commands.rs` | 面板调用的全部命令（Task 3 先放空壳） | 3、4 |
@@ -56,8 +56,8 @@
 | `app/src/components/{StatusBadge,states,PageHeader,QuitDialog,StartupError,StartupGate,FirstRunGate,EngineEventsBridge}.tsx`、`app/src/components/layout/AppShell.tsx`、`app/src/styles.css`、`app/src/App.tsx`、`app/src/main.tsx`、`app/src/test/render.tsx` | 面板外框、设计变量、状态标识、空 / 加载 / 错误状态、启动失败页、退出提示、测试辅助 | 5 |
 | `app/src/pages/Overview.tsx`、`Issues.tsx`、`app/src/components/{JobActions,LinearStatus}.tsx` | 概览、需求、共用的任务操作与 Linear 连接卡 | 6 |
 | `app/src/pages/Runs.tsx`、`RunDetail.tsx`、`app/src/lib/timeline.ts` | 运行记录与时间线 | 7 |
-| `app/src/pages/Bindings.tsx`、`BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts` | 项目绑定 | 8 |
-| `app/src/pages/Doctor.tsx`、`Settings.tsx`、`Help.tsx`、`app/src/components/{ExecutorCheck,WorkspaceCheck}.tsx`、`app/src/lib/mask.ts` | 环境检查、设置、使用说明 | 9 |
+| `app/src/pages/Bindings.tsx`、`BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts`、`app/src/lib/model-name-cases.json` | 项目绑定；模型名用例表（Rust 与 TS 共用） | 8 |
+| `app/src/pages/Doctor.tsx`、`Settings.tsx`、`Help.tsx`、`app/src/components/{ExecutorCheck,WorkspaceCheck}.tsx`、`app/src/lib/mask.ts`、`app/src/lib/mask-cases.json` | 环境检查、设置、使用说明；打码用例表（Rust 与 TS 共用） | 9 |
 | `app/src/pages/onboarding/` | 首次引导 | 10 |
 | `app/icons-src/`、`app/scripts/icons.mjs`、`app/src-tauri/icons/`、`app/public/icon.svg`、`docs/design/icons/` | 图标源文件、生成脚本、产物与三套方案的预览 | 11 |
 | `app/playwright.config.ts`、`app/tests/screens.spec.ts`、`docs/gates/screenshots/m2/` | 截图与截图比对（只在本机运行） | 12 |
@@ -106,6 +106,7 @@ pnpm --dir app add @tauri-apps/api
 `app/vite.config.ts`：
 
 ```ts
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -130,7 +131,7 @@ export default defineConfig({
 });
 ```
 
-（`test` 字段需要 `/// <reference types="vitest/config" />` 或从 `vitest/config` 导入 `defineConfig`，按 Vitest 当前版本的写法。）`tsconfig.app.json` 加 `"baseUrl": "."`、`"paths": { "@/*": ["src/*"] }`、`"resolveJsonModule": true`（模板已有就不重复），在 `"types"` 里加上 `"vitest/globals"` 与 `"@testing-library/jest-dom"`（保留模板原有的 `"vite/client"`），保持 `strict: true`。`globals: true` 让 Testing Library 的自动清理生效，公共设置里不必再调 `cleanup`。
+（首行的 `/// <reference types="vitest/config" />` 让 `tsc -b` 认得 `test` 字段；若解析到的 Vitest 版本要求改从 `vitest/config` 导入 `defineConfig`，照它的文档写。）`tsconfig.app.json` 加 `"baseUrl": "."`、`"paths": { "@/*": ["src/*"] }`、`"resolveJsonModule": true`（模板已有就不重复），在 `"types"` 里加上 `"vitest/globals"` 与 `"@testing-library/jest-dom"`（保留模板原有的 `"vite/client"`），保持 `strict: true`。`globals: true` 让 Testing Library 的自动清理生效，公共设置里不必再调 `cleanup`。
 
 `app/src/lib/clock.ts`（假后端与测试共用的时钟；Task 4 的假后端、Task 5 的时间格式都读它）：
 
@@ -329,7 +330,6 @@ pub fn run() {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "IssueRelay",
   "mainBinaryName": "issuerelay-app",
-  "version": "0.1.0",
   "identifier": "com.sunkailun.issuerelay",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -362,7 +362,7 @@ pub fn run() {
 }
 ```
 
-（窗口启动时隐藏，由 Task 3 决定何时显示；`tauri init` 生成的默认图标先保留，Task 11 替换。`mainBinaryName` 把安装包里的主程序文件名固定为 `issuerelay-app`：Task 13 与 M3 把命令行程序 `issuerelay` 放在同一目录，不区分大小写的磁盘上主程序若叫 `IssueRelay` 就会与它撞名。键名以解析到的 Tauri 版本的配置文档为准。）
+（窗口启动时隐藏，由 Task 3 决定何时显示；`tauri init` 生成的默认图标先保留，Task 11 替换。`mainBinaryName` 把安装包里的主程序文件名固定为 `issuerelay-app`：Task 13 与 M3 把命令行程序 `issuerelay` 放在同一目录，不区分大小写的磁盘上主程序若叫 `IssueRelay` 就会与它撞名。键名以解析到的 Tauri 版本的配置文档为准。这里不写 `version`：安装包的版本跟随 Cargo（`version.workspace`），`AppInfo.version` 也读 `CARGO_PKG_VERSION`，M3 的发布流程依赖这一点。`app/package.json` 的 `version` 只是私有前端包的版本，不是应用版本。）
 
 `app/src-tauri/capabilities/default.json`：
 
@@ -613,8 +613,8 @@ mod tests {
 }
 ```
 
-Run: `pnpm --dir app test` 与 `cargo test -p issuerelay-app`
-Expected: 失败（文件与函数还不存在）。
+Run: `pnpm --dir app test`
+Expected: 失败（`language.ts` 与五个翻译文件还不存在）。Rust 侧要到 Step 2 在 `lib.rs` 里声明 `pub mod i18n;` 之后才会编译这些测试，此时 `cargo test -p issuerelay-app` 不会多出测试，本步只看 TS 的失败。
 
 - [ ] **Step 2: 实现**
 
@@ -941,10 +941,10 @@ git commit -m "feat(app): add the five interface languages shared by the panel a
 
 ### Task 3: 宿主接入、启动状态、窗口与退出、日志、事件转发、通知、托盘
 
-设计第 4.1 节（单实例；关窗口不退出；从托盘退出即停止监控，有任务在跑时先询问）、6.2 节（「等待完成 / 立即停止」）、9.1 节（托盘菜单）、9.5 节（四种通知可分别关闭）。宿主在后台异步启动，面板的命令等它就绪；启动状态（启动中 / 就绪 / 失败及原因代码）留在 `AppState` 里随时可查，失败时再发一次事件给已经打开的面板。退出是一个纯函数的状态机，可以不开窗口测试。日志先经 core 的逐行清洗再写文件和 stderr（清洗代码从 devhost 移进 core，两个宿主共用）。
+设计第 4.1 节（单实例；关窗口不退出；从托盘退出即停止监控，有任务在跑时先询问）、6.2 节（「等待完成 / 立即停止」）、9.1 节（托盘菜单）、9.5 节（四种通知可分别关闭）。宿主在后台异步启动，面板的命令等它就绪；启动状态（启动中 / 就绪 / 失败及原因代码）留在 `AppState` 里随时可查，失败时再发一次事件给已经打开的面板。「就绪」指 `Host::start` 已返回：按第一部分 Task 9 的 AR51，它不再等 Linear，引擎先用一个「连接中」的占位连接，首次连接在后台进行（`LinearSetup::Connecting`），连接中不算出问题。退出是一个纯函数的状态机，可以不开窗口测试。日志先经 core 的逐行清洗再写文件和 stderr（清洗代码从 devhost 移进 core，两个宿主共用；字符规则在 core 里只有一份实现 `text::strip_control`，`clean_text` 也建在它上面）。
 
 **Files:**
-- Create: `crates/core/src/logscrub.rs`；Modify: `crates/core/src/lib.rs`（`pub mod logscrub;`）、`crates/core/Cargo.toml`（`tracing-subscriber`）、`crates/devhost/src/main.rs`（改用 core 的清洗，测试随代码移走）
+- Create: `crates/core/src/logscrub.rs`；Modify: `crates/core/src/text.rs`（`strip_control` 移到这里，`clean_text` 改为建在它上面）、`crates/core/src/lib.rs`（`pub mod logscrub;`）、`crates/core/Cargo.toml`（`tracing-subscriber`）、`crates/devhost/src/main.rs`（改用 core 的清洗，测试随代码移走）
 - Create: `app/src-tauri/src/{state,startup,window,quit,logging,events,notify,tray,test_support}.rs`
 - Create: `app/src-tauri/src/commands.rs`（空壳：只有一个空的 `handler()`，Task 4 写入全部命令并删掉它）
 - Create: `app/src/lib/problem-cases.json`（托盘与面板共用的「需要处理」判定用例表，Task 5 的侧栏测试也读它）
@@ -955,25 +955,51 @@ git commit -m "feat(app): add the five interface languages shared by the panel a
 
 **Interfaces:**
 - Produces:
-  - core：`pub fn issuerelay_core::logscrub::strip_control(text: &str) -> String`、`pub struct logscrub::CleanLines<W>(pub W)`（`io::Write`）、`pub struct logscrub::CleanWriter<M>(pub M)`（`MakeWriter`：`CleanWriter(io::stderr)`、`CleanWriter(non_blocking)`）
+  - core：`pub fn issuerelay_core::text::strip_control(text: &str) -> String`（字符规则的唯一实现：控制字符变空格、`is_invisible` 的字符去掉，不去首尾、不截断；`clean_text` 是它再去首尾、截到 500 字）、`pub struct logscrub::CleanLines<W>(pub W)`（`io::Write`）、`pub struct logscrub::CleanWriter<M>(pub M)`（`MakeWriter`：`CleanWriter(io::stderr)`、`CleanWriter(non_blocking)`）
   - `pub const AUTOSTART_ARG: &str = "--autostart"`
   - `state`：`pub enum StartupCode { AlreadyRunning, StoreUnavailable, Other }`、`pub struct StartupFailure { pub code: StartupCode, pub detail: String }`、`pub enum StartupState { Starting, Ready, Failed(StartupFailure) }`（serde：`{"kind":"starting"}`、`{"kind":"ready"}`、`{"kind":"failed","code":"already_running","detail":"…"}`）；`pub struct AppState`：`new(autostarted: bool)`、`set_host(&self, result: Result<Host, StartupFailure>)`、`async host(&self) -> Result<Host, String>`、`try_host(&self) -> Option<Host>`、`startup_state(&self) -> StartupState`、`pub quit: Mutex<QuitState>`、`pub autostarted: bool`
   - `startup`：`pub async fn start(app: AppHandle)`、`pub fn failure(error: &anyhow::Error, state_db: &Path) -> StartupFailure`
   - `pub fn window::show(app: &AppHandle)`、`pub fn window::hide(app: &AppHandle)`（macOS 上同时切换程序坞图标）、`pub fn window::on_event(window: &tauri::Window, event: &WindowEvent)`
   - `quit`：`pub enum QuitState { Idle, Asking, Waiting, Stopping, Done }`、`pub enum QuitEvent { Requested { host_ready: bool, running: usize }, Wait, StopNow, Stopped, WindowClosed }`、`pub enum QuitStep { Nothing, Ask(usize), ShowPanel, Stop(StopMode), HideWindow, Exit }`、`pub fn next(state: QuitState, event: QuitEvent) -> (QuitState, QuitStep)`（纯函数）、`pub fn handle(app: &AppHandle, event: QuitEvent) -> QuitStep`、`pub fn request(app: &AppHandle)`、`pub fn on_run_event(app: &AppHandle, event: RunEvent)`
-  - `events`：`pub const ENGINE_EVENT: &str = "engine-event"`、`RESYNC_EVENT = "engine-resync"`、`QUIT_REQUESTED = "quit-requested"`（载荷：运行中的条数）、`STARTUP_FAILED = "startup-failed"`（载荷：`StartupState::Failed`）；`pub enum Forward { Event(EngineEvent), Resync, Stop }`、`pub fn forward(received: Result<EngineEvent, RecvError>) -> Forward`、`pub fn spawn_forwarder(app: AppHandle, host: Host)`
+  - `events`：`pub const ENGINE_EVENT: &str = "engine-event"`、`RESYNC_EVENT = "engine-resync"`、`QUIT_REQUESTED = "quit-requested"`（载荷：运行中的条数）、`STARTUP_FAILED = "startup-failed"`（载荷：`StartupState::Failed`）；`pub enum Forward { Event(Box<EngineEvent>), Resync, Stop }`（事件装箱：`EngineEvent::Job` 带着约 280 字节的 `Job`，不装箱会触发 `clippy::large_enum_variant`）、`pub fn forward(received: Result<EngineEvent, RecvError>) -> Forward`、`pub fn spawn_forwarder(app: AppHandle, host: Host)`
   - `pub enum notify::NotificationKind { RunStarted, AwaitingAcceptance, NeedsInfo, Failed }`、`pub fn notify::notification_for(previous: Option<JobState>, job: &Job) -> Option<NotificationKind>`、`pub fn notify::enabled(kind, settings: &NotificationSettings) -> bool`、`pub fn notify::content(kind, job: &Job, t: &Translator) -> (String, String)`（标题＝编号＋标题，正文＝已翻译的一句话，不带引擎原文）
   - `pub enum tray::TrayState { Idle, Running, Paused, Problem }`、`pub struct tray::TrayView { pub state: TrayState, pub status_line: String, pub toggle_label: String }`、`pub fn tray::tray_view(status: &StatusSnapshot, setup: &LinearSetup, t: &Translator) -> TrayView`、`pub fn tray::create(app: &AppHandle) -> tauri::Result<()>`、`pub fn tray::refresh(app: &AppHandle, host: &Host)`
   - `pub fn logging::init(logs_dir: Option<&Path>) -> Option<WorkerGuard>`、`pub fn logging::allowed(target: &str, level: &Level) -> bool`、`pub fn logging::warn_failed<T, E: Display>(result: Result<T, E>, what: &str)`、`pub fn logging::debug_failed<T, E: Display>(result: Result<T, E>, what: &str)`
   - 测试辅助（`#[cfg(test)] mod test_support`）：`job(state: JobState) -> Job`（18 个字段全部写出）、`checked() -> StatusSnapshot`（9 个字段全部写出；Task 4 给 `StatusSnapshot` 加 `held` 时同步补上）
   - `app/src/lib/problem-cases.json`：`[{ "name", "linear": "connected" | "not_configured" | "interface_changed" | "connect_failed", "checked", "linear_ok", "last_error", "paused", "running", "expected": "idle" | "running" | "paused" | "problem" }]`
-- Consumes: 第一部分的 `host::{Host, HostParts, SystemConnector, LinearSetup, AuthMethod, StopMode}`（Task 9：`stop` 可重复调用，`stop(StopRuns)` 会结束一个仍在等待的 `stop(WaitForRuns)`，两者都返回；宿主最后停 IPC）、`engine::{EngineEvent, StatusSnapshot}`、`config::{NotificationSettings, ExecutorKind}`、`model::{Job, JobState}`、`linear::Viewer`、`ipc::server::AlreadyRunning`、`paths::AppPaths`、`text::{clean_text, is_invisible}`；Task 2 的 `i18n::Translator`
+- Consumes: 第一部分的 `host::{Host, HostParts, SystemConnector, LinearSetup, AuthMethod, StopMode}`（Task 9：`stop` 可重复调用，`stop(StopRuns)` 会结束一个仍在等待的 `stop(WaitForRuns)`，两者都返回；宿主最后停 IPC）、`engine::{EngineEvent, StatusSnapshot}`、`config::{NotificationSettings, ExecutorKind}`、`model::{Job, JobState}`、`linear::Viewer`、`ipc::server::AlreadyRunning`、`paths::AppPaths`、`text::clean_text`；`LinearSetup` 含 AR51 新增的 `Connecting`（`{"kind":"connecting"}`）；Task 2 的 `i18n::Translator`
 
 - [ ] **Step 1: 把日志清洗移进 core（先写失败测试）**
 
-devhost 逐行清洗日志（`CleanLines`、`strip_control`、`CleanStderr`，`crates/devhost/src/main.rs`），因为事件字段（`error = %…`）可能带 Linear 的文本；托盘程序跑同一个引擎，日志文件同样要清洗。代码移进 core，两个宿主共用，不复制。
+devhost 逐行清洗日志（`CleanLines`、`strip_control`、`CleanStderr`，`crates/devhost/src/main.rs`），因为事件字段（`error = %…`）可能带 Linear 的文本；托盘程序跑同一个引擎，日志文件同样要清洗。代码移进 core，两个宿主共用，不复制。`strip_control` 与 `text::clean_text` 原是同一个循环的两份副本：`strip_control` 放进 `text.rs` 作为字符规则的唯一实现，`clean_text` 改为建在它上面，日志清洗与面板的用例表（Task 4）都经它。
 
-新建 `crates/core/src/logscrub.rs`，先只放从 devhost 移来的测试（外加一条 `CleanWriter` 的测试）：
+`crates/core/src/text.rs` 测试模块加（第一条从 devhost 移来）：
+
+```rust
+    #[test]
+    fn the_error_line_keeps_the_root_cause_however_long_the_chain() {
+        let error = anyhow::anyhow!("root cause\u{1b}[2J")
+            .context("x".repeat(600))
+            .context("outer\n");
+        let line = strip_control(&format!("{error:#}"));
+        assert!(line.starts_with("outer : xxx"), "{line}");
+        assert!(line.ends_with(": root cause [2J"), "{line}");
+        assert_eq!(
+            line.chars().count(),
+            "outer : ".len() + 600 + ": root cause [2J".len()
+        );
+    }
+
+    #[test]
+    fn clean_text_is_the_character_rule_trimmed_and_capped() {
+        // One implementation: `strip_control` keeps the ends and the length, `clean_text` trims
+        // and caps what it returns.
+        assert_eq!(strip_control(" a\tb\u{200b} "), " a b ");
+        assert_eq!(clean_text(" a\tb\u{200b} "), strip_control(" a\tb\u{200b} ").trim());
+    }
+```
+
+新建 `crates/core/src/logscrub.rs`，先只放从 devhost 移来的另外三条测试（外加一条 `CleanWriter` 的测试）：
 
 ```rust
 #[cfg(test)]
@@ -981,7 +1007,6 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::Mutex;
 
-    use anyhow::anyhow;
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
@@ -1049,20 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn the_error_line_keeps_the_root_cause_however_long_the_chain() {
-        let error = anyhow!("root cause\u{1b}[2J")
-            .context("x".repeat(600))
-            .context("outer\n");
-        let line = strip_control(&format!("{error:#}"));
-        assert!(line.starts_with("outer : xxx"), "{line}");
-        assert!(line.ends_with(": root cause [2J"), "{line}");
-        assert_eq!(
-            line.chars().count(),
-            "outer : ".len() + 600 + ": root cause [2J".len()
-        );
-    }
-
-    #[test]
     fn every_writer_the_subscriber_gets_cleans_its_line() {
         let make = CleanWriter(Mutex::new(Vec::new()));
         make.make_writer()
@@ -1081,27 +1092,25 @@ cargo add -p issuerelay-core tracing-subscriber --no-default-features --features
 
 （`MakeWriter` 在 `tracing-subscriber` 的 `fmt` feature 下；工作区里 devhost 已在用同一个 crate，锁文件不引入新的包。feature 名以解析到的版本为准。）
 
-Run: `cargo test -p issuerelay-core --lib logscrub`
-Expected: 编译失败（`CleanLines`、`CleanWriter`、`strip_control` 还不存在）。
+Run: `cargo test -p issuerelay-core --lib logscrub` 与 `cargo test -p issuerelay-core --lib text`
+Expected: 编译失败（`strip_control`、`CleanLines`、`CleanWriter` 还不存在）。
 
-在测试模块上方写实现（`strip_control` 与 `CleanLines` 照 devhost 原样移来，`CleanStderr` 推广成接受任意写入端的 `CleanWriter`，日志文件也能用）：
+`crates/core/src/text.rs`：`clean_text` 改为建在 `strip_control` 上（行为不变，`text.rs` 原有测试照旧通过），`strip_control` 从 devhost 移来：
 
 ```rust
-//! Log lines as they are written. A log line can carry Linear's or an executor's text in its
-//! fields (`error = %…`: the subscriber escapes only the message and error values), so every
-//! line loses its control and invisible characters before it reaches a terminal or a log file,
-//! keeping only the newline that ends it. The devhost and the desktop app log through
-//! `CleanWriter`.
-use std::io::{self, Write};
+pub fn clean_text(text: &str) -> String {
+    let flat = strip_control(text);
+    let flat = flat.trim();
+    match flat.char_indices().nth(MAX_TEXT_CHARS) {
+        Some((cut, _)) => format!("{}…", &flat[..cut]),
+        None => flat.to_string(),
+    }
+}
 
-use tracing_subscriber::fmt::MakeWriter;
-
-use crate::text::is_invisible;
-
-/// `text` with every control character turned into a space and every invisible character
-/// (`text::is_invisible`: zero-width and direction-changing ones) removed. This is `clean_text`
-/// without the trimming and the length cap, for text that must keep its end, such as the root
-/// cause of an error.
+/// `text` with every control character (newline and tab included) turned into a space and every
+/// invisible character (`is_invisible`) removed; nothing is trimmed and nothing cut. The one
+/// implementation of the character rule: `clean_text` trims and caps what it returns, the log
+/// scrub (`logscrub::CleanLines`) and the root cause at the end of an error chain need the ends.
 pub fn strip_control(text: &str) -> String {
     text.chars()
         .filter_map(|c| {
@@ -1115,6 +1124,21 @@ pub fn strip_control(text: &str) -> String {
         })
         .collect()
 }
+```
+
+（`clean_text` 的文档注释保留原文。）然后在 `logscrub.rs` 的测试模块上方写实现（`CleanLines` 照 devhost 原样移来，`CleanStderr` 推广成接受任意写入端的 `CleanWriter`，日志文件也能用）：
+
+```rust
+//! Log lines as they are written. A log line can carry Linear's or an executor's text in its
+//! fields (`error = %…`: the subscriber escapes only the message and error values), so every
+//! line loses its control and invisible characters before it reaches a terminal or a log file,
+//! keeping only the newline that ends it. The devhost and the desktop app log through
+//! `CleanWriter`.
+use std::io::{self, Write};
+
+use tracing_subscriber::fmt::MakeWriter;
+
+use crate::text::strip_control;
 
 /// Passes what is written to `W` with `strip_control` applied, keeping only the line ending that
 /// closes the text (the last byte, when it is a newline). A log line can then neither move the
@@ -1155,10 +1179,10 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for CleanWriter<M> {
 }
 ```
 
-`crates/devhost/src/main.rs`（照第一部分 Task 9 合入后的版本改）：删掉本地的 `strip_control`、`CleanLines`、`CleanStderr` 与 `use tracing_subscriber::fmt::MakeWriter`、`text::is_invisible` 两处导入；改为 `use issuerelay_core::logscrub::{CleanWriter, strip_control};`；`init_logging` 里 `.with_writer(CleanStderr)` 改为 `.with_writer(CleanWriter(io::stderr))`；`main` 里错误行照旧用 `strip_control`。测试模块删掉已移走的四条（`a_log_line_carries_no_terminal_escapes`、`only_the_closing_newline_survives`、`a_write_reports_the_bytes_it_was_given_and_passes_errors_on`、`the_error_line_keeps_the_root_cause_however_long_the_chain`）与 `written`；`Failing`、`a_closed_pipe_is_not_a_failure_but_other_write_errors_are`、`only_run_logs_below_warnings_by_default` 留下（它们测的是 devhost 自己的 `write_line` 与 `default_filter`）。`.github/CODEOWNERS` 加 `/crates/core/src/logscrub.rs`（清洗从已登记的 devhost 移来，覆盖不能断）。
+`crates/devhost/src/main.rs`（照第一部分 Task 9 合入后的版本改）：删掉本地的 `strip_control`、`CleanLines`、`CleanStderr` 与 `use tracing_subscriber::fmt::MakeWriter`、`text::is_invisible` 两处导入；改为从 core 导入 `logscrub::CleanWriter` 与 `text::strip_control`（`clean_text` 照旧从 `text` 导入）；`init_logging` 里 `.with_writer(CleanStderr)` 改为 `.with_writer(CleanWriter(io::stderr))`；`main` 里错误行照旧用 `strip_control`。测试模块删掉已移走的四条（`a_log_line_carries_no_terminal_escapes`、`only_the_closing_newline_survives`、`a_write_reports_the_bytes_it_was_given_and_passes_errors_on`、`the_error_line_keeps_the_root_cause_however_long_the_chain`）与 `written`，以及只给移走的那条测试用的 `use anyhow::anyhow;`（Task 9 之后的 devhost 测试模块以它开头；留着就是未使用的导入，`-D warnings` 会拒绝）；`Failing`、`a_closed_pipe_is_not_a_failure_but_other_write_errors_are`、`only_run_logs_below_warnings_by_default` 留下（它们测的是 devhost 自己的 `write_line` 与 `default_filter`；core 的 `logscrub` 测试另有一份同样的 `Failing`，两处各自的测试在用）。`.github/CODEOWNERS` 加 `/crates/core/src/logscrub.rs`（清洗从已登记的 devhost 移来，覆盖不能断）。
 
-Run: `cargo test -p issuerelay-core --lib logscrub`、`cargo test -p issuerelay-devhost`、`cargo clippy --workspace --all-targets -- -D warnings`
-Expected: PASS（core 5 条清洗测试：移来的 4 条加 `CleanWriter` 的 1 条；devhost 剩下的测试照旧通过）。
+Run: `cargo test -p issuerelay-core --lib logscrub`、`cargo test -p issuerelay-core --lib text`、`cargo test -p issuerelay-devhost`、`cargo clippy --workspace --all-targets -- -D warnings`
+Expected: PASS（`logscrub` 4 条：移来的 3 条加 `CleanWriter` 的 1 条；`text` 原有测试加 2 条新的；devhost 剩下的测试照旧通过）。
 
 ```bash
 git add crates Cargo.lock .github/CODEOWNERS
@@ -1178,6 +1202,8 @@ cargo add -p issuerelay-app --dev chrono
 （`chrono` 只给测试：`Job` 有三个必填的 `DateTime<Utc>` 字段、`StatusSnapshot.last_poll_at` 也是，测试辅助要构造它们。）
 
 - [ ] **Step 3: 纯逻辑的失败测试**
+
+先在 `lib.rs`（此时还是 Task 1 / Task 2 的版本）`pub mod i18n;` 旁加上 Step 4 的模块声明：`pub mod commands; pub mod events; pub mod logging; pub mod notify; pub mod quit; pub mod startup; pub mod state; pub mod tray; pub mod window;` 与 `#[cfg(test)] mod test_support;`。下面各文件此时只有测试模块（`commands.rs` 先空着），所以测试会编译并失败，而不是被 cargo 跳过。
 
 `app/src-tauri/src/test_support.rs`（`lib.rs` 里 `#[cfg(test)] mod test_support;`；几个模块的测试共用，字段逐个写出，core 加字段时编译器会指出这里）：
 
@@ -1291,7 +1317,10 @@ mod tests {
   { "name": "not logged in", "linear": "not_configured", "checked": true, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
   { "name": "not logged in, before any check", "linear": "not_configured", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
   { "name": "Linear's tools changed", "linear": "interface_changed", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
-  { "name": "connecting failed", "linear": "connect_failed", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" }
+  { "name": "connecting failed", "linear": "connect_failed", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "the first connection is still under way", "linear": "connecting", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "while connecting, a failed check is no problem yet", "linear": "connecting", "checked": true, "linear_ok": false, "last_error": true, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "connecting while paused", "linear": "connecting", "checked": false, "linear_ok": false, "last_error": false, "paused": true, "running": 0, "expected": "paused" }
 ]
 ```
 
@@ -1347,7 +1376,7 @@ mod tests {
     fn the_tray_state_follows_the_cases_the_panel_shares() {
         let cases: Vec<ProblemCase> = serde_json::from_str(include_str!("../../src/lib/problem-cases.json"))
             .expect("problem-cases.json is valid");
-        assert!(cases.len() >= 11, "the shared cases were read");
+        assert!(cases.len() >= 14, "the shared cases were read");
         let t = Translator::new("en");
         for case in cases {
             let setup = match case.linear.as_str() {
@@ -1355,6 +1384,7 @@ mod tests {
                 "not_configured" => LinearSetup::NotConfigured,
                 "interface_changed" => LinearSetup::InterfaceChanged { message: "list_issues changed".into() },
                 "connect_failed" => LinearSetup::ConnectFailed { message: "network is down".into() },
+                "connecting" => LinearSetup::Connecting,
                 other => panic!("unknown Linear state {other} in {:?}", case.name),
             };
             let status = StatusSnapshot {
@@ -1400,9 +1430,10 @@ mod tests {
     }
 
     #[test]
-    fn the_exit_hook_with_running_jobs_asks_first() {
-        // Cmd+Q and the system's request reach `on_run_event`, which turns them into `Requested`,
-        // exactly like the tray's Quit.
+    fn a_request_with_runs_in_progress_asks_and_a_repeat_is_decided_afresh() {
+        // The tray's Quit, and Cmd+Q or the system once `on_run_event` turned them into
+        // `Requested`. The hook itself depends on Tauri's `ExitRequested.code` and is checked by
+        // hand in Task 13 Step 4.
         let (state, step) = next(QuitState::Idle, Requested { host_ready: true, running: 1 });
         assert_eq!((state, step), (QuitState::Asking, QuitStep::Ask(1)));
         assert_eq!(
@@ -1473,7 +1504,10 @@ mod tests {
             }
         }
         // The channel kept the last two events; the three before them were lost.
-        assert_eq!(seen, [Forward::Resync, Forward::Event(EngineEvent::Status), Forward::Event(EngineEvent::Config)]);
+        assert_eq!(
+            seen,
+            [Forward::Resync, Forward::Event(Box::new(EngineEvent::Status)), Forward::Event(Box::new(EngineEvent::Config))]
+        );
     }
 
     #[test]
@@ -1589,6 +1623,10 @@ mod tests {
         let store = failure(&store, &db);
         assert_eq!(store.code, StartupCode::StoreUnavailable);
         assert!(!store.detail.contains('\n'), "the detail is one cleaned line: {:?}", store.detail);
+        let folder = anyhow!("permission denied").context(format!("cannot create {}", Path::new("data").display()));
+        assert_eq!(failure(&folder, &db).code, StartupCode::StoreUnavailable, "the run records' folder");
+        let lock = anyhow!("permission denied").context(format!("cannot lock {}", Path::new("data").join("issuerelay.lock").display()));
+        assert_eq!(failure(&lock, &db).code, StartupCode::Other, "the IPC endpoint's lock is not the store");
         let other = failure(&anyhow!("this system has no local data directory"), &db);
         assert_eq!(other.code, StartupCode::Other);
     }
@@ -1637,6 +1675,8 @@ pub struct StartupFailure {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartupState {
     Starting,
+    /// `Host::start` returned. Linear may still be connecting (`LinearSetup::Connecting`):
+    /// the host no longer waits for it.
     Ready,
     Failed(StartupFailure),
 }
@@ -1787,6 +1827,8 @@ use crate::{
     quit::{self, QuitEvent, QuitStep},
 };
 
+// `set_activation_policy` is taken to return a `Result`; if it returns `()` in the resolved Tauri
+// version, call it directly instead of through `warn_failed` (and say so in the report).
 pub fn show(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     logging::warn_failed(app.set_activation_policy(tauri::ActivationPolicy::Regular), "showing the Dock icon");
@@ -1946,6 +1988,10 @@ pub fn request(app: &AppHandle) {
 
 /// The app's event loop hook: an exit IssueRelay did not ask for itself (Cmd+Q, the system) goes
 /// through `request`; the app's own `exit(0)`, and any exit once quitting is done, go through.
+/// This relies on `ExitRequested.code` being `Some` only for `AppHandle::exit` and `None` for
+/// Cmd+Q, the system's request (log out, shut down) and the last window closing. Verify that
+/// against the resolved Tauri version's documentation: a Cmd+Q that arrived with `Some(code)`
+/// would exit without asking, and the runs in progress would be recorded as interrupted.
 pub fn on_run_event(app: &AppHandle, event: RunEvent) {
     if let RunEvent::ExitRequested { api, code, .. } = event {
         let done = *app.state::<AppState>().quit.lock().unwrap_or_else(PoisonError::into_inner) == QuitState::Done;
@@ -2086,7 +2132,8 @@ fn notification(
 /// What the forwarder does with one result from the engine's channel.
 #[derive(Debug, PartialEq)]
 pub enum Forward {
-    Event(EngineEvent),
+    /// Boxed: a job event carries a whole `Job`, which would make every `Forward` that large.
+    Event(Box<EngineEvent>),
     /// Events were lost: one resync, then forwarding goes on.
     Resync,
     /// The engine is gone.
@@ -2095,7 +2142,7 @@ pub enum Forward {
 
 pub fn forward(received: Result<EngineEvent, RecvError>) -> Forward {
     match received {
-        Ok(event) => Forward::Event(event),
+        Ok(event) => Forward::Event(Box::new(event)),
         Err(RecvError::Lagged(_)) => Forward::Resync,
         Err(RecvError::Closed) => Forward::Stop,
     }
@@ -2108,12 +2155,12 @@ pub fn spawn_forwarder(app: AppHandle, host: Host) {
         loop {
             match forward(events.recv().await) {
                 Forward::Event(event) => {
-                    if let EngineEvent::Job { job } = &event
+                    if let EngineEvent::Job { job } = event.as_ref()
                         && let Some(kind) = notification(&mut known, job, || seed(&host))
                     {
                         notify::show(&app, &host, kind, job);
                     }
-                    logging::debug_failed(app.emit(ENGINE_EVENT, &event), "forwarding an engine event");
+                    logging::debug_failed(app.emit(ENGINE_EVENT, event.as_ref()), "forwarding an engine event");
                     tray::refresh(&app, &host);
                 }
                 Forward::Resync => {
@@ -2164,11 +2211,17 @@ pub struct TrayView {
 }
 
 /// What the tray shows for the engine's status. A problem (not connected to Linear, the last
-/// check failed, a job could not start) wins over paused, which wins over running.
+/// check failed, a job could not start) wins over paused, which wins over running. While the
+/// first connection is under way (`Connecting`, the host no longer waits for it) nothing is a
+/// problem yet: the checks fail until it is done.
 pub fn tray_view(status: &StatusSnapshot, setup: &LinearSetup, t: &Translator) -> TrayView {
-    let problem = !matches!(setup, LinearSetup::Connected { .. })
-        || (status.last_poll_at.is_some() && !status.linear_ok)
-        || status.last_error.is_some();
+    let problem = match setup {
+        LinearSetup::Connected { .. } => {
+            (status.last_poll_at.is_some() && !status.linear_ok) || status.last_error.is_some()
+        }
+        LinearSetup::Connecting => false,
+        _ => true,
+    };
     let state = if problem {
         TrayState::Problem
     } else if status.paused {
@@ -2297,8 +2350,9 @@ pub fn refresh(app: &AppHandle, host: &Host) {
 `startup.rs`：
 
 ```rust
-//! Starts the host in the background so the window and tray appear at once, then decides
-//! whether to show the panel. How the start went is kept in `AppState` (`startup_state`), so a
+//! Starts the host in the background so the tray appears at once, then decides whether to show
+//! the panel (the window is shown once `Host::start` returned or failed; it no longer waits for
+//! Linear, which connects in the background). How the start went is kept in `AppState` (`startup_state`), so a
 //! panel that opens later still learns it; `startup-failed` tells a panel that is already open.
 use std::{path::Path, sync::Arc};
 
@@ -2356,15 +2410,22 @@ pub async fn start(app: AppHandle) {
 /// A start failure as the panel shows it: a code it translates, and the cleaned error as the
 /// detail line.
 pub fn failure(error: &anyhow::Error, state_db: &Path) -> StartupFailure {
+    let message = format!("{error:#}");
+    let folder = state_db.parent().unwrap_or(state_db);
     let code = if error.downcast_ref::<AlreadyRunning>().is_some() {
         StartupCode::AlreadyRunning
-    } else if format!("{error:#}").contains(&state_db.display().to_string()) {
-        // `Store::open` names the database file in every error it returns.
+    } else if message.contains(&state_db.display().to_string())
+        || message.starts_with(&format!("cannot create {}", folder.display()))
+    {
+        // `Store::open` names the database file, or its folder when it cannot create it (on macOS
+        // the IPC endpoint creates that same folder first, in the same words): either way the run
+        // records cannot be kept. The other IPC errors name the socket or its lock and stay
+        // `Other`.
         StartupCode::StoreUnavailable
     } else {
         StartupCode::Other
     };
-    StartupFailure { code, detail: clean_text(&format!("{error:#}")) }
+    StartupFailure { code, detail: clean_text(&message) }
 }
 ```
 
@@ -2452,7 +2513,7 @@ Expected: 菜单栏出现托盘图标；菜单里有一行状态与四个操作�
 
 - [ ] **Step 6: 文档与提交**
 
-- 设计第 4.1 节补：「托盘程序启动时先出托盘图标，宿主在后台启动（解析环境、连接 Linear 需要几秒）；面板的命令等宿主就绪。启动状态（启动中 / 就绪 / 失败及原因代码：另一个宿主已在运行、运行记录打不开、其他）随时可查，面板据此显示启动失败页。开机自启时停在托盘，其余情况显示面板；macOS 上面板隐藏时（含开机自启）不显示程序坞图标。退出由一个状态机决定：有任务在跑时先问，选了等待仍可改为立即停止，等待期间关窗口只隐藏窗口。」第 9.1 节补托盘图标四种状态的判定顺序（出问题 > 已暂停 > 运行中 > 空闲；「出问题」的用例表在 `app/src/lib/problem-cases.json`，托盘与面板共用）。第 11 节补：「桌面应用的程序日志写在 `logs/app.<日期>.log`（每天一个，保留 7 个），每行先去掉控制字符与不可见字符。」
+- 设计第 4.1 节补：「托盘程序启动时先出托盘图标，宿主在后台启动（解析环境、打开运行记录需要几秒；Linear 的首次连接不在其中，它在后台进行，期间显示『正在连接 Linear…』）；面板的命令等宿主就绪。启动状态（启动中 / 就绪 / 失败及原因代码：另一个宿主已在运行、运行记录打不开、其他）随时可查，面板据此显示启动失败页。开机自启时停在托盘，其余情况显示面板；macOS 上面板隐藏时（含开机自启）不显示程序坞图标。退出由一个状态机决定：有任务在跑时先问，选了等待仍可改为立即停止，等待期间关窗口只隐藏窗口。」第 9.1 节补托盘图标四种状态的判定顺序（出问题 > 已暂停 > 运行中 > 空闲；「出问题」的用例表在 `app/src/lib/problem-cases.json`，托盘与面板共用）。第 11 节补：「桌面应用的程序日志写在 `logs/app.<日期>.log`（每天一个，保留 7 个），每行先去掉控制字符与不可见字符。」
 - `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 托盘、通知、退出状态机、启动状态 | app/src-tauri/src/tray.rs、notify.rs、quit.rs、state.rs、startup.rs |` 与 `| 日志逐行清洗（devhost 与桌面应用共用） | crates/core/src/logscrub.rs |`；`.github/CODEOWNERS` 加 `/app/src-tauri/src/`（宿主接入与命令都是高风险）。
 
 Run: 六条验证命令
@@ -2471,10 +2532,10 @@ git commit -m "feat(app): host the engine in the tray app with notifications and
 
 **Files:**
 - Modify（core）：`crates/core/src/engine.rs`（`StatusSnapshot.held`、`HeldJob`、`IssueStatus::Waiting` 的原因换成 `WaitReasonView`）、`crates/core/src/trigger.rs`（`WaitReasonView`、`WaitReason::view`）、`crates/core/tests/engine.rs`
-- Modify: `app/src-tauri/src/commands.rs`（Task 3 的空壳：写入全部命令，删掉空的 `handler()`）、`app/src-tauri/src/lib.rs`（注册命令）、`app/src-tauri/src/test_support.rs`（`checked()` 补 `held`，随 Step 1 的 core 提交）
+- Modify: `app/src-tauri/src/commands.rs`（Task 3 的空壳：写入全部命令，删掉空的 `handler()`）、`app/src-tauri/src/lib.rs`（注册命令）、`app/src-tauri/Cargo.toml` 与 `Cargo.lock`（`url`）、`app/src-tauri/src/test_support.rs`（`checked()` 补 `held`，随 Step 1 的 core 提交）
 - Create: `app/src/lib/types.ts`、`app/src/lib/backend.ts`、`app/src/lib/api.ts`、`app/src/lib/clean.ts`、`app/src/lib/clean-cases.json`、`app/src/lib/mock-fixtures.ts`、`app/src/lib/mock.ts`
 - Test: `commands.rs` 末尾 `mod tests`、`app/src/lib/api.test.ts`、`app/src/lib/mock.test.ts`、`app/src/lib/clean.test.ts`
-- Modify: `docs/ai-coding/AI_CODING_GUIDE.md`（第 5、7 节）、`docs/ai-coding/TESTING_SPEC.md`（假对象清单）、`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 9.2 节）
+- Modify: `docs/ai-coding/AI_CODING_GUIDE.md`（第 5、7 节）、`docs/ai-coding/TESTING_SPEC.md`（假实现清单）、`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 9.2 节）
 
 **Interfaces:**
 - Produces（core）：`pub struct engine::HeldJob { pub job_id: i64, pub retry_at: DateTime<Utc> }`；`StatusSnapshot` 加 `#[serde(default)] pub held: Vec<HeldJob>`（因启动失败而暂缓、仍在排队的任务，按 `job_id` 升序；`retry_at` 是暂缓开始时按本机时钟算出的下次尝试时间，只供显示）；`pub enum trigger::WaitReasonView { ProjectNotBound, DirectoryMissing { directory: String }, ExecutorNotReady { executor: ExecutorKind } }`（serde `tag = "code"`：`{"code":"project_not_bound"}`、`{"code":"directory_missing","directory":"…"}`、`{"code":"executor_not_ready","executor":"claude"}`）、`pub fn WaitReason::view(&self) -> WaitReasonView`；`IssueStatus::Waiting { reason: WaitReasonView }`。`WaitReason::describe()` 不变：任务的 `reason` 与命令行照旧用这句英文。
@@ -2501,17 +2562,17 @@ git commit -m "feat(app): host the engine in the tray app with notifications and
 | `linear_use_api_key` | `key: String` | `Viewer`（姓名已清洗） |
 | `linear_logout` | — | `()` |
 | `linear_reconnect` | — | `LinearSetup` |
-| `setup_action` | `action: SetupAction` | `String`（命令输出，清洗过） |
-| `control_servers` | — | `ControlServers { claude: Option<bool>, codex: Option<bool> }`（执行者没装为 `None`） |
+| `setup_action` | `action: SetupAction` | `()`（命令的输出不显示：做没做成看随后自动重跑的环境检查；失败时错误里带清洗过的输出） |
+| `control_servers` | — | `ControlServers { claude: ControlServer, codex: ControlServer }`，每个执行者一个状态：`registered` / `not_registered` / `not_installed` / `unknown`（检查本身失败——超时、起不来、被信号结束——记一条警告并报 `unknown`，从不当成「没装」） |
 | `linear_server_named` | `executor: ExecutorKind` | `bool`：Linear 的 MCP 服务是否以一键授权用的名字注册（Claude `linear-server`、Codex `linear`，名字取自 core 的 `setup::arguments`）；环境检查按网址认 Linear，名字不同时一键授权用不了，面板改为给出手动命令 |
-| `open_linear` | `url: String`（必须以 `https://linear.app/` 开头） | `()`；不是 Linear 链接时返回错误代码 `not_a_linear_link`（面板翻译它） |
+| `open_linear` | `url: String`（`is_linear_url`：`url::Url` 解析后协议为 `https`、主机为 `linear.app` 或其子域名） | `()`；其他链接返回错误代码 `not_a_linear_link`（面板翻译它） |
 | `choose_directory` | — | `Option<String>` |
 | `autostart_enabled` / `set_autostart` | — / `enabled: bool` | `bool` / `()` |
 | `quit` | `mode: QuitMode`（`"wait"` / `"stop"`） | `()`（交给 Task 3 的退出状态机：`QuitEvent::Wait` / `QuitEvent::StopNow`） |
 | `request_quit` | — | `()`（与托盘「退出」相同；宿主没起来时直接退出，供启动失败页用） |
 
-  - 前端：`types.ts` 里与上面一一对应的类型（含 `HeldJob`、`WaitReason`、`StartupState`）；叶子模块 `backend.ts`：`interface Backend`（方法名为命令名的 camelCase，外加 `onEngineEvent`、`onResync`、`onQuitRequested`、`onStartupFailed` 四个订阅）、`class BackendError extends Error`（`code: ErrorCode | null`）、`ERROR_CODES`；`api.ts`：`isTauri()`、`tauriBackend`、`loadBackend(): Promise<Backend>`（在 Tauri 里用真实命令，否则用 `import()` 动态载入的假后端）；`api.ts` 与 `mock.ts` 都只从 `backend.ts`、`types.ts` 导入，彼此不互相导入；`createMockBackend(scenario: "demo" | "fresh", options?: { latencyMs?: number }): Backend`（`latencyMs` 默认 120，测试传 0；构造时 `setFixedClock(MOCK_NOW)`）；`mock-fixtures.ts` 的 `ago`、`DEMO_*`、`FRESH_DOCTOR`、`DEFAULT_SETTINGS`；`clean.ts`：`cleanDisplayText(text: string): string`、`cleanDisplayLines(text: string): string`。
-- Consumes: Task 1 的 `MOCK_NOW`、`setFixedClock`；Task 3 的 `AppState`、`StartupState`、`quit::{handle, QuitEvent}`、`tray::refresh`、`events::*`、`test_support`；第一部分的 `setup::{self, SetupAction}`、`executor::resolve_program_in`、`doctor::{SystemRunner, CommandRunner}`、`host::*`、`logscrub::strip_control`（Task 3）。
+  - 前端：`types.ts` 里与上面一一对应的类型（含 `HeldJob`、`WaitReason`、`StartupState`）；叶子模块 `backend.ts`：`interface Backend`（方法名为命令名的 camelCase，外加 `onEngineEvent`、`onResync`、`onQuitRequested`、`onStartupFailed` 四个订阅）、`class BackendError extends Error`（`code: ErrorCode | null`）、`ERROR_CODES`；`api.ts`：`isTauri()`、`tauriBackend`、`loadBackend(): Promise<Backend>`（在 Tauri 里用真实命令，否则用 `import()` 动态载入的假后端）；`api.ts` 与 `mock.ts` 都只从 `backend.ts`、`types.ts` 导入，彼此不互相导入；`createMockBackend(scenario: "demo" | "fresh" | "connecting", options?: { latencyMs?: number }): Backend`（`connecting`：demo 的本地数据，Linear 还在首次连接，`linearReconnect()` 之后连上；`latencyMs` 默认 120，测试传 0；构造时 `setFixedClock(MOCK_NOW)`）；`mock-fixtures.ts` 的 `ago`、`DEMO_*`、`FRESH_DOCTOR`、`DEFAULT_SETTINGS`；`clean.ts`：`cleanDisplayText(text: string): string`、`cleanDisplayLines(text: string): string`。
+- Consumes: Task 1 的 `MOCK_NOW`、`setFixedClock`；Task 3 的 `AppState`、`StartupState`、`quit::{handle, QuitEvent}`、`tray::refresh`、`events::*`、`test_support`；第一部分的 `setup::{self, SetupAction}`、`executor::resolve_program_in`、`doctor::{SystemRunner, CommandRunner}`、`host::*`（`LinearSetup` 含 AR51 的 `Connecting`）、`text::clean_text`（Task 3 起建在 `text::strip_control` 上）。
 
 - [ ] **Step 1: core 补充：暂缓任务的重试时间与结构化等待原因（先写失败测试）**
 
@@ -2710,7 +2771,7 @@ pub struct HeldJob {
         let mut held: Vec<HeldJob> = backoff
             .held
             .iter()
-            .filter(|(id, pause)| pause.until > now && queued.contains(id))
+            .filter(|(id, pause)| pause.until > now && queued.contains(*id))
             .map(|(id, pause)| HeldJob {
                 job_id: *id,
                 retry_at: pause.retry_at,
@@ -2747,10 +2808,28 @@ mod tests {
     #[test]
     fn only_linear_links_are_opened() {
         assert!(is_linear_url("https://linear.app/demo/issue/DEMO-1"));
+        // The OAuth authorization page the login opens lives on a subdomain.
+        assert!(is_linear_url("https://mcp.linear.app/authorize"));
+        assert!(!is_linear_url("http://linear.app/"));
         assert!(!is_linear_url("http://linear.app/demo/issue/DEMO-1"));
-        assert!(!is_linear_url("https://linear.app.evil.example/x"));
+        // User info and look-alike hosts: parsed, the host is evil.example and linear.app.evil.example.
+        assert!(!is_linear_url("https://linear.app@evil.example/"));
+        assert!(!is_linear_url("https://linear.app.evil.example/"));
         assert!(!is_linear_url("https://evil.example/https://linear.app/"));
         assert!(!is_linear_url("file:///etc/passwd"));
+        assert!(!is_linear_url("not a link"));
+    }
+
+    #[test]
+    fn a_failed_registration_check_is_unknown_never_not_installed() {
+        assert_eq!(registration(ExecutorKind::Claude, Ok(true)), ControlServer::Registered);
+        assert_eq!(registration(ExecutorKind::Claude, Ok(false)), ControlServer::NotRegistered);
+        assert_eq!(
+            registration(ExecutorKind::Codex, Err(anyhow::anyhow!("`codex mcp get issuerelay` timed out after 60s"))),
+            ControlServer::Unknown
+        );
+        assert_eq!(serde_json::to_value(ControlServer::NotInstalled).unwrap(), "not_installed");
+        assert_eq!(serde_json::to_value(ControlServer::Unknown).unwrap(), "unknown");
     }
 
     #[test]
@@ -2803,10 +2882,9 @@ mod tests {
         let cases: Vec<CleanCase> = serde_json::from_str(include_str!("../../src/lib/clean-cases.json"))
             .expect("clean-cases.json is valid");
         // Escape sequences are the panel's own addition; every other case is core's character
-        // rule (control characters become spaces, `text::is_invisible` ones go), without the
-        // trimming and the length cap of `clean_text`.
+        // rule, checked against `clean_text` itself (it trims what it returns, the panel does not).
         for case in cases.iter().filter(|case| !case.ansi) {
-            assert_eq!(strip_control(&case.input), case.expected, "{:?}", case.input);
+            assert_eq!(clean_text(&case.input), case.expected.trim(), "{:?}", case.input);
         }
         assert!(
             cases.iter().filter(|case| case.ansi).all(|case| case.input.contains(['\u{1b}', '\u{9b}'])),
@@ -2820,6 +2898,12 @@ Run: `cargo test -p issuerelay-app commands`
 Expected: 编译失败。
 
 - [ ] **Step 3: 实现 `commands.rs`**
+
+```bash
+cargo add -p issuerelay-app url
+```
+
+（`is_linear_url` 用它解析链接；core 已在用同一个 crate，锁文件不引入新的包。）
 
 ```rust
 //! The commands the panel calls. Each waits for the host, does one thing and returns something
@@ -2838,7 +2922,6 @@ use issuerelay_core::{
     executor,
     host::{Host, LinearSetup},
     linear::{Project, Viewer},
-    logscrub::strip_control,
     model::Job,
     setup::{self, SetupAction},
     text::clean_text,
@@ -2874,10 +2957,15 @@ fn clamp_limit(limit: usize, max: usize) -> usize {
     limit.clamp(1, max)
 }
 
-/// Only Linear's own pages are opened from the panel; issue URLs come from Linear and are
-/// shown, but a link elsewhere is never opened.
+/// The only links IssueRelay opens in the browser, from the panel (`open_linear`) and for the
+/// Linear login (its authorization page): `https` on `linear.app` or one of its subdomains, such
+/// as `mcp.linear.app`. Parsed, so user info (`https://linear.app@evil.example/`) and look-alike
+/// hosts (`linear.app.evil.example`) are refused.
 fn is_linear_url(url: &str) -> bool {
-    url.starts_with("https://linear.app/")
+    url::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some_and(|host| host == "linear.app" || host.ends_with(".linear.app"))
+    })
 }
 
 /// Where the command-line program is installed: next to the app's own executable.
@@ -2934,10 +3022,34 @@ pub struct AppInfo {
     pub system_locale: Option<String>,
 }
 
+/// Whether IssueRelay's control server is registered with one executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlServer {
+    Registered,
+    NotRegistered,
+    NotInstalled,
+    /// The check itself failed (timed out, did not start, was killed); it was logged and the
+    /// panel offers to check again.
+    Unknown,
+}
+
 #[derive(Serialize)]
 pub struct ControlServers {
-    pub claude: Option<bool>,
-    pub codex: Option<bool>,
+    pub claude: ControlServer,
+    pub codex: ControlServer,
+}
+
+/// What a registration check of an installed executor came to; a failed check is logged.
+fn registration(kind: ExecutorKind, checked: anyhow::Result<bool>) -> ControlServer {
+    match checked {
+        Ok(true) => ControlServer::Registered,
+        Ok(false) => ControlServer::NotRegistered,
+        Err(e) => {
+            tracing::warn!(executor = kind.as_str(), error = %format!("{e:#}"), "could not check the control server registration");
+            ControlServer::Unknown
+        }
+    }
 }
 
 async fn host(state: &State<'_, AppState>) -> CmdResult<Host> {
@@ -3069,6 +3181,11 @@ pub async fn linear_login(app: AppHandle, state: State<'_, AppState>) -> CmdResu
     let opener = app.clone();
     let viewer = host
         .login(move |url| {
+            // The same check as `open_linear`: the browser opens nothing but Linear.
+            if !is_linear_url(url) {
+                tracing::warn!(url = %clean_text(url), "refused to open an authorization page outside linear.app");
+                return;
+            }
             if let Err(e) = opener.opener().open_url(url, None::<&str>) {
                 tracing::warn!(error = %e, "could not open the authorization page");
             }
@@ -3103,15 +3220,16 @@ pub async fn linear_reconnect(app: AppHandle, state: State<'_, AppState>) -> Cmd
     Ok(setup)
 }
 
-/// Runs a one-click setup command with the executor found on the resolved PATH.
+/// Runs a one-click setup command with the executor found on the resolved PATH. Its output is not
+/// shown: the panel checks again afterwards; a failure carries the cleaned output in its error.
 #[tauri::command]
-pub async fn setup_action(state: State<'_, AppState>, action: SetupAction) -> CmdResult<String> {
+pub async fn setup_action(state: State<'_, AppState>, action: SetupAction) -> CmdResult<()> {
     let host = host(&state).await?;
     let env = host.env();
     let program = executor::resolve_program_in(action_executor(action), env.path.as_deref()).map_err(error)?;
     let runner = SystemRunner::with_env(env.shared());
-    let output = setup::run(action, &program, cli_path().as_deref(), &runner).await.map_err(error)?;
-    Ok(clean_text(&output.stdout))
+    setup::run(action, &program, cli_path().as_deref(), &runner).await.map_err(error)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3119,10 +3237,12 @@ pub async fn control_servers(state: State<'_, AppState>) -> CmdResult<ControlSer
     let host = host(&state).await?;
     let env = host.env();
     let runner = SystemRunner::with_env(env.clone().shared());
-    let mut found = [None, None];
+    let mut found = [ControlServer::NotInstalled; 2];
     for (slot, kind) in found.iter_mut().zip([ExecutorKind::Claude, ExecutorKind::Codex]) {
+        // Not found on the resolved PATH: not installed. Found: the check decides, and a check
+        // that fails is `Unknown`, never "not installed".
         if let Ok(program) = executor::resolve_program_in(kind, env.path.as_deref()) {
-            *slot = setup::control_server_registered(&program, &runner).await.ok();
+            *slot = registration(kind, setup::control_server_registered(&program, &runner).await);
         }
     }
     Ok(ControlServers { claude: found[0], codex: found[1] })
@@ -3355,33 +3475,60 @@ describe("mock backend", () => {
     expect((await backend.appInfo()).system_locale).toBe("en-US");
     expect(await backend.startupState()).toEqual({ kind: "ready" });
   });
+
+  test("a start still connecting to Linear is ready, and connects on reconnect", async () => {
+    const backend = createMockBackend("connecting", { latencyMs: 0 });
+    expect(await backend.startupState()).toEqual({ kind: "ready" });
+    expect((await backend.status()).linear).toEqual({ kind: "connecting" });
+    await expect(backend.issues()).rejects.toThrow("still connecting to Linear");
+    const events: EngineEvent[] = [];
+    await backend.onEngineEvent((event) => events.push(event));
+    await backend.linearReconnect();
+    expect((await backend.status()).linear).toEqual({ kind: "connected", method: "oauth" });
+    expect(events).toContainEqual({ kind: "status" });
+  });
+
+  test("links outside linear.app are refused, as the app refuses them", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    await backend.openLinear("https://mcp.linear.app/authorize");
+    for (const url of ["https://linear.app@evil.example/", "https://linear.app.evil.example/", "http://linear.app/"]) {
+      await expect(backend.openLinear(url), url).rejects.toMatchObject({ code: "not_a_linear_link" });
+    }
+  });
+
+  test("control servers report one state per executor", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    expect(await backend.controlServers()).toEqual({ claude: "not_registered", codex: "not_registered" });
+    await backend.setupAction({ kind: "register_control_server", executor: "claude" });
+    expect((await backend.controlServers()).claude).toBe("registered");
+  });
 });
 ```
 
-`app/src/lib/clean-cases.json`（`ansi: false` 的用例同时由 Rust 测试对照 core 的字符规则核对；`ansi: true` 的是面板额外去掉的转义序列）：
+`app/src/lib/clean-cases.json`（`ansi: false` 的用例同时由 Rust 测试对照 core 的 `clean_text` 核对：期望值去掉首尾空白后比较，因为 `clean_text` 会去首尾而面板不去；`ansi: true` 的是面板额外去掉的转义序列。每行的 `note` 写明它用到的码位；不可见与方向控制字符一律写成 `\uXXXX` 转义（U+E0041 写成代理对），文件里不出现原样的不可见字符，免得被编辑器悄悄吞掉后用例照样通过）：
 
 ```json
 [
-  { "input": "plain text", "expected": "plain text", "ansi": false },
-  { "input": "  indented, not trimmed", "expected": "  indented, not trimmed", "ansi": false },
-  { "input": "tab\there", "expected": "tab here", "ansi": false },
-  { "input": "line one\nline two", "expected": "line one line two", "ansi": false },
-  { "input": "done\rrewritten", "expected": "done rewritten", "ansi": false },
-  { "input": "bell\u0007 and del\u007f", "expected": "bell  and del ", "ansi": false },
-  { "input": "next line\u0085here", "expected": "next line here", "ansi": false },
-  { "input": "lone escape\u001b", "expected": "lone escape ", "ansi": false },
-  { "input": "zero​width", "expected": "zerowidth", "ansi": false },
-  { "input": "abc‮def", "expected": "abcdef", "ansi": false },
-  { "input": "soft­hyphen and bom﻿", "expected": "softhyphen and bom", "ansi": false },
-  { "input": "hidden󠁁tag", "expected": "hiddentag", "ansi": false },
-  { "input": "family 👨‍👩‍👧", "expected": "family 👨‍👩‍👧", "ansi": false },
-  { "input": "日本語 é", "expected": "日本語 é", "ansi": false },
-  { "input": "\u001b[1;32mok\u001b[0m", "expected": "ok", "ansi": true },
-  { "input": "\u001b[2Jclear", "expected": "clear", "ansi": true },
-  { "input": "\u009b31mred", "expected": "red", "ansi": true },
-  { "input": "\u001b]0;title\u0007text", "expected": "text", "ansi": true },
-  { "input": "\u001b]8;;https://example.com\u001b\\link\u001b]8;;\u001b\\", "expected": "link", "ansi": true },
-  { "input": "\u001bcreset", "expected": "reset", "ansi": true }
+  { "note": "plain text stays", "input": "plain text", "expected": "plain text", "ansi": false },
+  { "note": "leading spaces stay (nothing is trimmed)", "input": "  indented, not trimmed", "expected": "  indented, not trimmed", "ansi": false },
+  { "note": "U+0009 tab becomes a space", "input": "tab\there", "expected": "tab here", "ansi": false },
+  { "note": "U+000A line feed becomes a space", "input": "line one\nline two", "expected": "line one line two", "ansi": false },
+  { "note": "U+000D carriage return becomes a space", "input": "done\rrewritten", "expected": "done rewritten", "ansi": false },
+  { "note": "U+0007 bell and U+007F delete become spaces", "input": "bell\u0007 and del\u007f", "expected": "bell  and del ", "ansi": false },
+  { "note": "U+0085 next line, a C1 control, becomes a space", "input": "next line\u0085here", "expected": "next line here", "ansi": false },
+  { "note": "U+001B escape with no sequence after it becomes a space", "input": "lone escape\u001b", "expected": "lone escape ", "ansi": false },
+  { "note": "U+200B zero width space is removed", "input": "zero\u200bwidth", "expected": "zerowidth", "ansi": false },
+  { "note": "U+202E right-to-left override is removed", "input": "abc\u202edef", "expected": "abcdef", "ansi": false },
+  { "note": "U+00AD soft hyphen and U+FEFF byte order mark are removed", "input": "soft\u00adhyphen and bom\ufeff", "expected": "softhyphen and bom", "ansi": false },
+  { "note": "U+E0041 tag latin capital letter A, written as the surrogate pair DB40 DC41, is removed", "input": "hidden\udb40\udc41tag", "expected": "hiddentag", "ansi": false },
+  { "note": "U+200D zero width joiner stays: emoji sequences need it", "input": "family 👨\u200d👩\u200d👧", "expected": "family 👨\u200d👩\u200d👧", "ansi": false },
+  { "note": "other scripts and accents stay", "input": "日本語 é", "expected": "日本語 é", "ansi": false },
+  { "note": "CSI colour sequences (U+001B [) are removed", "input": "\u001b[1;32mok\u001b[0m", "expected": "ok", "ansi": true },
+  { "note": "a CSI that clears the screen is removed", "input": "\u001b[2Jclear", "expected": "clear", "ansi": true },
+  { "note": "a one-byte CSI (U+009B) sequence is removed", "input": "\u009b31mred", "expected": "red", "ansi": true },
+  { "note": "an OSC ended by BEL (U+0007) is removed", "input": "\u001b]0;title\u0007text", "expected": "text", "ansi": true },
+  { "note": "OSC 8 hyperlinks ended by ST (U+001B \\) are removed", "input": "\u001b]8;;https://example.com\u001b\\link\u001b]8;;\u001b\\", "expected": "link", "ansi": true },
+  { "note": "a two-character ESC sequence (ESC c) is removed", "input": "\u001bcreset", "expected": "reset", "ansi": true }
 ]
 ```
 
@@ -3392,12 +3539,14 @@ import { expect, test } from "vitest";
 import cases from "./clean-cases.json";
 import { cleanDisplayLines, cleanDisplayText } from "./clean";
 
-test.each(cases)("$input is shown as $expected", ({ input, expected }) => {
+// Each row names the code points it uses in `note`; the file writes them as escapes.
+test.each(cases)("$note", ({ input, expected }) => {
   expect(cleanDisplayText(input)).toBe(expected);
 });
 
 test("multi-line output keeps its lines, each one cleaned", () => {
-  expect(cleanDisplayLines("ok\u001b[0m\r\n‮failed\tonce")).toBe("ok\nfailed once");
+  // U+001B [0m resets a colour; U+202E (right-to-left override) is removed.
+  expect(cleanDisplayLines("ok\u001b[0m\r\n\u202efailed\tonce")).toBe("ok\nfailed once");
 });
 ```
 
@@ -3491,7 +3640,9 @@ export type LinearSetup =
   | { kind: "connected"; method: AuthMethod }
   | { kind: "not_configured" }
   | { kind: "interface_changed"; message: string }
-  | { kind: "connect_failed"; message: string };
+  | { kind: "connect_failed"; message: string }
+  /** The first connection is still under way (the host no longer waits for it). */
+  | { kind: "connecting" };
 export interface StatusView { status: StatusSnapshot; linear: LinearSetup }
 
 /** Why an eligible-looking issue waits, as a code the panel translates. */
@@ -3580,7 +3731,9 @@ export type SetupAction =
   | { kind: "login_linear_mcp"; executor: ExecutorKind }
   | { kind: "register_control_server"; executor: ExecutorKind }
   | { kind: "remove_control_server"; executor: ExecutorKind };
-export interface ControlServers { claude: boolean | null; codex: boolean | null }
+/** One executor's control-server registration; `unknown` when the check itself failed. */
+export type ControlServer = "registered" | "not_registered" | "not_installed" | "unknown";
+export interface ControlServers { claude: ControlServer; codex: ControlServer }
 export interface AppInfo { version: string; cli_path: string | null; platform: string; system_locale: string | null }
 export type StartupCode = "already_running" | "store_unavailable" | "other";
 export type StartupState =
@@ -3641,7 +3794,7 @@ export interface Backend {
   linearUseApiKey(key: string): Promise<Viewer>;
   linearLogout(): Promise<void>;
   linearReconnect(): Promise<LinearSetup>;
-  setupAction(action: SetupAction): Promise<string>;
+  setupAction(action: SetupAction): Promise<void>;
   controlServers(): Promise<ControlServers>;
   linearServerNamed(executor: ExecutorKind): Promise<boolean>;
   openLinear(url: string): Promise<void>;
@@ -3719,10 +3872,14 @@ export const tauriBackend: Backend = {
   onStartupFailed: (listener) => on<StartupState>("startup-failed", listener),
 };
 
-/** `?mock=fresh` in a browser starts the mock as a first run (no login, no bindings). */
-function mockScenario(): "demo" | "fresh" {
+/**
+ * `?mock=fresh` in a browser starts the mock as a first run (no login, no bindings);
+ * `?mock=connecting` as a start whose first connection to Linear is still under way.
+ */
+function mockScenario(): "demo" | "fresh" | "connecting" {
   const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
-  return params.get("mock") === "fresh" ? "fresh" : "demo";
+  const scenario = params.get("mock");
+  return scenario === "fresh" || scenario === "connecting" ? scenario : "demo";
 }
 
 /**
@@ -3772,7 +3929,8 @@ function isControl(code: number): boolean {
  * Text from executors, the AI or the engine as the panel shows it: escape sequences removed,
  * every other control character turned into a space, invisible characters dropped. Unlike core's
  * `clean_text` it neither trims nor shortens, so a log line keeps its indentation. The cases in
- * clean-cases.json are checked here and, for the character rules, against core in commands.rs.
+ * clean-cases.json are checked here and, for the character rules, against core's `clean_text`
+ * in commands.rs (which trims what it returns).
  */
 export function cleanDisplayText(text: string): string {
   let out = "";
@@ -3987,6 +4145,17 @@ export interface MockOptions {
 }
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
+const CONNECTING = "still connecting to Linear";
+
+/** `https` on linear.app or one of its subdomains: the rule of `is_linear_url` in commands.rs. */
+function isLinearUrl(text: string): boolean {
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" && (url.hostname === "linear.app" || url.hostname.endsWith(".linear.app"));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The panel's backend without Tauri: fictional data in memory that behaves like the engine as far
@@ -3994,19 +4163,23 @@ const NOT_CONNECTED = "not connected to Linear: log in first";
  * saving settings and bindings, and the same events. Development, component tests and screenshots
  * use it; it never touches real data.
  */
-export function createMockBackend(scenario: "demo" | "fresh", options: MockOptions = {}): Backend {
+export function createMockBackend(scenario: "demo" | "fresh" | "connecting", options: MockOptions = {}): Backend {
   const latencyMs = options.latencyMs ?? 120;
   // Relative times and run durations in tests and screenshots are computed from this moment.
   setFixedClock(MOCK_NOW);
-  const demo = scenario === "demo";
+  // "connecting" is the demo install starting up: its local data, Linear not connected yet.
+  const demo = scenario !== "fresh";
   let jobs: Job[] = demo ? structuredClone(DEMO_JOBS) : [];
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
   let settings: Settings = { ...DEFAULT_SETTINGS, onboarding_completed: demo, full_access_acknowledged: demo };
-  let linear: LinearSetup = demo ? { kind: "connected", method: "oauth" } : { kind: "not_configured" };
-  let viewer: Viewer | null = demo ? DEMO_VIEWER : null;
-  let doctor: DoctorReport = structuredClone(demo ? DEMO_DOCTOR : FRESH_DOCTOR);
-  const controlServers: ControlServers = { claude: false, codex: false };
+  let linear: LinearSetup =
+    scenario === "demo" ? { kind: "connected", method: "oauth" } : scenario === "connecting" ? { kind: "connecting" } : { kind: "not_configured" };
+  let viewer: Viewer | null = scenario === "demo" ? DEMO_VIEWER : null;
+  let doctor: DoctorReport = structuredClone(
+    scenario === "demo" ? DEMO_DOCTOR : scenario === "connecting" ? { ...DEMO_DOCTOR, viewer: null, linear_error: CONNECTING, workspace: null } : FRESH_DOCTOR,
+  );
+  const controlServers: ControlServers = { claude: "not_registered", codex: "not_registered" };
   let autostart = false;
   const listeners = {
     event: new Set<(event: EngineEvent) => void>(),
@@ -4027,6 +4200,9 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
   };
   const find = (id: number): Job => jobs.find((job) => job.id === id) ?? fail(`job ${id} not found`);
   const connected = () => linear.kind === "connected";
+  const connecting = () => linear.kind === "connecting";
+  /** What a call that needs Linear fails with while it is not connected. */
+  const offline = () => fail(connecting() ? CONNECTING : NOT_CONNECTED);
   const update = (id: number, change: Partial<Job>) => {
     jobs = jobs.map((job) => (job.id === id ? { ...job, ...change } : job));
     emit({ kind: "job", job: find(id) });
@@ -4043,8 +4219,9 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
       paused: settings.paused,
       linear_ok: connected(),
       viewer,
-      last_poll_at: ago(0.5),
-      last_error: connected() ? null : NOT_CONNECTED,
+      // While connecting no check has finished yet.
+      last_poll_at: connecting() ? null : ago(0.5),
+      last_error: connected() || connecting() ? null : NOT_CONNECTED,
       running: jobs.filter((job) => job.state === "running").length,
       queued: jobs.filter((job) => job.state === "queued").length,
       waiting: jobs.filter((job) => job.state === "waiting_binding").length,
@@ -4076,7 +4253,7 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
         find(id);
         return (DEMO_LOGS[id] ?? []).slice(-lines);
       }),
-    issues: () => reply(() => (connected() ? issueViews() : fail(NOT_CONNECTED))),
+    issues: () => reply(() => (connected() ? issueViews() : offline())),
     pause: () =>
       reply(() => {
         settings = { ...settings, paused: true };
@@ -4132,7 +4309,7 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
         emit({ kind: "config" });
         return bindings.length !== before;
       }),
-    projects: () => reply(() => (connected() ? DEMO_PROJECTS : fail(NOT_CONNECTED))),
+    projects: () => reply(() => (connected() ? DEMO_PROJECTS : offline())),
     settings: () => reply(() => structuredClone(settings)),
     saveSettings: (next) =>
       reply(() => {
@@ -4149,7 +4326,12 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
         viewer = null;
         emit({ kind: "status" });
       }),
-    linearReconnect: () => reply(() => linear),
+    // A start still connecting gets its connection here; otherwise the setup stays as it is.
+    linearReconnect: () =>
+      reply(() => {
+        if (connecting()) connect("oauth");
+        return linear;
+      }),
     setupAction: (action) =>
       reply(() => {
         doctor = {
@@ -4160,16 +4342,15 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
               : report,
           ),
         };
-        if (action.kind === "register_control_server") controlServers[action.executor] = true;
-        if (action.kind === "remove_control_server") controlServers[action.executor] = false;
-        return `${action.kind} for ${action.executor}: done`;
+        if (action.kind === "register_control_server") controlServers[action.executor] = "registered";
+        if (action.kind === "remove_control_server") controlServers[action.executor] = "not_registered";
       }),
     controlServers: () => reply(() => ({ ...controlServers })),
     // The demo registered Linear under the names the one-click login uses.
     linearServerNamed: () => reply(() => true),
     openLinear: (url) =>
       reply(() => {
-        if (!url.startsWith("https://linear.app/")) fail("not_a_linear_link");
+        if (!isLinearUrl(url)) fail("not_a_linear_link");
       }),
     chooseDirectory: () => reply(() => "~/code/new-project"),
     autostartEnabled: () => reply(() => autostart),
@@ -4187,7 +4368,7 @@ export function createMockBackend(scenario: "demo" | "fresh", options: MockOptio
 }
 ```
 
-（控制服务两个执行者都是「已安装、未注册」，与环境检查里两者都已安装一致。`listeners.resync`、`quit`、`startup` 只在测试替换订阅时用到，假后端自己不发这三种事件。）
+（控制服务两个执行者都是 `not_registered`（已安装、未注册），与环境检查里两者都已安装一致。`listeners.resync`、`quit`、`startup` 只在测试替换订阅时用到，假后端自己不发这三种事件。）
 
 Run: `pnpm --dir app test` 与 `cargo test -p issuerelay-app`
 Expected: PASS。
@@ -4195,7 +4376,7 @@ Expected: PASS。
 - [ ] **Step 6: 文档与提交**
 
 - `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 面板命令（含仅面板可用的标记完成、重试、停止） | app/src-tauri/src/commands.rs |` 与 `| 前端数据层、假后端与虚构数据 | app/src/lib/ |`；第 7 节「外部接口变更规则」补一句：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端。
-- `docs/ai-coding/TESTING_SPEC.md` 的假对象清单登记「面板的假后端 `createMockBackend`（`app/src/lib/mock.ts`，数据在 `mock-fixtures.ts`）：组件测试、浏览器开发与截图共用，规则与报错文本照引擎」。
+- `docs/ai-coding/TESTING_SPEC.md` 的「假实现清单」登记「面板的假后端 `createMockBackend`（`app/src/lib/mock.ts`，数据在 `mock-fixtures.ts`）：组件测试、浏览器开发与截图共用，规则与报错文本照引擎」。
 - 设计第 9.2 节补：「需求页按原因代码显示等待原因；排队中因启动失败暂缓的任务显示下次重试的时间。」
 
 Run: 六条验证命令
@@ -4229,7 +4410,7 @@ git commit -m "feat(app): add the panel commands and the typed front-end backend
   - 查询键常量 `queryKeys`：`startup`、`status`、`jobs`、`job(id)`、`log(id)`、`issues`、`bindings`、`projects`、`settings`、`doctor`、`controlServers`、`linearServerNamed(executor)`、`autostart`、`appInfo`
   - 查询钩子：`useStartupState()`（启动中每秒再问一次）、`useStatus()`、`useJobs(limit = 200)`、`useJob(id)`、`useJobLog(id, { live })`（运行中每 1.5 秒刷新）、`useIssues()`、`useBindings()`、`useProjects(enabled)`、`useSettings()`、`useDoctor(enabled)`、`useControlServers()`、`useLinearServerNamed(executor, enabled)`、`useAutostart()`、`useAppInfo()`
   - 变更钩子（成功后按需失效相关查询；失败时 sonner 提示：标题是该操作的 `actions.failed.*` 译文，说明是 `describeError` 给出的细节）：`usePause`、`useResume`、`usePollNow`、`useCancelJob`、`useRetryJob`、`useMarkDone`、`useSaveBinding`、`useRemoveBinding`、`useSaveSettings`、`useLinearLogin`、`useLinearApiKey`、`useLinearLogout`、`useLinearReconnect`、`useSetupAction`、`useSetAutostart`
-  - `useEngineEvents()`：`status` → 失效 `status`；`job` → 失效 `status`、`jobs`、`job(id)`、`issues`；`config` → 失效 `settings`、`bindings`、`status`；`resync` → 失效全部。由 `<EngineEventsBridge/>` 挂在 `QueryClientProvider` 之内。
+  - `useEngineEvents()`：`status` → 失效 `status`（`StatusView` 里带着 Linear 的连接状态 `linear`：宿主在首次连接结束、重新连接、登录或登出时用 `Engine::set_linear` 换连接，它发出 `Status`，所以面板不用刷新页面就能看到 `connecting` 变成 `connected` 或 `connect_failed`，AR51）；`job` → 失效 `status`、`jobs`、`job(id)`、`issues`；`config` → 失效 `settings`、`bindings`、`status`；`resync` → 失效全部。由 `<EngineEventsBridge/>` 挂在 `QueryClientProvider` 之内。
   - `subscription(start: Promise<() => void>): () => void`（在 `useEffect` 里订阅后端事件，卸载早于订阅完成时也会退订）
   - `StatusBadge({ state })`、`STATE_STYLE: Record<JobState, { icon, className }>`
   - `EmptyState({ icon, title, description, action? })`、`LoadingState({ rows? })`、`ErrorState({ error, headline?, onRetry? })`（`headline` 是翻译键，默认 `common.error_title`）、`DetailLine({ text })`（清洗过的、次要样式的一行原文）
@@ -4240,7 +4421,7 @@ git commit -m "feat(app): add the panel commands and the typed front-end backend
   - `StartupError({ code, detail })`、`StartupGate({ children })`、`FirstRunGate()`、`QuitDialog()`、`EngineEventsBridge()`、`App({ backend })`
   - `renderWithProviders(ui, { backend?, route?, lang? })`（测试用；默认 `createMockBackend("demo", { latencyMs: 0 })`）
   - 翻译命名空间：`shell`、`format`、`executor`（`claude`、`codex`、`default`）、`permission`（`full`、`auto`、`personal`、`default`）、`actions.failed.*`、`errors.*`、`state.retrying_at`（Task 6–10 直接用，不再各自新建）
-- Consumes: Task 1 的 `now()`、`setFixedClock`；Task 2 的 i18n；Task 3 的 `app/src/lib/problem-cases.json`；Task 4 的 `Backend`、`BackendError`、`loadBackend`、`createMockBackend`、`types`、`cleanDisplayText`
+- Consumes: Task 1 的 `now()`、`setFixedClock`；Task 2 的 i18n；Task 3 的 `app/src/lib/problem-cases.json`；Task 4 的 `Backend`、`BackendError`、`loadBackend`、`createMockBackend`（含 `connecting` 场景）、`types`（`LinearSetup` 含 `connecting`、`ControlServer`）、`cleanDisplayText`
 
 - [ ] **Step 1: 设计变量**
 
@@ -4250,7 +4431,7 @@ git commit -m "feat(app): add the panel commands and the typed front-end backend
 - 字体：`--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Hiragino Sans", "Microsoft YaHei UI", "Malgun Gothic", sans-serif;`，`--font-mono: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;`；基础字号 14px，行高 1.5。
 - 圆角 `--radius: 0.625rem`；间距只用 Tailwind 的 4px 刻度。
 - 布局常量（页面规格里只引用变量，不写像素）：`--sidebar-width: 232px`、`--content-max-width: 1080px`、`--page-padding: 1.5rem`。
-- 八种任务状态各一个变量（浅色 / 深色两套），并经 `@theme inline` 暴露为 `text-state-*`、`bg-state-*/15` 等工具类：
+- 八种任务状态各一个变量（浅色 / 深色两套），并经 `@theme inline` 暴露为 `text-state-*`、`border-state-*/30`、`bg-state-*/10` 等工具类（`StatusBadge` 用的就是这三种）：
 
 | 状态 | 变量 | 浅色 | 深色 | 图标（lucide） |
 |---|---|---|---|---|
@@ -4361,6 +4542,11 @@ test("engine events refresh exactly the data they touch", async () => {
   expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toEqual(
     expect.arrayContaining([JSON.stringify(["settings"]), JSON.stringify(["bindings"])]),
   );
+  spy.mockClear();
+  // A Status event re-reads the status, which carries the Linear setup: "connecting" turns into
+  // "connected" or "connect_failed" without a reload.
+  emit({ kind: "status" });
+  expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toContain(JSON.stringify(["status"]));
   spy.mockClear();
   resync();
   expect(spy).toHaveBeenCalledWith();
@@ -4545,6 +4731,7 @@ function inputs(row: Row): [StatusSnapshot, LinearSetup] {
     not_configured: { kind: "not_configured" },
     interface_changed: { kind: "interface_changed", message: "list_issues changed" },
     connect_failed: { kind: "connect_failed", message: "network is down" },
+    connecting: { kind: "connecting" },
   };
   const status: StatusSnapshot = {
     paused: row.paused,
@@ -4631,10 +4818,12 @@ export type ProblemCause = "not_configured" | "interface_changed" | "connect_fai
 
 /**
  * The problem rule of the tray (`tray::tray_view` in app/src-tauri/src/tray.rs): not connected
- * to Linear, the last check failed, or a job could not start. Both sides are tested with
+ * to Linear, the last check failed, or a job could not start. While the first connection is
+ * still under way (`connecting`) nothing is a problem yet. Both sides are tested with
  * app/src/lib/problem-cases.json.
  */
 export function problemCause(status: StatusSnapshot, linear: LinearSetup): ProblemCause | null {
+  if (linear.kind === "connecting") return null;
   if (linear.kind !== "connected") return linear.kind;
   if (status.last_poll_at !== null && !status.linear_ok) return "check_failed";
   if (status.last_error !== null) return "start_failed";
@@ -4705,7 +4894,8 @@ import { StartupError } from "./StartupError";
 /**
  * The startup error page instead of the panel, for any failed start of the host. The state is
  * asked for (`startup_state`, again every second while starting), so a panel opened after the
- * failure sees it too; `startup-failed` updates a panel that was already open.
+ * failure sees it too; `startup-failed` updates a panel that was already open. "Ready" means the
+ * host started; Linear may still be connecting, which `LinearStatus` shows.
  */
 export function StartupGate({ children }: { children: ReactNode }) {
   const backend = useBackend();
@@ -4742,7 +4932,7 @@ export function EngineEventsBridge() {
 - `StatusBadge.tsx`：shadcn `Badge`（`variant="outline"`），左侧图标，文字为 `t("state.<state>")`；`running` 的图标加 `animate-spin`；颜色用 `text-state-*`、`border-state-*/30`、`bg-state-*/10`。
 - `states.tsx`：`EmptyState` 居中、图标 `size-10`、标题 + 说明 + 可选操作按钮；`LoadingState` 用 `Skeleton` 画 `rows` 行（默认 3）；`DetailLine` 是一行 `cleanDisplayText` 之后的原文（`text-muted-foreground`、等宽、小一号、可选中、可折行），用在每个显示引擎原文的地方；`ErrorState` 用 `Alert`（destructive）：标题是 `describeError(error, t, headline ?? "common.error_title")` 的 `headline`，下面是 `DetailLine`（有细节时），有 `onRetry` 时显示 `common.retry` 按钮。
 - `PageHeader.tsx`：标题（`text-xl font-semibold`，`h1`）、可选说明（`text-muted-foreground`）、右侧操作区。
-- `AppShell.tsx`：左侧侧栏宽 `var(--sidebar-width)`（应用名与图标、七个 `NavLink`：`/` 概览 `LayoutDashboard`、`/issues` 需求 `ListTodo`、`/runs` 运行记录 `History`、`/bindings` 项目绑定 `FolderGit2`、`/doctor` 环境检查 `Stethoscope`、`/settings` 设置 `Settings`、`/help` 使用说明 `CircleHelp`；当前页高亮），侧栏底部是监控状态和版本号：`status.draining` 为真时 `shell.draining`，否则按 `trayState(status, linear)`：`problem` → `shell.problem`（`text-state-failed`）、`paused` → `shell.paused`、`running` / `idle` → `shell.monitoring`；状态读不到时只显示版本号。右侧 `<Outlet />`，内容区最大宽度 `var(--content-max-width)`、左右内边距 `var(--page-padding)`、可滚动。
+- `AppShell.tsx`：左侧侧栏宽 `var(--sidebar-width)`（应用名与图标、七个 `NavLink`：`/` 概览 `LayoutDashboard`、`/issues` 需求 `ListTodo`、`/runs` 运行记录 `History`、`/bindings` 项目绑定 `FolderGit2`、`/doctor` 环境检查 `Stethoscope`、`/settings` 设置 `Settings`、`/help` 使用说明 `CircleHelp`；当前页高亮），侧栏底部是监控状态和版本号：`status.draining` 为真时 `shell.draining`，`linear.kind` 为 `connecting` 时 `shell.connecting`，否则按 `trayState(status, linear)`：`problem` → `shell.problem`（`text-state-failed`）、`paused` → `shell.paused`、`running` / `idle` → `shell.monitoring`；状态读不到时只显示版本号。右侧 `<Outlet />`，内容区最大宽度 `var(--content-max-width)`、左右内边距 `var(--page-padding)`、可滚动。
 - `QuitDialog.tsx`：用 `subscription` 订阅 `onQuitRequested`；shadcn `AlertDialog`：标题 `quit.title`，正文 `quit.body`（`count`），三个按钮 `quit.wait`、`quit.stop`、`quit.cancel`；选了等待后换成等待中的说明（`quit.waiting`）和一个 `quit.stop` 按钮（Rust 侧的退出状态机允许从等待改为立即停止）。
 - `StartupError.tsx`：整页居中卡片，标题 `startup.failed_title`；正文是按代码翻译的标题 `startup.<code>`（`already_running`、`store_unavailable`、`other`），下面 `DetailLine` 显示 `detail`；按钮 `startup.quit` 调 `requestQuit()`。
 - `FirstRunGate.tsx`：读 `useSettings()`；加载中显示 `LoadingState`；读取失败显示 `ErrorState`（带重试）；`onboarding_completed` 为假时 `<Navigate to="/onboarding" replace />`，否则 `<Outlet />`。
@@ -4760,6 +4950,7 @@ export function EngineEventsBridge() {
     "paused": "Paused",
     "draining": "Waiting for runs to finish",
     "problem": "Needs attention",
+    "connecting": "Connecting to Linear…",
     "version": "Version {{version}}"
   },
   "format": {
@@ -4829,7 +5020,7 @@ git commit -m "feat(app): add the panel shell, design tokens and data hooks"
 - Test: `app/src/pages/Overview.test.tsx`、`app/src/pages/Issues.test.tsx`、`app/src/components/JobActions.test.tsx`
 
 **Interfaces:**
-- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：未登录 → `linear.not_configured` ＋「Log in to Linear」；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接状态另有「重新授权」与「退出登录」。
+- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：首次连接还在进行（`connecting`，AR51）→ `linear.connecting`「Connecting to Linear…」，没有任何操作按钮；未登录 → `linear.not_configured` ＋「Log in to Linear」；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接状态另有「重新授权」与「退出登录」。
 - Consumes: Task 5 的钩子、`StatusBadge`、三种状态组件与 `DetailLine`、`PageHeader`、`trayState`/`problemCause`、`formatTime`、`state.retrying_at`；Task 4 的 `BackendError`、`StatusSnapshot.held`、`WaitReason`。
 
 页面规格：
@@ -4941,9 +5132,10 @@ test("only Linear links are offered for opening", async () => {
 `app/src/pages/Overview.test.tsx`：
 
 ```tsx
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
+import { EngineEventsBridge } from "@/components/EngineEventsBridge";
 import { BackendError } from "@/lib/backend";
 import { formatTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
@@ -4971,11 +5163,29 @@ test("the monitoring switch pauses and resumes", async () => {
   expect(pause).toHaveBeenCalled();
 });
 
-test("a first run without a login points to the guide", async () => {
+test("a first run without a login offers the login and the environment check", async () => {
   await renderWithProviders(<Overview />, { backend: createMockBackend("fresh", { latencyMs: 0 }) });
   expect(await screen.findByRole("button", { name: "Log in to Linear" })).toBeInTheDocument();
   expect(screen.getByText("Nothing is running")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open the environment check" })).toBeInTheDocument();
+});
+
+test("while the first connection is under way the overview says so, then follows it", async () => {
+  const backend = createMockBackend("connecting", { latencyMs: 0 });
+  await renderWithProviders(
+    <>
+      <EngineEventsBridge />
+      <Overview />
+    </>,
+    { backend },
+  );
+  expect(await screen.findByText("Connecting to Linear…")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Log in to Linear" })).not.toBeInTheDocument();
+  // Connecting is no problem yet: no reminder.
+  expect(screen.queryByRole("link", { name: "Open the environment check" })).not.toBeInTheDocument();
+  // The connection finishes; the Status event refreshes the card without a reload.
+  await act(() => backend.linearReconnect());
+  expect(await screen.findByText("Jane Doe")).toBeInTheDocument();
 });
 
 test("an environment problem is named, with the engine's line as a detail", async () => {
@@ -5034,7 +5244,7 @@ Expected: 失败。
 - `overview`：`monitoring` = `Monitoring`；`running` = `Running`、`queued` = `Queued`、`recent` = `Recent results`（区块名）；`no_running` = `Nothing is running`；`queue_empty` = `Nothing is waiting`；`recent_empty` = `No finished runs yet`；`alert_failed_one` = `{{count}} run failed`、`alert_failed_other` = `{{count}} runs failed`；`alert_awaiting_one` = `{{count}} issue awaits your acceptance`、`alert_awaiting_other` = `{{count}} issues await your acceptance`；`view` = `View`；`draining` = `Waiting for the runs in progress to finish; nothing new starts`；`open_doctor` = `Open the environment check`；`problem.not_configured` = `Not logged in to Linear`、`problem.interface_changed` = `Linear's tools changed: update IssueRelay`、`problem.connect_failed` = `Could not connect to Linear; IssueRelay tries again every minute`、`problem.check_failed` = `The last check of Linear failed`、`problem.start_failed` = `A run could not be started`；`status_failed` = `Could not read IssueRelay's status`；`jobs_failed` = `Could not read the runs`。复数用 i18next 的 `_one` / `_other`，五个文件都写两个键（中日韩两者内容相同）。
 - `issues`：`not_todo` = `Its status is {{state}}, not {{todo}}`；`eligible` = `The next check picks it up`；`waiting.project_not_bound` = `Its project is not bound to a local folder`、`waiting.directory_missing` = `The bound folder {{directory}} does not exist`、`waiting.executor_not_ready` = `{{executor}} is not ready; see the environment check`；`load_failed` = `Could not read the issues from Linear`；`open_guide` = `Open the guide`。
 - `actions`：`stop` = `Stop`、`run_again` = `Run again`、`mark_done` = `Mark done`、`open_in_linear` = `Open in Linear`、`poll_now` = `Check now`、`confirm` = `Confirm`；确认对话框文案 `actions.mark_done_confirm`：「把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。」（英文 `Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.`）。Task 8 的删除确认复用 `actions.confirm`。
-- `linear`：`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`。
+- `linear`：`connecting` = `Connecting to Linear…`、`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`。
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
 Expected: PASS。在浏览器（`pnpm --dir app dev`）里看一遍两个页面的浅色与深色，截图附在报告里。
@@ -5166,7 +5376,8 @@ test("unreadable lines and IssueRelay's own notes stay visible, cleaned", () => 
 });
 
 test("text from the AI is cleaned before it is shown", () => {
-  const lines = [JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done‮\u001b[2J" }] } })];
+  // U+202E (right-to-left override) is removed, U+001B [2J (clear the screen) too.
+  const lines = [JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done\u202e\u001b[2J" }] } })];
   expect(parseTimeline(lines, "claude")).toEqual([{ kind: "message", text: "done" }]);
 });
 
@@ -5303,12 +5514,13 @@ git commit -m "feat(app): add the run history with a readable timeline and the r
 
 **Files:**
 - Modify: `app/src/pages/Bindings.tsx`
-- Create: `app/src/pages/BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts`
+- Create: `app/src/pages/BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts`、`app/src/lib/model-name-cases.json`（模型名用例表：TS 测试与 Rust 测试都读）
+- Modify: `app/src-tauri/src/commands.rs`（测试模块加一条：用例表对照 core 的 `config::is_valid_model_name`）
 - Modify: 五个翻译文件（新增 `bindings` 命名空间；在 Task 5 建好的 `permission` 里补每档的说明 `permission.full_hint` 等；执行者名沿用 `executor`）
 - Test: `app/src/pages/Bindings.test.tsx`、`app/src/pages/BindingDialog.test.tsx`、`app/src/lib/model-name.test.ts`
 
 **Interfaces:**
-- Produces: `BindingForm({ initial?, onSaved })`（对话框与首次引导共用的表单主体）；`isValidModelName(text: string): boolean`（与 Rust 的 `config::is_valid_model_name` 同规则：1–100 个 ASCII 字母、数字、`.`、`_`、`:`、`-`，不以 `-` 开头）。
+- Produces: `BindingForm({ initial?, onSaved })`（对话框与首次引导共用的表单主体）；`isValidModelName(text: string): boolean`（与 Rust 的 `config::is_valid_model_name` 同规则：1–100 个 ASCII 字母、数字、`.`、`_`、`:`、`-`，不以 `-` 开头；两边读同一张用例表 `model-name-cases.json`）。
 - Consumes: Task 5 的钩子；`useBindings`、`useProjects`、`useSaveBinding`、`useRemoveBinding`、`useDoctor`（检查结果）、`useSettings`（默认执行者与档位、`full_access_acknowledged`）、`useSaveSettings`；三种状态组件、`DetailLine`、`describeError`；Task 6 的 `actions.confirm`；Task 4 假后端对非绝对目录的拒绝。
 
 页面与表单规格：
@@ -5325,16 +5537,55 @@ git commit -m "feat(app): add the run history with a readable timeline and the r
 
 - [ ] **Step 1: 失败测试**
 
+`app/src/lib/model-name-cases.json`（100 个 `x` 合法，101 个不合法）：
+
+```json
+[
+  {"name": "sonnet", "valid": true},
+  {"name": "claude-sonnet-5-5", "valid": true},
+  {"name": "gpt-5-codex", "valid": true},
+  {"name": "o3:high", "valid": true},
+  {"name": "a.b_c", "valid": true},
+  {"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true},
+  {"name": "", "valid": false},
+  {"name": "-rf", "valid": false},
+  {"name": "sonnet[1m]", "valid": false},
+  {"name": "a b", "valid": false},
+  {"name": "模型", "valid": false},
+  {"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false}
+]
+```
+
 `app/src/lib/model-name.test.ts`：
 
 ```ts
 import { expect, test } from "vitest";
+import cases from "./model-name-cases.json";
 import { isValidModelName } from "./model-name";
 
-test("model names follow the engine's rule", () => {
-  for (const ok of ["sonnet", "claude-sonnet-5-5", "gpt-5-codex", "o3:high", "a.b_c"]) expect(isValidModelName(ok), ok).toBe(true);
-  for (const bad of ["", "-rf", "sonnet[1m]", "a b", "模型", "x".repeat(101)]) expect(isValidModelName(bad), bad).toBe(false);
+test.each(cases)("$name: valid $valid", ({ name, valid }) => {
+  expect(isValidModelName(name)).toBe(valid);
 });
+```
+
+`app/src-tauri/src/commands.rs` 测试模块加（同一张表对照 core 的规则）：
+
+```rust
+    /// One row of app/src/lib/model-name-cases.json, which the panel's `isValidModelName` test reads.
+    #[derive(Deserialize)]
+    struct ModelNameCase {
+        name: String,
+        valid: bool,
+    }
+
+    #[test]
+    fn model_name_cases_follow_core() {
+        let cases: Vec<ModelNameCase> = serde_json::from_str(include_str!("../../src/lib/model-name-cases.json"))
+            .expect("model-name-cases.json is valid");
+        for case in cases {
+            assert_eq!(issuerelay_core::config::is_valid_model_name(&case.name), case.valid, "{:?}", case.name);
+        }
+    }
 ```
 
 `app/src/pages/BindingDialog.test.tsx`：
@@ -5446,7 +5697,7 @@ Expected: 失败。
 
 按规格实现（Radix 在 jsdom 里需要的桩 Task 1 已放进 `src/test-setup.ts`，本任务不再改它）。英文文案：`bindings.load_failed` = `Could not read the bindings`、`bindings.empty` = `No bindings yet`、`bindings.add_first` = `Add your first binding`、`bindings.project` = `Linear project`、`bindings.choose` = `Choose…`、`bindings.model` = `Model`、`bindings.remove` = `Remove`、`bindings.model_invalid` = `Only letters, digits and . _ : - are allowed, for example sonnet or gpt-5-codex; names with brackets (such as sonnet[1m]) are not supported`；`FullAccessWarning` 的确认按钮 `bindings.full_access_ok` = `I understand`，说明里含 `run any command on this computer`。
 
-Run: `pnpm --dir app test && pnpm --dir app lint`
+Run: `pnpm --dir app test && pnpm --dir app lint` 与 `cargo test -p issuerelay-app commands`
 Expected: PASS。浏览器里看列表、新建、编辑、风险提示，截图附在报告里。
 
 - [ ] **Step 3: 提交**
@@ -5467,12 +5718,13 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 
 **Files:**
 - Modify: `app/src/pages/Doctor.tsx`、`app/src/pages/Settings.tsx`、`app/src/pages/Help.tsx`
-- Create: `app/src/lib/mask.ts`（与 Rust `env::mask_credentials` 同规则：`://` 之前不含 `@` 和 `/` 的部分算协议头，其后到第一个 `/` 为止、最后一个 `@` 之前的用户信息换成 `***`；没有协议头时从开头算）、`app/src/components/ExecutorCheck.tsx`（引导页复用）、`app/src/components/WorkspaceCheck.tsx`（引导页复用）
+- Create: `app/src/lib/mask.ts`（与 Rust `env::mask_credentials` 同规则：`://` 之前不含 `@` 和 `/` 的部分算协议头，其后到第一个 `/` 为止、最后一个 `@` 之前的用户信息换成 `***`；没有协议头时从开头算）、`app/src/lib/mask-cases.json`（打码用例表：TS 测试与 Rust 测试都读）、`app/src/components/ExecutorCheck.tsx`（引导页复用）、`app/src/components/WorkspaceCheck.tsx`（引导页复用）
+- Modify: `app/src-tauri/src/commands.rs`（测试模块加一条：打码用例表对照 core 的 `env::mask_credentials`）
 - Modify: 五个翻译文件（`doctor`、`settings`、`help` 命名空间；`help.example.*` 的键 Task 10 也读）
 - Test: `app/src/pages/Doctor.test.tsx`、`app/src/pages/Settings.test.tsx`、`app/src/pages/Help.test.tsx`、`app/src/lib/mask.test.ts`
 
 **Interfaces:**
-- Produces: `ExecutorCheck({ report, onFixed })`、`WorkspaceCheck({ report, labelName })`、`maskCredentials(url: string): string`；翻译键 `help.example.good_title`、`help.example.good_body`、`help.example.vague_title`、`help.example.vague_body`（Task 10 第 6 步读前两个）；环境检查页的「重新走一遍引导」链接（`doctor.rerun_guide`，到 `/onboarding`）。
+- Produces: `ExecutorCheck({ report, onFixed })`、`WorkspaceCheck({ report, labelName })`、`maskCredentials(url: string): string`（与 core 读同一张用例表 `mask-cases.json`）；翻译键 `help.example.good_title`、`help.example.good_body`、`help.example.vague_title`、`help.example.vague_body`（Task 10 第 6 步读前两个）；环境检查页的「重新走一遍引导」链接（`doctor.rerun_guide`，到 `/onboarding`）。
 - Consumes: Task 5 的钩子（`useDoctor`、`useSetupAction`、`useControlServers`、`useLinearServerNamed`、`useSettings`、`useSaveSettings`、`useAutostart`、`useSetAutostart`、`useLinearLogin`、`useLinearApiKey`、`useLinearLogout`、`useLinearReconnect`、`useAppInfo`）、三种状态组件、`DetailLine`、`StatusBadge`；Task 6 的 `LinearStatus`；Task 8 的 `FullAccessWarning`。
 
 页面规格：
@@ -5480,10 +5732,10 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 **环境检查**（`/doctor`）——打开页面时自动跑一次 `doctor()`（它会现查，最多约一分钟），页头有「重新检查」；检查中显示进度说明 `doctor.checking`（「正在检查 Linear、Claude Code 和 Codex，最多约一分钟」）；`doctor()` 失败时整页 `ErrorState`（标题 `doctor.failed`，带重试）。页头右侧另有链接「重新走一遍引导」（`doctor.rerun_guide`，到 `/onboarding`，Task 10 从第 1 步开始并显示各步的真实状态）。五个区块，各是一个 `<section aria-labelledby>`：
 
 1. Linear：复用 Task 6 的 `LinearStatus manage`（未登录 → 登录；连接失败 → 重试连接；接口已变化 → 说明需要升级；已连接 → 授权人，另有重新授权与退出登录），不另写一套状态判断；环境检查报了 `linear_error` 时，在下面加标题 `doctor.linear_check_failed` 与它的 `DetailLine`。
-2. 工作区：标签 `{{label}}` 是否存在；已检查的团队（`teams_checked`）与缺失的状态（`missing_states`）；缺失时说明在 Linear 的「设置 → 团队 → 工作流」里添加，并提供打开 `https://linear.app/` 的按钮（程序不代为创建）。
+2. 工作区：标签 `{{label}}` 是否存在；已检查的团队（`teams_checked`）与缺失的状态（`missing_states`）；缺失时说明在 Linear 的「设置 → 团队 → 工作流」里添加，并提供打开 `https://linear.app/` 的按钮（程序不代为创建）。没有工作区报告（`workspace` 为 `null`：还没连上 Linear）时，这一块是空状态 `doctor.workspace_unchecked`（「Connect to Linear first to check the workspace」）。
 3. 执行者：Claude Code、Codex 各一张 `ExecutorCheck` 卡：已安装（版本）、已登录、Linear MCP 已连通三项，每项通过 / 不通过的图标与由布尔值得出的已翻译标题；`problems` 的原文作为 `DetailLine` 列在下面；修复按钮——没装：显示官方安装说明链接（`https://docs.anthropic.com/en/docs/claude-code/setup`、`https://developers.openai.com/codex/cli`，经 `openLinear` 打不开的外链，改为显示可复制的地址，不直接打开）；没登录：说明在终端运行 `claude` 并登录 / `codex login`；Linear MCP 没连通时先问 `useLinearServerNamed(executor)`：Linear 以一键授权用的名字注册（Claude `linear-server`、Codex `linear`）→ 显示「在浏览器授权」（`setupAction({ kind: "login_linear_mcp", executor })`，提示最多等 5 分钟）；否则显示「一键添加」（`setupAction({ kind: "add_linear_mcp", executor })`，按钮名 `Add Linear to Claude Code` / `Add Linear to Codex`），并说明「已用别的名字添加过的，在终端运行 `claude mcp list` 找到名字后运行 `claude mcp login <名字>`」（Codex 同理）；`setupAction` 调用一律带 `executor`；每次修复完成后自动重新检查。
 4. 运行环境：PATH 来源、代理来源与代理值（`maskCredentials` 打码）；读取时的问题（`env.problems`）放在标题 `doctor.env_problems` 下作为 `DetailLine`；说明为什么需要它们（第 8 节最后一段的意思）。
-5. 绑定：每个绑定的目录是否存在、执行者是否就绪（由布尔值得出的已翻译文字）。
+5. 绑定：每个绑定的目录是否存在、执行者是否就绪（由布尔值得出的已翻译文字）；一个绑定都没有时是空状态 `doctor.no_bindings`（「No bindings yet」，链接到 `/bindings`）。
 
 **设置**（`/settings`）——一张表单，分组卡片，底部固定「保存」；保存成功 toast，失败时 toast 标题 `actions.failed.save_settings`、说明为原文；语言切换保存后立即生效（含托盘）。加载：`LoadingState`；`settings()` 读取失败：`ErrorState`（标题 `settings.load_failed`，带重试）。
 
@@ -5495,7 +5747,7 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 | 提示词 | 默认模板（多行；说明固定规则始终生效、模板写团队流程，例如测试分支名、部署读回方式） |
 | 通知 | 四个开关：开始运行、进入待验收、需要补充信息、失败 |
 | 系统 | 开机自启（`setAutostart`，立即生效，不经「保存」）；自动更新（开关存进设置，M3 起生效，旁注 `settings.auto_update_note`） |
-| MCP 控制服务 | Claude Code、Codex 各一行：已注册 / 未注册 / 执行者未安装；按钮「注册」/「移除」（`setupAction({ kind: "register_control_server" / "remove_control_server", executor })`）；说明 `settings.control_server_note`：「按用户范围注册，无人值守的运行也会加载它；它的工具里有『暂停监控』」；命令行程序没找到时说明（开发版需先 `cargo build -p issuerelay-cli`） |
+| MCP 控制服务 | Claude Code、Codex 各一行，按 `ControlServer`：`registered` 已注册 /`not_registered` 未注册 / `not_installed` 执行者未安装 / `unknown` 查不出（「Could not check」＋按钮「Check again」重查 `controlServers`，失败原因已在日志里）；按钮「注册」/「移除」（`setupAction({ kind: "register_control_server" / "remove_control_server", executor })`）；说明 `settings.control_server_note`：「按用户范围注册，无人值守的运行也会加载它；它的工具里有『暂停监控』」；命令行程序没找到时说明（开发版需先 `cargo build -p issuerelay-cli`） |
 | 高级 | 触发标签名与四个状态名；个人 API key（密码输入框＋「使用这个 key」，成功后显示「已改用 API key」）；日志保留天数与总大小（MB） |
 
 字段校验与后端一致（数值下限、名字非空且不含引号与控制字符），不合法时字段下方提示，「保存」禁用。
@@ -5504,21 +5756,51 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 
 - [ ] **Step 1: 失败测试**
 
+`app/src/lib/mask-cases.json`（core `env::mask_credentials` 测试里的各种写法）：
+
+```json
+[
+  {"value": "http://jane:s3cret@proxy.example:8080", "masked": "http://***@proxy.example:8080"},
+  {"value": "jane:s3cret@proxy.example:8080", "masked": "***@proxy.example:8080"},
+  {"value": " http://jane:s3cret@proxy.example:8080", "masked": " http://***@proxy.example:8080"},
+  {"value": "HTTPS_PROXY=http://jane:s3cret@proxy.example:8080", "masked": "HTTPS_PROXY=http://***@proxy.example:8080"},
+  {"value": "http://jane:p@ss@proxy.example:8080", "masked": "http://***@proxy.example:8080"},
+  {"value": "http://token@proxy.example:8080/path@x", "masked": "http://***@proxy.example:8080/path@x"},
+  {"value": "http://proxy.example:8080", "masked": "http://proxy.example:8080"},
+  {"value": "localhost,127.0.0.1", "masked": "localhost,127.0.0.1"}
+]
+```
+
 `app/src/lib/mask.test.ts`：
 
 ```ts
 import { expect, test } from "vitest";
+import cases from "./mask-cases.json";
 import { maskCredentials } from "./mask";
 
-test("credentials in proxy URLs are masked like the engine does", () => {
-  expect(maskCredentials("http://jane:s3cret@proxy.example:8080")).toBe("http://***@proxy.example:8080");
-  expect(maskCredentials("jane:s3cret@proxy.example:8080")).toBe("***@proxy.example:8080");
-  expect(maskCredentials(" http://jane:s3cret@proxy.example:8080")).toBe(" http://***@proxy.example:8080");
-  expect(maskCredentials("HTTPS_PROXY=http://jane:s3cret@proxy.example:8080")).toBe("HTTPS_PROXY=http://***@proxy.example:8080");
-  expect(maskCredentials("http://jane:p@ss@proxy.example:8080")).toBe("http://***@proxy.example:8080");
-  expect(maskCredentials("http://proxy.example:8080")).toBe("http://proxy.example:8080");
-  expect(maskCredentials("localhost,127.0.0.1")).toBe("localhost,127.0.0.1");
+test.each(cases)("$value is shown as $masked, as the engine masks it", ({ value, masked }) => {
+  expect(maskCredentials(value)).toBe(masked);
 });
+```
+
+`app/src-tauri/src/commands.rs` 测试模块加：
+
+```rust
+    /// One row of app/src/lib/mask-cases.json, which the panel's `maskCredentials` test reads.
+    #[derive(Deserialize)]
+    struct MaskCase {
+        value: String,
+        masked: String,
+    }
+
+    #[test]
+    fn mask_cases_follow_core() {
+        let cases: Vec<MaskCase> = serde_json::from_str(include_str!("../../src/lib/mask-cases.json"))
+            .expect("mask-cases.json is valid");
+        for case in cases {
+            assert_eq!(issuerelay_core::env::mask_credentials(&case.value), case.masked, "{:?}", case.value);
+        }
+    }
 ```
 
 `app/src/pages/Doctor.test.tsx`：
@@ -5632,6 +5914,16 @@ test("autostart switches at once and the MCP control server can be registered", 
   expect(setup).toHaveBeenCalledWith({ kind: "register_control_server", executor: "claude" });
 });
 
+test("a registration that could not be checked says so and can be checked again", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const check = vi.spyOn(backend, "controlServers").mockResolvedValueOnce({ claude: "unknown", codex: "not_registered" });
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("Could not check")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+  await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+  expect(await screen.findByRole("button", { name: "Register with Claude Code" })).toBeInTheDocument();
+});
+
 test("a rejected API key says so and changes nothing", async () => {
   await renderWithProviders(<Settings />);
   await userEvent.type(await screen.findByLabelText("Personal API key"), "lin_api_bad");
@@ -5692,9 +5984,9 @@ Expected: 失败。
 
 - [ ] **Step 2: 实现**
 
-按规格实现。外部安装说明链接只作为可复制文本显示（`open_linear` 只开 Linear 的链接，这是有意的限制）。英文文案：`doctor.failed` = `Could not run the environment check`、`doctor.rerun_guide` = `Run the first-run guide again`、`doctor.linear_check_failed` = `The check of Linear failed`、`doctor.add_linear` = `Add Linear to {{executor}}`、`doctor.login_linear` = `Authorize Linear in {{executor}}`、`doctor.other_name` = `Added Linear under another name? Run {{list}} in a terminal to find it, then {{login}}.`（`list` 为 `claude mcp list` / `codex mcp list`，`login` 为 `claude mcp login <name>` / `codex mcp login <name>`）、`settings.load_failed` = `Could not read the settings`、`settings.comment_language` = `AI comment language`、`settings.follow_ui` = `Follow the interface language`、`settings.control_server_note` = `It is registered for your user, so unattended runs load it too; its tools can pause monitoring.`、`help.trigger_title` = `Trigger conditions`、`help.conditions.assigned` = `The issue is assigned to you`、`help.conditions.label` = `It has the {{label}} label`、`help.conditions.todo` = `Its status is {{todo}}`、`help.conditions.bound` = `Its project is bound to a local folder and the executor is ready`、`help.defaults_note` = `Showing the default names: the settings could not be read.`（示例需求的英文里不要再出现 `assigned to you`，Task 10 按它找第 6 步）；`zh-CN` 的 `help.trigger_title` 为「触发条件」，四个条件的文案见上面的页面规格。
+按规格实现。外部安装说明链接只作为可复制文本显示（`open_linear` 只开 Linear 的链接，这是有意的限制）。英文文案：`doctor.failed` = `Could not run the environment check`、`doctor.rerun_guide` = `Run the first-run guide again`、`doctor.linear_check_failed` = `The check of Linear failed`、`doctor.add_linear` = `Add Linear to {{executor}}`、`doctor.login_linear` = `Authorize Linear in {{executor}}`、`doctor.other_name` = `Added Linear under another name? Run {{list}} in a terminal to find it, then {{login}}.`（`list` 为 `claude mcp list` / `codex mcp list`，`login` 为 `claude mcp login <name>` / `codex mcp login <name>`）、`doctor.login_hint` = `Run {{command}} in a terminal and log in`（`command` 为 `claude` / `codex login`）、`doctor.workspace_unchecked` = `Connect to Linear first to check the workspace`、`doctor.no_bindings` = `No bindings yet`、`doctor.env_problems` = `Reading the environment had problems`、`settings.load_failed` = `Could not read the settings`、`settings.language` = `Interface language`、`settings.follow_system` = `Follow the system`、`settings.comment_language` = `AI comment language`、`settings.follow_ui` = `Follow the interface language`、`settings.poll_interval` = `Check every (seconds)`、`settings.min_value` = `Must be at least {{min}}`、`settings.notify_run_started` = `Run started`、`settings.notify_awaiting_acceptance` = `Ready for acceptance`、`settings.notify_needs_info` = `Needs information`、`settings.notify_failed` = `Run failed`、`settings.autostart` = `Start at login`、`settings.register` = `Register with {{executor}}`、`settings.remove_server` = `Remove from {{executor}}`、`settings.control_unknown` = `Could not check`、`settings.check_again` = `Check again`、`settings.api_key` = `Personal API key`、`settings.use_key` = `Use this key`、`settings.api_key_used` = `Using the API key now`、语言名 `languages.zh-CN` = `简体中文`、`languages.zh-TW` = `繁體中文`、`languages.en` = `English`、`languages.ja` = `日本語`、`languages.ko` = `한국어`（各语言用自己的名字，五个文件里相同；Task 10 的语言步骤也用）、`settings.control_server_note` = `It is registered for your user, so unattended runs load it too; its tools can pause monitoring.`、`help.trigger_title` = `Trigger conditions`、`help.conditions.assigned` = `The issue is assigned to you`、`help.conditions.label` = `It has the {{label}} label`、`help.conditions.todo` = `Its status is {{todo}}`、`help.conditions.bound` = `Its project is bound to a local folder and the executor is ready`、`help.defaults_note` = `Showing the default names: the settings could not be read.`（示例需求的英文里不要再出现 `assigned to you`，Task 10 按它找第 6 步）；`zh-CN` 的 `help.trigger_title` 为「触发条件」，四个条件的文案见上面的页面规格。
 
-Run: `pnpm --dir app test && pnpm --dir app lint`
+Run: `pnpm --dir app test && pnpm --dir app lint` 与 `cargo test -p issuerelay-app commands`
 Expected: PASS。浏览器里看三页的浅色与深色，截图附在报告里。
 
 - [ ] **Step 3: 提交**
@@ -5725,8 +6017,8 @@ git commit -m "feat(app): add the environment check, settings and help pages"
 规格：
 
 - 整页布局（不带侧栏）：左侧竖排步骤列表（当前步高亮，已完成打勾，可点回已完成的步骤），右侧当前步内容，底部「上一步 / 下一步」。顶部应用名与图标。
-- 第 1 步：语言单选（shadcn `RadioGroup`：跟随系统＋五种语言），选中立即切换界面并保存设置。
-- 第 2 步：未连接时「在浏览器里授权 Linear」（`linearLogin()`，等待期间显示「请在浏览器里完成授权」与取消提示）；已连接时显示授权人；高级选项里可改用个人 API key。连上之前不能进下一步。
+- 第 1 步：语言单选（shadcn `RadioGroup`：跟随系统（`settings.follow_system`）＋五种语言（`languages.*`，各用自己的名字），选中立即切换界面并保存设置。
+- 第 2 步：首次连接还在进行（`linear.kind` 为 `connecting`，AR51）时显示「正在检查与 Linear 的连接…」（`onboarding.checking`），没有授权按钮，下一步不可用，连接结束（`Status` 事件刷新状态）后按结果显示；未连接时「在浏览器里授权 Linear」（`linearLogin()`，等待期间显示「请在浏览器里完成授权」与取消提示）；已连接时显示授权人；高级选项里可改用个人 API key。连上之前不能进下一步。
 - 第 3 步：`WorkspaceCheck`（来自 `doctor()` 的工作区部分）；检查中 `LoadingState` 并说明最多约一分钟；`doctor()` 失败时 `ErrorState`（标题 `doctor.failed`，带重试），仍可「我稍后再加」继续；缺标签或状态时显示添加方法，但允许继续（「我稍后再加」）。
 - 第 4 步：两个 `ExecutorCheck`（一键授权只在 Linear 以默认名字注册时出现，见 Task 9）；至少一个执行者就绪才能进下一步；都没就绪时说明需要先装好并登录 Claude Code 或 Codex；`doctor()` 失败时同第 3 步的错误状态，不能进下一步。
 - 第 5 步：嵌入 `BindingForm`；保存成功后可「再加一个」或进下一步；也允许「稍后再绑定」。
@@ -5747,9 +6039,9 @@ import { createMockBackend } from "@/lib/mock";
 import { renderWithProviders } from "@/test/render";
 import Onboarding from "./Onboarding";
 
-/** The guide in the fresh scenario; `prepare` changes the mock before the first render. */
-async function start(prepare: (backend: Backend) => Promise<void> = async () => {}) {
-  const backend = createMockBackend("fresh", { latencyMs: 0 });
+/** The guide (fresh scenario unless told otherwise); `prepare` changes the mock before the first render. */
+async function start(prepare: (backend: Backend) => Promise<void> = async () => {}, scenario: "fresh" | "connecting" = "fresh") {
+  const backend = createMockBackend(scenario, { latencyMs: 0 });
   await prepare(backend);
   const result = await renderWithProviders(
     <Routes>
@@ -5804,6 +6096,14 @@ test("without a ready executor the guide does not move on", async () => {
   expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
 });
 
+test("while the first connection is under way the Linear step is checking", async () => {
+  await start(async () => {}, "connecting");
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  expect(await screen.findByText("Checking the connection to Linear…")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Authorize Linear in the browser" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+});
+
 test("a check that fails is shown with a retry, and the workspace step can be skipped", async () => {
   await start(async (backend) => {
     await backend.linearLogin();
@@ -5823,7 +6123,7 @@ Expected: 失败。
 
 - [ ] **Step 2: 实现**
 
-按规格实现。英文文案：`onboarding.next` = `Next`、`onboarding.authorize` = `Authorize Linear in the browser`、`onboarding.later` = `I'll add them later`、`onboarding.bind_later` = `Bind later`、`onboarding.no_executor` = `Install and log in to Claude Code or Codex first`、`onboarding.start` = `Start using IssueRelay`；第 6 步的触发条件沿用 Task 9 的 `help.conditions.*`（英文含 `assigned to you`）。
+按规格实现。英文文案：`onboarding.next` = `Next`、`onboarding.checking` = `Checking the connection to Linear…`、`onboarding.authorize` = `Authorize Linear in the browser`、`onboarding.later` = `I'll add them later`、`onboarding.bind_later` = `Bind later`、`onboarding.no_executor` = `Install and log in to Claude Code or Codex first`、`onboarding.start` = `Start using IssueRelay`；第 6 步的触发条件沿用 Task 9 的 `help.conditions.*`（英文含 `assigned to you`）；语言名用 Task 9 的 `languages.*`（测试里的 `English`）。
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
 Expected: PASS。浏览器里用 `http://localhost:1420/?mock=fresh#/onboarding` 走一遍，每一步截图附在报告里。
@@ -5849,7 +6149,7 @@ git commit -m "feat(app): add the first-run guide"
 - Create: `app/scripts/icons.mjs`（用 `@resvg/resvg-js` 渲染 PNG；`--preview` 出三套对比图；`--option <a|b|c>` 出选定方案的全部文件）
 - Create（脚本生成后提交）：`app/src-tauri/icons/*`（`pnpm tauri icon` 由 1024px PNG 生成的桌面应用图标；它顺带写出的移动端目录删掉、不提交）、`app/src-tauri/icons/tray/macos/{idle,running,paused,problem}.png`（macOS 模板图 44×44，纯黑加透明度）、`app/public/icon.svg`（面板侧栏与关于页用）、`docs/design/icons/preview.png`（三套对比）
 - Modify（脚本生成后提交）：`app/src-tauri/icons/tray/{idle,running,paused,problem}.png`（Task 3 放的占位图，换成 Windows 彩色 32×32）
-- Modify: `app/src-tauri/src/tray.rs`（macOS 用 `icons/tray/macos/*`，Windows 用 `icons/tray/*`）、`app/package.json`（`"icons": "node scripts/icons.mjs"`）、`app/pnpm-lock.yaml`、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（登记 `docs/design/icons/` 与 `app/icons-src/`）
+- Modify: `app/src-tauri/src/tray.rs`（macOS 用 `icons/tray/macos/*`，Windows 用 `icons/tray/*`）、`app/package.json`（`"icons": "node scripts/icons.mjs"`）、`app/pnpm-lock.yaml`、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（登记 `docs/design/icons/` 与 `app/icons-src/`）、`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 9.6 节与第 18 节第 1 条）
 - 渲染出的 1024px PNG 在 `app/icons-src/build/`，Task 1 已把它加进 `.gitignore`。
 
 **Interfaces:**
@@ -5923,7 +6223,7 @@ git commit -m "feat(app): add the app and tray icons"
 
 **Files:**
 - Create: `app/playwright.config.ts`、`app/tests/screens.spec.ts`
-- Modify: `app/src/lib/mock.ts`（`language` 选项）、`app/src/lib/api.ts`（读地址里的 `?lang=`）、`app/pnpm-lock.yaml`
+- Modify: `app/src/lib/mock.ts`（`language` 选项）、`app/src/lib/api.ts`（读地址里的 `?lang=`）、`app/tsconfig.node.json`（`include` 加上 Playwright 的文件）、`app/pnpm-lock.yaml`
 - Create（生成后提交）：`docs/gates/screenshots/m2/{zh-CN,en}-{light,dark}-{overview,issues,runs,run-detail,bindings,doctor,settings,help,onboarding-1,onboarding-2,onboarding-4,onboarding-6}.png`
 - Modify: `app/package.json`（`"screenshots": "playwright test --update-snapshots"`、`"test:screens": "playwright test"`）、`README.md`（中英文各放两张截图：概览、运行详情）
 
@@ -5936,6 +6236,8 @@ git commit -m "feat(app): add the app and tray icons"
 pnpm --dir app add -D @playwright/test
 pnpm --dir app exec playwright install chromium
 ```
+
+`app/tsconfig.node.json` 的 `include` 加上 `playwright.config.ts` 与 `tests/**/*.ts`（否则 `pnpm lint` 不检查它们的类型）。
 
 `app/playwright.config.ts`：`webServer` 用 `pnpm build && pnpm preview --port 4173`，`use.viewport` 为 1100×720，`snapshotPathTemplate` 指向 `../docs/gates/screenshots/m2/{arg}{ext}`，两个项目：`light`（`colorScheme: "light"`）与 `dark`（`colorScheme: "dark"`）。
 
@@ -5998,7 +6300,8 @@ git commit -m "test(app): add key page screenshots and a local screenshot compar
 - [ ] **Step 1: 构建**：`pnpm --dir app tauri build --bundles app`（得到 `IssueRelay.app`；确认 `Contents/MacOS/` 里的主程序叫 `issuerelay-app`，即 `mainBinaryName` 生效）、`cargo build -p issuerelay-cli --release`，把命令行程序复制到 `IssueRelay.app/Contents/MacOS/issuerelay`（M3 由打包流程完成），复制后两个文件都在。
 - [ ] **Step 2: 从访达启动**（不经终端，验证登录 shell 的 PATH 与代理）：首次引导走一遍；环境检查页确认 PATH 来源为登录 shell、代理来源与值（打码）；Claude、Codex 都就绪。
 - [ ] **Step 3: 沙箱流程**：绑定沙箱项目（目录 `~/issuerelay-sandbox/demo`）；在沙箱项目建一条需求（Claude）→ 被接走（记时）→ 待验收 → 面板「标记完成」→ Linear 为 Done；换 Codex 再跑一条；四种通知各出现一次（开始运行、待验收、需要补充信息、失败）；托盘四种图标都出现过；暂停 / 恢复（托盘与面板）；设置里把运行时长上限改为 1 分钟制造一次超时（改完恢复 60）；一条故意做不到的需求制造失败；运行中停止一次；「重新运行」一次。
-- [ ] **Step 4: 退出流程**：有任务在跑时托盘「退出」→ 提示 → 选「等待完成」→ 结束后自动退出；再来一次选「立即停止」→ 运行记为已取消、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`）、没有 `.git/index.lock`；第三次：选「等待完成」，在运行还没结束时关掉面板窗口（程序不退出，托盘还在），从托盘「退出」或「打开面板」把面板带回来，等待中的提示还在，改选「立即停止」→ 运行记为已取消、程序随即退出、没有残留进程（Review Focus 2）。
+- [ ] **Step 4: 退出流程**：有任务在跑时托盘「退出」→ 提示 → 选「等待完成」→ 结束后自动退出；再来一次选「立即停止」→ 运行记为已取消、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`）、没有 `.git/index.lock`；第三次：选「等待完成」，在运行还没结束时关掉面板窗口（程序不退出，托盘还在），从托盘「退出」或「打开面板」把面板带回来，等待中的提示还在，改选「立即停止」→ 运行记为已取消、程序随即退出、没有残留进程（Review Focus 2）；第四次：有任务在跑时在面板里按 Cmd+Q → 同样先问，选「保持运行」后程序与运行都还在（这一条检验退出钩子对 `ExitRequested.code` 的假设，Task 3 的单元测试测不到它）；可行的话再试有任务在跑时注销或关机：系统发来退出请求 → 程序先问（macOS 可能提示某个应用阻止了注销），选「立即停止」后运行记为已取消、注销继续；做不到或结果不同就把原因写进报告。
+- [ ] **Step 4a: 离线启动**（AR51）：退出程序，断开网络（或让 `mcp.linear.app` 不可达），再启动：面板立刻可用、终端里 `issuerelay status` 立刻有回应（宿主不再等 Linear）；面板与侧栏显示「正在连接 Linear…」，托盘不显示出问题；连接失败后面板显示连接失败与「重试」，托盘转为出问题；恢复网络后点「重试」→ 连上，面板不用刷新就显示授权人。
 - [ ] **Step 5a: Linear 口径**：建一条中文标题的沙箱需求，确认提示词里的链接只保留到 `/issue/<编号>`，且这个链接在浏览器里能打开同一条需求（M1 验收 H2，M2 第一部分 Task 6）；若工作区有多个团队，确认环境检查只检查已绑定项目所属的团队，`teams_checked` 与实际一致（截图不进仓库）。
 - [ ] **Step 5: 其他**：开机自启开关（打开后 `~/Library/LaunchAgents/` 出现条目，关闭后消失，不真的注销重登）；模拟登录项启动：退出程序后 `open IssueRelay.app --args --autostart`（与登录项传的参数相同），只出托盘图标、不出窗口、程序坞里没有图标，从托盘打开面板后程序坞图标出现，关掉面板后消失；MCP 控制服务注册到 Claude Code（`claude mcp get issuerelay` 退出码 0），再移除；切换五种语言，托盘菜单与通知跟着变；关窗口后程序留在托盘、程序坞图标消失；第二次打开应用只把面板带到前面。
 - [ ] **Step 6: 精简运行评估**（设计第 18 节第 6 条）：在沙箱目录手动对比 `claude -p … --strict-mcp-config --mcp-config '{"mcpServers":{"linear-server":{"type":"http","url":"https://mcp.linear.app/mcp"}}}'` 与现有参数的启动时间，以及 Linear 工具是否可用（是否复用已有授权）；Codex 对比 `-c` 覆盖 `mcp_servers` 的可行性。结论写进验收报告与设计第 18 节；是否做成按绑定的选项由结论决定，若做，另起任务（执行者参数属于极高风险，单独提交）。
@@ -6020,4 +6323,4 @@ git commit -m "docs(m2): record the desktop app acceptance on macOS"
 
 ### 2026-10-13 预检后修订
 
-计划在执行前做了一次只读的预检扫描（任务两两之间的共享文件与接口、各任务自身的一致性、对照已合入的 core 与第一部分 Task 9 的约定、评审规则、本计划的全局约束），主智能体对每条发现作了裁决（AR1–AR50），本次修订把它们全部写进了计划：测试基础设施（Vitest 全局 API 与只收 `src/**/*.test.*`、公共设置里的 jsdom 桩与固定时钟复位、`.gitignore`、shadcn 组件、Dependabot 的 npm 条目、文件结构表，AR1–AR8）；多语言（缺键守卫、`pub mod i18n`、一张语言用例表且先看文字子标签、真正走到英文回退的测试、自己的相对时间文案、「已取消」、系统语言取 Rust 的 `sys_locale`、锁文件随提交，AR9–AR16）；宿主接入（`chrono` 与写全字段的测试辅助、空壳 `commands.rs`、可查询的启动状态、纯函数的退出状态机、事件转发的落后路径、开机自启不出程序坞图标、日志清洗移进 core、不静默吞错、托盘与面板共用的问题用例表、翻译表只解析一次、`mainBinaryName`，AR17–AR28）；命令与数据层（叶子模块 `backend.ts` 与动态载入的假后端、core 加 `StatusSnapshot.held` 与 `WaitReasonView`、引擎原文只作细节行、`JobActions` 的可选任务与「只重跑最新一次」、写成数据表的假后端、TESTING_SPEC 登记假对象、`setupAction` 一律带执行者，AR29–AR36）；外框与页面（新的 `App` 测试与事件桥组件、等订阅而不是等变量、每页的加载 / 空 / 错误状态与错误测试、布局与状态色变量、共用命名空间与 `?state=` 取值、概览的环境提醒与只数最新一次失败、`cleanDisplayText`、时间线的运行记录行与结果合并规则并直接读 core 夹具、表单测试的输入转义与按区块查询、假后端拒绝非绝对目录、环境检查的五个区块与 `follow-ui` 与按名字决定的一键授权与控制服务的用户范围说明、引导测试等连接状态，AR37–AR47）；图标、截图与实机验收（`tauri icon` 的路径与移动端目录、截图的 `?lang=` 与证明比对会失败、等待改立即停止与登录启动无程序坞图标的实机步骤、Windows 待实机清单，AR48–AR50）。照原样接受、没有改计划的：R14（测试里的 `/Applications/IssueRelay.app/...` 与 `file://` 字面量是通用写法，不是本机路径）；G7（提交命令示例不写 `Co-Authored-By`，由派发时补上）；A14 余下的面板与 Rust 输入不一致一项（已由 AR15 关闭）；扫描第 6 节列的 Tauri、shadcn、Radix 等 API 名称不逐个核对，照全局约束以解析到的版本文档为准、不同处在报告里说明。另外修正了两处扫描没列的不一致：假后端的控制服务原来说 Codex「未安装」而环境检查说它已安装（现在两边都是已安装）；Task 3 的模块原为私有 `mod`，`AppState::host` 等在 Task 4 接上命令之前会被当成死代码（现在都是 `pub mod`）。
+计划在执行前做了一次只读的预检扫描（任务两两之间的共享文件与接口、各任务自身的一致性、对照已合入的 core 与第一部分 Task 9 的约定、评审规则、本计划的全局约束），主智能体对每条发现作了裁决（AR1–AR50），本次修订把它们全部写进了计划：测试基础设施（Vitest 全局 API 与只收 `src/**/*.test.*`、公共设置里的 jsdom 桩与固定时钟复位、`.gitignore`、shadcn 组件、Dependabot 的 npm 条目、文件结构表，AR1–AR8）；多语言（缺键守卫、`pub mod i18n`、一张语言用例表且先看文字子标签、真正走到英文回退的测试、自己的相对时间文案、「已取消」、系统语言取 Rust 的 `sys_locale`、锁文件随提交，AR9–AR16）；宿主接入（`chrono` 与写全字段的测试辅助、空壳 `commands.rs`、可查询的启动状态、纯函数的退出状态机、事件转发的落后路径、开机自启不出程序坞图标、日志清洗移进 core、不静默吞错、托盘与面板共用的问题用例表、翻译表只解析一次、`mainBinaryName`，AR17–AR28）；命令与数据层（叶子模块 `backend.ts` 与动态载入的假后端、core 加 `StatusSnapshot.held` 与 `WaitReasonView`、引擎原文只作细节行、`JobActions` 的可选任务与「只重跑最新一次」、写成数据表的假后端、TESTING_SPEC 登记假对象、`setupAction` 一律带执行者，AR29–AR36）；外框与页面（新的 `App` 测试与事件桥组件、等订阅而不是等变量、每页的加载 / 空 / 错误状态与错误测试、布局与状态色变量、共用命名空间与 `?state=` 取值、概览的环境提醒与只数最新一次失败、`cleanDisplayText`、时间线的运行记录行与结果合并规则并直接读 core 夹具、表单测试的输入转义与按区块查询、假后端拒绝非绝对目录、环境检查的五个区块与 `follow-ui` 与按名字决定的一键授权与控制服务的用户范围说明、引导测试等连接状态，AR37–AR47）；图标、截图与实机验收（`tauri icon` 的路径与移动端目录、截图的 `?lang=` 与证明比对会失败、等待改立即停止与登录启动无程序坞图标的实机步骤、Windows 待实机清单，AR48–AR50）。照原样接受、没有改计划的：R14（测试里的 `/Applications/IssueRelay.app/...` 与 `file://` 字面量是通用写法，不是本机路径）；G7（提交命令示例不写 `Co-Authored-By`，由派发时补上）；A14 余下的面板与 Rust 输入不一致一项（已由 AR15 关闭）；扫描第 6 节列的 Tauri、shadcn、Radix 等 API 名称不逐个核对，照全局约束以解析到的版本文档为准、不同处在报告里说明。同日的复扫（核对上述修订）又提出 4 条 H、5 条 M、17 条 L，连同新裁决 AR51（`Host::start` 不再等 Linear，`LinearSetup` 新增 `connecting`）一并写进了计划：`held()` 的类型错误、devhost 测试里遗留的导入、只给测试用的导入、事件转发的大枚举改为装箱；字符规则在 core 里合为 `text::strip_control` 一份实现、用例表对照 `clean_text`；退出钩子对 `ExitRequested.code` 的假设写明待核对并在 Task 13 实机检查 Cmd+Q；链接检查改为 `url::Url` 解析、登录回调同样只开 Linear；用例里的不可见字符改为转义；控制服务检查不再吞错（`unknown` 状态）；以及各条 L（版本跟随 Cargo、测试钉住的英文文案列出、模型名与打码各有共用用例表等）。另外修正了两处扫描没列的不一致：假后端的控制服务原来说 Codex「未安装」而环境检查说它已安装（现在两边都是已安装）；Task 3 的模块原为私有 `mod`，`AppState::host` 等在 Task 4 接上命令之前会被当成死代码（现在都是 `pub mod`）。
