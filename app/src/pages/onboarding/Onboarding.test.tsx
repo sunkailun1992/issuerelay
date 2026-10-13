@@ -55,6 +55,14 @@ test("the guide walks from language to the first binding and finishes", async ()
   expect(await screen.findByText("overview page")).toBeInTheDocument();
 });
 
+test("the header of the guide shows the app icon beside the name", async () => {
+  const { container } = await start();
+  const icon = container.querySelector("header img");
+  expect(icon).toHaveAttribute("src", "/icon.svg");
+  expect(icon).toHaveAttribute("alt", "");
+  expect(screen.getByText("IssueRelay")).toBeInTheDocument();
+});
+
 test("without a ready executor the guide does not move on", async () => {
   await start(async (backend) => {
     await backend.linearLogin();

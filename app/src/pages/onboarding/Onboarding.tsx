@@ -1,4 +1,3 @@
-import { Workflow } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
@@ -69,9 +68,7 @@ export default function Onboarding() {
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex shrink-0 items-center gap-2 border-b px-(--page-padding) py-3">
-        <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-          <Workflow aria-hidden className="size-4" />
-        </span>
+        <img src="/icon.svg" alt="" aria-hidden className="size-8 shrink-0" />
         <span className="text-base font-semibold">{t("app.name")}</span>
       </header>
       <div className="flex min-h-0 flex-1">

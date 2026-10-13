@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="824" height="824" viewBox="100 100 824 824">
+  <!-- Option A (relay). macOS grid: an 824 px rounded square centred on the 1024 px canvas. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#666af9"/>
+      <stop offset="1" stop-color="#3633bf"/>
+    </linearGradient>
+    <filter id="glyph-shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#1c1a70" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)"/>
+  <!-- The glyph is drawn on the same 32 grid as the tray icon. The shadow filter sits on the wrapper,
+       outside the scale: inside it, the offset and the blur would be multiplied by the scale. -->
+  <g filter="url(#glyph-shadow)">
+    <g transform="translate(210 220) scale(20)">
+      <g fill="none" stroke="#cdd5ff" stroke-width="2.4" stroke-linecap="round">
+        <path d="M7.2 8.8 H16.45"/>
+        <path d="M3.8 14.4 H10.85"/>
+      </g>
+      <g transform="rotate(-45 18.6 14.6)">
+        <rect x="9.35" y="11.1" width="18.5" height="7" rx="3.5" fill="#fff"/>
+        <path d="M13.45 11.1 V18.1 M23.75 11.1 V18.1" stroke="#5a5ff0" stroke-width="1.4"/>
+      </g>
+    </g>
+  </g>
+</svg>

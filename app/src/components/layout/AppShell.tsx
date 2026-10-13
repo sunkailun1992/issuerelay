@@ -6,7 +6,6 @@ import {
   ListTodo,
   Settings,
   Stethoscope,
-  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -55,9 +54,7 @@ export function AppShell() {
     <div className="flex h-screen bg-background text-foreground">
       <aside className="flex w-(--sidebar-width) shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
         <div className="flex items-center gap-2 p-4">
-          <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-            <Workflow aria-hidden className="size-4" />
-          </span>
+          <img src="/icon.svg" alt="" aria-hidden className="size-8 shrink-0" />
           <span className="text-base font-semibold">{t("app.name")}</span>
         </div>
         <nav aria-label={t("app.name")} className="flex-1 px-2">

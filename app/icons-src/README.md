@@ -2,7 +2,7 @@
 
 IssueRelay 的应用图标与托盘图标：三套候选方案的 SVG 源文件、设计说明和生成命令（设计第 9.6 节）。图形都是原创，不含商标或徽标，也不模仿 Linear、Claude、OpenAI 的标志。
 
-状态：三套候选，尚未选定。`app/src-tauri/icons/` 里现在还是 `tauri init` 生成的默认应用图标和占位的托盘图；选定后用 `--option` 生成并替换。三套的对比图是 `docs/design/icons/preview.png`。
+状态：选定方案 A「接力」（M2 由主智能体代选，用户可以改选，见文末）。`app/src-tauri/icons/` 里的应用图标与托盘图、`app/public/icon.svg` 都是 A 的生成结果。B、C 的源文件留在这里，三套的对比图是 `docs/design/icons/preview.png`。
 
 ## 共同的设计
 
@@ -30,7 +30,7 @@ IssueRelay 的应用图标与托盘图标：三套候选方案的 SVG 源文件�
 
 | 文件 | 内容 |
 |---|---|
-| `app.svg` | 应用图标，1024 × 1024 |
+| `app.svg` | 应用图标，1024 × 1024；方形底的投影是名叫 `lift` 的滤镜，`public/icon.svg` 裁掉透明边时一并去掉它 |
 | `tray-mono.svg` | 托盘字形，macOS 模板图；32 × 32 网格，墨色用 `currentColor`（根元素的 `color` 是黑色） |
 | `tray-color.svg` | 托盘字形，Windows 彩色版；32 × 32 网格 |
 
@@ -51,10 +51,18 @@ pnpm --dir app tauri icon icons-src/build/app-1024.png   # 由 1024 px 图生成
 - `app/icons-src/build/app-1024.png`：1024 px 的应用图标，`tauri icon` 的输入；git 忽略，不提交。
 - `app/src-tauri/icons/tray/macos/<状态>.png`：macOS 模板图，44 × 44。
 - `app/src-tauri/icons/tray/<状态>.png`：Windows 彩色托盘图，32 × 32。
-- `app/public/icon.svg`：去掉透明边的应用图标，面板侧栏与关于页用。
+- `app/public/icon.svg`：去掉透明边的应用图标，面板侧栏左上角与首次引导的页眉用（`AppShell.tsx`、`Onboarding.tsx`）。
 
 状态是 `idle`、`running`、`paused`、`problem`。加 `--out <目录>` 把同样的目录树写到那个目录下，不动仓库里的文件，用来试渲染。
 
-`tauri icon` 如果同时写出 `icons/android/`、`icons/ios/`，删掉，不提交：本项目只做桌面。
+`tauri icon`（`@tauri-apps/cli` 2.12）会同时写出 `icons/android/` 和 `icons/ios/`，删掉，不提交：本项目只做桌面。它还会写 `64x64.png`，那是桌面图标，要提交。`tauri.conf.json` 的 `bundle.icon` 列的五个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.icns`、`icon.ico`）都在它的输出里，换方案时不用改。
 
 脚本会检查：每个 SVG 的 `viewBox`；macOS 模板图的每个像素都是黑色加透明度；四种状态的图两两不同；应用图标的四角透明、中心不透明。`--option` 的检查不过，就不写任何文件。
+
+## 改选方案
+
+要换成 B 或 C：
+
+1. `pnpm --dir app icons --option <b|c>`，再 `pnpm --dir app tauri icon icons-src/build/app-1024.png`，删掉 `app/src-tauri/icons/android/` 和 `ios/`。
+2. 把本文开头的状态行、设计文档 9.6 与 18 的第 1 条、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 里的「选定的是 A」改成新的选择。
+3. 一起提交生成的图标（`app/src-tauri/icons/`、`app/public/icon.svg`）和这些文档。托盘图用 `include_bytes!` 编进程序，下次构建就换上了。

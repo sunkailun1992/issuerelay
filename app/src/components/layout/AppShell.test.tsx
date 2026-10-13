@@ -4,6 +4,7 @@ import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import type { StatusView } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
+import iconSvg from "../../../public/icon.svg?raw";
 import { AppShell } from "./AppShell";
 
 test("the sidebar lists every page and shows the monitoring state", async () => {
@@ -12,6 +13,17 @@ test("the sidebar lists every page and shows the monitoring state", async () => 
     expect(screen.getByRole("link", { name })).toBeInTheDocument();
   }
   expect(await screen.findByText("监控中")).toBeInTheDocument();
+});
+
+test("the top of the sidebar shows the app icon, a file the panel ships", async () => {
+  const { container } = await renderWithProviders(<AppShell />);
+  // Decorative: the name beside it says what it is. `/icon.svg` is app/public/icon.svg, which the
+  // build copies as it is and `pnpm --dir app icons --option <x>` writes; the import above fails
+  // the whole file if it is missing.
+  const icon = container.querySelector("img");
+  expect(icon).toHaveAttribute("src", "/icon.svg");
+  expect(icon).toHaveAttribute("alt", "");
+  expect(iconSvg).toMatch(/^<svg\b/);
 });
 
 test("each link goes to its page", async () => {

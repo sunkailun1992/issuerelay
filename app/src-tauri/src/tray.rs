@@ -80,15 +80,62 @@ pub fn tray_view(status: &StatusSnapshot, setup: &LinearSetup, t: &Translator) -
     }
 }
 
-/// The icon for `state`. Placeholders until Task 11 draws the real ones.
-fn icon(state: TrayState) -> Image<'static> {
-    let bytes: &'static [u8] = match state {
-        TrayState::Idle => include_bytes!("../icons/tray/idle.png"),
-        TrayState::Running => include_bytes!("../icons/tray/running.png"),
-        TrayState::Paused => include_bytes!("../icons/tray/paused.png"),
-        TrayState::Problem => include_bytes!("../icons/tray/problem.png"),
+/// Which images the tray shows. macOS gets template images (black plus transparency, which the
+/// system tints for a light or a dark menu bar), Windows colour icons. Both sets are compiled in
+/// on every platform, picked by a constant and not by `#[cfg]`: neither build can lack the other's
+/// code, and the tests on either platform check both sets. The images are made from
+/// app/icons-src by `pnpm --dir app icons --option <x>` (design 9.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IconSet {
+    /// `icons/tray/macos/*`, 44 px.
+    MacTemplate,
+    /// `icons/tray/*`, 32 px.
+    WindowsColour,
+}
+
+impl IconSet {
+    /// The set this platform shows.
+    const CURRENT: IconSet = if cfg!(target_os = "macos") {
+        IconSet::MacTemplate
+    } else {
+        IconSet::WindowsColour
+    };
+
+    /// Whether the system must treat the images as templates. Only the macOS set is one: tinted
+    /// as a template, a colour icon would lose its colours.
+    fn is_template(self) -> bool {
+        self == IconSet::MacTemplate
+    }
+}
+
+/// The icon for `state` in `set`.
+fn icon_in(set: IconSet, state: TrayState) -> Image<'static> {
+    let bytes: &'static [u8] = match (set, state) {
+        (IconSet::MacTemplate, TrayState::Idle) => include_bytes!("../icons/tray/macos/idle.png"),
+        (IconSet::MacTemplate, TrayState::Running) => {
+            include_bytes!("../icons/tray/macos/running.png")
+        }
+        (IconSet::MacTemplate, TrayState::Paused) => {
+            include_bytes!("../icons/tray/macos/paused.png")
+        }
+        (IconSet::MacTemplate, TrayState::Problem) => {
+            include_bytes!("../icons/tray/macos/problem.png")
+        }
+        (IconSet::WindowsColour, TrayState::Idle) => include_bytes!("../icons/tray/idle.png"),
+        (IconSet::WindowsColour, TrayState::Running) => {
+            include_bytes!("../icons/tray/running.png")
+        }
+        (IconSet::WindowsColour, TrayState::Paused) => include_bytes!("../icons/tray/paused.png"),
+        (IconSet::WindowsColour, TrayState::Problem) => {
+            include_bytes!("../icons/tray/problem.png")
+        }
     };
     Image::from_bytes(bytes).expect("tray icons are valid PNG files")
+}
+
+/// The icon for `state` on this platform.
+fn icon(state: TrayState) -> Image<'static> {
+    icon_in(IconSet::CURRENT, state)
 }
 
 /// The menu items `refresh` updates.
@@ -138,7 +185,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     });
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(TrayState::Idle))
-        .icon_as_template(cfg!(target_os = "macos"))
+        .icon_as_template(IconSet::CURRENT.is_template())
         .tooltip("IssueRelay")
         .menu(&menu)
         // A menu bar item on macOS opens its menu on a left click; on Windows the left button
@@ -212,7 +259,7 @@ pub fn show_failed_start(app: &AppHandle) {
 fn set_icon(tray: &TrayIcon, state: TrayState) {
     logging::warn_failed(tray.set_icon(Some(icon(state))), "updating the tray icon");
     logging::warn_failed(
-        tray.set_icon_as_template(cfg!(target_os = "macos")),
+        tray.set_icon_as_template(IconSet::CURRENT.is_template()),
         "updating the tray icon",
     );
 }
@@ -396,18 +443,87 @@ mod tests {
         }
     }
 
+    const STATES: [TrayState; 4] = [
+        TrayState::Idle,
+        TrayState::Running,
+        TrayState::Paused,
+        TrayState::Problem,
+    ];
+    /// Both sets with the size their images have (design 9.6); the tests on either platform check both.
+    const SETS: [(IconSet, u32); 2] = [(IconSet::MacTemplate, 44), (IconSet::WindowsColour, 32)];
+
     #[test]
-    fn every_tray_icon_is_a_png_the_tray_can_show() {
-        // `icon` decodes the embedded file and panics on a broken one; the icons are replaced
-        // by hand (Task 11), so a bad file must fail here and not when the tray first changes.
-        for state in [
-            TrayState::Idle,
-            TrayState::Running,
-            TrayState::Paused,
-            TrayState::Problem,
-        ] {
-            let image = icon(state);
-            assert!(image.width() > 0 && image.height() > 0, "{state:?}");
+    fn every_state_has_an_icon_on_each_platform() {
+        // `icon_in` decodes the embedded file and panics on a broken one, so a bad file fails
+        // here and not when the tray first changes. The macOS images are templates, which the
+        // system tints: black plus transparency, no colour and no grey. The Windows ones are
+        // colour, so the two sets cannot be swapped by mistake.
+        for (set, size) in SETS {
+            for state in STATES {
+                let image = icon_in(set, state);
+                assert_eq!(
+                    (image.width(), image.height()),
+                    (size, size),
+                    "{set:?} {state:?}"
+                );
+                let (pixels, _) = image.rgba().as_chunks::<4>();
+                assert!(
+                    pixels.iter().any(|&[_, _, _, a]| a > 0),
+                    "{set:?} {state:?} is empty"
+                );
+                if set.is_template() {
+                    assert!(
+                        pixels.iter().all(|&[r, g, b, _]| (r, g, b) == (0, 0, 0)),
+                        "{state:?} is not black plus transparency"
+                    );
+                } else {
+                    assert!(
+                        pixels
+                            .iter()
+                            .any(|&[r, g, b, a]| a > 0 && !(r == g && g == b)),
+                        "{state:?} has no colour"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_tray_state_has_a_distinct_valid_icon() {
+        for (set, _) in SETS {
+            let icons: Vec<Vec<u8>> = STATES
+                .into_iter()
+                .map(|state| icon_in(set, state).rgba().to_vec())
+                .collect();
+            // `assert!` and not `assert_ne!`, which would print both images' pixels on a failure.
+            for (i, a) in icons.iter().enumerate() {
+                for (j, b) in icons.iter().enumerate().skip(i + 1) {
+                    assert!(
+                        a != b,
+                        "{:?} and {:?} share a tray icon in {set:?}",
+                        STATES[i],
+                        STATES[j]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_macos_icons_are_templates_and_each_platform_shows_its_own_set() {
+        assert!(IconSet::MacTemplate.is_template());
+        assert!(!IconSet::WindowsColour.is_template());
+        let own = if cfg!(target_os = "macos") {
+            IconSet::MacTemplate
+        } else {
+            IconSet::WindowsColour
+        };
+        assert_eq!(IconSet::CURRENT, own);
+        for state in STATES {
+            assert!(
+                icon(state).rgba() == icon_in(own, state).rgba(),
+                "{state:?} is not the image of this platform's set"
+            );
         }
     }
 

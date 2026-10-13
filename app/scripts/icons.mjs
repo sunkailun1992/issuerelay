@@ -14,7 +14,8 @@
 // Exit codes: 0 done; 1 a source file is missing or a rendered image failed its check; 2 bad arguments.
 //
 // Source conventions (app/icons-src/option-<x>/):
-//   app.svg         1024 x 1024; the macOS grid: an 824 px rounded square centred on the canvas.
+//   app.svg         1024 x 1024; the macOS grid: an 824 px rounded square centred on the canvas. Its
+//                   drop shadow is the filter `lift`, which `public/icon.svg` leaves out.
 //   tray-mono.svg   32 x 32 grid; the ink is `currentColor` (the root sets `color="#000"`), so it
 //                   renders black plus alpha and the preview can tint it for a dark menu bar.
 //   tray-color.svg  32 x 32 grid; the same glyph in colour.
@@ -136,7 +137,11 @@ function traySvg(glyph, kind, state, size, ink = "#000") {
 const trayImage = (option, kind, state, size, ink) =>
   render(traySvg(kind === "mono" ? option.mono : option.colour, kind, state, size, ink), size);
 
-/** The app icon without its margin, for the panel (sidebar and about page). */
+/**
+ * The app icon without its margin, for the panel (the sidebar and the first-run header). The
+ * margin is where the plate's drop shadow (the filter `lift`) falls; cropped to the plate it would
+ * only smudge the corners, so the shadow goes with the margin.
+ */
 function panelIconSvg(appSvg) {
   const plate = APP_SIZE - 2 * PLATE_MARGIN;
   const rootTag = /<svg\b[^>]*>/.exec(appSvg)?.[0];
@@ -145,7 +150,14 @@ function panelIconSvg(appSvg) {
     .replace(/\bwidth="[^"]*"/, `width="${plate}"`)
     .replace(/\bheight="[^"]*"/, `height="${plate}"`)
     .replace(/\bviewBox="[^"]*"/, `viewBox="${PLATE_MARGIN} ${PLATE_MARGIN} ${plate} ${plate}"`);
-  return appSvg.replace(rootTag, cropped);
+  const flat = appSvg
+    .replace(rootTag, cropped)
+    .replace(/ filter="url\(#lift\)"/, "")
+    .replace(/\n? *<filter id="lift"[\s\S]*?<\/filter>/, "");
+  if (/#lift|id="lift"/.test(flat)) {
+    throw new CheckError("app.svg: the plate's drop shadow must be one filter `lift`, used once, on the plate");
+  }
+  return flat;
 }
 
 function writeOutput(outRoot, relative, data) {
