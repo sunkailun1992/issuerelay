@@ -3,6 +3,7 @@ import { vi } from "vitest";
 import { createMockBackend } from "@/lib/mock";
 import type { StartupState } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
+import { advanceUntil } from "@/test/time";
 import { StartupGate } from "./StartupGate";
 
 const gated = (
@@ -45,7 +46,9 @@ test("a failure announced while the panel is showing replaces it", async () => {
 });
 
 test("a start still under way shows the panel and asks again every second until it is settled", async () => {
-  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  // Every timer is the test's: the mock answers from a timer and so does the library's redraw, so
+  // time is advanced by hand and nothing is waited for.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const answers: StartupState[] = [
     { kind: "starting" },
@@ -54,34 +57,30 @@ test("a start still under way shows the panel and asks again every second until 
   ];
   let asked = 0;
   backend.startupState = vi.fn(async () => answers[Math.min(asked++, answers.length - 1)]);
-  const settle = () => act(() => new Promise<void>((done) => setTimeout(done, 5)));
-  const second = () => act(() => vi.advanceTimersByTimeAsync(1000).then(() => new Promise<void>((done) => setTimeout(done, 5))));
+  const asks = () => vi.mocked(backend.startupState).mock.calls.length;
 
   await renderWithProviders(gated, { backend });
-  await settle();
-  expect(backend.startupState).toHaveBeenCalledTimes(1);
+  expect(asks()).toBe(1);
   expect(screen.getByText("the panel")).toBeInTheDocument();
 
-  await second();
-  expect(backend.startupState).toHaveBeenCalledTimes(2);
+  expect(await advanceUntil(() => asks() === 2)).toBe(1000);
   expect(screen.getByText("the panel")).toBeInTheDocument();
 
-  await second();
-  expect(backend.startupState).toHaveBeenCalledTimes(3);
-  expect(screen.getByText("IssueRelay could not open its run records")).toBeInTheDocument();
+  const failure = () => screen.queryByText("IssueRelay could not open its run records") !== null;
+  expect(await advanceUntil(failure)).toBeLessThan(1200);
+  expect(asks()).toBe(3);
 
   // Settled: nobody asks again.
-  await second();
-  await second();
-  expect(backend.startupState).toHaveBeenCalledTimes(3);
+  await act(() => vi.advanceTimersByTimeAsync(10_000));
+  expect(asks()).toBe(3);
 });
 
 test("a host that is ready is not asked again", async () => {
-  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const ask = vi.spyOn(backend, "startupState");
   await renderWithProviders(gated, { backend });
-  await act(() => new Promise<void>((done) => setTimeout(done, 5)));
-  await act(() => vi.advanceTimersByTimeAsync(5000));
+  expect(ask).toHaveBeenCalledTimes(1);
+  await act(() => vi.advanceTimersByTimeAsync(10_000));
   expect(ask).toHaveBeenCalledTimes(1);
 });

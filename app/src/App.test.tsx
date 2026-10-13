@@ -1,16 +1,19 @@
-import { act, render, screen } from "@testing-library/react";
+import { onlineManager } from "@tanstack/react-query";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { initI18nOnce, setLanguage } from "@/i18n";
+import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import { createMockBackend } from "@/lib/mock";
-import type { StartupState } from "@/lib/types";
+import type { StartupState, StatusView } from "@/lib/types";
 import App from "./App";
 
 afterEach(async () => {
   // App routes by the address's fragment and follows the language setting.
   window.location.hash = "";
   document.documentElement.classList.remove("dark");
+  onlineManager.setOnline(true);
   await setLanguage("en");
 });
 
@@ -122,4 +125,30 @@ test("the interface follows the system's dark appearance", async () => {
   render(<App backend={createMockBackend("demo", { latencyMs: 0 })} />);
   await screen.findByRole("heading", { name: "Overview" });
   expect(document.documentElement).toHaveClass("dark");
+});
+
+test("the panel keeps reading and acting while the system reports it is offline", async () => {
+  // Every call is local IPC: "offline" says nothing about it, and must not freeze the panel.
+  await initI18nOnce("en");
+  onlineManager.setOnline(false);
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const pause = vi.spyOn(backend, "pause");
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+  expect(await screen.findByText("Version 0.1.0")).toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("switch", { name: "Monitoring" }));
+  await waitFor(() => expect(pause).toHaveBeenCalledTimes(1));
+});
+
+test("a page that cannot read what the backend gave shows the error page, not a blank window", async () => {
+  await initI18nOnce("en");
+  // React reports an error it hands to a boundary; keep the output of the test run readable.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // A reply the panel cannot make sense of: the sidebar fails while it renders.
+  backend.status = async () => ({}) as StatusView;
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: en.crash.reload })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
 });

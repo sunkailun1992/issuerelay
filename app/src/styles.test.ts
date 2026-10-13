@@ -1,7 +1,8 @@
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import css from "./styles.css?raw";
 import { JOB_STATES } from "@/lib/types";
 import { STATE_STYLE } from "@/components/StatusBadge";
+import { blend, bytes, contrast, inGamut, oklch } from "@/test/colour";
 
 /** The declarations of the first rule with this selector. */
 function block(selector: string): string {
@@ -35,4 +36,73 @@ test("the interface uses the system fonts, which cover Chinese, Japanese and Kor
   expect(theme).toMatch(/--font-sans: -apple-system, .*"PingFang SC".*"Hiragino Sans".*"Microsoft YaHei UI".*"Malgun Gothic"/);
   expect(theme).toMatch(/--font-mono: .*"SF Mono".*Consolas/);
   expect(css).not.toContain("fontsource");
+});
+
+/** The colour a theme gives to `--name`, as `oklch(...)` text. */
+function token(theme: ":root" | ".dark", name: string): string {
+  const match = new RegExp(`^\\s*--${name}: (oklch\\([^)]*\\));`, "m").exec(block(theme));
+  expect(match, `${theme} --${name}`).not.toBeNull();
+  return match![1];
+}
+
+const THEMES = [
+  ["light", ":root"],
+  ["dark", ".dark"],
+] as const;
+const STATES = JOB_STATES.map((state) => STATE_STYLE[state].className.split(" ")[0].replace("text-state-", ""));
+/** What a badge can sit on: the page, a card, and the muted fill of a hovered row or a block. */
+const SURFACES = ["background", "card", "muted"] as const;
+/** A badge's tint is its own colour at 10% over the surface (`bg-state-*` with `/10`). */
+const TINT = 0.1;
+
+describe("the state colours", () => {
+  // Pixels Chrome 154 drew on 2026-10-13 for the same colours (screenshot of a page of swatches).
+  // They tie the maths below to what a user sees, and settle how the 10% tint is composited.
+  test("the colour maths gives the pixels a browser draws", () => {
+    const near = (got: number[], want: number[]) => got.every((channel, i) => Math.abs(channel - want[i]) <= 1);
+    expect(bytes(oklch("oklch(0.72 0.15 250)"))).toEqual([82, 169, 254]);
+    expect(bytes(oklch("oklch(0.60 0.15 150)"))).toEqual([37, 152, 77]);
+    const onDark = oklch("oklch(0.205 0 0)");
+    const white = oklch("oklch(1 0 0)");
+    expect(near(bytes(blend(oklch("oklch(0.72 0.15 250)"), onDark, TINT)), [28, 37, 46])).toBe(true);
+    expect(near(bytes(blend(oklch("oklch(0.75 0.14 150)"), onDark, TINT)), [30, 40, 33])).toBe(true);
+    expect(near(bytes(blend(oklch("oklch(0.60 0.15 150)"), white, TINT)), [233, 244, 237])).toBe(true);
+    expect(near(bytes(blend(oklch("oklch(0.55 0.20 295)"), white, TINT)), [242, 237, 251])).toBe(true);
+  });
+
+  test("the contrast of black on white is 21 and of a colour on itself 1", () => {
+    expect(contrast(oklch("oklch(0 0 0)"), oklch("oklch(1 0 0)"))).toBeCloseTo(21, 5);
+    expect(contrast(oklch("oklch(0.6 0.1 30)"), oklch("oklch(0.6 0.1 30)"))).toBe(1);
+  });
+
+  test.each(THEMES)("%s: every state colour is inside the sRGB gamut, so every display shows it as measured", (_theme, selector) => {
+    for (const name of STATES) {
+      expect(inGamut(oklch(token(selector, `state-${name}`))), `${selector} --state-${name}`).toBe(true);
+    }
+  });
+
+  // Small text on a badge: WCAG 1.4.3 asks for 4.5:1.
+  test.each(THEMES)("%s: the label of every badge reaches 4.5:1 on its own tint over each surface", (_theme, selector) => {
+    for (const name of STATES) {
+      const text = oklch(token(selector, `state-${name}`));
+      for (const surface of SURFACES) {
+        const under = oklch(token(selector, surface));
+        const ratio = contrast(text, blend(text, under, TINT));
+        expect(ratio, `${selector} --state-${name} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  // Blending light itself, which reviews of the colours did, reads lower over a dark surface; the
+  // colours clear that too on the two surfaces the pages use most.
+  test.each(THEMES)("%s: the label also reaches 4.5:1 when the tint is blended as light", (_theme, selector) => {
+    for (const name of STATES) {
+      const text = oklch(token(selector, `state-${name}`));
+      for (const surface of ["background", "card"] as const) {
+        const under = oklch(token(selector, surface));
+        const ratio = contrast(text, blend(text, under, TINT, "linear"));
+        expect(ratio, `${selector} --state-${name} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
 });

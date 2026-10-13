@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router";
@@ -7,6 +7,7 @@ import { initI18nOnce, type Lang } from "@/i18n";
 import type { Backend } from "@/lib/backend";
 import { BackendProvider } from "@/lib/backend-context";
 import { createMockBackend } from "@/lib/mock";
+import { createQueryClient } from "@/lib/query-client";
 
 interface RenderOptions {
   /** The backend the component talks to; the demo mock without delay by default. */
@@ -23,7 +24,8 @@ export async function renderWithProviders(
   // i18next was started by the test setup (with the missing-key guard); this only switches
   // the language.
   await initI18nOnce(lang);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  // The app's own client, with its defaults: a test that ran by other rules would prove little.
+  const client = createQueryClient();
   const result = render(
     <BackendProvider backend={backend}>
       <QueryClientProvider client={client}>

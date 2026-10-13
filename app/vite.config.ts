@@ -16,7 +16,7 @@ export default defineConfig({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
-    // Only the component and unit tests: Task 12's Playwright spec (tests/*.spec.ts) is not Vitest's.
+    // Only the component and unit tests: the Playwright specs under `tests/` (`*.spec.ts`) are not Vitest's.
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
     // Vitest turns every CSS file into an empty string; styles.test.ts reads the design tokens as text.

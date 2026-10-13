@@ -49,9 +49,9 @@
 | `app/src-tauri/src/commands.rs` | 面板调用的全部命令 |
 | `app/src/lib/problem-cases.json` | 托盘与面板共用的「需要处理」判定用例表 |
 | `app/src/lib/{types,backend,api,mock,mock-fixtures,clean}.ts`、`app/src/lib/clean-cases.json` | 前端数据层：类型、后端接口与错误类型、命令封装、假后端与虚构数据、显示文本清洗与用例表 |
-| `app/src/lib/{theme,format,errors,problem}.ts`、`app/src/lib/backend-context.tsx`、`app/src/hooks/{queries,useEngineEvents,subscription}.ts` | 主题、时间格式、失败的显示、「需要处理」判定、后端注入、查询、事件桥、订阅辅助 |
-| `app/src/components/{StatusBadge,states,PageHeader,QuitDialog,StartupError,StartupGate,FirstRunGate,EngineEventsBridge}.tsx`、`app/src/components/layout/AppShell.tsx`、`app/src/styles.css`、`app/src/App.tsx`、`app/src/main.tsx` | 面板外框、设计变量、状态标识、空 / 加载 / 错误状态、启动失败页、退出提示 |
-| `app/src/test/` | 组件测试的辅助（`render.tsx`）；测试文件本身与被测文件放在一起（`*.test.ts`、`*.test.tsx`） |
+| `app/src/lib/{theme,format,errors,problem,query-client}.ts`、`app/src/lib/backend-context.tsx`、`app/src/hooks/{queries,useEngineEvents,useLinearConnectionRefresh,subscription}.ts` | 主题、时间格式、失败的显示、「需要处理」判定、数据缓存的默认规则（调用都在本机：离线照常读写、不重试、不因焦点或重连重读，应用与测试共用一个）、后端注入、查询、事件桥、Linear 连接变了就重读依赖它的数据、订阅辅助 |
+| `app/src/components/{StatusBadge,states,PageHeader,QuitDialog,StartupError,StartupGate,FirstRunGate,EngineEventsBridge,ErrorBoundary}.tsx`、`app/src/components/layout/AppShell.tsx`、`app/src/styles.css`、`app/src/App.tsx`、`app/src/main.tsx` | 面板外框、设计变量（状态色按 4.5:1 对比度定，`styles.test.ts` 核对）、状态标识、空 / 加载 / 错误状态、启动失败页、退出提示、渲染出错时的错误页 |
+| `app/src/test/` | 组件测试的辅助（`render.tsx`；`time.ts` 在假时钟下按时间往前推；`colour.ts` 颜色与对比度的计算）；测试文件本身与被测文件放在一起（`*.test.ts`、`*.test.tsx`） |
 | `app/src/pages/Overview.tsx`、`Issues.tsx`、`app/src/components/{JobActions,LinearStatus}.tsx`、`app/src/hooks/{useTick,useLang,useTriggerNames}.ts`、`app/src/lib/runs.ts` | 概览、需求、共用的任务操作与 Linear 连接卡；按时钟重绘（时长、「几分钟前」）、界面语言、触发用的标签与状态名（设置读到之前用默认名）、哪条运行是需求最新的一次 |
 | `app/src/pages/Runs.tsx`、`RunDetail.tsx`、`app/src/lib/timeline.ts` | 运行记录与时间线 |
 | `app/src/pages/Bindings.tsx`、`BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts`、`app/src/lib/model-name-cases.json` | 项目绑定；模型名用例表（Rust 与 TS 共用） |

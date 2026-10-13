@@ -137,11 +137,12 @@ export function useAppInfo() {
  * or as a function of what the action was called with); when it fails the user is told with the
  * translated headline `failureKey` and the backend's line as the reason (`reportFailure`).
  * `quiet` can keep a failure that is no failure from being reported. The keys in `reread` are
- * also waited for: the action is over once those are read again. That is for the cheap local
- * data a page goes on to look at right after saving (the first-run gate reads the settings the
- * guide just saved); everything else is refreshed in the background, since the action is done
- * when the backend says so and not when every page, the environment check included, has read
- * its data again.
+ * also waited for: the action is over once those are read again, and read again wherever they
+ * are cached, also when no page shows them right now (`refetchType: "all"`), so that whatever
+ * the user opens next, the first-run gate included, finds the saved values and not the ones from
+ * before. That is for cheap local data; everything else is refreshed in the background, for the
+ * pages that show it, since the action is done when the backend says so and not when every page,
+ * the environment check included, has read its data again.
  */
 function useAction<Variables, Result>(
   run: (backend: Backend, variables: Variables) => Promise<Result>,
@@ -163,7 +164,7 @@ function useAction<Variables, Result>(
       for (const queryKey of typeof refreshes === "function" ? refreshes(variables) : refreshes) {
         void client.invalidateQueries({ queryKey });
       }
-      await Promise.all(reread.map((queryKey) => client.invalidateQueries({ queryKey })));
+      await Promise.all(reread.map((queryKey) => client.invalidateQueries({ queryKey, refetchType: "all" })));
     },
     onError: (error) => {
       if (!quiet?.(error)) reportFailure(error, t, failureKey);

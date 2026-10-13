@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -8,6 +8,7 @@ import { BackendError, type Backend } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import type { Binding, Settings } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
+import { advanceUntil } from "@/test/time";
 import {
   queryKeys,
   useAppInfo,
@@ -49,9 +50,6 @@ afterEach(() => {
 function invalidated(spy: { mock: { calls: unknown[][] } }): string[] {
   return spy.mock.calls.map(([filters]) => JSON.stringify((filters as { queryKey?: unknown } | undefined)?.queryKey));
 }
-
-/** Lets what is already under way (answers with no delay) finish. */
-const settle = () => act(() => new Promise<void>((done) => setTimeout(done, 10)));
 
 describe("the query keys", () => {
   test("are the ones the engine events invalidate", () => {
@@ -127,10 +125,12 @@ describe("reading", () => {
     const doctor = vi.spyOn(backend, "doctor");
     const named = vi.spyOn(backend, "linearServerNamed");
     function Off() {
+      // A read that is not switched off: when it has been answered, so would the others have been.
+      const status = useStatus();
       useProjects(false);
       useDoctor(false);
       useLinearServerNamed("claude", false);
-      return null;
+      return <p>{status.data ? "status read" : "reading"}</p>;
     }
     function On() {
       useProjects(true);
@@ -139,7 +139,7 @@ describe("reading", () => {
       return null;
     }
     const off = await renderWithProviders(<Off />, { backend });
-    await settle();
+    expect(await screen.findByText("status read")).toBeInTheDocument();
     expect(projects).not.toHaveBeenCalled();
     expect(doctor).not.toHaveBeenCalled();
     expect(named).not.toHaveBeenCalled();
@@ -151,7 +151,9 @@ describe("reading", () => {
   });
 
   test("a job's log is read again every second and a half while it is live, and not otherwise", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    // Every timer is the test's: the mock answers from a timer and so does the library's redraw, so
+    // time is advanced by hand and nothing is waited for.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const log = vi.spyOn(backend, "jobLog");
     function Logs() {
@@ -163,24 +165,21 @@ describe("reading", () => {
         </button>
       );
     }
-    const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms).then(() => new Promise<void>((done) => setTimeout(done, 10))));
+    const reads = () => log.mock.calls.length;
 
     await renderWithProviders(<Logs />, { backend });
-    await settle();
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(reads()).toBe(1);
     expect(log.mock.calls[0][0]).toBe(12);
-    await tick(1400);
-    expect(log).toHaveBeenCalledTimes(1);
-    await tick(200);
-    expect(log).toHaveBeenCalledTimes(2);
-    await tick(1500);
-    expect(log).toHaveBeenCalledTimes(3);
+    // The next read comes a second and a half later, not sooner, and then again.
+    expect(await advanceUntil(() => reads() === 2)).toBe(1500);
+    expect(await advanceUntil(() => reads() === 3)).toBeGreaterThanOrEqual(1500);
+    expect(await advanceUntil(() => reads() === 4)).toBeLessThan(1700);
 
-    await userEvent.click(screen.getByRole("button", { name: "finish" }));
-    await settle();
-    const before = log.mock.calls.length;
-    await tick(6000);
-    expect(log).toHaveBeenCalledTimes(before);
+    fireEvent.click(screen.getByRole("button", { name: "finish" }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    const before = reads();
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(reads()).toBe(before);
   });
 });
 
@@ -280,10 +279,15 @@ describe("acting", () => {
           { onSuccess: () => (seen = client.getQueryData<Settings>(queryKeys.settings)?.onboarding_completed) },
         );
       };
-      return <Act run={finish} />;
+      return (
+        <>
+          <p>{settings.data ? "settings read" : "reading"}</p>
+          <Act run={finish} />
+        </>
+      );
     }
     await renderWithProviders(<Finish />, { backend });
-    await settle();
+    await screen.findByText("settings read");
     await userEvent.click(screen.getByRole("button", { name: "go" }));
     await waitFor(() => expect(seen).toBeDefined());
     expect(seen).toBe(true);
@@ -301,10 +305,58 @@ describe("acting", () => {
         const binding: Binding = { id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs" };
         save.mutate(binding, { onSuccess: () => (seen = client.getQueryData<Binding[]>(queryKeys.bindings)?.map((b) => b.id)) });
       };
-      return <Act run={bind} />;
+      return (
+        <>
+          <p>{bindings.data ? "bindings read" : "reading"}</p>
+          <Act run={bind} />
+        </>
+      );
     }
     await renderWithProviders(<Bind />, { backend });
-    await settle();
+    await screen.findByText("bindings read");
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    await waitFor(() => expect(seen).toBeDefined());
+    expect(seen).toEqual(["proj-3"]);
+  });
+
+  test("the re-read also reaches data that no page shows right now", async () => {
+    // The user looked at the settings and went elsewhere: the cache still holds them, nothing observes them.
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    let seen: number | undefined;
+    function Save() {
+      const client = useQueryClient();
+      const save = useSaveSettings();
+      const run = async () => {
+        const settings = await backend.settings();
+        save.mutate(
+          { ...settings, poll_interval_secs: 60 },
+          { onSuccess: () => (seen = client.getQueryData<Settings>(queryKeys.settings)?.poll_interval_secs) },
+        );
+      };
+      return <Act run={() => void run()} />;
+    }
+    const { client } = await renderWithProviders(<Save />, { backend });
+    await client.fetchQuery({ queryKey: queryKeys.settings, queryFn: () => backend.settings() });
+    expect(client.getQueryData<Settings>(queryKeys.settings)?.poll_interval_secs).toBe(30);
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    await waitFor(() => expect(seen).toBeDefined());
+    expect(seen).toBe(60);
+  });
+
+  test("a binding that is saved is in the cached list even when no page shows the bindings", async () => {
+    const backend = createMockBackend("fresh", { latencyMs: 0 });
+    let seen: string[] | undefined;
+    function Bind() {
+      const client = useQueryClient();
+      const save = useSaveBinding();
+      const binding: Binding = { id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs" };
+      const run = () =>
+        save.mutate(binding, { onSuccess: () => (seen = client.getQueryData<Binding[]>(queryKeys.bindings)?.map((b) => b.id)) });
+      return <Act run={run} />;
+    }
+    const { client } = await renderWithProviders(<Bind />, { backend });
+    await client.fetchQuery({ queryKey: queryKeys.bindings, queryFn: () => backend.bindings() });
+    expect(client.getQueryData<Binding[]>(queryKeys.bindings)).toEqual([]);
     await userEvent.click(screen.getByRole("button", { name: "go" }));
     await waitFor(() => expect(seen).toBeDefined());
     expect(seen).toEqual(["proj-3"]);

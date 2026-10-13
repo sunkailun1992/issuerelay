@@ -66,6 +66,11 @@
     "other": "發生問題，IssueRelay 無法啟動",
     "quit": "結束"
   },
+  "crash": {
+    "title": "面板因發生錯誤而停止",
+    "hint": "重新載入面板即可繼續。IssueRelay 本身仍在背景執行。",
+    "reload": "重新載入"
+  },
   "shell": {
     "monitoring": "監控中",
     "paused": "已暫停",

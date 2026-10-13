@@ -1,8 +1,8 @@
-import { waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { vi } from "vitest";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
-import { useJob, useJobs, useStatus } from "@/hooks/queries";
+import { useDoctor, useIssues, useJob, useJobs, useProjects, useStatus } from "@/hooks/queries";
 import { createMockBackend } from "@/lib/mock";
 import type { EngineEvent } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
@@ -157,4 +157,102 @@ test("React's double mount in development leaves exactly one subscription", asyn
   await waitFor(() => expect(live).toEqual({ events: 1, resync: 1 }));
   unmount();
   await waitFor(() => expect(live).toEqual({ events: 0, resync: 0 }));
+});
+
+describe("when the connection to Linear changes", () => {
+  /** What needs a connection to Linear, as three lines of text: the answer or why there is none. */
+  function Dependent() {
+    const issues = useIssues();
+    const projects = useProjects();
+    const doctor = useDoctor();
+    return (
+      <>
+        <p>issues: {issues.error ? issues.error.message : (issues.data?.length ?? "reading")}</p>
+        <p>projects: {projects.error ? projects.error.message : (projects.data?.length ?? "reading")}</p>
+        <p>doctor: {doctor.data ? (doctor.data.viewer?.name ?? doctor.data.linear_error) : "reading"}</p>
+      </>
+    );
+  }
+
+  test("what depends on it is read again, so a page does not keep the answer it got before the connection", async () => {
+    const backend = createMockBackend("connecting", { latencyMs: 0 });
+    await renderWithProviders(
+      <>
+        <EngineEventsBridge />
+        <Dependent />
+      </>,
+      { backend },
+    );
+    expect(await screen.findByText("issues: still connecting to Linear")).toBeInTheDocument();
+    expect(await screen.findByText("projects: still connecting to Linear")).toBeInTheDocument();
+    expect(await screen.findByText("doctor: still connecting to Linear")).toBeInTheDocument();
+    // The first connection ends; the app announces a changed setup, the status says "connected".
+    await act(() => backend.linearReconnect());
+    expect(await screen.findByText("issues: 9")).toBeInTheDocument();
+    expect(await screen.findByText("projects: 3")).toBeInTheDocument();
+    expect(await screen.findByText("doctor: Jane Doe")).toBeInTheDocument();
+  });
+
+  test("a connection that ends is noticed the same way", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    await renderWithProviders(
+      <>
+        <EngineEventsBridge />
+        <Dependent />
+      </>,
+      { backend },
+    );
+    expect(await screen.findByText("issues: 9")).toBeInTheDocument();
+    await act(() => backend.linearLogout());
+    expect(await screen.findByText("issues: not connected to Linear: log in first")).toBeInTheDocument();
+    expect(await screen.findByText("projects: not connected to Linear: log in first")).toBeInTheDocument();
+  });
+
+  test("React's double run of an effect in development is no change of the connection", async () => {
+    // The bridge mounts when the status is already there, so that its first effect run knows the connection.
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    function WhenStatusIsRead() {
+      return useStatus().data ? <EngineEventsBridge /> : null;
+    }
+    const { client } = await renderWithProviders(
+      <StrictMode>
+        <WhenStatusIsRead />
+      </StrictMode>,
+      { backend },
+    );
+    const spy = vi.spyOn(client, "invalidateQueries");
+    await waitFor(() => expect(client.getQueryData(["status"])).toBeDefined());
+    await act(async () => {});
+    expect(spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey))).not.toContain(JSON.stringify(["issues"]));
+  });
+
+  test("an event that leaves the connection as it is reads nothing again", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    // Every read of the status is a different one (the queue count), but the connection stays.
+    const view = await backend.status();
+    let reads = 0;
+    backend.status = async () => ({ ...view, status: { ...view.status, queued: ++reads } });
+    const issues = vi.spyOn(backend, "issues");
+    const projects = vi.spyOn(backend, "projects");
+    const doctor = vi.spyOn(backend, "doctor");
+    function Queue() {
+      return <p>queued: {useStatus().data?.status.queued}</p>;
+    }
+    await renderWithProviders(
+      <>
+        <EngineEventsBridge />
+        <Dependent />
+        <Queue />
+      </>,
+      { backend },
+    );
+    await screen.findByText("issues: 9");
+    await screen.findByText("queued: 1");
+    // Another status is read after the event; once it shows, a changed connection would already have been noticed.
+    await act(() => backend.pollNow());
+    await screen.findByText("queued: 2");
+    expect(issues).toHaveBeenCalledTimes(1);
+    expect(projects).toHaveBeenCalledTimes(1);
+    expect(doctor).toHaveBeenCalledTimes(1);
+  });
 });

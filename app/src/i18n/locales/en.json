@@ -66,6 +66,11 @@
     "other": "Something stopped IssueRelay from starting",
     "quit": "Quit"
   },
+  "crash": {
+    "title": "The panel stopped because of an error",
+    "hint": "Reload the panel to carry on. IssueRelay itself keeps running in the background.",
+    "reload": "Reload"
+  },
   "shell": {
     "monitoring": "Monitoring",
     "paused": "Paused",
