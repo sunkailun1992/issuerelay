@@ -34,7 +34,7 @@ pub fn job(state: JobState) -> Job {
 }
 
 /// An engine that checked Linear just now and has nothing to do, with each of
-/// `StatusSnapshot`'s 9 fields set.
+/// `StatusSnapshot`'s 10 fields set.
 pub fn checked() -> StatusSnapshot {
     StatusSnapshot {
         paused: false,
@@ -49,5 +49,6 @@ pub fn checked() -> StatusSnapshot {
         queued: 0,
         waiting: 0,
         draining: false,
+        held: Vec::new(),
     }
 }

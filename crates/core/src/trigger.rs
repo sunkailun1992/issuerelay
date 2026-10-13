@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::model::{Issue, Job};
 
@@ -24,6 +26,31 @@ impl WaitReason {
             }
             WaitReason::ExecutorNotReady(kind) => {
                 format!("executor {} is not ready", kind.as_str())
+            }
+        }
+    }
+}
+
+/// `WaitReason` as the panel reads it: a code it translates, with the folder or executor the
+/// reason names. `describe` stays the text the job's reason and the CLI show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum WaitReasonView {
+    ProjectNotBound,
+    DirectoryMissing { directory: String },
+    ExecutorNotReady { executor: ExecutorKind },
+}
+
+impl WaitReason {
+    /// The structured form, for the panel's issue list.
+    pub fn view(&self) -> WaitReasonView {
+        match self {
+            WaitReason::ProjectNotBound => WaitReasonView::ProjectNotBound,
+            WaitReason::DirectoryMissing(dir) => WaitReasonView::DirectoryMissing {
+                directory: dir.display().to_string(),
+            },
+            WaitReason::ExecutorNotReady(kind) => {
+                WaitReasonView::ExecutorNotReady { executor: *kind }
             }
         }
     }
@@ -356,6 +383,36 @@ mod tests {
         assert!(same_name("In Testing", " in testing "));
         assert!(!same_name("É", "é"));
         assert!(!same_name("ai-ready", "ai ready"));
+    }
+
+    #[test]
+    fn wait_reasons_have_a_code_the_panel_translates() {
+        let shapes = [
+            (
+                WaitReason::ProjectNotBound,
+                serde_json::json!({"code": "project_not_bound"}),
+            ),
+            (
+                WaitReason::DirectoryMissing(PathBuf::from("demo-app")),
+                serde_json::json!({"code": "directory_missing", "directory": "demo-app"}),
+            ),
+            (
+                WaitReason::ExecutorNotReady(ExecutorKind::Codex),
+                serde_json::json!({"code": "executor_not_ready", "executor": "codex"}),
+            ),
+        ];
+        for (reason, json) in shapes {
+            assert_eq!(serde_json::to_value(reason.view()).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<WaitReasonView>(json).unwrap(),
+                reason.view()
+            );
+        }
+        // The stored job reason and the CLI keep the English sentence.
+        assert_eq!(
+            WaitReason::ProjectNotBound.describe(),
+            "project is not bound to a local directory"
+        );
     }
 
     #[test]

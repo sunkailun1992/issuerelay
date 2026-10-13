@@ -30,6 +30,7 @@ use issuerelay_core::{
     model::{Issue, Job, JobState},
     runner::{ExitKind, RunLimits},
     store::{NewJob, Store},
+    trigger::WaitReasonView,
 };
 #[cfg(target_os = "macos")]
 use issuerelay_core::{model::ProcessTag, runner, store::Leftover};
@@ -4265,10 +4266,12 @@ async fn the_issue_list_explains_what_each_labeled_issue_is_waiting_for() {
             state: "In Testing".into()
         }
     );
-    assert!(matches!(
+    assert_eq!(
         status_of(&views, "3"),
-        IssueStatus::Waiting { .. }
-    ));
+        IssueStatus::Waiting {
+            reason: WaitReasonView::ProjectNotBound
+        }
+    );
     h.engine.tick().await.unwrap();
     h.settle().await;
     let views = h.engine.issues().await.unwrap();
@@ -4663,6 +4666,39 @@ async fn a_start_that_keeps_failing_is_tried_again_after_a_growing_pause() {
 }
 
 #[tokio::test]
+async fn a_job_held_back_after_a_failed_start_says_when_it_is_tried_again() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert!(h.engine.status().held.is_empty());
+    h.linear.fail_issue_reads("1");
+    let before = chrono::Utc::now();
+    h.engine.dispatch().await.unwrap();
+    let after = chrono::Utc::now();
+    let id = h.latest("1").id;
+    let held = h.engine.status().held;
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].job_id, id);
+    // The first pause is 30 s, given as a wall-clock time the panel can show.
+    let pause = chrono::Duration::seconds(30);
+    assert!(
+        held[0].retry_at >= before + pause && held[0].retry_at <= after + pause,
+        "{held:?}"
+    );
+    let json = serde_json::to_value(h.engine.status()).unwrap();
+    assert_eq!(json["held"][0]["job_id"], id);
+    // A stopped job is no longer listed, and a retry starts afresh.
+    h.engine.cancel_job(id).unwrap();
+    assert!(
+        h.engine.status().held.is_empty(),
+        "a stopped job is not held"
+    );
+    h.engine.retry_job(id).unwrap();
+    assert!(h.engine.status().held.is_empty(), "a retry starts afresh");
+}
+
+#[tokio::test]
 async fn a_retry_is_not_held_back_by_an_earlier_failed_start() {
     let h = Harness::new(1, false);
     h.bind("proj-1", "repo-a");
@@ -4825,9 +4861,25 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
         ),
         (
             IssueStatus::Waiting {
-                reason: "project is not bound to a local directory".into(),
+                reason: WaitReasonView::ProjectNotBound,
             },
-            serde_json::json!({"kind": "waiting", "reason": "project is not bound to a local directory"}),
+            serde_json::json!({"kind": "waiting", "reason": {"code": "project_not_bound"}}),
+        ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::DirectoryMissing {
+                    directory: "demo-app".into(),
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "directory_missing", "directory": "demo-app"}}),
+        ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::ExecutorNotReady {
+                    executor: ExecutorKind::Claude,
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "executor_not_ready", "executor": "claude"}}),
         ),
         (IssueStatus::Paused, serde_json::json!({"kind": "paused"})),
     ];
@@ -4842,6 +4894,10 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
     }))
     .unwrap();
     assert!(!older.draining);
+    assert!(
+        older.held.is_empty(),
+        "a host from before `held` existed sends none"
+    );
 }
 
 #[tokio::test(start_paused = true)]
