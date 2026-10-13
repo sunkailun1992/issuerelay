@@ -11,6 +11,8 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | 单元测试 | `#[test]` / `#[tokio::test]`，写在源文件末尾的 `mod tests` | 配置、触发、调度、提示词、命令拼装、结果识别、解析、格式化 | 每次提交 |
 | 集成测试 | `crates/*/tests/`，加上 `tests/common/` 的假实现 | 运行器 + `fake-agent`、Linear MCP + 假服务端、引擎 + 假 Linear + 脚本化运行器、IPC | 每次提交 |
 | 平台测试 | `#[cfg(windows)]` / `#[cfg(unix)]` 的测试，CI 两个平台都跑 | `.cmd` 包装、命名管道、残留的套接字文件 | 推 main 与开 PR 时 |
+| 前端组件测试 | Vitest + Testing Library（jsdom；公共设置在 `app/src/test-setup.ts`），`pnpm --dir app test` | 面板的组件、页面与数据层，对着内置假后端，不连引擎 | 每次提交；CI 两个平台都跑 |
+| 截图比对 | Playwright，只在本机运行 | 面板各屏的基准截图（只含虚构数据） | 改界面时在本机跑；字体因机器而异，CI 不跑 |
 | 实机验收 | 开发宿主（M2 起是托盘程序）+ 真实 Linear + 真实 Claude / Codex | 完整流程、耗时、失败与超时 | 每个里程碑收尾，写 `docs/gates/` |
 
 ## 单元与集成测试规则
@@ -19,6 +21,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 与时间有关的上限用毫秒级（例如卡住判定 400 毫秒），不写长时间的 `sleep`。
 - 会等异步事件的集成测试给整个测试体套一个总上限（例如 `tests/host.rs` 的 `bounded`，20 秒），启动、停止和等运行的地方再各套较短的上限：CI 没有单个测试的超时，挂住的测试会拖住整个任务。
 - 临时文件一律用 `tempfile`，不写本机固定路径。
+- 应用 crate（`app/src-tauri`）链接了 Tauri：它的测试可执行文件在 Windows 上要带 Common Controls v6 清单，否则一启动就失败（`STATUS_ENTRYPOINT_NOT_FOUND`，tauri-apps/tauri#13419）。`build.rs` 已把清单嵌进该 crate 的所有可执行文件；这一点只有 CI 的 Windows 任务能验证。
 - 每个状态、每个错误分支至少一个测试；修 bug 先写一个能复现它的测试。
 - 测试数据只用虚构值：`DEMO-1`、`Demo Project`、`Jane Doe`、`user-1`、`proj-1`。
 

@@ -5,7 +5,7 @@
 - Issues and pull requests are welcome, in English or Chinese. Ask questions with the Question issue form (Discussions are off and blank issues are disabled).
 - Open an issue first for large changes and new features, and for anything that touches the six Critical areas: executor flags and permission tiers, the prompt's fixed rules, ending the process tree, credential storage and authorization, the IPC method table, and mark-done.
 - Read [AGENTS.md](AGENTS.md) before you code. It is written for AI tools, and its rules apply to people too.
-- Run the four checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test` and `bash scripts/check-secrets.sh --strict` (on Windows the scan needs Git Bash or WSL).
+- Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (the app crate's release build embeds `app/dist`); the panel needs Node.js 22 or later and pnpm. On Windows the scan needs Git Bash or WSL.
 - Write commit messages and PR titles as English Conventional Commits, for example `fix(runner): kill the whole process tree on timeout`. Do not change version numbers; maintainers do that when they release.
 - A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts.
 - This repository is public. Never post tokens, company information or real Linear content in issues, PRs, logs or screenshots.
@@ -40,25 +40,35 @@ rustup toolchain install   # 按 rust-toolchain.toml 装好 1.99.0 及 rustfmt�
 cargo build --workspace
 ```
 
+桌面面板（`app/`）还需要 [Node.js](https://nodejs.org/) 22 以上和 [pnpm](https://pnpm.io/)（版本见 `app/package.json` 的 `packageManager`）：
+
+```bash
+pnpm --dir app install
+pnpm --dir app build   # 应用 crate 的发布构建内嵌 app/dist，所以先构建面板，再跑 cargo
+```
+
 单元测试和集成测试用假执行者和假 Linear MCP，所以不需要 Linear 账号，也不需要安装 Claude Code 或 Codex。
 
 实机验收才需要真实环境：你自己的 Linear 测试项目（不是真实业务项目），加上已登录的 Claude Code 或 Codex。步骤见 [docs/gates/](docs/gates/) 和 [TESTING_SPEC.md](docs/ai-coding/TESTING_SPEC.md)。
 
 ## 提交前检查
 
-提交前在仓库根目录跑这四条，全部通过再推送：
+提交前在仓库根目录跑这六条，全部通过再推送。先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`：应用 crate 的发布构建内嵌 `app/dist`，CI 也是这个顺序（没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板）：
 
 ```bash
+pnpm --dir app build   # 前置步骤，不算在六条里
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+pnpm --dir app lint
+pnpm --dir app test
 bash scripts/check-secrets.sh --strict
 ```
 
 - 密钥扫描必须无输出、退出码为 0。新文件要先 `git add`，扫描才会覆盖它。
 - Windows 上运行 `bash scripts/check-secrets.sh --strict` 需要 Git Bash（随 Git for Windows 安装）或 WSL。
-- CI 在 macOS 和 Windows 上跑前三条（`test (macos-latest)`、`test (windows-latest)`），在 Ubuntu 上跑密钥扫描（`secrets`）。三项都通过才能合并。第一次给本仓库贡献时，GitHub 会先等维护者批准你的 PR 的工作流运行，CI 才会开始；这是仓库设置，耐心等一下即可。
-- 这四条与 [AGENTS.md](AGENTS.md) 的「验证命令」一致。如有出入，以 AGENTS.md 为准。
+- CI 在 macOS 和 Windows 上跑前五条（`test (macos-latest)`、`test (windows-latest)`；先安装前端依赖，`pnpm --dir app build` 排在 cargo 之前），在 Ubuntu 上跑密钥扫描（`secrets`）。三项都通过才能合并。第一次给本仓库贡献时，GitHub 会先等维护者批准你的 PR 的工作流运行，CI 才会开始；这是仓库设置，耐心等一下即可。
+- 这六条与 [AGENTS.md](AGENTS.md) 的「验证命令」一致。如有出入，以 AGENTS.md 为准。
 
 ## 分支、提交与 PR
 

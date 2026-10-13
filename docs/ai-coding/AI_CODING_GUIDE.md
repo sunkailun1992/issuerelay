@@ -15,8 +15,12 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 格式与静态检查 | `cargo fmt --all --check`；`cargo clippy --workspace --all-targets -- -D warnings` |
 | 开发宿主 | `cargo run -p issuerelay-devhost -- login`（或 `api-key`、`logout`、`projects`、`run`） |
 | 命令行 | `cargo run -p issuerelay-cli -- status`（宿主运行时才有响应） |
+| 前端依赖 | `pnpm --dir app install` |
+| 前端构建 | `pnpm --dir app build`（产物 `app/dist`；应用 crate 的发布构建内嵌它，所以排在 cargo 命令之前） |
+| 前端检查与测试 | `pnpm --dir app lint`；`pnpm --dir app test` |
+| 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev` |
 
-工具链由 `rust-toolchain.toml` 固定为 1.99.0。
+工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22 以上，pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 
 ## 3. 分层
 
@@ -95,7 +99,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ## 10. 版本
 
-- 语义化版本，由工作区 `[workspace.package] version` 统一管理。
+- 语义化版本，由工作区 `[workspace.package] version` 统一管理。应用的版本也只在这里：`app/src-tauri/tauri.conf.json` 不写 `version`，安装包的版本和应用对外报告的版本（`CARGO_PKG_VERSION`）都跟随 Cargo；`app/package.json` 的 `version` 只是私有前端包的版本，发布时不动。
 - 只有运行行为变化才升版本；只改文档、测试、规范不升。
 - 版本号只由维护者在发布时升（外部贡献者不改）；升版本时在推送前按 `origin/main` 的最新值顺延，开工时算的号不作数。
 - M3 起推送 `vX.Y.Z` 标签触发发布。

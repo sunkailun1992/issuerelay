@@ -58,12 +58,19 @@
 
 ## 验证命令
 
+前端需要 Node.js 22 以上与 pnpm（版本见 `app/package.json` 的 `packageManager`），先 `pnpm --dir app install`。`pnpm --dir app build` 排在 cargo 命令之前：应用 crate 的发布构建内嵌 `app/dist`，CI 也是这个顺序。没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板。
+
 ```bash
+pnpm --dir app build
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+pnpm --dir app lint
+pnpm --dir app test
 bash scripts/check-secrets.sh --strict
 ```
+
+其中 `pnpm --dir app build` 是前置步骤，其余六条是验证命令，全部通过才算完成。
 
 ## 禁止事项
 

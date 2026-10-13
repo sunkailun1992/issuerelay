@@ -38,13 +38,18 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 开发
 
-需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。
+需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。桌面面板（`app/`）还需要 Node.js 22 以上和 pnpm（版本见 `app/package.json` 的 `packageManager`）。
 
 ```bash
 cargo test --workspace
 cargo run -p issuerelay-devhost -- --help   # 开发用无界面宿主（不发布）；启动不等 Linear（连接在后台进行，结果写进日志），没有登录时也会启动，并提示先登录
 cargo run -p issuerelay-cli -- --help       # 命令行
+pnpm --dir app install                      # 面板的前端依赖
+pnpm --dir app tauri dev                    # 启动桌面应用开发版
+pnpm --dir app dev                          # 只在浏览器里看面板，用假数据
 ```
+
+`pnpm --dir app build` 排在 cargo 命令之前：应用 crate 的发布构建内嵌 `app/dist`（`pnpm --dir app tauri build` 会自己先构建，`tauri dev` 连开发服务器、不需要）。
 
 提交前的检查、代码规范与开发流程见 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding](docs/ai-coding/README.md)。
 

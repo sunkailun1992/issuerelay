@@ -47,6 +47,7 @@
 ## 8. 供应链
 
 - 新依赖用 `cargo add` 引入，并说明用途；`Cargo.lock` 入库。
+- 前端依赖（`app/`）用 `pnpm add` 引入，并说明用途；`app/pnpm-lock.yaml` 入库，CI 用 `pnpm install --frozen-lockfile` 安装，版本更新由 Dependabot 每周检查并延迟 7 天。
 - GitHub Actions 只用官方或广泛使用的 action，并固定主版本。
 - 不在构建脚本或 CI 里下载并执行来历不明的脚本。
 
