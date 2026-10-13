@@ -11,7 +11,9 @@
     "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
-    "icons": "node scripts/icons.mjs"
+    "icons": "node scripts/icons.mjs",
+    "screenshots": "playwright test --update-snapshots",
+    "test:screens": "playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.2",
@@ -32,6 +34,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.0",
     "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.12.2",

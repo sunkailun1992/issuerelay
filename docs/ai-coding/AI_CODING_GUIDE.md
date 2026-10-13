@@ -18,7 +18,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 前端依赖 | `pnpm --dir app install` |
 | 前端构建 | `pnpm --dir app build`（产物 `app/dist`；应用 crate 的发布构建内嵌它，所以排在 cargo 命令之前） |
 | 前端检查与测试 | `pnpm --dir app lint`（含 `tsc` 类型检查）；`pnpm --dir app test` |
-| 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束 |
+| 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对，再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
+| 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束，加 `?lang=zh-CN`（或别的语言代码）让设置里的界面语言是它 |
 
 工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22 以上，pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 
@@ -172,7 +173,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ### 12.7 窗口尺寸
 
-- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。这一点没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
+- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。需求与运行记录的表格、绑定对话框、首次引导在 900×600 与 885×600 下由 `app/tests/screens.spec.ts` 检查（`pnpm --dir app test:screens`，只在本机跑）；其他页面没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
 - 表格每行最多放一个操作按钮（需求编号本身就是「在 Linear 中打开」，`IssueLink`）；长文本允许在词中断行（`wrap-anywhere`），长路径中间省略（`MiddleEllipsis`）。
 - 表单对话框（`BindingDialog`）不高过窗口，字段在框内滚动，按钮始终看得见。
 

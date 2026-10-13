@@ -68,6 +68,12 @@ function mockScenario(): "demo" | "fresh" | "connecting" {
   return scenario === "fresh" || scenario === "connecting" ? scenario : "demo";
 }
 
+/** `?lang=zh-CN` in a browser makes the mock's settings ask for that language (screenshots). */
+function mockLanguage(): string | undefined {
+  const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  return params.get("lang") ?? undefined;
+}
+
 /**
  * The backend the panel uses: the real commands inside Tauri; in a plain browser the mock,
  * loaded with `import()` only then, so the demo data stays out of the app's own start-up code.
@@ -75,5 +81,5 @@ function mockScenario(): "demo" | "fresh" | "connecting" {
 export async function loadBackend(): Promise<Backend> {
   if (isTauri()) return tauriBackend;
   const { createMockBackend } = await import("./mock");
-  return createMockBackend(mockScenario());
+  return createMockBackend(mockScenario(), { language: mockLanguage() });
 }

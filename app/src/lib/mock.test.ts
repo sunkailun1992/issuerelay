@@ -158,6 +158,19 @@ describe("mock backend", () => {
     expect(await backend.startupState()).toEqual({ kind: "ready" });
   });
 
+  test("the language option is the language the settings ask for; without it they follow the system", async () => {
+    for (const scenario of ["demo", "fresh", "connecting"] as const) {
+      expect((await createMockBackend(scenario, { latencyMs: 0 }).settings()).language, scenario).toBe("system");
+      const asked = await createMockBackend(scenario, { latencyMs: 0, language: "zh-CN" }).settings();
+      expect(asked.language, scenario).toBe("zh-CN");
+    }
+    // Only the language changes: a first run stays a first run, an installed demo stays set up.
+    const fresh = await createMockBackend("fresh", { latencyMs: 0, language: "ja" }).settings();
+    expect([fresh.onboarding_completed, fresh.full_access_acknowledged]).toEqual([false, false]);
+    const demo = await createMockBackend("demo", { latencyMs: 0, language: "ja" }).settings();
+    expect([demo.onboarding_completed, demo.full_access_acknowledged]).toEqual([true, true]);
+  });
+
   test("a start still connecting to Linear is ready, and connects on reconnect", async () => {
     const backend = createMockBackend("connecting", { latencyMs: 0 });
     expect(await backend.startupState()).toEqual({ kind: "ready" });

@@ -29,6 +29,24 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 3. 状态是 `Todo`；
 4. 所属 Linear 项目已在 IssueRelay 里绑定了本地目录。
 
+## 界面预览 / Screenshots
+
+桌面面板的两个页面：概览，和一次运行的详情（信息、时间线、原始日志）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+
+*Two pages of the desktop panel: the overview, and the detail of one run (facts, timeline, raw log). The screenshots show only the fictional data of the built-in mock backend; all 48 (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+
+**中文界面**
+
+![概览：监控开关、连接状态、运行中、排队与最近结果](docs/gates/screenshots/m2/zh-CN-light-overview.png)
+
+![运行详情：运行信息、时间线与原始日志](docs/gates/screenshots/m2/zh-CN-light-run-detail.png)
+
+**English interface**
+
+![Overview: the monitoring switch, the Linear connection, running, queued and recent runs](docs/gates/screenshots/m2/en-light-overview.png)
+
+![Run detail: the run's facts, the timeline and the raw log](docs/gates/screenshots/m2/en-light-run-detail.png)
+
 ## 安全须知
 
 - **默认以「完全放开」权限无人值守运行 AI**：它能执行任意命令、使用你电脑上的全部凭据。只在你信任的仓库和需求上使用；可以按项目调低档位。
@@ -47,6 +65,7 @@ cargo run -p issuerelay-cli -- --help       # 命令行
 pnpm --dir app install                      # 面板的前端依赖
 pnpm --dir app tauri dev                    # 启动桌面应用开发版
 pnpm --dir app dev                          # 只在浏览器里看面板，用假数据
+pnpm --dir app test:screens                 # 面板截图比对与版面检查，只在本机运行，不进 CI
 ```
 
 `pnpm --dir app build` 排在 cargo 命令之前：应用 crate 的发布构建内嵌 `app/dist`（`pnpm --dir app tauri build` 会自己先构建，`tauri dev` 连开发服务器、不需要）。

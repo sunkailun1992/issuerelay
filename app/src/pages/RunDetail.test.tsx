@@ -291,6 +291,15 @@ test("the timeline of the demo's run: the session, what the AI said, the command
   expect(within(screen.getByRole("group", { name: "stderr" })).getByText("warning: unused import")).toBeInTheDocument();
 });
 
+test("the model name is not fainter than the muted text around it", async () => {
+  await openRun(12);
+  const model = await screen.findByText("claude-sonnet-5-5");
+  // jsdom has no styles to measure: a fading class is what took this small text under 4.5:1 over the page
+  // (4.2:1 in the dark theme, 2.7:1 in the light one; the screenshots' audit measured both).
+  expect(model.className).not.toMatch(/opacity/);
+  expect(model.parentElement?.className).not.toMatch(/opacity/);
+});
+
 test("the timeline is the tab that is open first, and the raw log is another tab", async () => {
   await openRun(12);
   expect(screen.getByRole("tab", { name: "Timeline" })).toHaveAttribute("aria-selected", "true");

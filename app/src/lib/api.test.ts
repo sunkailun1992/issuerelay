@@ -2,8 +2,9 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import capability from "../../src-tauri/capabilities/default.json";
 
 afterEach(() => {
-  // Also after a failed assertion: the next test must not think it runs inside Tauri.
+  // Also after a failed assertion: the next test must not think it runs inside Tauri, or at an address with a scenario.
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  window.history.replaceState(null, "", "/");
   vi.doUnmock("@tauri-apps/api/core");
   vi.doUnmock("@tauri-apps/api/event");
 });
@@ -15,6 +16,21 @@ describe("backend selection", () => {
     expect(isTauri()).toBe(false);
     const backend = await loadBackend();
     expect((await backend.status()).status.viewer?.name).toBe("Jane Doe");
+  });
+
+  test("?lang= in the address makes the mock's settings ask for that language, ?mock= picks the scenario", async () => {
+    window.history.replaceState(null, "", "/?mock=fresh&lang=zh-CN");
+    vi.resetModules();
+    const { loadBackend } = await import("./api");
+    const settings = await (await loadBackend()).settings();
+    expect(settings.language).toBe("zh-CN");
+    expect(settings.onboarding_completed).toBe(false);
+  });
+
+  test("without ?lang= the mock's settings follow the system", async () => {
+    vi.resetModules();
+    const { loadBackend } = await import("./api");
+    expect((await (await loadBackend()).settings()).language).toBe("system");
   });
 
   test("command errors become BackendError with the backend's text, and codes are recognised", async () => {

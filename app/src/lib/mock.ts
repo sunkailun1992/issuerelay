@@ -13,6 +13,8 @@ import type {
 export interface MockOptions {
   /** The delay of every call: 120 ms by default so loading states show in a browser; tests pass 0. */
   latencyMs?: number;
+  /** The `language` of the settings ("system" or a language code); the screenshots ask for one in the address. */
+  language?: string;
 }
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
@@ -57,7 +59,12 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   let jobs: Job[] = demo ? structuredClone(DEMO_JOBS) : [];
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
-  let settings: Settings = { ...DEFAULT_SETTINGS, onboarding_completed: demo, full_access_acknowledged: demo };
+  let settings: Settings = {
+    ...DEFAULT_SETTINGS,
+    language: options.language ?? DEFAULT_SETTINGS.language,
+    onboarding_completed: demo,
+    full_access_acknowledged: demo,
+  };
   let linear: LinearSetup =
     scenario === "demo" ? { kind: "connected", method: "oauth" } : scenario === "connecting" ? { kind: "connecting" } : { kind: "not_configured" };
   let viewer: Viewer | null = scenario === "demo" ? DEMO_VIEWER : null;

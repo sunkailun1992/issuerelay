@@ -101,7 +101,7 @@ function SessionStart({ model }: { model: string }) {
   return (
     <p className="flex flex-wrap items-baseline gap-x-2 text-muted-foreground">
       <span>{t("timeline.session_started")}</span>
-      {model !== "" && <span className="font-mono text-xs opacity-70">{model}</span>}
+      {model !== "" && <span className="font-mono text-xs">{model}</span>}
     </p>
   );
 }

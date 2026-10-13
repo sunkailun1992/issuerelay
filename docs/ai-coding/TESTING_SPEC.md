@@ -12,7 +12,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | 集成测试 | `crates/*/tests/`，加上 `tests/common/` 的假实现 | 运行器 + `fake-agent`、Linear MCP + 假服务端、引擎 + 假 Linear + 脚本化运行器、IPC | 每次提交 |
 | 平台测试 | `#[cfg(windows)]` / `#[cfg(unix)]` 的测试，CI 两个平台都跑 | `.cmd` 包装、命名管道、残留的套接字文件 | 推 main 与开 PR 时 |
 | 前端组件测试 | Vitest + Testing Library（jsdom；公共设置在 `app/src/test-setup.ts`），`pnpm --dir app test` | 面板的组件、页面与数据层，对着内置假后端，不连引擎 | 每次提交；CI 两个平台都跑 |
-| 截图比对（M2 Task 12 落地，现在还没有） | Playwright，只在本机运行 | 面板各屏的基准截图（只含虚构数据） | 改界面时在本机跑；字体因机器而异，CI 不跑 |
+| 截图比对与版面检查 | Playwright（`app/tests/screens.spec.ts`，用本机装的 Google Chrome），`pnpm --dir app test:screens` | 面板各屏的基准截图（`docs/gates/screenshots/m2/`，只含虚构数据）；最小窗口下的版面（jsdom 没有版面，只能在真浏览器里量） | 改界面时在本机跑；字体因机器而异，CI 不跑 |
 | 实机验收 | 开发宿主（M2 起是托盘程序）+ 真实 Linear + 真实 Claude / Codex | 完整流程、耗时、失败与超时 | 每个里程碑收尾，写 `docs/gates/` |
 
 ## 单元与集成测试规则
@@ -36,6 +36,16 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 测试默认用英文，按英文文案找元素：改英文文案要同步改钉住它的测试；别的语言用 `lang` 参数单独断言。
 - 每个读数据的页面至少有一个用失败的假后端驱动的错误状态测试（`AI_CODING_GUIDE.md` 第 12.6 节）。
 - `styles.test.ts` 以文本读 `styles.css?raw`（Vitest 只给这个文件保留 CSS 内容），核对状态色在两种主题下的对比度、布局常量与字体。
+
+## 截图比对与版面检查（只在本机）
+
+- 跑法：`pnpm --dir app test:screens`。Playwright 自己执行 `pnpm build && pnpm preview --port 4173` 起面板、跑完自己停掉（不借用已在跑的服务）；浏览器是本机装的 Google Chrome（`channel: "chrome"`），不下载浏览器。每屏在 1100×720 下拍浅色与深色各一张，语言用 `zh-CN` 与 `en`（地址的 `?lang=`），数据来自假后端（`?mock=` 选场景），时区固定为 UTC，所以截图里的时间不随机器变。
+- 基准图在 `docs/gates/screenshots/m2/`，名字是 `<语言>-<主题>-<屏>.png`：八个页面加首次引导的第 1、2、4、6 步，共 48 张。基准图里只有假后端的虚构数据；换了文案或假后端的数据，基准图要重拍。
+- 重拍：`pnpm --dir app screenshots`（即 `playwright test --update-snapshots`，不带模式的写法在 Playwright 1.64.0 里等于 `changed`，2026-10-14 核对）只重写与现有基准图不再相符的图，所以改完要看 `git diff --stat` 与新图；改动小于下面说的容差时它不会重写，要整套重拍就用 `pnpm --dir app exec playwright test --update-snapshots=all`。
+- 容差：`maxDiffPixelRatio: 0.01`（一屏 1% 的像素，约 7900 个），加 Playwright 默认的逐像素颜色容差。所以它拦得住版面位移、大块的颜色和内容变化，拦不住很小的改动（一个状态色、一个徽章、几个字）；小改动靠组件测试，窗口尺寸靠同一个文件里的版面检查。
+- 只在本机跑，不进 CI：面板用系统字体，同一页在不同机器上像素不同，CI 的机器上比对不稳定；它能防的是同一台机器上页面的意外变化。换了机器或升了 Chrome 的大版本，先整套重拍再比对。
+- 版面检查（同一个文件，不拍图）：最小窗口 900×600 与带 Windows 滚动条的 885×600 下，需求与运行记录两页没有横向溢出、每个按钮都在容器的右边界之内；绑定对话框（添加与编辑）装得进窗口、「取消」「保存」看得见；首次引导每一步的出口与「上一步 / 下一步」看得见。
+- `app/tests/*.spec.ts` 不是 Vitest 的测试：Vitest 只收 `app/src/**/*.test.{ts,tsx}`；`app/test-results/` 与 `app/playwright-report/` 是输出，git 忽略。
 
 ## 面板与 core 共用的用例表
 
@@ -66,7 +76,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `FakeRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令的输出（计数调用）；`SystemRunner` 本身用 `fake-agent` 测超时 |
 | `Recorder` | `crates/core/src/setup.rs` 的测试模块 | 设置命令的运行：记录每次调用的程序、参数与时间上限，按设定答复输出，或报告无法运行 |
 | `BarrierRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令：要求几条命令同时在运行，检查才能结束（证明它们真的并行） |
-| `createMockBackend`（面板的假后端） | `app/src/lib/mock.ts`，数据在 `app/src/lib/mock-fixtures.ts` | 面板的 Tauri 命令与事件（`Backend`）：组件测试、浏览器开发与截图共用，规则与报错文本照引擎；数据全部虚构，后续测试依赖的确切字符串都定义在 `mock-fixtures.ts`；场景 `demo`、`fresh`（首次运行）、`connecting`（首次连接 Linear 还没结束） |
+| `createMockBackend`（面板的假后端） | `app/src/lib/mock.ts`，数据在 `app/src/lib/mock-fixtures.ts` | 面板的 Tauri 命令与事件（`Backend`）：组件测试、浏览器开发与截图共用，规则与报错文本照引擎；数据全部虚构，后续测试依赖的确切字符串都定义在 `mock-fixtures.ts`；场景 `demo`、`fresh`（首次运行）、`connecting`（首次连接 Linear 还没结束）；选项 `latencyMs`（每个调用的延迟）与 `language`（写进设置的 `language`，浏览器里地址的 `?lang=` 传给它，截图用） |
 
 和时间有关的缓存测试用 tokio 的暂停时钟（`#[tokio::test(start_paused = true)]` 加 `tokio::time::advance`），不真的等待。
 
