@@ -40,8 +40,11 @@ fn owned(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 
-/// The arguments for `action`, after the executor's program. `cli` is IssueRelay's
-/// command-line program, which registering the control server needs.
+/// The arguments for `action`, after the executor's program: fixed literals, except that
+/// registering the control server puts `cli`, IssueRelay's own command-line program, after `--`.
+/// `cli` must be an absolute path, valid Unicode (the executor stores it and starts it from any
+/// folder); anything else, or no `cli` when registering, is an error. The other actions ignore
+/// `cli`.
 pub fn arguments(action: SetupAction, cli: Option<&Path>) -> Result<Vec<String>> {
     use ExecutorKind::{Claude, Codex};
     Ok(match action {
@@ -176,9 +179,10 @@ pub async fn run(
 }
 
 /// Whether IssueRelay's control server is registered with the executor at `program`:
-/// `mcp get issuerelay` exits 0 only then, and exits non-zero when it is not (measured with
-/// Claude Code 2.1.285 and codex-cli 0.159.2 on 2026-10-13). A command that was ended by a signal,
-/// or that cannot run to completion, says nothing about the registration: it is an error.
+/// `mcp get issuerelay` exits 0 only then, and exits non-zero when it is not (Claude Code
+/// 2.1.285 and codex-cli 0.159.2, as recorded in the M2 core plan (2026-10-13)). A command that
+/// was ended by a signal, or that cannot run to completion, says nothing about the registration:
+/// it is an error.
 pub async fn control_server_registered(program: &Path, runner: &dyn CommandRunner) -> Result<bool> {
     let args = ["mcp", "get", CONTROL_SERVER_NAME];
     let command = format!("{} {}", program.display(), args.join(" "));
@@ -455,6 +459,21 @@ mod tests {
     async fn a_failure_shows_both_streams_when_both_print() {
         let error = failure_of(Recorder::new(1, "out text", "err text")).await;
         assert_eq!(shown(&error), "stderr: err text; stdout: out text");
+    }
+
+    #[tokio::test]
+    async fn two_long_streams_are_each_cut_to_half_the_limit_and_marked() {
+        let error = failure_of(Recorder::new(1, &"o".repeat(1000), &"e".repeat(1000))).await;
+        assert_eq!(
+            shown(&error),
+            format!("stderr: {}…; stdout: {}…", "e".repeat(200), "o".repeat(200))
+        );
+        // A short stream next to a long one keeps all of its text and gets no mark.
+        let error = failure_of(Recorder::new(1, "out text", &"e".repeat(1000))).await;
+        assert_eq!(
+            shown(&error),
+            format!("stderr: {}…; stdout: out text", "e".repeat(200))
+        );
     }
 
     #[tokio::test]

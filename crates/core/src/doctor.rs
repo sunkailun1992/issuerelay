@@ -26,10 +26,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
-use crate::env::{ExecEnv, SharedEnv};
+use crate::env::{ExecEnv, SharedEnv, Sources};
 use crate::executor;
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
-use crate::text::strip_ansi;
+use crate::text::{is_invisible, strip_ansi};
 use crate::trigger::same_name;
 
 /// What a finished check command printed and how it exited.
@@ -92,18 +92,17 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 /// Runs the real check commands, each under its own time limit: by default 60 s for
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
 /// the limit from its caller instead, which the one-click setup commands do (a login waits up to
-/// five minutes for the browser). A command runs in the
-/// user's home directory, in a process group of its own (Windows: a Job Object, and without a
-/// console window, like the executors), with the shared environment (the PATH and proxy the
-/// executors will get). A check is done when the command's own process exits: whatever it left
-/// running in its group is ended then (`claude mcp list` starts stdio MCP servers of its own,
-/// which inherit its pipes), and the output is what the pipes delivered up to `PIPE_DRAIN` after
-/// that. A pipe that cannot be read fails the call: half of an `mcp list` must not pass for the
-/// whole answer. A command still running at its limit is killed together with everything it
-/// started and the call fails with `timed out after 20s` (the limit as `Duration` prints it).
-/// Every command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not
-/// colour what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers
-/// strip colour codes too).
+/// five minutes for the browser). A command runs in the user's home directory, in a process
+/// group of its own (Windows: a Job Object, and without a console window, like the executors),
+/// with the shared environment (the PATH and proxy the executors will get). A check is done when
+/// the command's own process exits: whatever it left running in its group is ended then
+/// (`claude mcp list` starts stdio MCP servers of its own, which inherit its pipes), and the
+/// output is what the pipes delivered up to `PIPE_DRAIN` after that. A pipe that cannot be read
+/// fails the call: half of an `mcp list` must not pass for the whole answer. A command still
+/// running at its limit is killed together with everything it started and the call fails with
+/// `timed out after 20s` (the limit as `Duration` prints it). Every command also gets
+/// `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they print
+/// into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -292,7 +291,8 @@ pub struct ExecutorReport {
     pub kind: ExecutorKind,
     /// Where the executable was found; `None` when it is not installed.
     pub program: Option<PathBuf>,
-    /// First line of `--version`, when that ran.
+    /// The first line of `--version` that shows anything, cleaned like the problems, when that
+    /// ran.
     pub version: Option<String>,
     pub logged_in: bool,
     /// Linear's MCP server is configured, authorized and connected in this executor.
@@ -323,10 +323,11 @@ pub async fn check_executor(
 }
 
 /// `check_executor`, plus whether every check gave a usable answer. A check gives none when its
-/// command could not run (it timed out or did not start), when the login check's output cannot
-/// be read, or when `mcp list` exited non-zero without showing any Linear line (it crashed). A
-/// negative answer that can be read ("not logged in", no Linear server) is usable.
-/// `SystemReadiness` retries an incomplete result sooner.
+/// command could not run (it timed out or did not start, or what it printed could not be read),
+/// when the login check's output cannot be understood, or when `mcp list` exited non-zero
+/// without showing any Linear line (it crashed). A negative answer that can be read ("not
+/// logged in", no Linear server) is usable. `SystemReadiness` retries an incomplete result
+/// sooner.
 async fn check_executor_detailed(
     kind: ExecutorKind,
     program: Option<PathBuf>,
@@ -358,11 +359,9 @@ async fn check_executor_detailed(
     );
     let mut complete = true;
     match version {
+        // Cleaned like the problems: the version reaches IPC, `--json` and the panel too.
         Ok(o) if o.code == Some(0) => {
-            report.version = strip_ansi(&o.stdout)
-                .lines()
-                .next()
-                .map(|l| l.trim().to_string())
+            report.version = Some(first_line(&o.stdout)).filter(|line| !line.is_empty())
         }
         Ok(o) => report.problems.push(with_detail(
             format!("`{name} --version` failed"),
@@ -579,12 +578,13 @@ fn exit_code_text(code: Option<i32>) -> String {
     code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
 }
 
-/// Command output as a problem may show it: colour codes and other control characters
-/// dropped, at most `MAX_PROBLEM_TEXT` characters.
+/// Command output as a problem or the version may show it: colour codes, other control
+/// characters and the characters that reorder or hide text (`text::is_invisible`) dropped, at
+/// most `MAX_PROBLEM_TEXT` characters.
 fn clean(text: &str) -> String {
     let text: String = strip_ansi(text)
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible(*c))
         .collect();
     text.trim().chars().take(MAX_PROBLEM_TEXT).collect()
 }
@@ -630,9 +630,10 @@ impl WorkspaceReport {
 /// Looks for the trigger label and, in the teams of the bound projects, the four statuses
 /// IssueRelay moves issues through. A team that never uses IssueRelay need not have them. Every
 /// team is looked at before any project is bound, and also when no bound project names a team
-/// (Linear sent `teams` as null or empty, or no longer lists the project): with nothing to narrow
-/// the check down to, no team at all would report a workspace with missing statuses as fine.
-/// Names compare like everywhere else (`same_name`). Errors when Linear cannot be queried.
+/// that Linear lists (Linear sent `teams` as null or empty, no longer lists the project, or no
+/// longer lists its teams, as it leaves out archived ones): with nothing to narrow the check down
+/// to, no team at all would report a workspace with missing statuses as fine. Names compare like
+/// everywhere else (`same_name`). Errors when Linear cannot be queried.
 pub async fn check_workspace(
     api: &dyn LinearApi,
     names: &TriggerNames,
@@ -653,7 +654,8 @@ pub async fn check_workspace(
             .filter(|p| bound.contains(p.id.as_str()))
             .flat_map(|p| p.team_ids)
             .collect();
-        if !team_ids.is_empty() {
+        // Narrowed only when that leaves a team to check.
+        if teams.iter().any(|team| team_ids.contains(&team.id)) {
             teams.retain(|team| team_ids.contains(&team.id));
         }
     }
@@ -754,8 +756,8 @@ struct CachedCheck {
 /// Finds where an executor is installed; `None` when it is not.
 type FindProgram = Arc<dyn Fn(ExecutorKind) -> Option<PathBuf> + Send + Sync>;
 
-/// Works out the environment executors get, again.
-type RefreshEnv = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ExecEnv> + Send>> + Send + Sync>;
+/// Reads the sources of the executors' environment again (`env::read_sources`).
+type RefreshEnv = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Sources> + Send>> + Send + Sync>;
 
 /// Checks the real `claude` / `codex` on PATH and caches what it finds, one entry per executor.
 /// An entry whose checks all gave a usable answer is reused for `ttl`; one with a check that
@@ -783,11 +785,12 @@ impl SystemReadiness {
     /// `env` is shared with the job runner: executors are looked up on its PATH, check commands
     /// run with it, and every fresh check resolves it again first.
     pub fn new(ttl: Duration, env: SharedEnv) -> Self {
-        Self::with_refresh(ttl, env, Arc::new(|| Box::pin(crate::env::resolve())))
+        Self::with_refresh(ttl, env, Arc::new(|| Box::pin(crate::env::read_sources())))
     }
 
-    /// `new` with another way to resolve the environment again; the tests use it so that no login
-    /// shell runs. The check commands and the lookup of the executables are wired as `new` does.
+    /// `new` with another way to read the sources of the environment again; the tests use it so
+    /// that no login shell runs. The check commands and the lookup of the executables are wired
+    /// as `new` does.
     fn with_refresh(ttl: Duration, env: SharedEnv, refresh_env: RefreshEnv) -> Self {
         let lookup = env.clone();
         Self::with_parts(
@@ -864,10 +867,15 @@ impl ReadinessProbe for SystemReadiness {
         // refresh instead of starting a second round of commands.
         let mut cache = self.cache.lock().await;
         // A fresh check looks at the PATH and proxy again too, before the executors are found:
-        // installing `claude` or changing the proxy shows up without restarting the host.
+        // installing `claude` or changing the proxy shows up without restarting the host (Unix:
+        // the login shell is read again; Windows: the registry). A source that cannot be read
+        // this time keeps what it gave before (`env::combine`), so a slow rc file does not make
+        // a good environment worse.
         if fresh {
-            let resolved = (self.refresh_env)().await;
-            *self.env.write().unwrap_or_else(PoisonError::into_inner) = resolved;
+            let sources = (self.refresh_env)().await;
+            let mut env = self.env.write().unwrap_or_else(PoisonError::into_inner);
+            let resolved = crate::env::combine(&sources, Some(&env));
+            *env = resolved;
         }
         let now = Instant::now();
         let due = |kind: ExecutorKind| match cache.get(&kind) {
@@ -1078,6 +1086,30 @@ mod tests {
         assert!(report.ready(), "{report:?}");
         assert_eq!(report.version.as_deref(), Some("2.1.285 (Claude Code)"));
         assert!(report.problems.is_empty());
+    }
+
+    // The version reaches IPC, `--json` and the panel like the problems do, so it is cleaned the
+    // same way: a control character or a direction override must not come through.
+    #[tokio::test]
+    async fn the_version_is_cleaned_like_the_problems() {
+        let replies = |version: &str| {
+            [
+                ("--version", out(0, version)),
+                ("auth status", out(0, r#"{"loggedIn": true}"#)),
+                ("mcp list", out(0, CLAUDE_OK)),
+            ]
+        };
+        let (report, _) = detailed(
+            ExecutorKind::Claude,
+            &replies("2.1.285\u{7}\u{202e} (Claude\u{200b} Code)\nsecond line\n"),
+        )
+        .await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285 (Claude Code)"));
+        // The first line that shows anything is the version; nothing at all is no version.
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\n\u{1b}[0m\n2.1.285\n")).await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285"));
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\u{202e}\n")).await;
+        assert_eq!(report.version, None);
     }
 
     #[tokio::test]
@@ -1402,6 +1434,8 @@ mod tests {
         // A colour code goes away whole; any other control character is dropped on its own.
         assert_eq!(clean("  a\u{1b}[31mb\tc\r  "), "abc");
         assert_eq!(clean("a\u{1b}xb"), "axb");
+        // So are the characters that reorder or hide text (`text::is_invisible`).
+        assert_eq!(clean("a\u{202e}b\u{200b}c\u{2066}d"), "abcd");
         assert_eq!(clean(&"x".repeat(300)).chars().count(), 200);
         // The limit counts characters, not bytes.
         assert_eq!(clean(&"—".repeat(300)).chars().count(), 200);
@@ -2140,9 +2174,20 @@ mod tests {
         )
     }
 
-    /// A `refresh_env` that resolves to the host's environment as it is.
+    /// What a read of the environment's sources finds when the login shell gives `shell` and
+    /// nothing else is set.
+    fn read_with_shell(shell: Result<crate::env::Vars, String>) -> Sources {
+        Sources {
+            host: crate::env::Vars::new(),
+            shell,
+            system_proxy: Ok(Vec::new()),
+            system_path: Ok((None, None)),
+        }
+    }
+
+    /// A `refresh_env` that finds nothing beyond the host's own environment.
     fn inherited() -> RefreshEnv {
-        Arc::new(|| Box::pin(async { ExecEnv::inherit() }))
+        Arc::new(|| Box::pin(async { read_with_shell(Ok(crate::env::Vars::new())) }))
     }
 
     fn kinds(reports: &[ExecutorReport]) -> Vec<ExecutorKind> {
@@ -2342,11 +2387,9 @@ mod tests {
             env.clone(),
             Arc::new(|| {
                 Box::pin(async {
-                    ExecEnv {
-                        path: Some("/opt/demo/bin".into()),
-                        path_source: EnvSource::LoginShell,
-                        ..ExecEnv::inherit()
-                    }
+                    read_with_shell(Ok([("PATH".to_string(), "/opt/demo/bin".to_string())]
+                        .into_iter()
+                        .collect()))
                 })
             }),
         );
@@ -2366,10 +2409,68 @@ mod tests {
             readiness.env().unwrap().path.as_deref(),
             Some("/opt/demo/bin")
         );
+        assert_eq!(readiness.env().unwrap().path_source, EnvSource::LoginShell);
         assert_eq!(
             env.read().unwrap().path.as_deref(),
             Some("/opt/demo/bin"),
             "the job runner sees it too"
+        );
+    }
+
+    // One slow rc file during a re-check must not swap a good login-shell PATH for the host's
+    // own (launchd's minimal one for an app started from Finder): the executors would read as not
+    // installed, and that complete answer would be cached for the whole TTL.
+    #[tokio::test]
+    async fn a_source_that_fails_on_a_later_check_keeps_what_it_gave_before() {
+        use crate::env::EnvSource;
+        use std::sync::atomic::AtomicUsize;
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        let readiness = SystemReadiness::with_parts(
+            TTL,
+            FAILED_CHECK_TTL,
+            Arc::new(runner(&[])),
+            Arc::new(|_| None),
+            ExecEnv::inherit().shared(),
+            Arc::new(move || {
+                let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+                Box::pin(async move {
+                    read_with_shell(if first {
+                        Ok([
+                            ("PATH".to_string(), "/opt/demo/bin".to_string()),
+                            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
+                        ]
+                        .into_iter()
+                        .collect())
+                    } else {
+                        Err("/bin/zsh did not finish within 10s".to_string())
+                    })
+                })
+            }),
+        );
+        readiness.executor_reports(true).await;
+        let first = readiness.env().unwrap();
+        assert_eq!(first.path.as_deref(), Some("/opt/demo/bin"));
+        assert!(first.problems.is_empty(), "{:?}", first.problems);
+
+        readiness.executor_reports(true).await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "each fresh check reads again"
+        );
+        let second = readiness.env().unwrap();
+        assert_eq!(second.path, first.path, "the earlier PATH is kept");
+        assert_eq!(second.path_source, EnvSource::LoginShell);
+        assert_eq!(second.proxy, first.proxy, "and the earlier proxy");
+        assert!(
+            second
+                .problems
+                .iter()
+                .any(|p| p.contains("login shell") && p.contains("did not finish within 10s")),
+            "the failure is still reported: {:?}",
+            second.problems
         );
     }
 
@@ -2413,21 +2514,27 @@ mod tests {
         // `--version` shows what reached the command; the other commands print nothing.
         std::fs::write(
             &claude,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"fake-claude $ISSUERELAY_TEST_MARKER\"; fi\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"fake-claude $HTTPS_PROXY\"; fi\n",
         )
         .unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let resolved = ExecEnv {
-            path: Some(dir.path().to_string_lossy().into_owned()),
-            proxy: vec![("ISSUERELAY_TEST_MARKER".into(), "resolved".into())],
-            ..ExecEnv::inherit()
-        };
+        // What the login shell gives: the folder with the fake `claude` and a proxy. The host's
+        // own variables are left out, so a proxy the machine running the test sets cannot win.
+        let shell: crate::env::Vars = [
+            (
+                "PATH".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+            ),
+            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let probe = SystemReadiness::with_refresh(
             TTL,
             ExecEnv::inherit().shared(),
             Arc::new(move || {
-                let resolved = resolved.clone();
-                Box::pin(async move { resolved })
+                let shell = shell.clone();
+                Box::pin(async move { read_with_shell(Ok(shell)) })
             }),
         );
         // Executing a script right after writing it can fail with `ETXTBSY` when another test
@@ -2442,7 +2549,7 @@ mod tests {
         }
         assert_eq!(
             reports[0].version.as_deref(),
-            Some("fake-claude resolved"),
+            Some("fake-claude http://127.0.0.1:9"),
             "{reports:?}"
         );
         assert_eq!(reports[0].program, Some(claude));

@@ -26,7 +26,10 @@
 //! async mutexes held while their task is joined, and nothing a task does takes them, so a stop
 //! that waits for the runs holds neither and another stop can take them. The lock for the user's
 //! changes is held across their awaits, and `stop` never takes it.
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -236,8 +239,12 @@ struct Inner {
     /// loop and its runs have ended.
     ipc_shutdown: CancellationToken,
     worker: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Cancelled when the engine's task has ended, however it ended (a panic included), so that a
+    /// stop waiting for the runs can tell that nothing will free a place the task left taken.
+    worker_ended: CancellationToken,
     ipc: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
-    /// Why the engine's task died, once `stop` has joined it and found it so.
+    /// Why the engine's task died, once `stop` has joined it and found it so, or why stopping the
+    /// engine panicked.
     engine_failure: Mutex<Option<String>>,
     dead_engine_wait: Duration,
 }
@@ -301,6 +308,30 @@ async fn join<T>(
     Some(result)
 }
 
+/// Runs `future`, turning a panic while it is polled into `Err` with the panic's payload, as
+/// `std::panic::catch_unwind` does for a closure. A future that panicked is not polled again; it
+/// is dropped when this returns.
+async fn catch_unwind<F: Future>(future: F) -> std::thread::Result<F::Output> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(move |cx| {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+            Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    })
+    .await
+}
+
+/// What a panic said, when it said it with a string (`panic!` always does).
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
 /// Tells the runs in progress to stop, through the engine's public calls. `run_forever` does this
 /// itself on its way out; this is for when its task failed before it got there.
 fn stop_runs(engine: &Engine) {
@@ -358,10 +389,16 @@ impl Host {
         let ipc = tokio::spawn(server.run(engine.clone(), ipc_shutdown.clone()));
         // `run_forever`, not a bare loop: it ends the executors an earlier host left running
         // before anything new starts.
+        let worker_ended = CancellationToken::new();
         let worker = {
             let engine = engine.clone();
             let shutdown = engine_shutdown.clone();
-            tokio::spawn(async move { engine.run_forever(shutdown).await })
+            // Dropped with the task's future, also while a panic unwinds it, and then cancels.
+            let ended = worker_ended.clone().drop_guard();
+            tokio::spawn(async move {
+                let _ended = ended;
+                engine.run_forever(shutdown).await
+            })
         };
         let host = Host {
             inner: Arc::new(Inner {
@@ -378,6 +415,7 @@ impl Host {
                 engine_shutdown,
                 ipc_shutdown,
                 worker: tokio::sync::Mutex::new(Some(worker)),
+                worker_ended,
                 ipc: tokio::sync::Mutex::new(Some(ipc)),
                 engine_failure: Mutex::new(None),
                 dead_engine_wait: parts.dead_engine_wait.unwrap_or(DEAD_ENGINE_WAIT),
@@ -395,7 +433,11 @@ impl Host {
         &self.inner.engine
     }
 
-    /// The executors' environment as last resolved.
+    /// The executors' environment as last resolved, with the real values: a proxy URL in it keeps
+    /// its user name and password. It is for starting processes only (the one-click setup
+    /// commands run with it through `SystemRunner::with_env`); never show it or send it to the
+    /// panel. `Engine::doctor` gives the form to show, with the proxy values masked
+    /// (`ExecEnv::proxy_for_display`, which `ExecEnv`'s `Debug` uses too).
     pub fn env(&self) -> ExecEnv {
         self.inner
             .env
@@ -528,14 +570,50 @@ impl Host {
     ///
     /// If the engine's task died nobody has told the runs to stop, so the host does (through the
     /// engine's public calls) and waits for them for a limited time only, then lets go of the
-    /// lock anyway. `engine_failure` says that this happened.
+    /// lock anyway; a `WaitForRuns` that is waiting when the task dies goes the same way.
+    /// `engine_failure` says that this happened. Even a panic while the engine is stopped does not
+    /// keep the lock: the IPC server is stopped all the same.
     pub async fn stop(&self, mode: StopMode) {
+        // A task that died in a section holding one of the engine's std locks (the store, the
+        // running set) poisoned it, and the engine's calls in `stop_engine` that take it panic.
+        // The server below must stop whatever happens there: its lock keeps every later host out.
+        // So that part runs under `catch_unwind`. What follows touches only the IPC token and the
+        // IPC task slot, never the engine, so going on after the panic cannot meet the state the
+        // panic left half changed, and a later `stop` still finds every slot as this one left it
+        // (a tokio mutex is released, not poisoned, when a panic unwinds through its guard).
+        if let Err(panic) = catch_unwind(self.stop_engine(mode)).await {
+            let why = format!("stopping the engine panicked: {}", panic_message(&*panic));
+            tracing::error!("{why}; the IPC server is stopped all the same");
+            self.inner
+                .engine_failure
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert(why);
+        }
+        // Last: the lock goes with the server, and nothing is left for a second host to disturb.
+        self.inner.ipc_shutdown.cancel();
+        match join(&self.inner.ipc, |_| {}).await {
+            Some(Ok(Err(error))) => {
+                tracing::warn!(error = %format!("{error:#}"), "the IPC server stopped with an error")
+            }
+            Some(Err(error)) => tracing::warn!(%error, "the IPC server task failed"),
+            Some(Ok(Ok(()))) | None => {}
+        }
+    }
+
+    /// The part of `stop` before the IPC server: everything but the lock.
+    async fn stop_engine(&self, mode: StopMode) {
         let engine = &self.inner.engine;
         if mode == StopMode::WaitForRuns {
             // Nothing is locked while this waits: a `StopRuns` that comes meanwhile takes the
-            // task slots below.
+            // task slots below. The wait also ends when the engine's task has ended: if it died
+            // and left a place in the running set taken, nothing would ever free it, and the
+            // branch for a dead engine below waits for a limited time only.
             engine.set_draining(true);
-            engine.wait_idle().await;
+            tokio::select! {
+                () = engine.wait_idle() => {}
+                () = self.inner.worker_ended.cancelled() => {}
+            }
         }
         // `run_forever` tells the runs still in progress to stop on its way out.
         self.inner.engine_shutdown.cancel();
@@ -565,20 +643,12 @@ impl Host {
         } else {
             engine.wait_idle().await;
         }
-        // Last: the lock goes with the server, and nothing is left for a second host to disturb.
-        self.inner.ipc_shutdown.cancel();
-        match join(&self.inner.ipc, |_| {}).await {
-            Some(Ok(Err(error))) => {
-                tracing::warn!(error = %format!("{error:#}"), "the IPC server stopped with an error")
-            }
-            Some(Err(error)) => tracing::warn!(%error, "the IPC server task failed"),
-            Some(Ok(Ok(()))) | None => {}
-        }
     }
 
     /// Why the engine's task died, once `stop` has found it so: nothing polled Linear or started
     /// runs after that, so the program that runs the host should say so and end with a failure.
-    /// `None` while the engine ran until it was stopped.
+    /// Also set when stopping the engine panicked. `None` while the engine ran until it was
+    /// stopped.
     pub fn engine_failure(&self) -> Option<String> {
         self.inner
             .engine_failure
@@ -591,6 +661,10 @@ impl Host {
     /// and then tries a failed connection again every `every` until it works, the user changes the
     /// connection, or the host stops. Each attempt is `reconnect`, so it gives way to the user's
     /// changes and to attempts that began later; only `ConnectFailed` is retried.
+    ///
+    /// The stop is looked at first, every time (`biased`): an attempt reads the stored
+    /// credentials from the keychain, which on macOS can wait for a prompt nobody answers, so a
+    /// stop that came right after the start, before the first attempt, must not begin one.
     async fn connect_in_the_background(self, every: Duration) {
         let shutdown = &self.inner.engine_shutdown;
         let mut first = true;
@@ -598,6 +672,7 @@ impl Host {
             if first || matches!(self.linear_setup(), LinearSetup::ConnectFailed { .. }) {
                 first = false;
                 let setup = tokio::select! {
+                    biased;
                     _ = shutdown.cancelled() => return,
                     setup = self.reconnect() => setup,
                 };
@@ -606,6 +681,7 @@ impl Host {
                 }
             }
             tokio::select! {
+                biased;
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(every) => {}
             }
@@ -680,6 +756,23 @@ mod tests {
             join(&cell, |_| {}).await.is_none(),
             "and nothing is left to wait for"
         );
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_a_future_comes_back_as_an_error() {
+        assert_eq!(catch_unwind(async { 7 }).await.unwrap(), 7);
+        // A panic after the future has waited once, as the engine's calls in `stop` would.
+        let panicked = catch_unwind(async {
+            tokio::task::yield_now().await;
+            panic!("store lock: poisoned");
+        })
+        .await;
+        let payload = panicked.unwrap_err();
+        assert_eq!(panic_message(&*payload), "store lock: poisoned");
+        let formatted = catch_unwind(async { panic!("job {} failed", 3) }).await;
+        assert_eq!(panic_message(&*formatted.unwrap_err()), "job 3 failed");
+        let other = catch_unwind(async { std::panic::panic_any(7_u8) }).await;
+        assert_eq!(panic_message(&*other.unwrap_err()), "no message");
     }
 
     #[test]

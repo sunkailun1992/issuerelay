@@ -347,7 +347,34 @@ async fn bound_projects_that_name_no_team_leave_every_team_checked() {
 }
 
 #[tokio::test]
-async fn bound_projects_that_linear_no_longer_lists_leave_every_team_checked() {
+async fn a_bound_project_whose_teams_linear_no_longer_lists_leaves_every_team_checked() {
+    // Linear's team list leaves archived teams out, while a project can still name one. Narrowing
+    // the check to teams that are not listed would check no team at all and pass a workspace with
+    // missing statuses.
+    let mut workspace = two_teams(None);
+    workspace.projects = vec![
+        ("proj-1", vec!["team-archived"]),
+        ("proj-2", vec!["team-2"]),
+    ];
+    let names = TriggerNames::default();
+    let report = check_workspace(&workspace, &names, &[binding_to("proj-1")])
+        .await
+        .unwrap();
+    assert_eq!(report.teams_checked, ["Demo", "Beta"]);
+    assert_eq!(
+        report.missing_states,
+        ["Beta: In Progress", "Beta: In Testing"]
+    );
+    assert!(!report.ok(), "{report:?}");
+    // Next to a team that is listed, that team is checked alone.
+    let both = [binding_to("proj-1"), binding_to("proj-2")];
+    let report = check_workspace(&workspace, &names, &both).await.unwrap();
+    assert_eq!(report.teams_checked, ["Beta"]);
+}
+
+#[tokio::test]
+async fn bound_projects_that_linear_no_longer_lists_or_lists_without_a_team_leave_every_team_checked()
+ {
     let names = TriggerNames::default();
     let gone = [binding_to("proj-gone"), binding_to("proj-also-gone")];
     let report = check_workspace(&two_teams(None), &names, &gone)

@@ -13,10 +13,11 @@
 //! Linear, so every write that follows such a wait is conditional on the row still being in the
 //! state it was read in (a start's backoff: on the job not having been retried meanwhile). The
 //! Linear connection can be replaced at any time too (`set_linear`): a poll, a dispatch and the
-//! issue list each take the connection once and use only that one. Every await of a cycle comes
-//! before the synchronous blocks that decide and write, so a cycle can be dropped at any of its
-//! awaits without leaving anything half done: a stop does not wait for it (`run_forever`).
-//! Events are sent with no lock held, except by `emit_job`, which reads a job's row and sends it
+//! issue list each take the connection once and use only that one. Each decide-and-write block of
+//! a cycle is synchronous, and every write after an await is conditional, so a cycle can be
+//! dropped at any of its awaits without leaving anything half done: a stop does not wait for it
+//! (`run_forever`). Events are sent with no std lock held (a poll and a dispatch send theirs while
+//! they hold the async cycle lock), except by `emit_job`, which reads a job's row and sends it
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
 use std::{
@@ -494,7 +495,7 @@ impl Engine {
     /// Announces the job as it is stored now. The row is read and sent under one store guard, so
     /// two changes of one job announced from different tasks arrive in the order they were stored
     /// and the last event carries the newest row. This is the one place that sends while holding
-    /// a lock: `broadcast::Sender::send` never blocks and runs no subscriber code. It takes the
+    /// a std lock: `broadcast::Sender::send` never blocks and runs no subscriber code. It takes the
     /// store lock, so the caller must not hold it; a poisoned lock is used as it is, because
     /// `abandon_run` calls this while unwinding.
     fn emit_job(&self, job_id: i64) {
@@ -733,8 +734,14 @@ impl Engine {
 
     /// Deletes run logs past the retention settings (`log_retention_days`, `log_max_total_mb`),
     /// never the log of a run in progress. The background loop calls it when it starts and every
-    /// `LOG_CLEANUP_INTERVAL`.
+    /// `LOG_CLEANUP_INTERVAL`, outside its cycles.
+    ///
+    /// It holds the cycle lock until it is done, so no run starts while it works: a new run, or a
+    /// retried job that reuses the `<id>.jsonl` of its earlier attempt, could otherwise have its
+    /// log removed right after it began. The caller must not hold that lock, and should not drop
+    /// the call before it returns: the removal on the blocking pool goes on without the lock then.
     pub async fn clean_logs(&self) -> Result<CleanupReport> {
+        let _no_run_starts = self.inner.cycle.lock().await;
         let settings = self.config().settings;
         let in_use: HashSet<PathBuf> = self
             .store()
@@ -1802,9 +1809,9 @@ impl Engine {
         // ready together, `select!` may pick either, and no new cycle may start runs then.
         while !shutdown.is_cancelled() {
             // A check may wait for Linear for up to 30 s a call; a stop does not wait for it. The
-            // cycle is dropped at its current await, which leaves nothing half done: every await
-            // of a cycle comes before the synchronous blocks that decide and write, and every
-            // write after a wait is conditional (see the module doc).
+            // cycle is dropped at its current await, which leaves nothing half done: each
+            // decide-and-write block is synchronous, and every write after an await is
+            // conditional (see the module doc).
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,

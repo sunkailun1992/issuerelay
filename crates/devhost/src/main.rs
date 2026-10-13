@@ -327,25 +327,49 @@ async fn run(command: Command) -> Result<()> {
                 "stopping: waiting for running jobs to end (press Ctrl+C again to stop at once)"
             );
             // The first signal stops the runs and waits until their results are recorded. A second
-            // one returns at once: the runtime shuts down after `main` returns, and the guard of
-            // each run ends its process tree.
+            // one returns at once: the runtime shuts down after `run` returns, the guard of each
+            // run ends its process tree, and a blocked keychain call is not waited for
+            // (`block_on_bounded`). Either way an engine that had died is a failure.
             tokio::select! {
                 () = host.stop(StopMode::StopRuns) => engine_outcome(host.engine_failure()),
                 second = shutdown_signal() => {
                     second.context("cannot listen for a second stop signal")?;
                     tracing::warn!("second stop signal: ending the remaining runs now");
-                    Ok(())
+                    engine_outcome(host.engine_failure())
                 }
             }
         }
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// How long the runtime may take to shut down once `run` has returned. Dropping the tasks is
+/// quick (each run's guard ends its process tree as it is dropped); what is still running on the
+/// blocking pool after this is left behind, and ends with the process.
+const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
+
+/// Runs `future` on a new multi-threaded runtime and shuts the runtime down, waiting at most
+/// `shutdown` for its blocking pool. A dropped runtime would wait for every blocking call still
+/// running, and a keychain read can wait for a macOS prompt nobody answers: the devhost would not
+/// end after Ctrl+C.
+fn block_on_bounded<F: std::future::Future>(
+    future: F,
+    shutdown: Duration,
+) -> io::Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let output = runtime.block_on(future);
+    runtime.shutdown_timeout(shutdown);
+    Ok(output)
+}
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(default_filter(&cli.command));
-    match run(cli.command).await {
+    let outcome = block_on_bounded(run(cli.command), RUNTIME_SHUTDOWN)
+        .context("cannot start the async runtime")
+        .and_then(|outcome| outcome);
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // One line with the whole cause chain. The chain can carry Linear's text, so it is
@@ -524,6 +548,39 @@ mod tests {
                 "the devhost must not call `{call}` itself"
             );
         }
+    }
+
+    // A keychain read blocked on the blocking pool (a macOS prompt nobody answers) must not keep
+    // the devhost alive once `run` has returned: the runtime gives up on it after a short while.
+    #[test]
+    fn a_blocked_keychain_call_does_not_keep_the_devhost_alive() {
+        use std::sync::mpsc;
+
+        let (release, blocked) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = block_on_bounded(
+                async move {
+                    let (started, running) = tokio::sync::oneshot::channel();
+                    // Stands for the keychain call: it waits until the test lets it go.
+                    tokio::task::spawn_blocking(move || {
+                        let _ = started.send(());
+                        let _ = blocked.recv();
+                    });
+                    running.await.expect("the blocking call started");
+                    7
+                },
+                Duration::from_millis(100),
+            );
+            let _ = done.send(outcome.map_err(|e| e.to_string()));
+        });
+        let outcome = finished.recv_timeout(Duration::from_secs(10));
+        // Lets the blocked call end either way, so no thread is left behind.
+        drop(release);
+        assert_eq!(
+            outcome.expect("the runtime waited for the blocked call"),
+            Ok(7)
+        );
     }
 
     #[test]

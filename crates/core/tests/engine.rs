@@ -2965,6 +2965,56 @@ async fn the_cleanup_follows_the_retention_settings() {
     assert!(newest.exists());
 }
 
+// A run that started while the cleanup works could reuse the `<id>.jsonl` of an earlier attempt
+// (a retried job) that the cleanup is about to remove. The cleanup takes the cycle lock, which
+// every start of a run holds, so no run starts meanwhile: here a poll holds that lock while it
+// waits for Linear, and the cleanup waits for the poll.
+#[tokio::test]
+async fn the_log_cleanup_waits_for_a_cycle_in_progress() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = FakeLinear::new("user-1");
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *spy.viewer_gate.lock().unwrap() = Some(gate.clone());
+    let engine = build_engine(
+        root.path(),
+        &Config::default(),
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        Arc::new(ScriptedRunner::new(fake, false)),
+    );
+    let logs = root.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let old = logs.join("31.jsonl");
+    std::fs::write(&old, "x").unwrap();
+    age_file(&old, 40 * 24);
+
+    let poll = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.poll_once().await }
+    });
+    eventually("the poll to ask Linear for the user", || {
+        spy.viewer_calls() == 1
+    })
+    .await;
+    let cleanup = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.clean_logs().await }
+    });
+    let_the_blocking_pool_run().await;
+    assert!(
+        old.exists(),
+        "the cleanup ran while a cycle was in progress"
+    );
+    assert!(!cleanup.is_finished());
+
+    gate.add_permits(1);
+    poll.await.unwrap().unwrap();
+    let report = cleanup.await.unwrap().unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(!old.exists());
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_loop_cleans_old_logs_when_it_starts() {
     let h = Harness::new(2, false);
@@ -2976,6 +3026,12 @@ async fn the_loop_cleans_old_logs_when_it_starts() {
     let shutdown = CancellationToken::new();
     let worker = spawn_loop(&h.engine, &shutdown);
     eventually_on_the_blocking_pool("the cleanup at start", || !old.exists()).await;
+    // The file goes before the cleanup's task has returned: wait for the first check, which
+    // comes after it, so that the loop is idle and `stop_loop`'s yields are enough.
+    eventually_on_the_blocking_pool("the first check", || {
+        h.engine.status().last_poll_at.is_some()
+    })
+    .await;
     stop_loop(&shutdown, worker).await;
 }
 

@@ -1279,3 +1279,173 @@ async fn a_run_that_never_ends_does_not_hold_up_the_stop_of_a_dead_engine() {
     })
     .await;
 }
+
+// A stop that waits for the runs to finish would wait for ever if the engine's task died with a
+// run that never ends (a place in the running set nothing frees): once the task has ended, the
+// stop goes on as for a dead engine, with its bounded wait, and the lock is released.
+#[tokio::test]
+async fn a_stop_that_waits_for_the_runs_goes_on_when_the_engine_task_dies() {
+    bounded(async {
+        let linear = FakeLinear::new("user-1");
+        let runner = LingeringRunner::new();
+        let readiness = Arc::new(PanickingReadiness {
+            armed: AtomicBool::new(false),
+            panicked: AtomicBool::new(false),
+        });
+        let root = tempfile::tempdir().unwrap();
+        let connector = FakeConnector::new(vec![Stored::Works(linear.clone(), AuthMethod::OAuth)]);
+        let host = start(
+            root.path(),
+            connector.clone(),
+            HostParts {
+                readiness: Some(readiness.clone()),
+                dead_engine_wait: Some(Duration::from_millis(300)),
+                ..parts(Some(runner.clone()))
+            },
+        )
+        .await
+        .unwrap();
+        run_a_job(&host, root.path(), &linear).await;
+        readiness.armed.store(true, Ordering::SeqCst);
+        host.engine().poll_now();
+        eventually("the engine's loop never ran the check", || {
+            readiness.panicked.load(Ordering::SeqCst)
+        })
+        .await;
+
+        within_five_secs(
+            "the waiting stop never returned",
+            host.stop(StopMode::WaitForRuns),
+        )
+        .await;
+        assert!(host.engine_failure().is_some(), "the engine's task died");
+        // As for a dead engine, the run was told to stop; it does not, and the stop went on.
+        within_five_secs(
+            "the run was never told to stop",
+            runner.told_to_stop.acquire(),
+        )
+        .await
+        .expect("closed")
+        .forget();
+        assert_eq!(latest_job_state(&host), JobState::Running);
+
+        let second = start(root.path(), connector, parts(None)).await.unwrap();
+        stop_now(&second).await;
+        runner.release.add_permits(1);
+    })
+    .await;
+}
+
+/// Drops every log event, except that it panics, once, on the first event whose message is
+/// `message`: a bug inside an engine section that holds one of the engine's locks.
+struct PanicsOnMessage {
+    message: &'static str,
+    /// Set just before the panic.
+    panicked: Arc<AtomicBool>,
+}
+
+impl tracing::Subscriber for PanicsOnMessage {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(Option<String>);
+
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        let mut message = Message(None);
+        event.record(&mut message);
+        if message.0.as_deref() == Some(self.message) && !self.panicked.swap(true, Ordering::SeqCst)
+        {
+            panic!("scripted panic while logging {:?}", self.message);
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+// The engine's task can die in a section that holds one of the engine's std locks; the lock is
+// then poisoned, and the engine's calls that take it panic. The panic here comes from the log line
+// a check writes while it holds the store's lock (`job waiting`), so the stop's own calls to the
+// engine panic too. The stop must still end the IPC server, which holds the single-instance lock:
+// otherwise no host could start again until the program ended. (The test runtime runs every task
+// on this thread, where the subscriber is the default.)
+#[tokio::test]
+async fn a_stop_after_the_engine_died_holding_a_lock_still_releases_the_single_instance_lock() {
+    bounded(async {
+        let panicked = Arc::new(AtomicBool::new(false));
+        // tracing caches whether a log call is wanted when the call is first reached, and with a
+        // single registered subscriber it asks the default of the thread that reaches it first:
+        // a parallel test's thread, which has none, would switch the call off for this test too.
+        // With a second, idle subscriber registered it asks every registered one instead.
+        let _idle = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let logs = tracing::subscriber::set_default(PanicsOnMessage {
+            message: "job waiting",
+            panicked: panicked.clone(),
+        });
+        let linear = FakeLinear::new("user-1");
+        let connector = FakeConnector::new(vec![Stored::Works(linear.clone(), AuthMethod::OAuth)]);
+        let root = tempfile::tempdir().unwrap();
+        let host = start(root.path(), connector.clone(), parts(None))
+            .await
+            .unwrap();
+        // No project is bound, so the next check records the issue as waiting.
+        linear.upsert(issue("1", "proj-1"));
+        host.engine().poll_now();
+        eventually("the engine never logged the waiting job", || {
+            panicked.load(Ordering::SeqCst)
+        })
+        .await;
+
+        stop_now(&host).await;
+        let failure = host.engine_failure().expect("the engine's task died");
+        assert!(failure.contains("scripted panic"), "{failure}");
+        drop(logs);
+        // The lock is free: a new host can start.
+        let second = start(root.path(), connector, parts(None)).await.unwrap();
+        stop_now(&second).await;
+    })
+    .await;
+}
+
+// A stop that comes before the first connection has begun must not begin it: it reads the stored
+// credentials from the keychain, which on macOS can wait for a prompt nobody answers. The test
+// runtime runs every task on this thread, so the background connection has not begun yet when
+// `stop` is called; an unbiased choice between the stop and the connection would begin it about
+// every other time.
+#[tokio::test]
+async fn a_stop_right_after_the_start_reads_no_stored_credentials() {
+    bounded(async {
+        for round in 0..20 {
+            let connector = FakeConnector::new(vec![Stored::Nothing]);
+            let root = tempfile::tempdir().unwrap();
+            let host = start_unsettled(root.path(), connector.clone(), parts(None))
+                .await
+                .unwrap();
+            stop_now(&host).await;
+            assert_eq!(
+                connector.stored_calls(),
+                0,
+                "round {round}: the first connection began after the stop"
+            );
+        }
+    })
+    .await;
+}

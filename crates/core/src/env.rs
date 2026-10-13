@@ -3,9 +3,11 @@
 //!
 //! A desktop app started from Finder or at login gets launchd's minimal PATH, without Homebrew
 //! or npm's global directory, and Claude Code ignores the macOS system proxy: it reads only
-//! `HTTPS_PROXY` and its relatives (design section 8; M1 acceptance H1). `resolve` looks at the
-//! host's own environment, then the user's login shell, then the system proxy settings, and
-//! `ExecEnv::apply` hands the result to every child.
+//! `HTTPS_PROXY` and its relatives (design section 8; M1 acceptance H1). A Windows program keeps
+//! the PATH it was started with, so an executor installed while it runs is only found through
+//! the registry, where installers add their folders. `resolve` looks at the host's own
+//! environment, then the user's login shell (Unix) or the PATH in the registry (Windows), then
+//! the system proxy settings, and `ExecEnv::apply` hands the result to every child.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -78,7 +80,8 @@ pub enum EnvSource {
     Host,
     /// The user's login shell.
     LoginShell,
-    /// The operating system's proxy settings.
+    /// The operating system's settings: the proxy settings, and on Windows the PATH in the
+    /// registry.
     SystemSettings,
     /// Nowhere: no proxy is set.
     None,
@@ -154,6 +157,20 @@ impl ExecEnv {
             .map(|(name, value)| (name.clone(), mask_credentials(value)))
             .collect()
     }
+
+    /// The PATH, when `source` is where it came from.
+    fn path_from(&self, source: EnvSource) -> Option<&str> {
+        self.path.as_deref().filter(|_| self.path_source == source)
+    }
+
+    /// The proxy variables, when `source` is where they came from; none otherwise.
+    fn proxy_from(&self, source: EnvSource) -> &[(String, String)] {
+        if self.proxy_source == source {
+            &self.proxy
+        } else {
+            &[]
+        }
+    }
 }
 
 /// `url` with its user-info part (`user:password@`) replaced by `***@`. The user-info ends at
@@ -200,51 +217,129 @@ fn host_vars() -> Vars {
         .collect()
 }
 
+/// The machine's and the user's PATH from the operating system's settings, in that order (Windows:
+/// the `Path` values in the registry, expanded). Unix keeps no PATH there, the login shell is
+/// where it is set: `(None, None)`.
+pub(crate) type SystemPath = (Option<String>, Option<String>);
+
+/// What each source of the environment gave, read once (`read_sources`); `combine` puts them
+/// together.
+pub(crate) struct Sources {
+    /// The host's own PATH and proxy variables.
+    pub(crate) host: Vars,
+    /// The login shell's PATH and proxy variables; always empty on Windows, which has none.
+    pub(crate) shell: Result<Vars, String>,
+    /// The proxy variables for the operating system's proxy settings.
+    pub(crate) system_proxy: Result<Vec<(String, String)>, String>,
+    /// The PATH in the operating system's settings.
+    pub(crate) system_path: Result<SystemPath, String>,
+}
+
 /// Works out the environment children should get (see the module documentation). Never fails:
 /// what could not be read is listed in `problems`.
 pub async fn resolve() -> ExecEnv {
-    resolve_from(host_vars(), login_shell_vars(), system_proxy()).await
+    combine(&read_sources().await, None)
 }
 
-/// `resolve` over the three sources as they are given. The login shell and the system settings
-/// are read together: either can be slow (the shell runs the user's rc files), and a fresh
+/// Reads every source of the environment once.
+pub(crate) async fn read_sources() -> Sources {
+    read_sources_from(
+        host_vars(),
+        login_shell_vars(),
+        system_proxy(),
+        system_path(),
+    )
+    .await
+}
+
+/// The sources as the given reads find them. The login shell and the system settings are read
+/// together: any of them can be slow (the shell runs the user's rc files), and a fresh
 /// environment check waits for this while it holds the readiness cache's lock.
-async fn resolve_from(
+async fn read_sources_from(
     host: Vars,
     shell: impl Future<Output = Result<Vars, String>>,
-    system: impl Future<Output = Result<Vec<(String, String)>, String>>,
-) -> ExecEnv {
-    let (shell, system) = tokio::join!(shell, system);
-    combine(&host, shell, system)
+    system_proxy: impl Future<Output = Result<Vec<(String, String)>, String>>,
+    system_path: impl Future<Output = Result<SystemPath, String>>,
+) -> Sources {
+    let (shell, system_proxy, system_path) = tokio::join!(shell, system_proxy, system_path);
+    Sources {
+        host,
+        shell,
+        system_proxy,
+        system_path,
+    }
 }
 
-/// Puts the three sources together. PATH: the login shell's, followed by the host's entries it
-/// lacks; without a login shell PATH, the host's. Proxy: the host's own when it sets one, else
-/// the login shell's, else the system settings'.
-pub fn combine(
-    host: &Vars,
-    shell: Result<Vars, String>,
-    system: Result<Vec<(String, String)>, String>,
-) -> ExecEnv {
+/// Puts the sources together. PATH: the login shell's, followed by the host's entries it
+/// lacks; else the system settings' (Windows: the machine's and the user's `Path`), followed by
+/// the host's entries they lack (`windows_path_from`); else the host's own. Proxy: the host's
+/// own when it sets one, else the login shell's, else the system settings'.
+///
+/// A source that cannot be read is listed in `problems`. Given `previous`, the environment this
+/// one replaces, such a source keeps what it gave there (the PATH or the proxy whose source it
+/// was), and the problem says so: one slow rc file during a re-check must not swap a good PATH
+/// for the host's own, which for an app started from Finder is launchd's minimal one. A source
+/// that gave nothing there falls back as on a first read.
+pub(crate) fn combine(sources: &Sources, previous: Option<&ExecEnv>) -> ExecEnv {
+    let host = &sources.host;
     let mut problems = Vec::new();
-    let shell = shell.unwrap_or_else(|e| {
-        problems.push(format!("could not read the login shell's environment: {e}"));
-        Vars::new()
-    });
-    let system = system.unwrap_or_else(|e| {
-        problems.push(format!("could not read the system proxy settings: {e}"));
-        Vec::new()
-    });
-    let (path, path_source) = match shell.get("PATH").filter(|p| !p.trim().is_empty()) {
-        Some(shell_path) => (
-            Some(merge_paths(
-                shell_path,
-                host.get("PATH").map(String::as_str),
-            )),
-            EnvSource::LoginShell,
-        ),
-        None => (None, EnvSource::Host),
+    let shell = match &sources.shell {
+        Ok(vars) => vars.clone(),
+        Err(e) => {
+            let mut kept = Vars::new();
+            if let Some(previous) = previous {
+                if let Some(path) = previous.path_from(EnvSource::LoginShell) {
+                    kept.insert("PATH".to_string(), path.to_string());
+                }
+                kept.extend(previous.proxy_from(EnvSource::LoginShell).iter().cloned());
+            }
+            problems.push(unreadable(
+                "the login shell's environment",
+                e,
+                !kept.is_empty(),
+            ));
+            kept
+        }
     };
+    let system = match &sources.system_proxy {
+        Ok(vars) => vars.clone(),
+        Err(e) => {
+            let kept = previous
+                .map(|previous| previous.proxy_from(EnvSource::SystemSettings).to_vec())
+                .unwrap_or_default();
+            problems.push(unreadable("the system proxy settings", e, !kept.is_empty()));
+            kept
+        }
+    };
+    let (machine_path, user_path) = match &sources.system_path {
+        Ok(parts) => parts.clone(),
+        Err(e) => {
+            // What the system settings gave before, the host's entries already merged in.
+            let kept = previous
+                .and_then(|previous| previous.path_from(EnvSource::SystemSettings))
+                .map(str::to_string);
+            problems.push(unreadable(
+                "the PATH in the system settings",
+                e,
+                kept.is_some(),
+            ));
+            (kept, None)
+        }
+    };
+    let host_path = host.get("PATH").map(String::as_str);
+    let (path, path_source) =
+        if let Some(shell_path) = shell.get("PATH").filter(|p| !p.trim().is_empty()) {
+            (
+                Some(merge_paths(shell_path, host_path)),
+                EnvSource::LoginShell,
+            )
+        } else if let Some(path) =
+            windows_path_from(machine_path.as_deref(), user_path.as_deref(), host_path)
+        {
+            (Some(path), EnvSource::SystemSettings)
+        } else {
+            (None, EnvSource::Host)
+        };
     let (proxy, proxy_source) = if has_proxy(host) {
         (Vec::new(), EnvSource::Host)
     } else if has_proxy(&shell) {
@@ -268,6 +363,16 @@ pub fn combine(
     }
 }
 
+/// The problem for a source that could not be read; `kept` says that what it gave before is
+/// still used.
+fn unreadable(what: &str, error: &str, kept: bool) -> String {
+    if kept {
+        format!("could not read {what}: {error} (what it gave before is still used)")
+    } else {
+        format!("could not read {what}: {error}")
+    }
+}
+
 /// `first`'s entries, then those of `second` that `first` lacks; empty entries are dropped.
 pub fn merge_paths(first: &str, second: Option<&str>) -> String {
     let mut seen = HashSet::new();
@@ -278,6 +383,110 @@ pub fn merge_paths(first: &str, second: Option<&str>) -> String {
     std::env::join_paths(entries)
         .map(|joined| joined.to_string_lossy().into_owned())
         .unwrap_or_else(|_| first.to_string())
+}
+
+/// The PATH for the machine's and the user's `Path` from the registry (already expanded) and the
+/// host's own PATH: the machine's entries, then the user's, as Windows joins them for a program
+/// started now, then the host's entries that neither has, so nothing the host could run is lost.
+/// Entries compare as Windows compares paths, ignoring letter case and a trailing backslash (but
+/// `C:\` is not `C:`); the first spelling stays, and blank entries are dropped. `None` when the
+/// registry holds no entry at all. Written out rather than with `std::env::split_paths`, whose
+/// rules depend on the platform, so that the Windows rules are tested on every platform.
+fn windows_path_from(
+    machine: Option<&str>,
+    user: Option<&str>,
+    host: Option<&str>,
+) -> Option<String> {
+    let registry: Vec<String> = machine
+        .into_iter()
+        .chain(user)
+        .flat_map(windows_path_entries)
+        .filter(|entry| !entry.trim().is_empty())
+        .collect();
+    if registry.is_empty() {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let entries: Vec<String> = registry
+        .into_iter()
+        .chain(host.into_iter().flat_map(windows_path_entries))
+        .filter(|entry| !entry.trim().is_empty() && seen.insert(windows_path_key(entry)))
+        .map(|entry| {
+            // A `;` inside an entry only survives in quotes, as `std::env::join_paths` writes it.
+            if entry.contains(';') {
+                format!("\"{entry}\"")
+            } else {
+                entry
+            }
+        })
+        .collect();
+    Some(entries.join(";"))
+}
+
+/// The entries of a Windows PATH: split at `;`, except inside `"…"`, and the quotes dropped, as
+/// Windows and `std::env::split_paths` read it there.
+fn windows_path_entries(path: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut entry = String::new();
+    let mut quoted = false;
+    for c in path.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            ';' if !quoted => entries.push(std::mem::take(&mut entry)),
+            c => entry.push(c),
+        }
+    }
+    entries.push(entry);
+    entries
+}
+
+/// What two spellings of one Windows folder have in common: lower case, without trailing
+/// backslashes, unless that would leave a bare drive (`C:`, the current folder on that drive).
+fn windows_path_key(entry: &str) -> String {
+    let lower = entry.to_lowercase();
+    let trimmed = lower.trim_end_matches('\\');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        lower
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// `text` with every `%NAME%` that `lookup` knows replaced by its value, as Windows expands a
+/// `REG_EXPAND_SZ` value: a reference to an unknown variable, an empty name, a name that holds
+/// `=` and a `%` without a partner stay as they are. After an unknown name its closing `%` may
+/// open the next reference. Only the Windows registry read uses it; the tests run it on every
+/// platform.
+#[cfg(any(windows, test))]
+fn expand_references(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut expanded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            expanded.push_str(&rest[start..]);
+            return expanded;
+        };
+        let name = &after[..end];
+        let value = if name.is_empty() || name.contains(['=', '\0']) {
+            None
+        } else {
+            lookup(name)
+        };
+        match value {
+            Some(value) => {
+                expanded.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                expanded.push('%');
+                rest = after;
+            }
+        }
+    }
+    expanded.push_str(rest);
+    expanded
 }
 
 /// The PATH and proxy variables `env` printed between the two markers; `None` when the markers
@@ -306,11 +515,101 @@ async fn login_shell_vars() -> Result<Vars, String> {
     shell_vars(&shell, SHELL_TIMEOUT).await
 }
 
-/// Windows has no login shell: a program started from the Start menu or at login already gets
-/// the user's full PATH from the system.
+/// Windows has no login shell: the PATH comes from the registry (`system_path`) and the proxy
+/// from the Internet Settings (`system_proxy`).
 #[cfg(windows)]
 async fn login_shell_vars() -> Result<Vars, String> {
     Ok(Vars::new())
+}
+
+/// Unix keeps no PATH in the system settings: the login shell is where it is set.
+#[cfg(unix)]
+async fn system_path() -> Result<SystemPath, String> {
+    Ok((None, None))
+}
+
+/// Windows: the machine's and the user's `Path` from the registry, expanded, which is what a
+/// program started now gets (`windows_path_from` joins them). Installers add their folders
+/// there, while the host's own PATH stays as it was when the host started.
+#[cfg(windows)]
+async fn system_path() -> Result<SystemPath, String> {
+    tokio::task::spawn_blocking(read_windows_path)
+        .await
+        .map_err(|e| format!("reading the PATH from the registry stopped: {e}"))?
+}
+
+/// The registry keys that hold the machine's and the current user's environment variables.
+#[cfg(windows)]
+const MACHINE_ENVIRONMENT: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+#[cfg(windows)]
+const USER_ENVIRONMENT: &str = "Environment";
+
+/// Reads both `Path` values. A `REG_EXPAND_SZ` value has its `%NAME%` references expanded: with
+/// the host's own variables first (`SystemRoot`, `APPDATA` and the rest as the host started with
+/// them), then the user's and the machine's in the registry, for a variable an installer added
+/// after the host started (`%NVM_HOME%`); one level deep, as a variable's own references are not
+/// expanded again. A key or a value that does not exist is no value; any other failure fails the
+/// read.
+#[cfg(windows)]
+fn read_windows_path() -> Result<SystemPath, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    let machine = open_registry_key(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT)?;
+    let user = open_registry_key(HKEY_CURRENT_USER, USER_ENVIRONMENT)?;
+    let in_registry = |key: &Option<winreg::RegKey>, name: &str| {
+        key.as_ref()
+            .and_then(|key| registry_text(key, name).ok().flatten())
+            .map(|(text, _)| text)
+    };
+    let lookup = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .or_else(|| in_registry(&user, name))
+            .or_else(|| in_registry(&machine, name))
+    };
+    let path = |key: &Option<winreg::RegKey>| -> Result<Option<String>, String> {
+        let Some(key) = key else {
+            return Ok(None);
+        };
+        Ok(registry_text(key, "Path")?.map(|(text, expandable)| {
+            if expandable {
+                expand_references(&text, &lookup)
+            } else {
+                text
+            }
+        }))
+    };
+    Ok((path(&machine)?, path(&user)?))
+}
+
+/// The key `subkey` under `root`; `None` when it does not exist.
+#[cfg(windows)]
+fn open_registry_key(root: winreg::HKEY, subkey: &str) -> Result<Option<winreg::RegKey>, String> {
+    match winreg::RegKey::predef(root).open_subkey(subkey) {
+        Ok(key) => Ok(Some(key)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot open the registry key {subkey}: {e}")),
+    }
+}
+
+/// The text of the value `name` and whether it is to be expanded (`REG_EXPAND_SZ`); `None` when
+/// there is no such value. A value that is not text is an error.
+#[cfg(windows)]
+fn registry_text(key: &winreg::RegKey, name: &str) -> Result<Option<(String, bool)>, String> {
+    use winreg::enums::{REG_EXPAND_SZ, REG_SZ};
+    use winreg::types::FromRegValue;
+
+    let value = match key.get_raw_value(name) {
+        Ok(value) => value,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {name}: {e}")),
+    };
+    let expandable = value.vtype == REG_EXPAND_SZ;
+    if !expandable && value.vtype != REG_SZ {
+        return Err(format!("{name} is not text ({:?})", value.vtype));
+    }
+    let text = String::from_reg_value(&value).map_err(|e| format!("cannot read {name}: {e}"))?;
+    Ok(Some((text, expandable)))
 }
 
 /// Runs `shell -l -i -c <script>`, where the script prints `env` between two markers. The shell
@@ -590,6 +889,29 @@ mod tests {
             .collect()
     }
 
+    /// The sources as given, with no PATH in the system settings (as on Unix).
+    fn sources(
+        host: Vars,
+        shell: Result<Vars, String>,
+        system_proxy: Result<Vec<(String, String)>, String>,
+    ) -> Sources {
+        Sources {
+            host,
+            shell,
+            system_proxy,
+            system_path: Ok((None, None)),
+        }
+    }
+
+    /// `combine` over a first read, with no environment before it.
+    fn first(
+        host: &Vars,
+        shell: Result<Vars, String>,
+        system_proxy: Result<Vec<(String, String)>, String>,
+    ) -> ExecEnv {
+        combine(&sources(host.clone(), shell, system_proxy), None)
+    }
+
     #[test]
     fn the_hosts_own_proxy_wins_and_is_passed_on_unchanged() {
         let host = vars(&[("PATH", "/usr/bin"), ("HTTPS_PROXY", "http://host-proxy:1")]);
@@ -597,7 +919,7 @@ mod tests {
             ("PATH", "/opt/demo/bin:/usr/bin"),
             ("HTTPS_PROXY", "http://shell-proxy:2"),
         ]));
-        let env = combine(
+        let env = first(
             &host,
             shell,
             Ok(vec![("HTTPS_PROXY".into(), "http://system:3".into())]),
@@ -626,7 +948,7 @@ mod tests {
             ("https_proxy", "http://shell-proxy:2"),
             ("NO_PROXY", "localhost"),
         ]));
-        let env = combine(
+        let env = first(
             &host,
             shell,
             Ok(vec![("HTTPS_PROXY".into(), "http://system:3".into())]),
@@ -651,7 +973,7 @@ mod tests {
             "HTTPS_PROXY".to_string(),
             "http://127.0.0.1:7890".to_string(),
         )];
-        let env = combine(&host, Ok(Vars::new()), Ok(system.clone()));
+        let env = first(&host, Ok(Vars::new()), Ok(system.clone()));
         assert_eq!(env.proxy_source, EnvSource::SystemSettings);
         assert_eq!(env.proxy, system);
         assert_eq!(
@@ -660,14 +982,14 @@ mod tests {
         );
         assert_eq!(env.path_source, EnvSource::Host);
 
-        let none = combine(&host, Ok(Vars::new()), Ok(Vec::new()));
+        let none = first(&host, Ok(Vars::new()), Ok(Vec::new()));
         assert_eq!(none.proxy_source, EnvSource::None);
         assert!(none.proxy.is_empty());
     }
 
     #[test]
     fn what_could_not_be_read_is_listed_as_a_problem() {
-        let env = combine(
+        let env = first(
             &Vars::new(),
             Err("timed out".into()),
             Err("no scutil".into()),
@@ -677,6 +999,311 @@ mod tests {
         assert!(env.problems[1].contains("system proxy") && env.problems[1].contains("no scutil"));
         assert_eq!(env.path_source, EnvSource::Host);
         assert_eq!(env.proxy_source, EnvSource::None);
+    }
+
+    /// A first read in which the login shell gave a PATH and a proxy.
+    fn read_once() -> ExecEnv {
+        first(
+            &Vars::new(),
+            Ok(vars(&[
+                ("PATH", "/opt/demo/bin:/usr/bin"),
+                ("HTTPS_PROXY", "http://127.0.0.1:9"),
+            ])),
+            Ok(Vec::new()),
+        )
+    }
+
+    // One slow rc file during a re-check must not swap a good login-shell PATH for the host's
+    // own, which for an app started from Finder is launchd's minimal one.
+    #[test]
+    fn a_login_shell_that_fails_later_keeps_what_it_gave_before() {
+        let before = read_once();
+        assert_eq!(before.path_source, EnvSource::LoginShell);
+        assert_eq!(before.proxy_source, EnvSource::LoginShell);
+        let failed = sources(
+            Vars::new(),
+            Err("/bin/zsh did not finish within 10s".into()),
+            Ok(Vec::new()),
+        );
+        let again = combine(&failed, Some(&before));
+        assert_eq!(again.path, before.path);
+        assert_eq!(again.path_source, EnvSource::LoginShell);
+        assert_eq!(again.proxy, before.proxy);
+        assert_eq!(again.proxy_source, EnvSource::LoginShell);
+        assert_eq!(again.problems.len(), 1, "{:?}", again.problems);
+        let problem = &again.problems[0];
+        assert!(
+            problem.contains("login shell") && problem.contains("did not finish within 10s"),
+            "{problem}"
+        );
+        assert!(problem.contains("before"), "says what is kept: {problem}");
+        // Without an earlier environment the failed read falls back as it always did.
+        let alone = combine(&failed, None);
+        assert_eq!(alone.path, None);
+        assert_eq!(alone.path_source, EnvSource::Host);
+        assert_eq!(alone.proxy_source, EnvSource::None);
+    }
+
+    #[test]
+    fn a_source_that_answers_replaces_what_it_gave_before() {
+        let before = read_once();
+        let answered = sources(
+            Vars::new(),
+            Ok(vars(&[("PATH", "/opt/new/bin")])),
+            Ok(Vec::new()),
+        );
+        let again = combine(&answered, Some(&before));
+        assert_eq!(again.path.as_deref(), Some("/opt/new/bin"));
+        assert_eq!(again.path_source, EnvSource::LoginShell);
+        assert_eq!(
+            again.proxy_source,
+            EnvSource::None,
+            "the login shell no longer sets a proxy"
+        );
+        assert!(again.proxy.is_empty());
+        assert!(again.problems.is_empty(), "{:?}", again.problems);
+    }
+
+    #[test]
+    fn only_what_the_failed_source_gave_is_kept() {
+        // The PATH came from the login shell, the proxy from the system settings.
+        let before = first(
+            &Vars::new(),
+            Ok(vars(&[("PATH", "/opt/demo/bin")])),
+            Ok(vec![("HTTPS_PROXY".into(), "http://127.0.0.1:7890".into())]),
+        );
+        assert_eq!(before.proxy_source, EnvSource::SystemSettings);
+        // The system settings fail: their proxy stays, and the login shell's new PATH is used.
+        let again = combine(
+            &sources(
+                Vars::new(),
+                Ok(vars(&[("PATH", "/opt/new/bin")])),
+                Err("scutil --proxy did not answer within 5s".into()),
+            ),
+            Some(&before),
+        );
+        assert_eq!(again.path.as_deref(), Some("/opt/new/bin"));
+        assert_eq!(again.proxy, before.proxy);
+        assert_eq!(again.proxy_source, EnvSource::SystemSettings);
+        assert!(
+            again.problems[0].contains("system proxy"),
+            "{:?}",
+            again.problems
+        );
+        // The login shell fails: its PATH stays, and the system settings' new proxy is used.
+        let again = combine(
+            &sources(
+                Vars::new(),
+                Err("timed out".into()),
+                Ok(vec![("HTTPS_PROXY".into(), "http://127.0.0.1:7891".into())]),
+            ),
+            Some(&before),
+        );
+        assert_eq!(again.path, before.path);
+        assert_eq!(again.path_source, EnvSource::LoginShell);
+        assert_eq!(
+            again.proxy,
+            [(
+                "HTTPS_PROXY".to_string(),
+                "http://127.0.0.1:7891".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_source_that_never_answered_has_nothing_to_keep() {
+        let before = first(&Vars::new(), Err("timed out".into()), Ok(Vec::new()));
+        let again = combine(
+            &sources(Vars::new(), Err("timed out".into()), Ok(Vec::new())),
+            Some(&before),
+        );
+        assert_eq!(again.path, None);
+        assert_eq!(again.path_source, EnvSource::Host);
+        assert_eq!(again.proxy_source, EnvSource::None);
+        assert_eq!(again.problems.len(), 1, "{:?}", again.problems);
+        assert!(
+            !again.problems[0].contains("before"),
+            "nothing was kept: {:?}",
+            again.problems
+        );
+    }
+
+    /// A read on Windows: no login shell, the registry's PATH as given.
+    fn windows_read(host_path: &str, system_path: Result<SystemPath, String>) -> Sources {
+        Sources {
+            host: vars(&[("PATH", host_path)]),
+            shell: Ok(Vars::new()),
+            system_proxy: Ok(Vec::new()),
+            system_path,
+        }
+    }
+
+    // A Windows program keeps the PATH it started with; the registry holds the one a program
+    // started now gets, with the folder of an executor installed meanwhile.
+    #[test]
+    fn without_a_login_shell_the_path_comes_from_the_system_settings() {
+        let host = r"C:\Windows\system32;C:\Tools\only-the-host";
+        let registry = (
+            Some(r"C:\Windows\system32;C:\Windows".to_string()),
+            Some(r"C:\Program Files\nodejs".to_string()),
+        );
+        let env = combine(&windows_read(host, Ok(registry)), None);
+        assert_eq!(
+            env.path.as_deref(),
+            Some(r"C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;C:\Tools\only-the-host")
+        );
+        assert_eq!(env.path_source, EnvSource::SystemSettings);
+        assert!(env.problems.is_empty(), "{:?}", env.problems);
+
+        // A later read of the registry fails: the PATH it gave before stays.
+        let failed = || windows_read(host, Err("cannot open the registry key: denied".into()));
+        let again = combine(&failed(), Some(&env));
+        assert_eq!(again.path, env.path);
+        assert_eq!(again.path_source, EnvSource::SystemSettings);
+        let problem = &again.problems[0];
+        assert!(
+            problem.contains("PATH") && problem.contains("denied"),
+            "{problem}"
+        );
+        // A first read that fails keeps the host's PATH, as before the registry was read at all.
+        let alone = combine(&failed(), None);
+        assert_eq!(alone.path, None);
+        assert_eq!(alone.path_source, EnvSource::Host);
+        assert_eq!(alone.problems.len(), 1, "{:?}", alone.problems);
+    }
+
+    #[test]
+    fn the_registry_path_is_the_machines_then_the_users_then_what_only_the_host_has() {
+        let path = windows_path_from(
+            Some(r"C:\Windows\system32;C:\Windows"),
+            Some(r"C:\Program Files\nodejs;C:\Tools\npm"),
+            Some(r"C:\Windows\system32;C:\Tools\only-the-host"),
+        );
+        assert_eq!(
+            path.as_deref(),
+            Some(
+                r"C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;C:\Tools\npm;C:\Tools\only-the-host"
+            )
+        );
+    }
+
+    #[test]
+    fn either_registry_path_may_be_missing() {
+        let host = Some(r"C:\Tools\only-the-host");
+        assert_eq!(
+            windows_path_from(Some(r"C:\Windows"), None, host).as_deref(),
+            Some(r"C:\Windows;C:\Tools\only-the-host")
+        );
+        assert_eq!(
+            windows_path_from(None, Some(r"C:\Tools\npm"), host).as_deref(),
+            Some(r"C:\Tools\npm;C:\Tools\only-the-host")
+        );
+        assert_eq!(
+            windows_path_from(Some(r"C:\Windows"), Some(""), None).as_deref(),
+            Some(r"C:\Windows")
+        );
+        // Nothing in the registry: no PATH from the system settings, whatever the host has.
+        assert_eq!(windows_path_from(None, None, host), None);
+        assert_eq!(windows_path_from(Some(" ; ;"), Some(""), host), None);
+    }
+
+    #[test]
+    fn registry_entries_that_differ_only_in_case_or_a_trailing_backslash_are_one_entry() {
+        let path = windows_path_from(
+            Some(r"C:\Windows\System32;C:\Program Files\nodejs\"),
+            Some(r"c:\windows\system32\;C:\PROGRAM FILES\NODEJS;C:\Tools\npm"),
+            Some(r"C:\TOOLS\NPM\;C:\Windows\System32"),
+        );
+        // The first spelling stays.
+        assert_eq!(
+            path.as_deref(),
+            Some(r"C:\Windows\System32;C:\Program Files\nodejs\;C:\Tools\npm")
+        );
+        // A drive's root keeps its backslash: `C:` alone is the current folder on that drive.
+        assert_eq!(
+            windows_path_from(Some(r"C:\;C:"), None, None).as_deref(),
+            Some(r"C:\;C:")
+        );
+    }
+
+    #[test]
+    fn empty_registry_entries_are_dropped() {
+        let path = windows_path_from(
+            Some(r";C:\Windows;;  ;"),
+            Some(r";C:\Tools\npm;"),
+            Some(";;"),
+        );
+        assert_eq!(path.as_deref(), Some(r"C:\Windows;C:\Tools\npm"));
+    }
+
+    #[test]
+    fn a_quoted_registry_entry_may_hold_a_semicolon() {
+        // Windows reads a `"…"` part of a PATH as one entry, as `std::env::split_paths` does
+        // there, and `std::env::join_paths` quotes such an entry again.
+        let path = windows_path_from(Some(r#"C:\Windows;"C:\Tools\a;b";C:\Tools\c"#), None, None);
+        assert_eq!(
+            path.as_deref(),
+            Some(r#"C:\Windows;"C:\Tools\a;b";C:\Tools\c"#)
+        );
+        // Quotes around an entry without a semicolon are dropped.
+        assert_eq!(
+            windows_path_from(Some(r#""C:\Tools\d""#), None, None).as_deref(),
+            Some(r"C:\Tools\d")
+        );
+    }
+
+    /// Whether the Windows PATH `path` holds the system folder (`%SystemRoot%\system32`).
+    #[cfg(windows)]
+    fn holds_the_system_folder(path: &str) -> bool {
+        let system = format!(r"{}\system32", std::env::var("SystemRoot").unwrap());
+        windows_path_entries(path)
+            .iter()
+            .any(|entry| windows_path_key(entry) == windows_path_key(&system))
+    }
+
+    // The registry read itself runs on Windows only (CI). The machine's Path always holds the
+    // system folder, which Windows writes there as `%SystemRoot%\system32`.
+    #[cfg(windows)]
+    #[test]
+    fn the_machines_path_in_the_registry_holds_the_system_folder_expanded() {
+        let (machine, _user) = read_windows_path().unwrap();
+        let machine = machine.expect("the machine's Path");
+        assert!(holds_the_system_folder(&machine), "{machine}");
+        assert!(
+            !machine.to_lowercase().contains("%systemroot%"),
+            "{machine}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_the_path_comes_from_the_registry() {
+        let env = resolve().await;
+        assert_eq!(env.path_source, EnvSource::SystemSettings, "{env:?}");
+        let path = env.path.expect("a PATH from the registry");
+        assert!(holds_the_system_folder(&path), "{path}");
+    }
+
+    #[test]
+    fn registry_values_expand_the_variables_they_name() {
+        let lookup = |name: &str| match name {
+            "SystemRoot" => Some(r"C:\Windows".to_string()),
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_references(r"%SystemRoot%\system32;%ProgramFiles%\nodejs", &lookup),
+            r"C:\Windows\system32;C:\Program Files\nodejs"
+        );
+        // An unknown variable, a lone `%`, an empty name and a name with `=` stay as they are.
+        assert_eq!(
+            expand_references(r"%NOT_SET%\bin;%SystemRoot%", &lookup),
+            r"%NOT_SET%\bin;C:\Windows"
+        );
+        assert_eq!(expand_references("100%", &lookup), "100%");
+        assert_eq!(expand_references("%%", &lookup), "%%");
+        assert_eq!(expand_references("%=C:%", &lookup), "%=C:%");
+        assert_eq!(expand_references("", &lookup), "");
     }
 
     #[cfg(unix)]
@@ -1028,8 +1655,9 @@ mod tests {
         );
     }
 
-    // Both sources can be slow (the login shell runs the user's rc files) and `resolve` runs while
-    // the readiness check holds its lock: they are read together, not one after the other.
+    // Every source can be slow (the login shell runs the user's rc files) and a fresh check reads
+    // them while the readiness check holds its lock: they are read together, not one after the
+    // other.
     #[tokio::test(start_paused = true)]
     async fn the_login_shell_and_the_system_settings_are_read_at_the_same_time() {
         use std::time::Duration;
@@ -1039,19 +1667,24 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
             Ok(vars(&[("PATH", "/opt/demo/bin")]))
         };
-        let system = async {
+        let system_proxy = async {
             tokio::time::sleep(Duration::from_secs(5)).await;
             Ok(vec![(
                 "HTTPS_PROXY".to_string(),
                 "http://127.0.0.1:7890".to_string(),
             )])
         };
-        let env = resolve_from(Vars::new(), shell, system).await;
+        let system_path = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok((None, None))
+        };
+        let read = read_sources_from(Vars::new(), shell, system_proxy, system_path).await;
         assert_eq!(
             started.elapsed(),
             Duration::from_secs(10),
-            "one after the other would take 15 s"
+            "one after the other would take 20 s"
         );
+        let env = combine(&read, None);
         assert_eq!(env.path_source, EnvSource::LoginShell);
         assert_eq!(env.proxy_source, EnvSource::SystemSettings);
     }
