@@ -98,6 +98,13 @@
     "default": "デフォルト（{{name}}）"
   },
   "actions": {
+    "stop": "停止",
+    "run_again": "もう一度実行",
+    "mark_done": "完了にする",
+    "open_in_linear": "Linear で開く",
+    "poll_now": "今すぐチェック",
+    "confirm": "確認",
+    "mark_done_confirm": "{{identifier}} を {{done}} にしますか？これは IssueRelay が Linear に加える唯一の変更です。",
     "failed": {
       "pause": "監視を一時停止できませんでした",
       "resume": "監視を再開できませんでした",
@@ -113,11 +120,80 @@
       "linear_logout": "Linear からログアウトできませんでした",
       "linear_reconnect": "Linear に再接続できませんでした",
       "setup_action": "セットアップコマンドが失敗しました",
-      "set_autostart": "ログイン時の自動起動を変更できませんでした"
+      "set_autostart": "ログイン時の自動起動を変更できませんでした",
+      "open_linear": "Linear を開けませんでした"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay は Linear 自身のページしか開きません",
     "login_cancelled": "ブラウザでのログインをキャンセルしました"
+  },
+  "overview": {
+    "monitoring": "監視",
+    "running": "実行中",
+    "queued": "待機中",
+    "recent": "最近の結果",
+    "no_running": "実行中のタスクはありません",
+    "no_running_hint": "IssueRelay が課題に取り組んでいる間、実行がここに表示されます。",
+    "queue_empty": "待機中のタスクはありません",
+    "recent_empty": "終了した実行はまだありません",
+    "alert_failed_one": "{{count}} 件の実行が失敗しました",
+    "alert_failed_other": "{{count}} 件の実行が失敗しました",
+    "alert_awaiting_one": "{{count}} 件の課題が確認待ちです",
+    "alert_awaiting_other": "{{count}} 件の課題が確認待ちです",
+    "view": "表示",
+    "draining": "実行中のタスクの完了を待っています。新しい実行は始まりません",
+    "open_doctor": "環境チェックを開く",
+    "problem": {
+      "not_configured": "Linear にログインしていません",
+      "interface_changed": "Linear のツールが変更されました。IssueRelay を更新してください",
+      "connect_failed": "Linear に接続できません。IssueRelay は 1 分ごとに再試行します",
+      "check_failed": "直近の Linear のチェックに失敗しました",
+      "start_failed": "実行を開始できなかったタスクがあります"
+    },
+    "status_failed": "IssueRelay の状態を読み込めませんでした",
+    "jobs_failed": "実行履歴を読み込めませんでした"
+  },
+  "issues": {
+    "description": "自分に割り当てられた {{label}} ラベル付きの課題（最近更新された 50 件）",
+    "empty_title": "{{label}} ラベル付きの課題はまだありません",
+    "empty_description": "自分に割り当てられ、{{label}} ラベルが付き、ステータスが {{todo}} の課題を IssueRelay が引き受けます。",
+    "open_help": "仕組みを見る",
+    "column": {
+      "issue": "課題",
+      "title": "タイトル",
+      "linear_state": "Linear のステータス",
+      "local_state": "ローカルの状態",
+      "reason": "理由",
+      "actions": "操作"
+    },
+    "not_todo": "ステータスは {{state}} で、{{todo}} ではありません",
+    "eligible": "次のチェックで引き受けます",
+    "not_candidate": "自分に割り当てられていないか、ラベルが一致しません",
+    "paused": "監視を一時停止中です",
+    "waiting": {
+      "project_not_bound": "プロジェクトがローカルフォルダーに紐付けられていません",
+      "directory_missing": "紐付けたフォルダー {{directory}} が存在しません",
+      "executor_not_ready": "{{executor}} の準備ができていません。環境チェックを確認してください"
+    },
+    "load_failed": "Linear から課題を読み込めませんでした",
+    "open_guide": "ガイドを開く",
+    "open_doctor": "環境チェックを開く"
+  },
+  "linear": {
+    "connecting": "Linear に接続中…",
+    "not_configured": "Linear にログインしていません",
+    "log_in": "Linear にログイン",
+    "connect_failed": "Linear に接続できませんでした",
+    "interface_changed": "Linear のツールが変更されました。IssueRelay を更新してください",
+    "retry": "再試行",
+    "connected": "接続済み:",
+    "connected_plain": "接続済み",
+    "last_check": "最終チェック: {{time}}",
+    "never_checked": "まだチェックしていません",
+    "log_in_again": "再認証",
+    "log_out": "ログアウト",
+    "waiting_browser": "ブラウザーで認可を完了してください…",
+    "cancel_login": "キャンセル"
   }
 }

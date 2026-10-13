@@ -98,6 +98,13 @@
     "default": "默认（{{name}}）"
   },
   "actions": {
+    "stop": "停止",
+    "run_again": "重新运行",
+    "mark_done": "标记完成",
+    "open_in_linear": "在 Linear 中打开",
+    "poll_now": "立即检查",
+    "confirm": "确认",
+    "mark_done_confirm": "把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。",
     "failed": {
       "pause": "无法暂停监控",
       "resume": "无法恢复监控",
@@ -113,11 +120,80 @@
       "linear_logout": "无法退出 Linear 登录",
       "linear_reconnect": "无法重新连接 Linear",
       "setup_action": "配置命令执行失败",
-      "set_autostart": "无法更改开机自启设置"
+      "set_autostart": "无法更改开机自启设置",
+      "open_linear": "无法打开 Linear"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay 只会打开 Linear 自己的页面",
     "login_cancelled": "已取消浏览器登录"
+  },
+  "overview": {
+    "monitoring": "监控",
+    "running": "运行中",
+    "queued": "排队中",
+    "recent": "最近结果",
+    "no_running": "没有正在运行的任务",
+    "no_running_hint": "IssueRelay 处理需求时，运行中的任务会显示在这里。",
+    "queue_empty": "没有排队或等待的任务",
+    "recent_empty": "还没有结束的运行",
+    "alert_failed_one": "{{count}} 个任务运行失败",
+    "alert_failed_other": "{{count}} 个任务运行失败",
+    "alert_awaiting_one": "{{count}} 条需求等你验收",
+    "alert_awaiting_other": "{{count}} 条需求等你验收",
+    "view": "查看",
+    "draining": "正在等待运行中的任务结束，不会再开始新的任务",
+    "open_doctor": "打开环境检查",
+    "problem": {
+      "not_configured": "还没有登录 Linear",
+      "interface_changed": "Linear 的工具有变化，请更新 IssueRelay",
+      "connect_failed": "无法连接 Linear，IssueRelay 会每分钟重试一次",
+      "check_failed": "最近一次检查 Linear 失败了",
+      "start_failed": "有任务无法开始运行"
+    },
+    "status_failed": "无法读取 IssueRelay 的状态",
+    "jobs_failed": "无法读取运行记录"
+  },
+  "issues": {
+    "description": "指派给你、带 {{label}} 标签的需求，最近更新的 50 条",
+    "empty_title": "还没有带 {{label}} 标签的需求",
+    "empty_description": "需求指派给你、带有 {{label}} 标签且状态为 {{todo}} 时，IssueRelay 才会接手处理。",
+    "open_help": "了解工作方式",
+    "column": {
+      "issue": "编号",
+      "title": "标题",
+      "linear_state": "Linear 状态",
+      "local_state": "本地状态",
+      "reason": "原因",
+      "actions": "操作"
+    },
+    "not_todo": "状态是 {{state}}，不是 {{todo}}",
+    "eligible": "下一次检查会接走",
+    "not_candidate": "没有指派给你，或标签不匹配",
+    "paused": "监控已暂停",
+    "waiting": {
+      "project_not_bound": "项目还没有绑定本地目录",
+      "directory_missing": "绑定的目录 {{directory}} 不存在",
+      "executor_not_ready": "{{executor}} 还没有就绪，请看环境检查"
+    },
+    "load_failed": "无法从 Linear 读取需求",
+    "open_guide": "打开引导",
+    "open_doctor": "打开环境检查"
+  },
+  "linear": {
+    "connecting": "正在连接 Linear…",
+    "not_configured": "还没有登录 Linear",
+    "log_in": "登录 Linear",
+    "connect_failed": "无法连接 Linear",
+    "interface_changed": "Linear 的工具有变化，请更新 IssueRelay",
+    "retry": "重试",
+    "connected": "已连接，授权人",
+    "connected_plain": "已连接",
+    "last_check": "上次检查：{{time}}",
+    "never_checked": "尚未检查",
+    "log_in_again": "重新授权",
+    "log_out": "退出登录",
+    "waiting_browser": "请在浏览器里完成授权…",
+    "cancel_login": "取消"
   }
 }

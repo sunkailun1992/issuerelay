@@ -98,6 +98,13 @@
     "default": "預設（{{name}}）"
   },
   "actions": {
+    "stop": "停止",
+    "run_again": "重新執行",
+    "mark_done": "標記完成",
+    "open_in_linear": "在 Linear 中開啟",
+    "poll_now": "立即檢查",
+    "confirm": "確認",
+    "mark_done_confirm": "要把 {{identifier}} 設為 {{done}} 嗎？這是 IssueRelay 唯一會更動 Linear 的操作。",
     "failed": {
       "pause": "無法暫停監控",
       "resume": "無法繼續監控",
@@ -113,11 +120,80 @@
       "linear_logout": "無法登出 Linear",
       "linear_reconnect": "無法重新連線至 Linear",
       "setup_action": "設定指令執行失敗",
-      "set_autostart": "無法變更開機自動啟動的設定"
+      "set_autostart": "無法變更開機自動啟動的設定",
+      "open_linear": "無法開啟 Linear"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay 只會開啟 Linear 自己的頁面",
     "login_cancelled": "已取消瀏覽器登入"
+  },
+  "overview": {
+    "monitoring": "監控",
+    "running": "執行中",
+    "queued": "排隊中",
+    "recent": "最近結果",
+    "no_running": "沒有正在執行的任務",
+    "no_running_hint": "IssueRelay 處理需求時，執行中的任務會顯示在這裡。",
+    "queue_empty": "沒有排隊或等待的任務",
+    "recent_empty": "還沒有結束的執行",
+    "alert_failed_one": "{{count}} 項任務執行失敗",
+    "alert_failed_other": "{{count}} 項任務執行失敗",
+    "alert_awaiting_one": "{{count}} 項需求等你驗收",
+    "alert_awaiting_other": "{{count}} 項需求等你驗收",
+    "view": "查看",
+    "draining": "正在等待執行中的任務結束，不會再開始新的任務",
+    "open_doctor": "開啟環境檢查",
+    "problem": {
+      "not_configured": "尚未登入 Linear",
+      "interface_changed": "Linear 的工具有變動，請更新 IssueRelay",
+      "connect_failed": "無法連線至 Linear，IssueRelay 會每分鐘重試一次",
+      "check_failed": "最近一次檢查 Linear 失敗了",
+      "start_failed": "有任務無法開始執行"
+    },
+    "status_failed": "無法讀取 IssueRelay 的狀態",
+    "jobs_failed": "無法讀取執行紀錄"
+  },
+  "issues": {
+    "description": "指派給你、帶有 {{label}} 標籤的需求，最近更新的 50 項",
+    "empty_title": "還沒有帶有 {{label}} 標籤的需求",
+    "empty_description": "需求指派給你、帶有 {{label}} 標籤且狀態為 {{todo}} 時，IssueRelay 才會接手處理。",
+    "open_help": "了解運作方式",
+    "column": {
+      "issue": "編號",
+      "title": "標題",
+      "linear_state": "Linear 狀態",
+      "local_state": "本機狀態",
+      "reason": "原因",
+      "actions": "操作"
+    },
+    "not_todo": "狀態是 {{state}}，不是 {{todo}}",
+    "eligible": "下一次檢查會接手處理",
+    "not_candidate": "沒有指派給你，或標籤不相符",
+    "paused": "監控已暫停",
+    "waiting": {
+      "project_not_bound": "專案尚未綁定本機資料夾",
+      "directory_missing": "綁定的資料夾 {{directory}} 不存在",
+      "executor_not_ready": "{{executor}} 尚未就緒，請查看環境檢查"
+    },
+    "load_failed": "無法從 Linear 讀取需求",
+    "open_guide": "開啟引導",
+    "open_doctor": "開啟環境檢查"
+  },
+  "linear": {
+    "connecting": "正在連線至 Linear…",
+    "not_configured": "尚未登入 Linear",
+    "log_in": "登入 Linear",
+    "connect_failed": "無法連線至 Linear",
+    "interface_changed": "Linear 的工具有變動，請更新 IssueRelay",
+    "retry": "重試",
+    "connected": "已連線，授權人",
+    "connected_plain": "已連線",
+    "last_check": "上次檢查：{{time}}",
+    "never_checked": "尚未檢查",
+    "log_in_again": "重新授權",
+    "log_out": "登出",
+    "waiting_browser": "請在瀏覽器中完成授權…",
+    "cancel_login": "取消"
   }
 }

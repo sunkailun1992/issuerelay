@@ -1,0 +1,235 @@
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useLocation } from "react-router";
+import { vi } from "vitest";
+import { type Backend, BackendError } from "@/lib/backend";
+import { createMockBackend } from "@/lib/mock";
+import type { IssueStatus, IssueView } from "@/lib/types";
+import { renderWithProviders } from "@/test/render";
+import Issues from "./Issues";
+
+test("each labeled issue says whether it will be picked up", async () => {
+  await renderWithProviders(<Issues />);
+  expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
+  expect(screen.getByText(/status is Backlog, not Todo/)).toBeInTheDocument();
+  // Translated from the code `project_not_bound`, not the engine's English sentence.
+  expect(screen.getByText(/not bound to a local folder/)).toBeInTheDocument();
+});
+
+test("without a Linear connection the list explains what to do", async () => {
+  await renderWithProviders(<Issues />, { backend: createMockBackend("fresh", { latencyMs: 0 }) });
+  expect(await screen.findByText("Could not read the issues from Linear")).toBeInTheDocument();
+  expect(screen.getByText(/not connected to Linear/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open the guide" })).toBeInTheDocument();
+});
+
+/** Shows where the router is, so that a test can follow a button. */
+function Where() {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname + location.search}</p>;
+}
+
+/** The demo backend whose issue list is what `change` makes of the demo's. */
+function backendWithIssues(change: (views: IssueView[]) => IssueView[]): Backend {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.issues.bind(backend);
+  backend.issues = async () => change(await read());
+  return backend;
+}
+
+/** The demo backend where DEMO-4 has `status`. */
+function backendWhereDemo4Is(status: IssueStatus): Backend {
+  return backendWithIssues((views) => views.map((view) => (view.issue.identifier === "DEMO-4" ? { ...view, status } : view)));
+}
+
+/** The table row of an issue. */
+const rowOf = (identifier: string) => screen.getByText(identifier).closest("tr")!;
+
+test("the list is a table with a column for each thing it says about an issue", async () => {
+  await renderWithProviders(<Issues />);
+  await screen.findByText("DEMO-4");
+  const headers = screen.getAllByRole("columnheader").map((header) => header.textContent);
+  expect(headers).toEqual(["Issue", "Title", "Linear status", "Local status", "Reason", "Actions"]);
+  // Every issue of the demo is a row, the engine's order kept.
+  const rows = screen.getAllByRole("row").slice(1);
+  expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual([
+    "DEMO-12",
+    "DEMO-11",
+    "DEMO-10",
+    "DEMO-8",
+    "DEMO-7",
+    "DEMO-6",
+    "DEMO-5",
+    "DEMO-4",
+    "DEMO-3",
+  ]);
+});
+
+test("a row has the title, Linear's status and the local state of its newest run", async () => {
+  await renderWithProviders(<Issues />);
+  await screen.findByText("DEMO-4");
+  const withRun = within(rowOf("DEMO-10"));
+  expect(withRun.getByText("Add hello.txt")).toBeInTheDocument();
+  expect(withRun.getByText("In Testing")).toBeInTheDocument();
+  expect(withRun.getByText("Awaiting acceptance")).toBeInTheDocument();
+  // An issue that has had no run has a dash where the state would be.
+  const withoutRun = within(rowOf("DEMO-4"));
+  expect(withoutRun.getByText("Migrate the build to the new runner")).toBeInTheDocument();
+  expect(withoutRun.getByText("Backlog")).toBeInTheDocument();
+  expect(withoutRun.getByText("—")).toBeInTheDocument();
+});
+
+test("each row offers what its run allows, and Open in Linear", async () => {
+  await renderWithProviders(<Issues />);
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-10")).getByRole("button", { name: "Mark done" })).toBeInTheDocument();
+  expect(within(rowOf("DEMO-12")).getByRole("button", { name: "Stop" })).toBeInTheDocument();
+  expect(within(rowOf("DEMO-8")).getByRole("button", { name: "Run again" })).toBeInTheDocument();
+  const without = within(rowOf("DEMO-4"));
+  expect(without.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Open in Linear"]);
+});
+
+test("opening an issue in Linear goes through the backend with the issue's link", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const open = vi.spyOn(backend, "openLinear");
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  await userEvent.click(within(rowOf("DEMO-4")).getByRole("button", { name: "Open in Linear" }));
+  expect(open).toHaveBeenCalledWith("https://linear.app/demo/issue/DEMO-4");
+});
+
+test("marking an issue's run done asks first, from the issue list too", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const markDone = vi.spyOn(backend, "markDone");
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  await userEvent.click(within(rowOf("DEMO-10")).getByRole("button", { name: "Mark done" }));
+  expect(markDone).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  expect(markDone).toHaveBeenCalledWith(10);
+});
+
+test("every verdict of the engine is said in the interface's words", async () => {
+  const cases: [IssueStatus, string][] = [
+    [{ kind: "eligible" }, "The next check picks it up"],
+    [{ kind: "not_candidate" }, "It is not assigned to you, or its label does not match"],
+    [{ kind: "paused" }, "Monitoring is paused"],
+    [{ kind: "waiting", reason: { code: "project_not_bound" } }, "Its project is not bound to a local folder"],
+    [{ kind: "waiting", reason: { code: "directory_missing", directory: "~/code/missing" } }, "The bound folder ~/code/missing does not exist"],
+    [{ kind: "waiting", reason: { code: "executor_not_ready", executor: "codex" } }, "Codex is not ready; see the environment check"],
+    [{ kind: "waiting", reason: { code: "executor_not_ready", executor: "claude" } }, "Claude Code is not ready; see the environment check"],
+    [{ kind: "not_todo", state: "In Review" }, "Its status is In Review, not Todo"],
+  ];
+  for (const [status, text] of cases) {
+    const view = await renderWithProviders(<Issues />, { backend: backendWhereDemo4Is(status) });
+    await screen.findByText("DEMO-4");
+    expect(within(rowOf("DEMO-4")).getByText(text), text).toBeInTheDocument();
+    view.unmount();
+  }
+});
+
+test("the engine's codes are never shown as they are", async () => {
+  await renderWithProviders(<Issues />, { backend: backendWhereDemo4Is({ kind: "waiting", reason: { code: "directory_missing", directory: "~/code/missing" } }) });
+  await screen.findByText("DEMO-4");
+  expect(screen.queryByText(/directory_missing|project_not_bound|executor_not_ready/)).not.toBeInTheDocument();
+});
+
+test("a folder name from the configuration is shown as text and cleaned", async () => {
+  const esc = String.fromCharCode(27);
+  const directory = `~/code/<b>odd</b>${esc}[0m`;
+  await renderWithProviders(<Issues />, { backend: backendWhereDemo4Is({ kind: "waiting", reason: { code: "directory_missing", directory } }) });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-4")).getByText("The bound folder ~/code/<b>odd</b> does not exist")).toBeInTheDocument();
+});
+
+test("the reasons name the statuses the settings configure", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const settings = await backend.settings();
+  backend.settings = async () => ({ ...settings, trigger: { ...settings.trigger, todo: "Ready to build", label: "bot-ready" } });
+  await renderWithProviders(<Issues />, { backend });
+  expect(await screen.findByText(/Issues assigned to you with the bot-ready label/)).toBeInTheDocument();
+  expect(await screen.findByText("Its status is Backlog, not Ready to build")).toBeInTheDocument();
+});
+
+test("the header says which issues are listed", async () => {
+  await renderWithProviders(<Issues />);
+  expect(screen.getByRole("heading", { name: "Issues" })).toBeInTheDocument();
+  expect(await screen.findByText("Issues assigned to you with the ai-ready label, the 50 most recently updated")).toBeInTheDocument();
+});
+
+test("the refresh button reads the issues from Linear again", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = vi.spyOn(backend, "issues");
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  expect(read).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
+test("while the issues are read, five placeholder rows stand in", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.issues = () => new Promise<IssueView[]>(() => {});
+  const { container } = await renderWithProviders(<Issues />, { backend });
+  expect(screen.getByRole("status", { name: "Loading…" })).toBeInTheDocument();
+  expect(container.querySelectorAll("[data-slot=skeleton]")).toHaveLength(5);
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+});
+
+test("with no labeled issue the page says how an issue gets here, and where to read more", async () => {
+  await renderWithProviders(
+    <>
+      <Issues />
+      <Where />
+    </>,
+    { backend: backendWithIssues(() => []) },
+  );
+  expect(await screen.findByText("No issues with the ai-ready label yet")).toBeInTheDocument();
+  expect(screen.getByText(/assigned to you, has the ai-ready label and is in Todo/)).toBeInTheDocument();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "How it works" }));
+  expect(screen.getByTestId("where")).toHaveTextContent("/help");
+});
+
+test("the empty list names the label and the status the settings configure", async () => {
+  const backend = backendWithIssues(() => []);
+  const settings = await backend.settings();
+  backend.settings = async () => ({ ...settings, trigger: { ...settings.trigger, todo: "Ready to build", label: "bot-ready" } });
+  await renderWithProviders(<Issues />, { backend });
+  expect(await screen.findByText("No issues with the bot-ready label yet")).toBeInTheDocument();
+  expect(screen.getByText(/has the bot-ready label and is in Ready to build/)).toBeInTheDocument();
+});
+
+test("the error state leads to the guide and to the environment check", async () => {
+  await renderWithProviders(
+    <>
+      <Issues />
+      <Where />
+    </>,
+    { backend: createMockBackend("fresh", { latencyMs: 0 }) },
+  );
+  await userEvent.click(await screen.findByRole("button", { name: "Open the guide" }));
+  expect(screen.getByTestId("where")).toHaveTextContent("/onboarding");
+  await userEvent.click(screen.getByRole("button", { name: "Open the environment check" }));
+  expect(screen.getByTestId("where")).toHaveTextContent("/doctor");
+});
+
+test("a retry in the error state reads the issues again", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.issues.bind(backend);
+  backend.issues = vi.fn().mockRejectedValueOnce(new BackendError("Linear did not answer")).mockImplementation(read);
+  await renderWithProviders(<Issues />, { backend });
+  expect(await screen.findByText("Could not read the issues from Linear")).toBeInTheDocument();
+  expect(screen.getByText("Linear did not answer")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
+  expect(screen.queryByText("Could not read the issues from Linear")).not.toBeInTheDocument();
+});
+
+test("the issue list reads in the interface language", async () => {
+  await renderWithProviders(<Issues />, { lang: "zh-CN" });
+  expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
+  expect(screen.getByText("状态是 Backlog，不是 Todo")).toBeInTheDocument();
+  expect(screen.getByText("项目还没有绑定本地目录")).toBeInTheDocument();
+  expect(screen.getByText("指派给你、带 ai-ready 标签的需求，最近更新的 50 条")).toBeInTheDocument();
+});

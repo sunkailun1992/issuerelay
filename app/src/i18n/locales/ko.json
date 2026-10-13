@@ -98,6 +98,13 @@
     "default": "기본값({{name}})"
   },
   "actions": {
+    "stop": "중지",
+    "run_again": "다시 실행",
+    "mark_done": "완료로 표시",
+    "open_in_linear": "Linear에서 열기",
+    "poll_now": "지금 확인",
+    "confirm": "확인",
+    "mark_done_confirm": "{{identifier}}을(를) {{done}} 상태로 바꿀까요? IssueRelay가 Linear에서 변경하는 유일한 작업입니다.",
     "failed": {
       "pause": "모니터링을 일시 중지하지 못했습니다",
       "resume": "모니터링을 다시 시작하지 못했습니다",
@@ -113,11 +120,80 @@
       "linear_logout": "Linear에서 로그아웃하지 못했습니다",
       "linear_reconnect": "Linear에 다시 연결하지 못했습니다",
       "setup_action": "설정 명령이 실패했습니다",
-      "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다"
+      "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다",
+      "open_linear": "Linear를 열지 못했습니다"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay는 Linear의 페이지만 엽니다",
     "login_cancelled": "브라우저 로그인이 취소되었습니다"
+  },
+  "overview": {
+    "monitoring": "모니터링",
+    "running": "실행 중",
+    "queued": "대기 중",
+    "recent": "최근 결과",
+    "no_running": "실행 중인 작업이 없습니다",
+    "no_running_hint": "IssueRelay가 이슈를 처리하는 동안 실행이 여기에 표시됩니다.",
+    "queue_empty": "대기 중인 작업이 없습니다",
+    "recent_empty": "아직 끝난 실행이 없습니다",
+    "alert_failed_one": "실행 {{count}}건이 실패했습니다",
+    "alert_failed_other": "실행 {{count}}건이 실패했습니다",
+    "alert_awaiting_one": "이슈 {{count}}건이 검수를 기다리고 있습니다",
+    "alert_awaiting_other": "이슈 {{count}}건이 검수를 기다리고 있습니다",
+    "view": "보기",
+    "draining": "실행 중인 작업이 끝나기를 기다리는 중입니다. 새 작업은 시작되지 않습니다",
+    "open_doctor": "환경 점검 열기",
+    "problem": {
+      "not_configured": "Linear에 로그인하지 않았습니다",
+      "interface_changed": "Linear의 도구가 바뀌었습니다. IssueRelay를 업데이트하세요",
+      "connect_failed": "Linear에 연결할 수 없습니다. IssueRelay가 1분마다 다시 시도합니다",
+      "check_failed": "마지막 Linear 확인에 실패했습니다",
+      "start_failed": "시작하지 못한 실행이 있습니다"
+    },
+    "status_failed": "IssueRelay의 상태를 읽지 못했습니다",
+    "jobs_failed": "실행 기록을 읽지 못했습니다"
+  },
+  "issues": {
+    "description": "나에게 할당되고 {{label}} 라벨이 붙은 이슈 중 최근 업데이트된 50건",
+    "empty_title": "{{label}} 라벨이 붙은 이슈가 아직 없습니다",
+    "empty_description": "나에게 할당되고 {{label}} 라벨이 붙었으며 상태가 {{todo}}인 이슈를 IssueRelay가 가져갑니다.",
+    "open_help": "동작 방식 보기",
+    "column": {
+      "issue": "이슈",
+      "title": "제목",
+      "linear_state": "Linear 상태",
+      "local_state": "로컬 상태",
+      "reason": "사유",
+      "actions": "작업"
+    },
+    "not_todo": "상태가 {{todo}}이(가) 아니라 {{state}}입니다",
+    "eligible": "다음 확인 때 가져갑니다",
+    "not_candidate": "나에게 할당되지 않았거나 라벨이 맞지 않습니다",
+    "paused": "모니터링이 일시 중지되었습니다",
+    "waiting": {
+      "project_not_bound": "프로젝트가 로컬 폴더에 연결되어 있지 않습니다",
+      "directory_missing": "연결된 폴더 {{directory}}이(가) 없습니다",
+      "executor_not_ready": "{{executor}}이(가) 준비되지 않았습니다. 환경 점검을 확인하세요"
+    },
+    "load_failed": "Linear에서 이슈를 읽지 못했습니다",
+    "open_guide": "가이드 열기",
+    "open_doctor": "환경 점검 열기"
+  },
+  "linear": {
+    "connecting": "Linear에 연결하는 중…",
+    "not_configured": "Linear에 로그인하지 않았습니다",
+    "log_in": "Linear에 로그인",
+    "connect_failed": "Linear에 연결하지 못했습니다",
+    "interface_changed": "Linear의 도구가 바뀌었습니다. IssueRelay를 업데이트하세요",
+    "retry": "다시 시도",
+    "connected": "연결됨:",
+    "connected_plain": "연결됨",
+    "last_check": "마지막 확인: {{time}}",
+    "never_checked": "아직 확인하지 않았습니다",
+    "log_in_again": "다시 인증",
+    "log_out": "로그아웃",
+    "waiting_browser": "브라우저에서 인증을 마쳐 주세요…",
+    "cancel_login": "취소"
   }
 }

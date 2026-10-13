@@ -98,6 +98,13 @@
     "default": "Default ({{name}})"
   },
   "actions": {
+    "stop": "Stop",
+    "run_again": "Run again",
+    "mark_done": "Mark done",
+    "open_in_linear": "Open in Linear",
+    "poll_now": "Check now",
+    "confirm": "Confirm",
+    "mark_done_confirm": "Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.",
     "failed": {
       "pause": "Could not pause monitoring",
       "resume": "Could not resume monitoring",
@@ -113,11 +120,80 @@
       "linear_logout": "Could not log out of Linear",
       "linear_reconnect": "Could not reconnect to Linear",
       "setup_action": "The setup command failed",
-      "set_autostart": "Could not change start at login"
+      "set_autostart": "Could not change start at login",
+      "open_linear": "Could not open Linear"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay only opens Linear's own pages",
     "login_cancelled": "The browser login was cancelled"
+  },
+  "overview": {
+    "monitoring": "Monitoring",
+    "running": "Running",
+    "queued": "Queued",
+    "recent": "Recent results",
+    "no_running": "Nothing is running",
+    "no_running_hint": "A run shows up here while IssueRelay works on an issue.",
+    "queue_empty": "Nothing is waiting",
+    "recent_empty": "No finished runs yet",
+    "alert_failed_one": "{{count}} run failed",
+    "alert_failed_other": "{{count}} runs failed",
+    "alert_awaiting_one": "{{count}} issue awaits your acceptance",
+    "alert_awaiting_other": "{{count}} issues await your acceptance",
+    "view": "View",
+    "draining": "Waiting for the runs in progress to finish; nothing new starts",
+    "open_doctor": "Open the environment check",
+    "problem": {
+      "not_configured": "Not logged in to Linear",
+      "interface_changed": "Linear's tools changed: update IssueRelay",
+      "connect_failed": "Could not connect to Linear; IssueRelay tries again every minute",
+      "check_failed": "The last check of Linear failed",
+      "start_failed": "A run could not be started"
+    },
+    "status_failed": "Could not read IssueRelay's status",
+    "jobs_failed": "Could not read the runs"
+  },
+  "issues": {
+    "description": "Issues assigned to you with the {{label}} label, the 50 most recently updated",
+    "empty_title": "No issues with the {{label}} label yet",
+    "empty_description": "IssueRelay picks up an issue that is assigned to you, has the {{label}} label and is in {{todo}}.",
+    "open_help": "How it works",
+    "column": {
+      "issue": "Issue",
+      "title": "Title",
+      "linear_state": "Linear status",
+      "local_state": "Local status",
+      "reason": "Reason",
+      "actions": "Actions"
+    },
+    "not_todo": "Its status is {{state}}, not {{todo}}",
+    "eligible": "The next check picks it up",
+    "not_candidate": "It is not assigned to you, or its label does not match",
+    "paused": "Monitoring is paused",
+    "waiting": {
+      "project_not_bound": "Its project is not bound to a local folder",
+      "directory_missing": "The bound folder {{directory}} does not exist",
+      "executor_not_ready": "{{executor}} is not ready; see the environment check"
+    },
+    "load_failed": "Could not read the issues from Linear",
+    "open_guide": "Open the guide",
+    "open_doctor": "Open the environment check"
+  },
+  "linear": {
+    "connecting": "Connecting to Linear…",
+    "not_configured": "Not logged in to Linear",
+    "log_in": "Log in to Linear",
+    "connect_failed": "Could not connect to Linear",
+    "interface_changed": "Linear's tools changed: update IssueRelay",
+    "retry": "Try again",
+    "connected": "Connected as",
+    "connected_plain": "Connected",
+    "last_check": "Last check {{time}}",
+    "never_checked": "Not checked yet",
+    "log_in_again": "Authorize again",
+    "log_out": "Log out",
+    "waiting_browser": "Finish the authorization in your browser…",
+    "cancel_login": "Cancel"
   }
 }
