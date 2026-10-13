@@ -589,14 +589,13 @@ fn clean(text: &str) -> String {
     text.trim().chars().take(MAX_PROBLEM_TEXT).collect()
 }
 
-/// The first non-empty line of command output, `clean`ed; empty when there is none. Colour
-/// codes go first, so a line that holds only those does not count.
+/// The first line of command output that still shows something once `clean`ed, cleaned; empty
+/// when there is none. A line that holds only colour codes, control or invisible characters
+/// does not count. (No colour code spans two lines: a CSI sequence cannot hold a line break.)
 fn first_line(text: &str) -> String {
-    strip_ansi(text)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+    text.lines()
         .map(clean)
+        .find(|line| !line.is_empty())
         .unwrap_or_default()
 }
 
@@ -1108,6 +1107,9 @@ mod tests {
         // The first line that shows anything is the version; nothing at all is no version.
         let (report, _) = detailed(ExecutorKind::Claude, &replies("\n\u{1b}[0m\n2.1.285\n")).await;
         assert_eq!(report.version.as_deref(), Some("2.1.285"));
+        // A line that shows nothing once cleaned is passed over too.
+        let (report, _) = detailed(ExecutorKind::Claude, &replies("\u{202e}\n2.1.285\n")).await;
+        assert_eq!(report.version.as_deref(), Some("2.1.285"));
         let (report, _) = detailed(ExecutorKind::Claude, &replies("\u{202e}\n")).await;
         assert_eq!(report.version, None);
     }
@@ -1447,6 +1449,9 @@ mod tests {
             first_line("\u{1b}[0m\n\u{1b}[31mboom\u{1b}[0m\nsecond"),
             "boom"
         );
+        // So is a line of control or invisible characters only.
+        assert_eq!(first_line("\u{7}\t\nboom"), "boom");
+        assert_eq!(first_line("\u{202e}\u{200b}\n2.1.285"), "2.1.285");
     }
 
     #[tokio::test]

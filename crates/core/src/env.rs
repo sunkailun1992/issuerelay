@@ -10,6 +10,7 @@
 //! the system proxy settings, and `ExecEnv::apply` hands the result to every child.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::future::Future;
 #[cfg(unix)]
 use std::path::Path;
@@ -205,16 +206,28 @@ fn has_proxy(vars: &Vars) -> bool {
         .any(|name| vars.get(*name).is_some_and(|v| !v.trim().is_empty()))
 }
 
-/// The host's own PATH and proxy variables. Variables that are not valid Unicode are skipped
-/// (`std::env::vars` would panic on any such variable, even an unrelated one).
+/// The host's own PATH and proxy variables.
 fn host_vars() -> Vars {
-    std::env::vars_os()
-        .filter_map(|(name, value)| {
-            let name = name.into_string().ok()?;
-            interesting(&name).then_some(())?;
-            Some((name, value.into_string().ok()?))
-        })
-        .collect()
+    host_vars_from(std::env::vars_os(), !cfg!(windows))
+}
+
+/// The PATH and proxy variables of the environment `vars`. Where variable names have no case
+/// (`names_have_case` false: Windows), PATH is found in any spelling and kept as `PATH`: Windows
+/// spells it `Path`, the name of the registry value. Variables that are not valid Unicode are
+/// skipped (`std::env::vars` would panic on any such variable, even an unrelated one).
+fn host_vars_from(vars: impl Iterator<Item = (OsString, OsString)>, names_have_case: bool) -> Vars {
+    vars.filter_map(|(name, value)| {
+        let name = name.into_string().ok()?;
+        let name = if !names_have_case && name.eq_ignore_ascii_case("PATH") {
+            "PATH".to_string()
+        } else if interesting(&name) {
+            name
+        } else {
+            return None;
+        };
+        Some((name, value.into_string().ok()?))
+    })
+    .collect()
 }
 
 /// The machine's and the user's PATH from the operating system's settings, in that order (Windows:
@@ -1170,6 +1183,70 @@ mod tests {
         assert_eq!(alone.path, None);
         assert_eq!(alone.path_source, EnvSource::Host);
         assert_eq!(alone.problems.len(), 1, "{:?}", alone.problems);
+    }
+
+    /// An environment block as `std::env::vars_os` hands it out.
+    fn block(pairs: &[(&str, &str)]) -> impl Iterator<Item = (OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    // Windows spells the variable `Path` (the name of the registry value), and its variable names
+    // have no case. The host's own entries, such as the shims a terminal profile added, must
+    // survive the merge with the registry's PATH: the children get only the merged PATH, and an
+    // executor found only on the host's would read as not installed.
+    #[test]
+    fn where_names_have_no_case_a_host_path_spelled_path_keeps_its_own_entries() {
+        let host = host_vars_from(
+            block(&[
+                ("Path", r"C:\Windows\system32;C:\Tools\fnm-shims"),
+                ("https_proxy", "http://127.0.0.1:7890"),
+                ("TEMP", r"C:\Temp"),
+            ]),
+            false,
+        );
+        assert_eq!(
+            host.get("PATH").map(String::as_str),
+            Some(r"C:\Windows\system32;C:\Tools\fnm-shims")
+        );
+        assert_eq!(
+            host.get("https_proxy").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(host.len(), 2, "{:?}", host.keys().collect::<Vec<_>>());
+        let read = Sources {
+            host,
+            shell: Ok(Vars::new()),
+            system_proxy: Ok(Vec::new()),
+            system_path: Ok((Some(r"C:\Windows\system32".to_string()), None)),
+        };
+        let env = combine(&read, None);
+        assert_eq!(
+            env.path.as_deref(),
+            Some(r"C:\Windows\system32;C:\Tools\fnm-shims")
+        );
+        assert_eq!(env.path_source, EnvSource::SystemSettings);
+    }
+
+    #[test]
+    fn where_names_have_case_only_path_in_capitals_is_the_path() {
+        let host = host_vars_from(block(&[("Path", "/opt/other"), ("PATH", "/usr/bin")]), true);
+        assert_eq!(host.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(host.len(), 1, "{:?}", host.keys().collect::<Vec<_>>());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_hosts_path_is_found_whatever_its_spelling() {
+        let host = host_vars();
+        assert!(
+            host.get("PATH").is_some_and(|path| !path.is_empty()),
+            "{:?}",
+            host.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]

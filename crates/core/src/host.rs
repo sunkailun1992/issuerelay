@@ -577,18 +577,14 @@ impl Host {
         // A task that died in a section holding one of the engine's std locks (the store, the
         // running set) poisoned it, and the engine's calls in `stop_engine` that take it panic.
         // The server below must stop whatever happens there: its lock keeps every later host out.
-        // So that part runs under `catch_unwind`. What follows touches only the IPC token and the
-        // IPC task slot, never the engine, so going on after the panic cannot meet the state the
-        // panic left half changed, and a later `stop` still finds every slot as this one left it
-        // (a tokio mutex is released, not poisoned, when a panic unwinds through its guard).
+        // So that part runs under `catch_unwind`. What follows takes none of the engine's locks:
+        // `after_a_panic_in_stop` tells the engine to stop and waits a bounded while for its task,
+        // and the rest touches only the IPC token and task slot. Going on after the panic so cannot
+        // meet the state the panic left half changed, and a later `stop` still finds every slot as
+        // this one left it (a tokio mutex is released, not poisoned, when a panic unwinds through
+        // its guard).
         if let Err(panic) = catch_unwind(self.stop_engine(mode)).await {
-            let why = format!("stopping the engine panicked: {}", panic_message(&*panic));
-            tracing::error!("{why}; the IPC server is stopped all the same");
-            self.inner
-                .engine_failure
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get_or_insert(why);
+            self.after_a_panic_in_stop(panic_message(&*panic)).await;
         }
         // Last: the lock goes with the server, and nothing is left for a second host to disturb.
         self.inner.ipc_shutdown.cancel();
@@ -617,17 +613,7 @@ impl Host {
         }
         // `run_forever` tells the runs still in progress to stop on its way out.
         self.inner.engine_shutdown.cancel();
-        let _ = join(&self.inner.worker, |result| {
-            if let Err(error) = result {
-                tracing::error!(%error, "the engine task failed");
-                *self
-                    .inner
-                    .engine_failure
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
-            }
-        })
-        .await;
+        self.join_worker().await;
         if self.engine_failure().is_some() {
             stop_runs(engine);
             let wait = self.inner.dead_engine_wait;
@@ -643,6 +629,49 @@ impl Host {
         } else {
             engine.wait_idle().await;
         }
+    }
+
+    /// Waits for the engine's task to end and, if it failed, records why (`engine_failure`).
+    async fn join_worker(&self) {
+        let _ = join(&self.inner.worker, |result| {
+            if let Err(error) = result {
+                tracing::error!(%error, "the engine task failed");
+                *self
+                    .inner
+                    .engine_failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
+            }
+        })
+        .await;
+    }
+
+    /// What `stop` does when its engine part panicked with `panic`. The panic can come before the
+    /// engine was told to stop (a `WaitForRuns` whose wait met a poisoned running lock), so it is
+    /// told now, which ends its loop and the retries of the connection too. Then its task is waited
+    /// for, a bounded while (`dead_engine_wait`), so that `engine_failure` names the engine's own
+    /// failure when it had one: a task that died in a locked section is why the stop met a
+    /// poisoned lock. The stop's panic is recorded only when nothing else was. Nothing here takes
+    /// an engine lock, so it cannot panic the way the engine part did.
+    async fn after_a_panic_in_stop(&self, panic: &str) {
+        let why = format!("stopping the engine panicked: {panic}");
+        tracing::error!("{why}; the IPC server is stopped all the same");
+        self.inner.engine_shutdown.cancel();
+        let wait = self.inner.dead_engine_wait;
+        if tokio::time::timeout(wait, self.join_worker())
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                seconds = wait.as_secs_f32(),
+                "the engine task did not end after the stop panicked; going on without it"
+            );
+        }
+        self.inner
+            .engine_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(why);
     }
 
     /// Why the engine's task died, once `stop` has found it so: nothing polled Linear or started
@@ -756,6 +785,99 @@ mod tests {
             join(&cell, |_| {}).await.is_none(),
             "and nothing is left to wait for"
         );
+    }
+
+    /// A host around `worker`, a task the test controls in place of `run_forever`, with nothing
+    /// else running: no IPC server and no attempts to connect. Its engine's loop is told to stop
+    /// through `engine_shutdown`.
+    fn bare_host(
+        root: &std::path::Path,
+        worker: JoinHandle<()>,
+        engine_shutdown: CancellationToken,
+    ) -> Host {
+        let paths = AppPaths::under(root);
+        let env = ExecEnv::inherit().shared();
+        let engine = Engine::new(EngineDeps {
+            config_path: paths.config_file(),
+            store: Store::open_in_memory().unwrap(),
+            linear: Arc::new(Disconnected::new("not connected to Linear")),
+            readiness: Arc::new(SystemReadiness::new(READINESS_TTL, env.clone())),
+            job_runner: Arc::new(ProcessJobRunner::new(env.clone())),
+            logs_dir: paths.logs_dir(),
+        })
+        .unwrap();
+        Host {
+            inner: Arc::new(Inner {
+                engine,
+                env,
+                paths,
+                connector: Arc::new(SystemConnector),
+                link: Mutex::new(Link {
+                    setup: LinearSetup::NotConfigured,
+                    next_attempt: 0,
+                    current_from: 0,
+                }),
+                user_actions: tokio::sync::Mutex::new(()),
+                engine_shutdown,
+                ipc_shutdown: CancellationToken::new(),
+                worker: tokio::sync::Mutex::new(Some(worker)),
+                worker_ended: CancellationToken::new(),
+                ipc: tokio::sync::Mutex::new(None),
+                engine_failure: Mutex::new(None),
+                dead_engine_wait: Duration::from_secs(5),
+            }),
+        }
+    }
+
+    // `stop` catches a panic of its engine part, and that panic can come before the engine was
+    // told to stop: a `WaitForRuns` whose wait met a poisoned running lock. The engine is told then
+    // (its loop and the retries of the connection end with it) and its task is waited for.
+    #[tokio::test]
+    async fn after_a_panic_in_stop_the_engine_is_told_to_stop_and_its_task_is_waited_for() {
+        let root = tempfile::tempdir().unwrap();
+        let shutdown = CancellationToken::new();
+        // Stands for `run_forever`, which ends once it is told to stop.
+        let worker = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.cancelled().await }
+        });
+        let host = bare_host(root.path(), worker, shutdown.clone());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            host.after_a_panic_in_stop("running lock: PoisonError { .. }"),
+        )
+        .await
+        .expect("the engine task was not waited for in time");
+        assert!(shutdown.is_cancelled(), "the engine was not told to stop");
+        assert!(
+            host.inner.worker.lock().await.is_none(),
+            "the engine task was not waited for"
+        );
+        // The engine ended as told, so the stop's panic is the one failure to report.
+        assert_eq!(
+            host.engine_failure().as_deref(),
+            Some("stopping the engine panicked: running lock: PoisonError { .. }")
+        );
+    }
+
+    // An engine task that died is why the stop met a poisoned lock: its own failure is what
+    // `engine_failure` names.
+    #[tokio::test]
+    async fn after_a_panic_in_stop_the_engines_own_failure_is_the_one_reported() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = tokio::spawn(async { panic!("the engine's own panic") });
+        for _ in 0..1_000 {
+            if worker.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(worker.is_finished(), "the stand-in engine task never ended");
+        let host = bare_host(root.path(), worker, CancellationToken::new());
+        host.after_a_panic_in_stop("store lock: PoisonError { .. }")
+            .await;
+        let failure = host.engine_failure().expect("a failure is reported");
+        assert!(failure.contains("the engine's own panic"), "{failure}");
     }
 
     #[tokio::test]

@@ -3009,8 +3009,17 @@ async fn the_log_cleanup_waits_for_a_cycle_in_progress() {
     assert!(!cleanup.is_finished());
 
     gate.add_permits(1);
-    poll.await.unwrap().unwrap();
-    let report = cleanup.await.unwrap().unwrap();
+    // Bounded, so that a deadlock fails the test instead of stalling the run.
+    tokio::time::timeout(Duration::from_secs(5), poll)
+        .await
+        .expect("the poll never finished")
+        .unwrap()
+        .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(5), cleanup)
+        .await
+        .expect("the cleanup never finished")
+        .unwrap()
+        .unwrap();
     assert_eq!(report.removed, 1);
     assert!(!old.exists());
 }
