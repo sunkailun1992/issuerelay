@@ -1,6 +1,8 @@
 //! Cleaning of text that comes from the AI, Linear or the operating system before it is stored
 //! or shown by the panel, the CLI and MCP.
 
+use std::borrow::Cow;
+
 /// The most characters of a summary or a reason that are kept.
 const MAX_TEXT_CHARS: usize = 500;
 
@@ -54,6 +56,39 @@ pub fn is_invisible(c: char) -> bool {
             | '\u{FFA0}'
             | '\u{E0000}'..='\u{E007F}'
     )
+}
+
+/// `text` without ANSI CSI sequences: `ESC [`, parameter bytes (`0`-`?`), intermediate bytes
+/// (space-`/`) and one final byte (`@`-`~`). A CLI may colour what it prints into a pipe when
+/// colour is forced (`FORCE_COLOR`), which would hide the words and URLs the parsers look for.
+/// Anything that is not a complete CSI sequence stays as it is.
+pub fn strip_ansi(text: &str) -> Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return Cow::Borrowed(text);
+    }
+    let mut stripped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}[") {
+        stripped.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let bytes = after.as_bytes();
+        let mut end = 0;
+        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
+            end += 1;
+        }
+        while end < bytes.len() && matches!(bytes[end], 0x20..=0x2f) {
+            end += 1;
+        }
+        if end < bytes.len() && matches!(bytes[end], 0x40..=0x7e) {
+            // Every byte up to and including the final one is ASCII, so this is a char boundary.
+            rest = &after[end + 1..];
+        } else {
+            stripped.push_str("\u{1b}[");
+            rest = after;
+        }
+    }
+    stripped.push_str(rest);
+    Cow::Owned(stripped)
 }
 
 #[cfg(test)]
@@ -130,5 +165,33 @@ mod tests {
         let england = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
         assert_eq!(clean_text(england), "\u{1f3f4}");
         assert_eq!(clean_text(&format!("a{england}b")), "a\u{1f3f4}b");
+    }
+
+    #[test]
+    fn ansi_csi_sequences_are_stripped_and_nothing_else() {
+        // Text without an escape is returned as it is, without a copy.
+        assert!(matches!(
+            strip_ansi("plain ✔ text"),
+            Cow::Borrowed("plain ✔ text")
+        ));
+        assert_eq!(strip_ansi("\u{1b}[36mhttps://x\u{1b}[39m"), "https://x");
+        // Several parameters, no parameter, other final bytes, a private marker, an intermediate
+        // byte, and multi-byte text right next to a sequence.
+        assert_eq!(strip_ansi("\u{1b}[1;31mred\u{1b}[0m"), "red");
+        assert_eq!(strip_ansi("a\u{1b}[mb"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}[2Kb\u{1b}[?25lc\u{1b}[~d"), "abcd");
+        assert_eq!(strip_ansi("a\u{1b}[2 qb"), "ab");
+        // The final byte may be any of `@` to `~`, and nothing outside that range.
+        assert_eq!(strip_ansi("a\u{1b}[3@b"), "ab");
+        assert_eq!(strip_ansi("a\u{1b}[3\u{7f}b"), "a\u{1b}[3\u{7f}b");
+        assert_eq!(strip_ansi("\u{1b}[32m✔ Connected\u{1b}[39m"), "✔ Connected");
+        // Not a complete CSI sequence: left alone, and it does not hide a good one after it.
+        assert_eq!(strip_ansi("a\u{1b}[32"), "a\u{1b}[32");
+        assert_eq!(strip_ansi("a\u{1b}[ ✔"), "a\u{1b}[ ✔");
+        assert_eq!(strip_ansi("a\u{1b}[\u{7}b"), "a\u{1b}[\u{7}b");
+        assert_eq!(strip_ansi("\u{1b}[ \u{1b}[32mok\u{1b}[0m"), "\u{1b}[ ok");
+        // Escapes that are not CSI are not touched here.
+        assert_eq!(strip_ansi("a\u{1b}]8;;x\u{7}b"), "a\u{1b}]8;;x\u{7}b");
+        assert_eq!(strip_ansi("a\u{1b}Mb"), "a\u{1b}Mb");
     }
 }

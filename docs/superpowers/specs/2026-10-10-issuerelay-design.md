@@ -294,7 +294,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ### 10.3 MCP 服务
 
-`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除。注册命令为 `claude mcp add --scope user issuerelay -- <命令行程序> mcp`、`codex mcp add issuerelay -- <命令行程序> mcp`；是否已注册看 `mcp get issuerelay` 的退出码。
+`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除（移除命令为 `claude mcp remove --scope user issuerelay`、`codex mcp remove issuerelay`）。注册命令为 `claude mcp add --scope user issuerelay -- <命令行程序> mcp`、`codex mcp add issuerelay -- <命令行程序> mcp`；是否已注册看 `mcp get issuerelay` 的退出码。
 
 ## 11. 配置与数据位置
 

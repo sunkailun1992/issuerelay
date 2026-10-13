@@ -7,13 +7,13 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ExecutorKind;
 use crate::doctor::{CmdOutput, CommandRunner};
 use crate::linear::auth::LINEAR_MCP_URL;
-use crate::text::clean_text;
+use crate::text::{clean_text, strip_ansi};
 
 /// The name IssueRelay's control server is registered under.
 pub const CONTROL_SERVER_NAME: &str = "issuerelay";
@@ -63,6 +63,12 @@ pub fn arguments(action: SetupAction, cli: Option<&Path>) -> Result<Vec<String>>
         SetupAction::RegisterControlServer(kind) => {
             let cli =
                 cli.ok_or_else(|| anyhow!("IssueRelay's command-line program was not found"))?;
+            if !cli.is_absolute() {
+                bail!(
+                    "IssueRelay's command-line program must be given by an absolute path: {}",
+                    cli.display()
+                );
+            }
             let cli = cli.to_str().ok_or_else(|| {
                 anyhow!("the path of IssueRelay's command-line program is not valid Unicode")
             })?;
@@ -87,19 +93,62 @@ pub fn arguments(action: SetupAction, cli: Option<&Path>) -> Result<Vec<String>>
     })
 }
 
+/// The time limit of every setup command but a login, and of `mcp get`.
+const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+
+/// The time limit of a login: the user finishes it in the browser.
+const LOGIN_LIMIT: Duration = Duration::from_secs(5 * 60);
+
 /// How long `action` may take: a login waits for the user to finish in the browser.
 pub fn time_limit(action: SetupAction) -> Duration {
     match action {
-        SetupAction::LoginLinearMcp(_) => Duration::from_secs(5 * 60),
-        _ => Duration::from_secs(60),
+        SetupAction::LoginLinearMcp(_) => LOGIN_LIMIT,
+        _ => COMMAND_LIMIT,
     }
 }
 
-/// The most characters of a failed command's output an error carries.
+/// The most characters of a failed command's output an error carries, all streams together: when
+/// both streams print, each gets half. A cut is marked with `…`.
 const MAX_OUTPUT_CHARS: usize = 400;
 
+/// `text` as one plain line: escape sequences stripped first, then control and invisible
+/// characters cleaned (`clean_text`).
+fn plain(text: &str) -> String {
+    clean_text(&strip_ansi(text))
+}
+
+/// The first `limit` characters of `text`, with `…` added when it was longer.
+fn cut(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// What a failed command printed, as its error shows it: its stderr, or its stdout when the
+/// stderr is empty, or both when both print.
+fn shown_output(output: &CmdOutput) -> String {
+    let stderr = plain(&output.stderr);
+    let stdout = plain(&output.stdout);
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!(
+            "stderr: {}; stdout: {}",
+            cut(&stderr, MAX_OUTPUT_CHARS / 2),
+            cut(&stdout, MAX_OUTPUT_CHARS / 2)
+        ),
+        (false, true) => cut(&stderr, MAX_OUTPUT_CHARS),
+        (true, false) => cut(&stdout, MAX_OUTPUT_CHARS),
+        (true, true) => "no output".to_string(),
+    }
+}
+
 /// Runs `action` with `program`, the executor as the environment check found it. A command that
-/// exits non-zero is an error carrying its (cleaned, shortened) output.
+/// exits non-zero, is ended by a signal, or cannot run to completion is an error that names the
+/// command; the error of a command that finished carries its output (`shown_output`). On success
+/// the output is returned as the command printed it: callers clean it before they show it.
 pub async fn run(
     action: SetupAction,
     program: &Path,
@@ -108,40 +157,40 @@ pub async fn run(
 ) -> Result<CmdOutput> {
     let args = arguments(action, cli)?;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = format!("{} {}", program.display(), args.join(" "));
     let output = runner
         .run_limited(program, &refs, time_limit(action))
-        .await?;
-    if output.code != Some(0) {
-        let text = if output.stderr.trim().is_empty() {
-            &output.stdout
-        } else {
-            &output.stderr
-        };
-        let shown: String = clean_text(text).chars().take(MAX_OUTPUT_CHARS).collect();
-        let code = output
-            .code
-            .map_or_else(|| "none".to_string(), |c| c.to_string());
-        bail!(
-            "`{} {}` failed (exit code {code}): {shown}",
-            program.display(),
-            args.join(" ")
-        );
+        .await
+        .with_context(|| format!("`{command}` did not run to completion"))?;
+    match output.code {
+        Some(0) => Ok(output),
+        Some(code) => bail!(
+            "`{command}` failed (exit code {code}): {}",
+            shown_output(&output)
+        ),
+        None => bail!(
+            "`{command}` was ended by a signal: {}",
+            shown_output(&output)
+        ),
     }
-    Ok(output)
 }
 
 /// Whether IssueRelay's control server is registered with the executor at `program`:
-/// `mcp get issuerelay` exits 0 only then (measured with Claude Code 2.1.285 and codex-cli
-/// 0.159.2).
+/// `mcp get issuerelay` exits 0 only then, and exits non-zero when it is not (measured with
+/// Claude Code 2.1.285 and codex-cli 0.159.2 on 2026-10-13). A command that was ended by a signal,
+/// or that cannot run to completion, says nothing about the registration: it is an error.
 pub async fn control_server_registered(program: &Path, runner: &dyn CommandRunner) -> Result<bool> {
+    let args = ["mcp", "get", CONTROL_SERVER_NAME];
+    let command = format!("{} {}", program.display(), args.join(" "));
     let output = runner
-        .run_limited(
-            program,
-            &["mcp", "get", CONTROL_SERVER_NAME],
-            Duration::from_secs(60),
-        )
-        .await?;
-    Ok(output.code == Some(0))
+        .run_limited(program, &args, COMMAND_LIMIT)
+        .await
+        .with_context(|| format!("`{command}` did not run to completion"))?;
+    match output.code {
+        Some(0) => Ok(true),
+        Some(_) => Ok(false),
+        None => bail!("`{command}` was ended by a signal"),
+    }
 }
 
 #[cfg(test)]
@@ -151,21 +200,40 @@ mod tests {
 
     use super::*;
 
-    /// Records every command and answers with `reply`.
+    /// Records every command and answers with `reply`, or fails with `fail` when it is set.
     struct Recorder {
         reply: CmdOutput,
+        fail: Option<String>,
         calls: Mutex<Vec<(PathBuf, Vec<String>, Duration)>>,
     }
 
     impl Recorder {
         fn new(code: i32, stdout: &str, stderr: &str) -> Self {
+            Self::replying(Some(code), stdout, stderr)
+        }
+
+        fn replying(code: Option<i32>, stdout: &str, stderr: &str) -> Self {
             Self {
                 reply: CmdOutput {
-                    code: Some(code),
+                    code,
                     stdout: stdout.into(),
                     stderr: stderr.into(),
                 },
+                fail: None,
                 calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A command that was ended by a signal, with no output.
+        fn signalled() -> Self {
+            Self::replying(None, "", "")
+        }
+
+        /// A command that cannot run to completion; the runner reports `message`.
+        fn unrunnable(message: &str) -> Self {
+            Self {
+                fail: Some(message.into()),
+                ..Self::replying(Some(0), "", "")
             }
         }
     }
@@ -187,9 +255,18 @@ mod tests {
                 args.iter().map(|a| a.to_string()).collect(),
                 limit,
             ));
-            Ok(self.reply.clone())
+            match &self.fail {
+                Some(message) => Err(anyhow!("{message}")),
+                None => Ok(self.reply.clone()),
+            }
         }
     }
+
+    /// An absolute path to IssueRelay's command-line program, as this platform spells one.
+    #[cfg(windows)]
+    const CLI: &str = r"C:\Program Files\IssueRelay\issuerelay.exe";
+    #[cfg(not(windows))]
+    const CLI: &str = "/Applications/IssueRelay.app/Contents/MacOS/issuerelay";
 
     fn args(action: SetupAction, cli: Option<&Path>) -> Vec<String> {
         arguments(action, cli).unwrap()
@@ -198,7 +275,7 @@ mod tests {
     #[test]
     fn every_action_runs_a_fixed_official_command() {
         use ExecutorKind::{Claude, Codex};
-        let cli = Path::new("/Applications/IssueRelay.app/Contents/MacOS/issuerelay");
+        let cli = Path::new(CLI);
         assert_eq!(
             args(SetupAction::AddLinearMcp(Claude), None),
             [
@@ -327,11 +404,144 @@ mod tests {
             found.calls.lock().unwrap()[0].1,
             ["mcp", "get", "issuerelay"]
         );
+        assert_eq!(found.calls.lock().unwrap()[0].2, Duration::from_secs(60));
         let missing = Recorder::new(1, "", "No MCP server named \"issuerelay\"");
         assert!(
             !control_server_registered(Path::new("/fake/claude"), &missing)
                 .await
                 .unwrap()
         );
+    }
+
+    /// What `run` reports when adding Linear's server fails, given the command's `reply`.
+    async fn failure_of(reply: Recorder) -> anyhow::Error {
+        run(
+            SetupAction::AddLinearMcp(ExecutorKind::Claude),
+            Path::new("/fake/claude"),
+            None,
+            &reply,
+        )
+        .await
+        .unwrap_err()
+    }
+
+    /// The output part of a failure: what follows the command and its status.
+    fn shown(error: &anyhow::Error) -> String {
+        let text = format!("{error:#}");
+        text.split_once(": ")
+            .expect("a failure names the command and its status first")
+            .1
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_failure_shows_stderr_without_escape_residue() {
+        let error = failure_of(Recorder::new(
+            1,
+            "",
+            "error: server exists\u{1b}[2J already\n",
+        ))
+        .await;
+        assert_eq!(shown(&error), "error: server exists already");
+    }
+
+    #[tokio::test]
+    async fn a_long_output_is_cut_to_400_characters_and_marked() {
+        let error = failure_of(Recorder::new(1, "", &"x".repeat(1000))).await;
+        assert_eq!(shown(&error), format!("{}…", "x".repeat(400)));
+    }
+
+    #[tokio::test]
+    async fn a_failure_shows_both_streams_when_both_print() {
+        let error = failure_of(Recorder::new(1, "out text", "err text")).await;
+        assert_eq!(shown(&error), "stderr: err text; stdout: out text");
+    }
+
+    #[tokio::test]
+    async fn a_failure_shows_stdout_when_stderr_is_empty() {
+        let error = failure_of(Recorder::new(1, "only stdout", "")).await;
+        assert_eq!(shown(&error), "only stdout");
+    }
+
+    #[tokio::test]
+    async fn a_failure_without_output_says_so() {
+        let error = failure_of(Recorder::new(1, "", "")).await;
+        assert_eq!(shown(&error), "no output");
+    }
+
+    #[tokio::test]
+    async fn a_command_ended_by_a_signal_is_a_failure_of_its_own() {
+        let error = failure_of(Recorder::signalled()).await;
+        let text = format!("{error:#}");
+        assert!(text.contains("was ended by a signal"), "{text}");
+        assert!(!text.contains("exit code"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_cannot_run_to_completion_is_named() {
+        let error = failure_of(Recorder::unrunnable(
+            "No such file or directory (os error 2)",
+        ))
+        .await;
+        assert_eq!(
+            format!("{error:#}"),
+            "`/fake/claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp` did not run to completion: No such file or directory (os error 2)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registration_check_that_cannot_run_names_its_command() {
+        let runner = Recorder::unrunnable("timed out after 60s");
+        let error = control_server_registered(Path::new("/fake/claude"), &runner)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "`/fake/claude mcp get issuerelay` did not run to completion: timed out after 60s"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signal_death_is_no_registration_verdict() {
+        let runner = Recorder::signalled();
+        let error = control_server_registered(Path::new("/fake/claude"), &runner)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("was ended by a signal"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_relative_command_line_program_is_refused() {
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let error = arguments(
+                SetupAction::RegisterControlServer(kind),
+                Some(Path::new("issuerelay")),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("absolute path"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn setup_actions_keep_their_json_shape() {
+        let action = SetupAction::AddLinearMcp(ExecutorKind::Claude);
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"kind":"add_linear_mcp","executor":"claude"}"#);
+        assert_eq!(serde_json::from_str::<SetupAction>(&json).unwrap(), action);
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            for action in [
+                SetupAction::AddLinearMcp(kind),
+                SetupAction::LoginLinearMcp(kind),
+                SetupAction::RegisterControlServer(kind),
+                SetupAction::RemoveControlServer(kind),
+            ] {
+                let json = serde_json::to_string(&action).unwrap();
+                let back: SetupAction = serde_json::from_str(&json).unwrap();
+                assert_eq!(back, action, "{json}");
+            }
+        }
     }
 }

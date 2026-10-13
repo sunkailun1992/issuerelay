@@ -33,6 +33,8 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `FakeConnector`、`LingeringRunner`、`PanickingReadiness` | `crates/core/tests/host.rs` | 宿主的 Linear 连接（按次序给出已存凭据的结果，可让 `stored()` 等到放行）、被告知停止后仍不结束的运行、会在引擎循环里 panic 的环境检查 |
 | `Orphan` | `crates/core/tests/common/orphan.rs` | 宿主崩溃后留下的执行者（macOS：领着自己进程组的 `fake-agent`）；测试结束时没被回收就整组结束并回收 |
 | `FakeRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令的输出（计数调用）；`SystemRunner` 本身用 `fake-agent` 测超时 |
+| `Recorder` | `crates/core/src/setup.rs` 的测试模块 | 设置命令的运行：记录每次调用的程序、参数与时间上限，按设定答复输出，或报告无法运行 |
+| `BarrierRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令：要求几条命令同时在运行，检查才能结束（证明它们真的并行） |
 
 和时间有关的缓存测试用 tokio 的暂停时钟（`#[tokio::test(start_paused = true)]` 加 `tokio::time::advance`），不真的等待。
 

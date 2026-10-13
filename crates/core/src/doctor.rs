@@ -2,7 +2,6 @@
 //! does the Linear workspace have the label and statuses IssueRelay relies on; are bindings usable.
 
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     future::Future,
     io,
@@ -30,6 +29,7 @@ use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor;
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
+use crate::text::strip_ansi;
 use crate::trigger::same_name;
 
 /// What a finished check command printed and how it exited.
@@ -90,7 +90,9 @@ const MAX_PROBLEM_TEXT: usize = 200;
 const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 
 /// Runs the real check commands, each under its own time limit: by default 60 s for
-/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). A command runs in the
+/// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
+/// the limit from its caller instead, which the one-click setup commands do (a login waits up to
+/// five minutes for the browser). A command runs in the
 /// user's home directory, in a process group of its own (Windows: a Job Object, and without a
 /// console window, like the executors), with the shared environment (the PATH and proxy the
 /// executors will get). A check is done when the command's own process exits: whatever it left
@@ -575,39 +577,6 @@ fn register_linear_command(kind: ExecutorKind) -> String {
 /// An exit code as a problem shows it; `unknown` when a signal ended the process.
 fn exit_code_text(code: Option<i32>) -> String {
     code.map_or_else(|| "unknown".to_string(), |code| code.to_string())
-}
-
-/// `text` without ANSI CSI sequences: `ESC [`, parameter bytes (`0`-`?`), intermediate bytes
-/// (space-`/`) and one final byte (`@`-`~`). A CLI may colour what it prints into a pipe when
-/// colour is forced (`FORCE_COLOR`), which would hide the words and URLs the parsers look for.
-/// Anything that is not a complete CSI sequence stays as it is.
-fn strip_ansi(text: &str) -> Cow<'_, str> {
-    if !text.contains('\u{1b}') {
-        return Cow::Borrowed(text);
-    }
-    let mut stripped = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("\u{1b}[") {
-        stripped.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let bytes = after.as_bytes();
-        let mut end = 0;
-        while end < bytes.len() && matches!(bytes[end], 0x30..=0x3f) {
-            end += 1;
-        }
-        while end < bytes.len() && matches!(bytes[end], 0x20..=0x2f) {
-            end += 1;
-        }
-        if end < bytes.len() && matches!(bytes[end], 0x40..=0x7e) {
-            // Every byte up to and including the final one is ASCII, so this is a char boundary.
-            rest = &after[end + 1..];
-        } else {
-            stripped.push_str("\u{1b}[");
-            rest = after;
-        }
-    }
-    stripped.push_str(rest);
-    Cow::Owned(stripped)
 }
 
 /// Command output as a problem may show it: colour codes and other control characters
@@ -1390,6 +1359,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_registration_hint_is_the_setup_command_for_every_directory() {
+        // The hint is the command a user types by hand, and the one `setup` runs: they must agree.
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let args = crate::setup::arguments(crate::setup::SetupAction::AddLinearMcp(kind), None)
+                .unwrap();
+            assert_eq!(
+                register_linear_command(kind),
+                format!("{} {}", kind.program_name(), args.join(" "))
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_status_in_a_problem_is_one_clean_short_line() {
         // A bell and a tab are control characters; the rest is far longer than the limit.
@@ -1413,34 +1395,6 @@ mod tests {
             report.problems,
             [format!("Linear MCP in claude: {expected}")]
         );
-    }
-
-    #[test]
-    fn ansi_csi_sequences_are_stripped_and_nothing_else() {
-        // Text without an escape is returned as it is, without a copy.
-        assert!(matches!(
-            strip_ansi("plain ✔ text"),
-            Cow::Borrowed("plain ✔ text")
-        ));
-        assert_eq!(strip_ansi("\u{1b}[36mhttps://x\u{1b}[39m"), "https://x");
-        // Several parameters, no parameter, other final bytes, a private marker, an intermediate
-        // byte, and multi-byte text right next to a sequence.
-        assert_eq!(strip_ansi("\u{1b}[1;31mred\u{1b}[0m"), "red");
-        assert_eq!(strip_ansi("a\u{1b}[mb"), "ab");
-        assert_eq!(strip_ansi("a\u{1b}[2Kb\u{1b}[?25lc\u{1b}[~d"), "abcd");
-        assert_eq!(strip_ansi("a\u{1b}[2 qb"), "ab");
-        // The final byte may be any of `@` to `~`, and nothing outside that range.
-        assert_eq!(strip_ansi("a\u{1b}[3@b"), "ab");
-        assert_eq!(strip_ansi("a\u{1b}[3\u{7f}b"), "a\u{1b}[3\u{7f}b");
-        assert_eq!(strip_ansi("\u{1b}[32m✔ Connected\u{1b}[39m"), "✔ Connected");
-        // Not a complete CSI sequence: left alone, and it does not hide a good one after it.
-        assert_eq!(strip_ansi("a\u{1b}[32"), "a\u{1b}[32");
-        assert_eq!(strip_ansi("a\u{1b}[ ✔"), "a\u{1b}[ ✔");
-        assert_eq!(strip_ansi("a\u{1b}[\u{7}b"), "a\u{1b}[\u{7}b");
-        assert_eq!(strip_ansi("\u{1b}[ \u{1b}[32mok\u{1b}[0m"), "\u{1b}[ ok");
-        // Escapes that are not CSI are not touched here.
-        assert_eq!(strip_ansi("a\u{1b}]8;;x\u{7}b"), "a\u{1b}]8;;x\u{7}b");
-        assert_eq!(strip_ansi("a\u{1b}Mb"), "a\u{1b}Mb");
     }
 
     #[test]

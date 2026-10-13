@@ -457,6 +457,42 @@ async fn system_runner_gives_up_on_a_command_that_outlives_its_limit() {
 }
 
 #[tokio::test]
+async fn run_limited_gives_up_at_the_callers_limit_not_the_runners() {
+    // The runner's own limit is 10 s, so only the 300 ms the caller passes ends this 5 s command.
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(dir.path(), serde_json::json!([{"sleep_ms": 5000}]));
+    let runner = SystemRunner::with_limits(Duration::from_secs(10), Duration::from_secs(10));
+    let started = Instant::now();
+    let err = runner
+        .run_limited(agent(), &[script.as_str()], Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out after 300ms"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the call waited for the command: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn run_limited_waits_for_the_callers_limit_not_the_runners() {
+    // The runner's own limit is 300 ms, so only the 5 s the caller passes lets this 1 s command run.
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        dir.path(),
+        serde_json::json!([{"sleep_ms": 1000}, {"out": "ok"}]),
+    );
+    let runner = SystemRunner::with_limits(Duration::from_millis(300), Duration::from_millis(300));
+    let output = runner
+        .run_limited(agent(), &[script.as_str()], Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert_eq!(output.stdout.trim_end(), "ok", "{output:?}");
+}
+
+#[tokio::test]
 async fn a_command_that_timed_out_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("finished");
