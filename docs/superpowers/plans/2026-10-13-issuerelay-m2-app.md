@@ -3672,6 +3672,7 @@ git commit -m "test(app): add key page screenshots and a local screenshot compar
 - [ ] **Step 2: 从访达启动**（不经终端，验证登录 shell 的 PATH 与代理）：首次引导走一遍；环境检查页确认 PATH 来源为登录 shell、代理来源与值（打码）；Claude、Codex 都就绪。
 - [ ] **Step 3: 沙箱流程**：绑定沙箱项目（目录 `~/issuerelay-sandbox/demo`）；在沙箱项目建一条需求（Claude）→ 被接走（记时）→ 待验收 → 面板「标记完成」→ Linear 为 Done；换 Codex 再跑一条；四种通知各出现一次（开始运行、待验收、需要补充信息、失败）；托盘四种图标都出现过；暂停 / 恢复（托盘与面板）；设置里把运行时长上限改为 1 分钟制造一次超时（改完恢复 60）；一条故意做不到的需求制造失败；运行中停止一次；「重新运行」一次。
 - [ ] **Step 4: 退出流程**：有任务在跑时托盘「退出」→ 提示 → 选「等待完成」→ 结束后自动退出；再来一次选「立即停止」→ 运行记为已停止、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`）、没有 `.git/index.lock`。
+- [ ] **Step 5a: Linear 口径**：建一条中文标题的沙箱需求，确认提示词里的链接只保留到 `/issue/<编号>`，且这个链接在浏览器里能打开同一条需求（M1 验收 H2，M2 第一部分 Task 6）；若工作区有多个团队，确认环境检查只检查已绑定项目所属的团队，`teams_checked` 与实际一致（截图不进仓库）。
 - [ ] **Step 5: 其他**：开机自启开关（打开后 `~/Library/LaunchAgents/` 出现条目，关闭后消失，不真的注销重登）；MCP 控制服务注册到 Claude Code（`claude mcp get issuerelay` 退出码 0），再移除；切换五种语言，托盘菜单与通知跟着变；关窗口后程序留在托盘、程序坞图标消失；第二次打开应用只把面板带到前面。
 - [ ] **Step 6: 精简运行评估**（设计第 18 节第 6 条）：在沙箱目录手动对比 `claude -p … --strict-mcp-config --mcp-config '{"mcpServers":{"linear-server":{"type":"http","url":"https://mcp.linear.app/mcp"}}}'` 与现有参数的启动时间，以及 Linear 工具是否可用（是否复用已有授权）；Codex 对比 `-c` 覆盖 `mcp_servers` 的可行性。结论写进验收报告与设计第 18 节；是否做成按绑定的选项由结论决定，若做，另起任务（执行者参数属于极高风险，单独提交）。
 - [ ] **Step 7: 报告**：`docs/gates/<日期>-m2-acceptance.md`，按 `TESTING_SPEC.md` 的模板；真实数据一律脱敏（`DEMO-N`、`Demo Project`），截图不进仓库；未闭环写明（Windows 待实机、页面截图待用户确认等）。设计第 17 节 M2 一行的完成情况同步。
