@@ -1,0 +1,16 @@
+[
+  { "name": "connected, nothing running", "linear": "connected", "checked": true, "linear_ok": true, "last_error": false, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "a run in progress", "linear": "connected", "checked": true, "linear_ok": true, "last_error": false, "paused": false, "running": 2, "expected": "running" },
+  { "name": "paused wins over running", "linear": "connected", "checked": true, "linear_ok": true, "last_error": false, "paused": true, "running": 1, "expected": "paused" },
+  { "name": "no check yet is not a failure", "linear": "connected", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "the last check failed", "linear": "connected", "checked": true, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "a job could not start", "linear": "connected", "checked": true, "linear_ok": true, "last_error": true, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "a problem wins over paused", "linear": "connected", "checked": true, "linear_ok": true, "last_error": true, "paused": true, "running": 0, "expected": "problem" },
+  { "name": "not logged in", "linear": "not_configured", "checked": true, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "not logged in, before any check", "linear": "not_configured", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "Linear's tools changed", "linear": "interface_changed", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "connecting failed", "linear": "connect_failed", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "problem" },
+  { "name": "the first connection is still under way", "linear": "connecting", "checked": false, "linear_ok": false, "last_error": false, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "while connecting, a failed check is no problem yet", "linear": "connecting", "checked": true, "linear_ok": false, "last_error": true, "paused": false, "running": 0, "expected": "idle" },
+  { "name": "connecting while paused", "linear": "connecting", "checked": false, "linear_ok": false, "last_error": false, "paused": true, "running": 0, "expected": "paused" }
+]

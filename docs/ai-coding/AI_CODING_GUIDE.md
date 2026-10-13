@@ -68,6 +68,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |
 | 命令行与 MCP 控制服务 | `crates/cli/src/main.rs`、`mcp.rs`、`format.rs` |
 | 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
+| 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
+| 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
 
 ## 6. 运行数据与配置
 
@@ -76,9 +78,11 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名；每次保存前清扫同目录下超过 10 分钟的残留临时文件（`config.toml.<pid>.<n>.tmp`，保存中途崩溃留下的）；加载时对本版本不认识的配置键在日志里警告一次（只记键名，不记值），下次保存会丢掉它们 |
 | 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite；表结构版本记在 `user_version`（当前 2），比当前程序新的拒绝打开，没记版本的旧库（版本 0）按实际缺的列补齐；macOS 上每次运行记下执行者的进程号和启动时间，运行正常结束时清除，宿主崩溃后留到下次启动清扫处理完才清除 |
 | 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器每次打开日志都把 Unix 上的权限设为 0600（重试沿用的旧文件也一样）；单行最多保留 4 MiB，更长的被截断并记一条说明；`logs.rs` 按保留天数（`log_retention_days`，默认 30）和总大小（`log_max_total_mb`，默认 1024）清理，宿主启动时和之后每 6 小时一次，正在运行的任务的日志不删 |
+| 桌面应用的程序日志 | `<数据目录>/com.sunkailun.issuerelay/logs/app.<日期>.log` | tracing 日志：每天一个（按 UTC 日期命名），保留 7 个（只数 `app.*.log`，运行日志不受影响）；每行先经 `logscrub::CleanWriter` 去掉控制字符与不可见字符；`RUST_LOG` 可改过滤，但 rmcp 不低于 info（它在 debug 级写出 OAuth 授权码）；调试构建同时写 stderr |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘；改用 API key 时清掉 OAuth 凭据，OAuth 登录时清掉 API key（`auth::clear_oauth_credentials`、`clear_api_key`） |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
+| 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二次打开应用只把已运行的面板带到前面；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 
