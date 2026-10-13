@@ -47,7 +47,43 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::new(autostarted))
-        .invoke_handler(commands::handler())
+        .manage(commands::PendingLogin::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::app_info,
+            commands::startup_state,
+            commands::status,
+            commands::list_jobs,
+            commands::job,
+            commands::job_log,
+            commands::issues,
+            commands::pause,
+            commands::resume,
+            commands::poll_now,
+            commands::cancel_job,
+            commands::retry_job,
+            commands::mark_done,
+            commands::bindings,
+            commands::save_binding,
+            commands::remove_binding,
+            commands::projects,
+            commands::settings,
+            commands::save_settings,
+            commands::doctor,
+            commands::linear_login,
+            commands::linear_cancel_login,
+            commands::linear_use_api_key,
+            commands::linear_logout,
+            commands::linear_reconnect,
+            commands::setup_action,
+            commands::control_servers,
+            commands::linear_server_named,
+            commands::open_linear,
+            commands::choose_directory,
+            commands::autostart_enabled,
+            commands::set_autostart,
+            commands::quit,
+            commands::request_quit,
+        ])
         .setup(|app| {
             tray::create(app.handle())?;
             if app.state::<state::AppState>().autostarted {

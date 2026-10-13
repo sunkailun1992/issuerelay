@@ -70,6 +70,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
 | 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
 | 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
+| 面板命令（含仅面板可用的标记完成、重试、停止） | `app/src-tauri/src/commands.rs` |
+| 前端数据层、假后端与虚构数据 | `app/src/lib/` |
 
 ## 6. 运行数据与配置
 
@@ -91,6 +93,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`（`fields` 的取值同步 `REQUIRED_FIELDS`）、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
+- **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
 
 ## 8. 外部事实与夹具
 

@@ -2233,9 +2233,11 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
