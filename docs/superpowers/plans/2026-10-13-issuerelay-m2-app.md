@@ -15,7 +15,7 @@
 - 第一部分的全部全局约束继续有效（硬规则、两平台、测试不碰网络与真实钥匙串、虚构测试数据、公开仓库红线、英文注释中文文档、四条验证命令、英文 Conventional Commits 与 `Co-Authored-By` 写实际模型、分支与 PR、禁止强推）。
 - 验证命令扩展为六条（设计第 16 节）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`pnpm --dir app lint`、`pnpm --dir app test`、`bash scripts/check-secrets.sh --strict`（无输出）。
 - 「标记完成」「重新运行」「停止」只经本程序的 Tauri 命令在进程内调用引擎（`Engine::mark_done`、`retry_job`、`cancel_job`）；IPC 方法表、命令行、MCP 控制服务保持不提供。
-- 前端不拿任何插件权限：`capabilities/default.json` 只给 `core:default`；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。浏览器只打开 Linear 的链接：用 `url::Url` 解析后，协议必须是 `https`、主机必须是 `linear.app` 或它的子域名（例如 OAuth 授权页所在的 `mcp.linear.app`）；`open_linear` 命令与 Linear 登录时打开授权页的回调共用这一个检查（Task 4 的 `is_linear_url`），其他链接一律拒绝并记日志。
+- 前端不拿任何插件权限：`capabilities/default.json` 只给本程序登记在 app manifest（`app/src-tauri/build.rs`）里的面板命令与面板用到的两条 core 事件权限（`core:event:allow-listen`、`core:event:allow-unlisten`），由 `commands.rs` 的测试逐条核对（2026-10-13 Task 4 起，取代最初的 `core:default`）；新增命令时同步改 app manifest、能力文件与测试；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。浏览器只打开 Linear 的链接：用 `url::Url` 解析后，协议必须是 `https`、主机必须是 `linear.app` 或它的子域名（例如 OAuth 授权页所在的 `mcp.linear.app`）；`open_linear` 命令与 Linear 登录时打开授权页的回调共用这一个检查（Task 4 的 `is_linear_url`），其他链接一律拒绝并记日志。
 - 来自 Linear 与 AI 的文本只作为 React 文本节点渲染（自动转义），不用 `dangerouslySetInnerHTML`。执行者与 AI 的显示文本（时间线、原始日志、摘要）一律经 `cleanDisplayText`（Task 4）：去掉 ANSI 转义序列（CSI、以 BEL 或 ST 结尾的 OSC、两字符 ESC 序列），其余控制字符变空格，去掉 core `text::is_invisible` 去掉的字符；用例表 `app/src/lib/clean-cases.json` 由 Rust（对照 core 的 `clean_text`，字符规则在 core 里只有 `text::strip_control` 一份实现）与 TypeScript 两边的测试共同核对；用例里的不可见字符一律写成转义。
 - 引擎给的英文原文（任务原因、`last_error`、环境检查的 `problems`、`LinearSetup` 的说明、命令返回的错误链）从不单独出现：每处都先显示一条由结构化数据（状态、代码、布尔值）得出的已翻译标题，原文清洗后作为次要的细节行放在下面（Task 5 的 `describeError`、`DetailLine`）。系统通知只带已翻译的标题加需求编号与标题，从不带引擎原文。需求页的等待原因按代码翻译（Task 4 的 `WaitReasonView`）。
 - 面板与托盘的每段文案都走翻译键；五种语言（`zh-CN`、`zh-TW`、`en`、`ja`、`ko`）的键必须一一对应（CI 检查），组件里用到而 `en` 没有的键让测试失败（Task 2 的缺键守卫）。默认跟随系统语言：系统语言一律取 Rust 侧 `sys_locale` 报告的值（面板经 `AppInfo.system_locale` 拿到），托盘、通知与面板因此总是同一种语言；设置里随时切换并立即生效（含托盘菜单与通知）。
@@ -375,6 +375,8 @@ pub fn run() {
   "permissions": ["core:default"]
 }
 ```
+
+（这是 Task 1 落地时的写法；Task 4 的第二个提交起，权限收窄为 app manifest 里的面板命令加 `core:event:allow-listen`、`core:event:allow-unlisten`，见全局约束。）
 
 `.gitignore` 加 `app/node_modules/`、`app/dist/`、`app/src-tauri/gen/`，以及后续任务的生成物 `app/icons-src/build/`（Task 11 渲染的 1024px PNG）、`app/test-results/` 与 `app/playwright-report/`（Task 12 的 Playwright 输出）（若 `tauri init` 生成的 `.gitignore` 已覆盖就不重复）。
 
