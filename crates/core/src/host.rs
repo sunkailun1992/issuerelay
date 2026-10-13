@@ -1,10 +1,21 @@
 //! The host: what a desktop or headless program runs around the engine. It binds the IPC
-//! endpoint (one host per user), resolves the executors' environment, opens the run records,
-//! connects to Linear with the stored credentials, runs the engine's background loop and the IPC
-//! server, and lets the Linear connection change while it runs. Without credentials, with a
-//! failed connection or with changed Linear tools it still starts: the engine gets a
-//! `Disconnected` stand-in whose checks fail with the reason (design section 13), and a failed
-//! connection is retried every minute.
+//! endpoint (one host per user), resolves the executors' environment, opens the run records, runs
+//! the engine's background loop and the IPC server, connects to Linear with the stored
+//! credentials, and lets the Linear connection change while it runs.
+//!
+//! `start` does not wait for Linear: an offline start, or a keychain prompt nobody has answered
+//! yet, must not keep the engine and the command line down. Until the first connection ends the
+//! engine has a `Disconnected` stand-in ("connecting to Linear") and the setup reads
+//! `Connecting`. Without credentials, with a failed connection or with changed Linear tools the
+//! stand-in stays and its checks fail with the reason (design section 13); a failed connection is
+//! retried every minute.
+//!
+//! The connection has two kinds of writers. The user's changes (login, API key, logout) are
+//! serialized, one at a time, so that the keychain and the host end with the same login. The
+//! attempts to connect with the stored credentials (the first one, the retries, `reconnect`) can
+//! overlap: an attempt applies its result only if the user has not changed the connection since it
+//! began and no attempt that began later has applied its own, so a slow or old attempt never
+//! undoes a newer result.
 //!
 //! Stopping ends things in an order that matters. The single-instance lock belongs to the IPC
 //! server, so the server stops last, after the engine's loop has ended and every run has been
@@ -13,7 +24,8 @@
 //!
 //! Locking: the connection's mutex is never held across an `.await`. The two task slots are
 //! async mutexes held while their task is joined, and nothing a task does takes them, so a stop
-//! that waits for the runs holds neither and another stop can take them.
+//! that waits for the runs holds neither and another stop can take them. The lock for the user's
+//! changes is held across their awaits, and `stop` never takes it.
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -39,8 +51,15 @@ const READINESS_TTL: Duration = Duration::from_secs(5 * 60);
 /// How often a failed connection is tried again.
 const RETRY_EVERY: Duration = Duration::from_secs(60);
 
-/// A limit no job table reaches, so that `Engine::list_jobs` returns every record. It is
-/// `i64::MAX`, the largest limit SQLite takes.
+/// How long `stop` waits for the runs to end after the engine's task died. Stopping a run takes a
+/// few seconds (the executor gets five to end the processes it started) and recording it one
+/// more, but nothing is left to free the place of a run that the dead task had begun to register,
+/// and a stop must not wait for that for ever.
+const DEAD_ENGINE_WAIT: Duration = Duration::from_secs(60);
+
+/// The most rows `Engine::list_jobs` can be asked for. `Store::list_recent` casts the count to
+/// `i64` for SQLite's `LIMIT`, so on a 64-bit target this is `i64::MAX` and every record comes
+/// back, where a count with the top bit set would turn negative.
 const ALL_JOBS: usize = usize::MAX >> 1;
 
 /// How the stored credentials authorize.
@@ -58,6 +77,9 @@ pub enum AuthMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LinearSetup {
+    /// The first connection with the stored credentials has not ended: `Host::start` does not
+    /// wait for it. The engine's checks fail with "connecting to Linear" meanwhile.
+    Connecting,
     /// Connected with stored credentials or a login made in this session.
     Connected { method: AuthMethod },
     /// No stored credentials: the user has to log in.
@@ -132,8 +154,15 @@ impl Connector for SystemConnector {
     async fn login(&self, open_url: OpenUrl) -> Result<Arc<dyn LinearApi>> {
         let client = auth::login(auth::LINEAR_MCP_URL, open_url).await?;
         let linear = McpLinear::new(client).await?;
-        // OAuth now: a saved key would only stand in the way of the next start.
-        blocking(auth::clear_api_key).await?;
+        // The OAuth credentials are saved by now, and they are tried first at every start. A saved
+        // key that cannot be deleted is left behind unused, which is no reason to fail a login that
+        // worked: it only warns.
+        if let Err(error) = blocking(auth::clear_api_key).await {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "could not delete the saved API key after the login; the OAuth login stands"
+            );
+        }
         Ok(Arc::new(linear))
     }
 
@@ -146,7 +175,10 @@ impl Connector for SystemConnector {
             .context("Linear did not accept the API key")?;
         let key = key.to_string();
         blocking(move || {
-            // Stored OAuth credentials win at the next start; the user chose the key.
+            // Stored OAuth credentials win at the next start, and the user chose the key, so they
+            // go first. If saving the key then fails, neither is stored and the next start has no
+            // login. That order is on purpose: saving first would leave both stored when the
+            // deletion fails, and the old OAuth login would silently win.
             auth::clear_oauth_credentials()?;
             auth::save_api_key(&key)
         })
@@ -171,6 +203,9 @@ pub struct HostParts {
     pub job_runner: Option<Arc<dyn JobRunner>>,
     /// How often a failed connection is retried; `RETRY_EVERY` by default.
     pub retry_every: Option<Duration>,
+    /// How long `stop` waits for the runs to end after the engine's task died; `DEAD_ENGINE_WAIT`
+    /// by default.
+    pub dead_engine_wait: Option<Duration>,
 }
 
 /// The Linear connection as the host reports it. It changes together with the engine's
@@ -178,9 +213,11 @@ pub struct HostParts {
 /// `Host::linear_setup` never describes a connection the engine is not using.
 struct Link {
     setup: LinearSetup,
-    /// How many times the user changed the connection (login, API key, logout). A reconnect that
-    /// began before such a change must not undo it.
-    user_changes: u64,
+    /// The number the next attempt to connect with the stored credentials takes.
+    next_attempt: u64,
+    /// Attempts numbered below this are out of date: the user changed the connection after they
+    /// began, or an attempt that began later has applied its result.
+    current_from: u64,
 }
 
 struct Inner {
@@ -189,6 +226,9 @@ struct Inner {
     paths: AppPaths,
     connector: Arc<dyn Connector>,
     link: Mutex<Link>,
+    /// Held for the whole of a `login`, `use_api_key` or `logout`: one change of the login at a
+    /// time, so that the keychain and the host end with the same one. `stop` never takes it.
+    user_actions: tokio::sync::Mutex<()>,
     /// Ends the engine's loop, which tells the runs in progress to stop, and the retries of a
     /// failed connection.
     engine_shutdown: CancellationToken,
@@ -197,6 +237,9 @@ struct Inner {
     ipc_shutdown: CancellationToken,
     worker: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     ipc: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
+    /// Why the engine's task died, once `stop` has joined it and found it so.
+    engine_failure: Mutex<Option<String>>,
+    dead_engine_wait: Duration,
 }
 
 /// Cheap to clone; every clone is the same host. Call `stop` before the program ends: dropping
@@ -242,15 +285,20 @@ async fn connect_stored(connector: &dyn Connector) -> (Arc<dyn LinearApi>, Linea
 }
 
 /// Waits for the task in `cell` to end and returns how it ended; `None` when an earlier call
-/// already did. The cell's lock is held until the task has ended, so a call that comes meanwhile
-/// waits for it too, and the handle leaves the cell only then, so a call that is dropped midway
-/// leaves the waiting to the next one.
-async fn join<T>(cell: &tokio::sync::Mutex<Option<JoinHandle<T>>>) -> Option<Result<T, JoinError>> {
+/// already did. `ended` sees how it ended while the cell is still locked, so that a call that
+/// finds the cell empty can rely on whatever `ended` recorded. The cell's lock is held until the
+/// task has ended, so a call that comes meanwhile waits for it too, and the handle leaves the
+/// cell only then, so a call that is dropped midway leaves the waiting to the next one.
+async fn join<T>(
+    cell: &tokio::sync::Mutex<Option<JoinHandle<T>>>,
+    ended: impl FnOnce(&Result<T, JoinError>),
+) -> Option<Result<T, JoinError>> {
     let mut cell = cell.lock().await;
     let handle = cell.as_mut()?;
-    let ended = handle.await;
+    let result = handle.await;
+    ended(&result);
     *cell = None;
-    Some(ended)
+    Some(result)
 }
 
 /// Tells the runs in progress to stop, through the engine's public calls. `run_forever` does this
@@ -275,7 +323,10 @@ fn stop_runs(engine: &Engine) {
 
 impl Host {
     /// Binds the IPC endpoint (fails with `AlreadyRunning` when another host serves this user),
-    /// connects to Linear and starts the engine's loop and the IPC server.
+    /// starts the engine's loop and the IPC server, and connects to Linear in the background:
+    /// it returns without waiting for Linear, with `linear_setup` saying `Connecting` until the
+    /// first connection has ended. (Resolving the executors' environment still happens before it
+    /// returns, and can take a few seconds when it runs the login shell.)
     ///
     /// The bind comes first, before the run records are opened: `Engine::new` marks the runs a
     /// previous host left in progress as failed, and a host that is refused must not do that to
@@ -290,11 +341,10 @@ impl Host {
             Some(env) => env,
             None => crate::env::resolve().await.shared(),
         };
-        let (linear, setup) = connect_stored(connector.as_ref()).await;
         let engine = Engine::new(EngineDeps {
             config_path: paths.config_file(),
             store: Store::open(&paths.state_db())?,
-            linear,
+            linear: Arc::new(Disconnected::new("connecting to Linear")),
             readiness: parts
                 .readiness
                 .unwrap_or_else(|| Arc::new(SystemReadiness::new(READINESS_TTL, env.clone()))),
@@ -320,18 +370,22 @@ impl Host {
                 paths,
                 connector,
                 link: Mutex::new(Link {
-                    setup,
-                    user_changes: 0,
+                    setup: LinearSetup::Connecting,
+                    next_attempt: 0,
+                    current_from: 0,
                 }),
+                user_actions: tokio::sync::Mutex::new(()),
                 engine_shutdown,
                 ipc_shutdown,
                 worker: tokio::sync::Mutex::new(Some(worker)),
                 ipc: tokio::sync::Mutex::new(Some(ipc)),
+                engine_failure: Mutex::new(None),
+                dead_engine_wait: parts.dead_engine_wait.unwrap_or(DEAD_ENGINE_WAIT),
             }),
         };
         tokio::spawn(
             host.clone()
-                .retry_failed_connections(parts.retry_every.unwrap_or(RETRY_EVERY)),
+                .connect_in_the_background(parts.retry_every.unwrap_or(RETRY_EVERY)),
         );
         Ok(host)
     }
@@ -368,60 +422,92 @@ impl Host {
     }
 
     /// The user changed the connection (login, API key, logout): the engine uses `linear` at once
-    /// and `setup` is what `linear_setup` reports. A reconnect that began earlier no longer
-    /// applies its result.
+    /// and `setup` is what `linear_setup` reports. Attempts to connect that began earlier no
+    /// longer apply their result.
     fn switch_by_user(&self, linear: Arc<dyn LinearApi>, setup: LinearSetup) {
         let mut link = self.link();
-        link.user_changes += 1;
+        link.current_from = link.next_attempt;
         self.inner.engine.set_linear(linear);
         link.setup = setup;
     }
 
     /// Connects again with the stored credentials (after a failure, or after an update fixed an
-    /// interface change) and returns what came of it. If the user logged in, switched to a key or
-    /// logged out while this was connecting, their change stands and this returns it instead.
+    /// interface change) and returns what came of it.
+    ///
+    /// Attempts can overlap (the retry loop and a "reconnect" in the panel), and the user can
+    /// change the connection meanwhile. An attempt applies its result unless the user has changed
+    /// the connection since it began or an attempt that began later has applied its own; then it
+    /// returns what holds now instead. So an old attempt never undoes a newer result, the user's
+    /// change wins over any attempt, and an attempt that never ends holds nothing up.
     pub async fn reconnect(&self) -> LinearSetup {
-        let user_changes = self.link().user_changes;
+        let attempt = {
+            let mut link = self.link();
+            link.next_attempt += 1;
+            link.next_attempt - 1
+        };
         let (linear, setup) = connect_stored(self.inner.connector.as_ref()).await;
         let mut link = self.link();
-        if link.user_changes != user_changes {
+        if attempt < link.current_from {
             return link.setup.clone();
         }
+        link.current_from = attempt + 1;
         self.inner.engine.set_linear(linear);
         link.setup = setup.clone();
         setup
     }
 
-    /// Logs in with the browser; `open_url` opens the authorization page. On success the engine
-    /// uses the new connection at once. The viewer's name is cleaned (`clean_text`).
+    /// Logs in with the browser; `open_url` opens the authorization page. The engine uses the new
+    /// connection at once, and it does so before the viewer is read: the connector has changed the
+    /// keychain by then, and the host follows it even if reading the viewer fails (the call then
+    /// returns that error). The viewer's name is cleaned (`clean_text`).
+    ///
+    /// One change of the login at a time: this waits for a `login`, `use_api_key` or `logout` that
+    /// is still going, and a login waits for the browser for up to ten minutes, so the panel
+    /// should offer one change at a time. `stop` does not wait for it. Dropping the returned
+    /// future before the browser has answered abandons the login.
+    ///
+    /// The errors are the connector's `anyhow` chains as they came, typed so that callers can
+    /// `downcast_ref` them, and **not cleaned**: they can carry text from Linear or the system. The
+    /// panel's command layer cleans them before it shows them.
     pub async fn login(&self, open_url: impl Fn(&str) + Send + Sync + 'static) -> Result<Viewer> {
+        let _one_change_at_a_time = self.inner.user_actions.lock().await;
         let linear = self.inner.connector.login(Box::new(open_url)).await?;
-        let viewer = display_viewer(linear.viewer().await?);
         self.switch_by_user(
-            linear,
+            linear.clone(),
             LinearSetup::Connected {
                 method: AuthMethod::OAuth,
             },
         );
-        Ok(viewer)
+        Ok(display_viewer(linear.viewer().await?))
     }
 
     /// Switches to a personal API key, kept only if Linear accepts it. A rejected key changes
-    /// nothing. The viewer's name is cleaned (`clean_text`).
+    /// nothing. Once the key is accepted the engine uses the new connection at once, before the
+    /// viewer is read, as `login` does. The viewer's name is cleaned (`clean_text`).
+    ///
+    /// One change of the login at a time, as for `login`. The errors are the connector's `anyhow`
+    /// chains as they came (typed, so `downcast_ref` works), **not cleaned**: the panel's command
+    /// layer cleans them before it shows them.
     pub async fn use_api_key(&self, key: &str) -> Result<Viewer> {
+        let _one_change_at_a_time = self.inner.user_actions.lock().await;
         let linear = self.inner.connector.api_key(key).await?;
-        let viewer = display_viewer(linear.viewer().await?);
         self.switch_by_user(
-            linear,
+            linear.clone(),
             LinearSetup::Connected {
                 method: AuthMethod::ApiKey,
             },
         );
-        Ok(viewer)
+        Ok(display_viewer(linear.viewer().await?))
     }
 
-    /// Forgets the stored credentials; checks fail until the next login.
+    /// Forgets the stored credentials; checks fail until the next login. If they cannot be
+    /// deleted the call fails and nothing changes: they would be there at the next start.
+    ///
+    /// One change of the login at a time, as for `login`. The errors are the connector's `anyhow`
+    /// chains as they came (typed, so `downcast_ref` works), **not cleaned**: the panel's command
+    /// layer cleans them before it shows them.
     pub async fn logout(&self) -> Result<()> {
+        let _one_change_at_a_time = self.inner.user_actions.lock().await;
         self.inner.connector.logout().await?;
         self.switch_by_user(
             Arc::new(Disconnected::new("logged out of Linear: log in again")),
@@ -439,6 +525,10 @@ impl Host {
     /// more: `StopRuns` while a `WaitForRuns` is still waiting ends the runs and makes both calls
     /// return. A call that is dropped midway leaves the host as far along as it got (a dropped
     /// `WaitForRuns` leaves the engine draining), and the next call goes on from there.
+    ///
+    /// If the engine's task died nobody has told the runs to stop, so the host does (through the
+    /// engine's public calls) and waits for them for a limited time only, then lets go of the
+    /// lock anyway. `engine_failure` says that this happened.
     pub async fn stop(&self, mode: StopMode) {
         let engine = &self.inner.engine;
         if mode == StopMode::WaitForRuns {
@@ -449,14 +539,35 @@ impl Host {
         }
         // `run_forever` tells the runs still in progress to stop on its way out.
         self.inner.engine_shutdown.cancel();
-        if let Some(Err(error)) = join(&self.inner.worker).await {
-            tracing::error!(%error, "the engine task failed; stopping the runs from here");
+        let _ = join(&self.inner.worker, |result| {
+            if let Err(error) = result {
+                tracing::error!(%error, "the engine task failed");
+                *self
+                    .inner
+                    .engine_failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
+            }
+        })
+        .await;
+        if self.engine_failure().is_some() {
             stop_runs(engine);
+            let wait = self.inner.dead_engine_wait;
+            if tokio::time::timeout(wait, engine.wait_idle())
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    seconds = wait.as_secs_f32(),
+                    "runs are still marked as running after the engine task died; going on without them"
+                );
+            }
+        } else {
+            engine.wait_idle().await;
         }
-        engine.wait_idle().await;
         // Last: the lock goes with the server, and nothing is left for a second host to disturb.
         self.inner.ipc_shutdown.cancel();
-        match join(&self.inner.ipc).await {
+        match join(&self.inner.ipc, |_| {}).await {
             Some(Ok(Err(error))) => {
                 tracing::warn!(error = %format!("{error:#}"), "the IPC server stopped with an error")
             }
@@ -465,23 +576,38 @@ impl Host {
         }
     }
 
-    /// Tries a failed connection again every `every` until it works, the user changes the
-    /// connection, or the host stops.
-    async fn retry_failed_connections(self, every: Duration) {
+    /// Why the engine's task died, once `stop` has found it so: nothing polled Linear or started
+    /// runs after that, so the program that runs the host should say so and end with a failure.
+    /// `None` while the engine ran until it was stopped.
+    pub fn engine_failure(&self) -> Option<String> {
+        self.inner
+            .engine_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Makes the first connection with the stored credentials, which `start` does not wait for,
+    /// and then tries a failed connection again every `every` until it works, the user changes the
+    /// connection, or the host stops. Each attempt is `reconnect`, so it gives way to the user's
+    /// changes and to attempts that began later; only `ConnectFailed` is retried.
+    async fn connect_in_the_background(self, every: Duration) {
         let shutdown = &self.inner.engine_shutdown;
+        let mut first = true;
         loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(every) => {}
-            }
-            if matches!(self.linear_setup(), LinearSetup::ConnectFailed { .. }) {
+            if first || matches!(self.linear_setup(), LinearSetup::ConnectFailed { .. }) {
+                first = false;
                 let setup = tokio::select! {
                     _ = shutdown.cancelled() => return,
                     setup = self.reconnect() => setup,
                 };
                 if let LinearSetup::ConnectFailed { message } = &setup {
-                    tracing::debug!(%message, "Linear is still unreachable");
+                    tracing::debug!(%message, "could not connect to Linear");
                 }
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(every) => {}
             }
         }
     }
@@ -522,10 +648,17 @@ mod tests {
         let patience = Duration::from_millis(20);
 
         // A caller that gives up midway leaves the task where it was.
-        assert!(tokio::time::timeout(patience, join(&cell)).await.is_err());
+        assert!(
+            tokio::time::timeout(patience, join(&cell, |_| {}))
+                .await
+                .is_err()
+        );
 
-        let mut first = Box::pin(join(&cell));
-        let mut second = Box::pin(join(&cell));
+        let recorded = std::cell::Cell::new(None);
+        let mut first = Box::pin(join(&cell, |result| {
+            recorded.set(Some(*result.as_ref().unwrap()))
+        }));
+        let mut second = Box::pin(join(&cell, |_| {}));
         assert!(tokio::time::timeout(patience, &mut first).await.is_err());
         assert!(
             tokio::time::timeout(patience, &mut second).await.is_err(),
@@ -538,8 +671,13 @@ mod tests {
             "the first caller gets the result"
         );
         assert!(second.await.is_none(), "the second one only had to wait");
+        assert_eq!(
+            recorded.get(),
+            Some(7),
+            "how the task ended was recorded before the second caller looked"
+        );
         assert!(
-            join(&cell).await.is_none(),
+            join(&cell, |_| {}).await.is_none(),
             "and nothing is left to wait for"
         );
     }
@@ -547,6 +685,10 @@ mod tests {
     #[test]
     fn every_setup_has_the_json_shape_the_panel_reads() {
         let shapes = [
+            (
+                LinearSetup::Connecting,
+                serde_json::json!({"kind": "connecting"}),
+            ),
             (
                 LinearSetup::Connected {
                     method: AuthMethod::OAuth,

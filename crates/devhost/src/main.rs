@@ -4,12 +4,13 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     sync::Arc,
+    time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use issuerelay_core::{
-    host::{Host, HostParts, LinearSetup, StopMode, SystemConnector},
+    host::{Connector, Host, HostParts, LinearSetup, StopMode, SystemConnector},
     linear::{
         LinearApi, auth,
         mcp::{LinearClient, McpLinear},
@@ -187,26 +188,91 @@ async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
+/// How often `wait_for_first_connection` looks at the host.
+const CONNECTION_POLL: Duration = Duration::from_millis(100);
+
+/// How long the first connection to Linear may take before the devhost says it is still going.
+const STILL_CONNECTING_AFTER: Duration = Duration::from_secs(10);
+
+/// Waits until `setup` stops saying `Connecting` (`Host::start` does not wait for Linear) and
+/// returns what it says then. `still_connecting` is called once if that takes longer than
+/// `slow_after`.
+async fn wait_for_first_connection(
+    setup: impl Fn() -> LinearSetup,
+    poll: Duration,
+    slow_after: Duration,
+    still_connecting: impl FnOnce(),
+) -> LinearSetup {
+    let began = tokio::time::Instant::now();
+    let mut still_connecting = Some(still_connecting);
+    loop {
+        let now = setup();
+        if now != LinearSetup::Connecting {
+            return now;
+        }
+        if began.elapsed() >= slow_after
+            && let Some(say) = still_connecting.take()
+        {
+            say();
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Logs how the host's first connection to Linear ended: the devhost is already running by then.
+async fn report_first_connection(host: Host) {
+    let ended = wait_for_first_connection(
+        || host.linear_setup(),
+        CONNECTION_POLL,
+        STILL_CONNECTING_AFTER,
+        || tracing::info!("still connecting to Linear"),
+    )
+    .await;
+    match ended {
+        LinearSetup::Connected { method } => tracing::info!(?method, "connected to Linear"),
+        LinearSetup::NotConfigured => tracing::warn!(
+            "not logged in to Linear: run `issuerelay-devhost login` (or `api-key`) and start the devhost again; checks fail until then"
+        ),
+        LinearSetup::InterfaceChanged { message } | LinearSetup::ConnectFailed { message } => {
+            tracing::warn!(%message, "not connected to Linear")
+        }
+        // `wait_for_first_connection` returns only once the connection is no longer under way.
+        LinearSetup::Connecting => {}
+    }
+}
+
+/// What the devhost ends with once the host has stopped: a failure if the engine's task died
+/// (nothing polled Linear or started runs after that), as it was before the host was shared.
+fn engine_outcome(failure: Option<String>) -> Result<()> {
+    match failure {
+        Some(why) => Err(anyhow!("the engine task failed: {why}")),
+        None => Ok(()),
+    }
+}
+
 /// Runs one subcommand. The viewer's name and the projects' ids and names come from Linear, whose
 /// content is untrusted and may carry terminal escape sequences, so they are printed through
 /// `clean_text`.
 async fn run(command: Command) -> Result<()> {
     match command {
+        // `login` and `api-key` go through the connector, like the host's own: it deletes the
+        // other kind of saved credential, which would otherwise be left in the keychain (the
+        // OAuth credentials are tried first at every start, so an old login would win over a key).
         Command::Login => {
-            let client = auth::login(auth::LINEAR_MCP_URL, |url| {
-                // Not passed through `clean_text`: rmcp serializes the URL with `url::Url`, so it
-                // holds no control characters, and `clean_text` would cut a long one.
-                let _ = print_line(&format!("Open this URL to authorize IssueRelay:\n{url}"));
-                let _ = open::that_detached(url);
-            })
-            .await?;
-            let linear = McpLinear::new(client).await?;
+            let linear = SystemConnector
+                .login(Box::new(|url| {
+                    // Not passed through `clean_text`: rmcp serializes the URL with `url::Url`, so
+                    // it holds no control characters, and `clean_text` would cut a long one.
+                    let _ = print_line(&format!("Open this URL to authorize IssueRelay:\n{url}"));
+                    let _ = open::that_detached(url);
+                }))
+                .await?;
             let viewer = linear.viewer().await?;
             print_line(&format!(
                 "Logged in to Linear as {}",
                 clean_text(&viewer.name)
             ))?;
-            linear.close().await
+            Ok(())
         }
         Command::ApiKey => {
             if io::stdin().is_terminal() {
@@ -218,12 +284,10 @@ async fn run(command: Command) -> Result<()> {
             if key.is_empty() {
                 bail!("no API key on stdin");
             }
-            let linear =
-                McpLinear::new(auth::connect_api_key(auth::LINEAR_MCP_URL, key).await?).await?;
+            let linear = SystemConnector.api_key(key).await?;
             let viewer = linear.viewer().await?;
             print_line(&format!("API key works for {}", clean_text(&viewer.name)))?;
-            auth::save_api_key(key)?;
-            linear.close().await
+            Ok(())
         }
         Command::Logout => {
             auth::clear_credentials()?;
@@ -252,17 +316,10 @@ async fn run(command: Command) -> Result<()> {
                 HostParts::default(),
             )
             .await?;
-            match host.linear_setup() {
-                LinearSetup::Connected { .. } => {}
-                LinearSetup::NotConfigured => tracing::warn!(
-                    "not logged in to Linear: run `issuerelay-devhost login` (or `api-key`) and start the devhost again; checks fail until then"
-                ),
-                LinearSetup::InterfaceChanged { message }
-                | LinearSetup::ConnectFailed { message } => {
-                    tracing::warn!(%message, "not connected to Linear")
-                }
-            }
             tracing::info!("IssueRelay devhost is running; press Ctrl+C to stop");
+            // `start` does not wait for Linear: the outcome of the first connection is logged
+            // when it comes.
+            tokio::spawn(report_first_connection(host.clone()));
             shutdown_signal()
                 .await
                 .context("cannot listen for stop signals")?;
@@ -273,7 +330,7 @@ async fn run(command: Command) -> Result<()> {
             // one returns at once: the runtime shuts down after `main` returns, and the guard of
             // each run ends its process tree.
             tokio::select! {
-                () = host.stop(StopMode::StopRuns) => Ok(()),
+                () = host.stop(StopMode::StopRuns) => engine_outcome(host.engine_failure()),
                 second = shutdown_signal() => {
                     second.context("cannot listen for a second stop signal")?;
                     tracing::warn!("second stop signal: ending the remaining runs now");
@@ -306,7 +363,7 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
+    use issuerelay_core::host::AuthMethod;
 
     use super::*;
 
@@ -392,6 +449,80 @@ mod tests {
             Command::Projects,
         ] {
             assert_eq!(default_filter(&command), "warn");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_connection_is_waited_for_and_only_a_slow_one_is_announced() {
+        use std::cell::Cell;
+
+        let tick = Duration::from_millis(1);
+        // Ends after three looks.
+        let looks = Cell::new(0);
+        let quick = || {
+            looks.set(looks.get() + 1);
+            if looks.get() <= 3 {
+                LinearSetup::Connecting
+            } else {
+                LinearSetup::NotConfigured
+            }
+        };
+        let announced = Cell::new(0);
+        let ended = wait_for_first_connection(quick, tick, Duration::from_secs(60), || {
+            announced.set(announced.get() + 1)
+        })
+        .await;
+        assert_eq!(ended, LinearSetup::NotConfigured);
+        assert_eq!(announced.get(), 0, "a quick connection is not announced");
+
+        // Ends after sixty looks, much later than the announcement is due.
+        let looks = Cell::new(0);
+        let slow = || {
+            looks.set(looks.get() + 1);
+            if looks.get() <= 60 {
+                LinearSetup::Connecting
+            } else {
+                LinearSetup::Connected {
+                    method: AuthMethod::OAuth,
+                }
+            }
+        };
+        let ended = wait_for_first_connection(slow, tick, Duration::from_millis(5), || {
+            announced.set(announced.get() + 1)
+        })
+        .await;
+        assert_eq!(
+            ended,
+            LinearSetup::Connected {
+                method: AuthMethod::OAuth
+            }
+        );
+        assert_eq!(announced.get(), 1, "a slow one is announced once");
+    }
+
+    #[test]
+    fn a_dead_engine_task_makes_the_devhost_fail() {
+        assert!(engine_outcome(None).is_ok());
+        let error = engine_outcome(Some("task 3 panicked".into())).unwrap_err();
+        assert_eq!(error.to_string(), "the engine task failed: task 3 panicked");
+    }
+
+    // `login` and `api-key` must go through `SystemConnector`, which deletes the other kind of
+    // saved credential. Saving the key or the OAuth credentials directly would leave the old ones
+    // in the keychain, where the OAuth credentials win at the next start.
+    #[test]
+    fn the_login_commands_go_through_the_connector() {
+        let source = include_str!("main.rs");
+        let production = source.split("\n#[cfg(test)]\n").next().unwrap();
+        // However rustfmt breaks the lines.
+        let production: String = production.split_whitespace().collect();
+        assert!(production.contains("SystemConnector.login("));
+        assert!(production.contains("SystemConnector.api_key("));
+        for call in ["auth::login(", "auth::save_api_key("] {
+            assert!(
+                !production.contains(call),
+                "the devhost must not call `{call}` itself"
+            );
         }
     }
 

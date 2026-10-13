@@ -3,6 +3,7 @@
 ## 1. 凭据
 
 - Linear 的 OAuth 令牌和 API key 只存在系统钥匙串（`keyring`，服务名 `com.sunkailun.issuerelay`），不写文件，不进日志，不出现在 IPC 响应和错误信息里。
+- 同一时刻只留一种登录方式：改用 API key 时先清掉 OAuth 凭据再存 key，OAuth 登录后清掉保存的 key（清不掉只警告，因为启动时 OAuth 优先；`host::SystemConnector`；开发宿主的 `login` / `api-key` 也走它，不得自己存凭据）。启动时先试 OAuth，留着旧的 OAuth 凭据会让重启后仍用旧登录。登录、换 key、登出一次只做一个（`Host` 里的一把锁），钥匙串和宿主才会停在同一个登录上。
 - Claude Code、Codex、git、CI、测试环境的凭据，程序一概不碰，由各自的工具管理。
 - 测试不得读写真实钥匙串；必须碰的测试标 `#[ignore]`，并写明手动运行的方式。
 

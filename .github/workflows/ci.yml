@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 
+# A job that hangs would otherwise run for GitHub's default six hours. These limits are far above a
+# run (about six minutes at most so far, Windows being the slower job) and far below that.
 jobs:
   test:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +28,7 @@ jobs:
       - run: cargo test --workspace
 
   secrets:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
