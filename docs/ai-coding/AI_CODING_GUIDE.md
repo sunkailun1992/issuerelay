@@ -96,6 +96,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
 - **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
 - **面板命令**：增删命令要同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json`（`allow-<命令>`，下划线写成连字符）和前端的 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 与 `api.test.ts` 的测试拦住不一致。面板要用 Tauri 自带的其他接口（窗口、路径等）时，只在能力文件里加用到的那一条权限，并在提交说明里写明理由；插件权限不给，插件只在 Rust 侧用。
+- **开发者工具**：调试构建里 Cmd+Opt+I（macOS）/ Ctrl+Shift+I（Windows）什么也不做，因为能力文件没有给 `core:webview:allow-internal-toggle-devtools`；需要时只在本机临时加上（`lib.rs` 与 `api.test.ts` 的边界测试会因此失败），不要提交；发布构建没有开发者工具。
 
 ## 8. 外部事实与夹具
 

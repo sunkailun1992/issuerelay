@@ -114,7 +114,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::PathBuf,
+    };
 
     use serde_json::Value;
     use tauri::utils::{
@@ -336,5 +339,33 @@ mod tests {
         assert_eq!(files, ["default.json"]);
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert!(config["app"]["security"].get("capabilities").is_none());
+    }
+
+    /// Nor can the app widen it while it runs, which the checks above would not see: Tauri's
+    /// `Manager` call that adds a capability at run time (its name is put together below, so
+    /// that this file does not contain it) appears in no source file of the crate.
+    #[test]
+    fn no_capability_is_added_at_run_time() {
+        let call = concat!("add_", "capability");
+        let mut pending = vec![PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))];
+        let mut read = 0;
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    !source.contains(call),
+                    "{} adds a capability at run time",
+                    path.display()
+                );
+                read += 1;
+            }
+        }
+        assert!(read >= 10, "the crate's sources were read: {read}");
     }
 }

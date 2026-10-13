@@ -91,16 +91,77 @@ fn clamp_limit(limit: usize, max: usize) -> usize {
 }
 
 /// The only links IssueRelay opens in the browser, from the panel (`open_linear`) and for the
-/// Linear login (its authorization page): `https` on `linear.app` or one of its subdomains, such
-/// as `mcp.linear.app`. Parsed, so user info (`https://linear.app@evil.example/`) and look-alike
-/// hosts (`linear.app.evil.example`) are refused.
-fn is_linear_url(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|url| {
-        url.scheme() == "https"
-            && url
-                .host_str()
-                .is_some_and(|host| host == "linear.app" || host.ends_with(".linear.app"))
-    })
+/// Linear login (its authorization page), as `url::Url` parses them: `https` on `linear.app` or
+/// one of its subdomains (such as `mcp.linear.app`), without a user name or password and without
+/// an empty label (`linear.app.`, `.linear.app`). `None` for anything else, so user info
+/// (`https://linear.app@evil.example/`) and look-alike hosts (`linear.app.evil.example`) are
+/// refused. The browser is given this parsed URL, never the text as it came: the system's
+/// opener parses links its own way (macOS hands them to NSURL, which reads
+/// `https://linear.app\@evil.example/` as a link to evil.example where `url` reads linear.app),
+/// and only the normalized form reads the same to both.
+fn linear_url(text: &str) -> Option<url::Url> {
+    let url = url::Url::parse(text).ok()?;
+    let linear = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|host| {
+            !host.split('.').any(str::is_empty)
+                && (host == "linear.app" || host.ends_with(".linear.app"))
+        });
+    linear.then_some(url)
+}
+
+/// Why `open_linear_link` opened nothing.
+#[derive(Debug)]
+enum NotOpened {
+    /// Not a Linear link (`linear_url`); the refusal is logged.
+    NotLinear,
+    /// The system's opener failed.
+    Failed(anyhow::Error),
+}
+
+/// Opens `text` with `open` when it is a Linear link, handing `open` the normalized URL the
+/// check parsed (`linear_url`), never `text` itself; any other link is refused and logged.
+/// `open` is the opener plugin in the app and a recorder in the tests.
+fn open_linear_link<E: Into<anyhow::Error>>(
+    text: &str,
+    open: impl FnOnce(&str) -> Result<(), E>,
+) -> Result<(), NotOpened> {
+    let Some(url) = linear_url(text) else {
+        tracing::warn!(url = %clean_text(text), "refused to open a link outside linear.app");
+        return Err(NotOpened::NotLinear);
+    };
+    open(url.as_str()).map_err(|e| NotOpened::Failed(e.into()))
+}
+
+/// Whether `command` (`<executor> mcp get <name>`) found Linear's server under that name, from
+/// its exit code: 0 when it did, another code when it did not. A command ended by a signal
+/// (`None`) says nothing about the name: it is logged and an error (cleaned), so the panel shows
+/// a failure it can retry instead of the manual command for a server under another name.
+fn named(command: &str, code: Option<i32>) -> CmdResult<bool> {
+    match code {
+        Some(0) => Ok(true),
+        Some(_) => Ok(false),
+        None => {
+            tracing::warn!(command = %clean_text(command), "could not check the name of Linear's server: the command was ended by a signal");
+            Err(error(anyhow::anyhow!("`{command}` was ended by a signal")))
+        }
+    }
+}
+
+/// Waits for `login` unless `cancelled` fires first: the login's own answer (an error cleaned),
+/// or the code `login_cancelled`. A cancelled login's future is dropped, which abandons it
+/// (`Host::login`). A login that has finished wins over a cancel that comes at the same moment:
+/// by then the host uses the new login, so its answer is what happened.
+async fn cancellable<T>(
+    login: impl Future<Output = anyhow::Result<T>>,
+    cancelled: CancellationToken,
+) -> CmdResult<T> {
+    tokio::select! {
+        biased;
+        answer = login => answer.map_err(error),
+        () = cancelled.cancelled() => Err(LOGIN_CANCELLED.into()),
+    }
 }
 
 /// Where the command-line program is installed: next to the app's own executable.
@@ -356,19 +417,15 @@ pub async fn linear_login(
     // core writes the keychain only after the browser has answered (`Host::login`).
     let cancelled = pending.begin();
     let login = host.login(move |url| {
-        // The same check as `open_linear`: the browser opens nothing but Linear.
-        if !is_linear_url(url) {
-            tracing::warn!(url = %clean_text(url), "refused to open an authorization page outside linear.app");
-            return;
-        }
-        if let Err(e) = opener.opener().open_url(url, None::<&str>) {
-            tracing::warn!(error = %e, "could not open the authorization page");
+        // The same check as `open_linear`: the browser opens nothing but Linear, and only the
+        // URL the check parsed. A refusal is logged there.
+        if let Err(NotOpened::Failed(e)) =
+            open_linear_link(url, |url| opener.opener().open_url(url, None::<&str>))
+        {
+            tracing::warn!(error = %format!("{e:#}"), "could not open the authorization page");
         }
     });
-    let viewer = tokio::select! {
-        viewer = login => viewer.map_err(error)?,
-        () = cancelled.cancelled() => return Err(LOGIN_CANCELLED.into()),
-    };
+    let viewer = cancellable(login, cancelled).await?;
     tray::refresh(&app, &host);
     Ok(viewer)
 }
@@ -463,22 +520,27 @@ pub async fn linear_server_named(
     let program = executor::resolve_program_in(executor, env.path.as_deref()).map_err(error)?;
     let name = linear_server_name(executor).map_err(error)?;
     let runner = SystemRunner::with_env(env.shared());
+    let args = ["mcp", "get", name.as_str()];
     let output = runner
-        .run_limited(&program, &["mcp", "get", &name], MCP_GET_LIMIT)
+        .run_limited(&program, &args, MCP_GET_LIMIT)
         .await
         .map_err(error)?;
-    Ok(output.code == Some(0))
+    named(
+        &format!("{} {}", program.display(), args.join(" ")),
+        output.code,
+    )
 }
 
-/// Opens a Linear link in the system browser; any other link is refused (and logged) with the
-/// code `not_a_linear_link`.
+/// Opens a Linear link in the system browser, as the normalized URL the check parsed; any other
+/// link is refused (and logged) with the code `not_a_linear_link`.
 #[tauri::command]
 pub async fn open_linear(app: AppHandle, url: String) -> CmdResult<()> {
-    if !is_linear_url(&url) {
-        tracing::warn!(url = %clean_text(&url), "refused to open a link outside linear.app");
-        return Err(NOT_A_LINEAR_LINK.into());
-    }
-    app.opener().open_url(&url, None::<&str>).map_err(error)
+    open_linear_link(&url, |url| app.opener().open_url(url, None::<&str>)).map_err(|failure| {
+        match failure {
+            NotOpened::NotLinear => NOT_A_LINEAR_LINK.into(),
+            NotOpened::Failed(e) => error(e),
+        }
+    })
 }
 
 #[tauri::command]
@@ -527,23 +589,226 @@ pub fn request_quit(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use serde::Deserialize;
 
     use super::*;
 
+    /// What `open_linear_link` hands the system's opener for `text`; `None` when it refuses.
+    /// Whatever it opens must read the same to any parser: the canonical form of an `https` URL
+    /// on linear.app or one of its subdomains, without user info, and without anything another
+    /// parser could split differently (a backslash, whitespace, a control character, an `@` in
+    /// the authority).
+    fn opened(text: &str) -> Option<String> {
+        let mut handed = None;
+        let outcome = open_linear_link(text, |url| {
+            handed = Some(url.to_string());
+            Ok::<(), anyhow::Error>(())
+        });
+        match outcome {
+            Ok(()) => {}
+            Err(NotOpened::NotLinear) => {
+                assert_eq!(handed, None, "{text:?}: a refused link opens nothing");
+                return None;
+            }
+            Err(NotOpened::Failed(e)) => panic!("{text:?}: {e:#}"),
+        }
+        let handed = handed.expect("an accepted link is opened");
+        let url = url::Url::parse(&handed).expect("what is opened parses");
+        assert_eq!(
+            url.as_str(),
+            handed,
+            "{text:?}: opened in its canonical form"
+        );
+        assert_eq!(url.scheme(), "https", "{text:?}");
+        let host = url.host_str().expect("a host");
+        assert!(
+            host == "linear.app" || host.ends_with(".linear.app"),
+            "{text:?}: {host}"
+        );
+        assert!(
+            url.username().is_empty() && url.password().is_none(),
+            "{text:?}"
+        );
+        assert!(
+            !handed.contains(|c: char| c == '\\' || c.is_whitespace() || c.is_control()),
+            "{text:?}: {handed:?}"
+        );
+        let authority = handed["https://".len()..]
+            .split(['/', '?', '#'])
+            .next()
+            .expect("an authority");
+        assert!(!authority.contains('@'), "{text:?}: {handed:?}");
+        Some(handed)
+    }
+
     #[test]
-    fn only_linear_links_are_opened() {
-        assert!(is_linear_url("https://linear.app/demo/issue/DEMO-1"));
-        // The OAuth authorization page the login opens lives on a subdomain.
-        assert!(is_linear_url("https://mcp.linear.app/authorize"));
-        assert!(!is_linear_url("http://linear.app/"));
-        assert!(!is_linear_url("http://linear.app/demo/issue/DEMO-1"));
-        // User info and look-alike hosts: parsed, the host is evil.example and linear.app.evil.example.
-        assert!(!is_linear_url("https://linear.app@evil.example/"));
-        assert!(!is_linear_url("https://linear.app.evil.example/"));
-        assert!(!is_linear_url("https://evil.example/https://linear.app/"));
-        assert!(!is_linear_url("file:///etc/passwd"));
-        assert!(!is_linear_url("not a link"));
+    fn only_linear_links_are_opened_and_only_as_parsed() {
+        // Linear's links open as they are; the OAuth authorization page lives on a subdomain.
+        for link in [
+            "https://linear.app/demo/issue/DEMO-1",
+            "https://mcp.linear.app/authorize",
+            "https://mcp.linear.app/authorize?client_id=demo&redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback",
+        ] {
+            assert_eq!(opened(link).as_deref(), Some(link));
+        }
+        // Refused: another scheme or host, any user info, look-alike hosts, a trailing dot or an
+        // empty label, and text that is no link at all.
+        for refused in [
+            "http://linear.app/",
+            "http://linear.app/demo/issue/DEMO-1",
+            "https://linear.app@evil.example/",
+            "https://linear.app%5C@evil.example/",
+            "https://evil.example%5C@linear.app/",
+            "https://evil.example\\@linear.app/",
+            "https://user:secret@linear.app/",
+            "https://linear.app.evil.example/",
+            "https://evillinear.app/",
+            "https://linear.app\t.evil.example/",
+            "https://linear.app .evil.example/",
+            "https://linear.app./",
+            "https://mcp.linear.app./authorize",
+            "https://.linear.app/",
+            "https://evil.example/https://linear.app/",
+            "file:///etc/passwd",
+            "not a link",
+        ] {
+            assert_eq!(opened(refused), None, "{refused:?}");
+        }
+        // Accepted, but opened only as `url` parsed them, never as given: macOS's opener hands
+        // the text to NSURL, which reads the first one as a link to evil.example.
+        for (text, normalized) in [
+            (
+                "https://linear.app\\@evil.example/",
+                "https://linear.app/@evil.example/",
+            ),
+            ("HTTPS://LINEAR.APP/demo", "https://linear.app/demo"),
+            (
+                "HTTPS://MCP.Linear.App/authorize",
+                "https://mcp.linear.app/authorize",
+            ),
+            ("https://lin\near.app/demo", "https://linear.app/demo"),
+            ("https://linear.app\r\n/demo", "https://linear.app/demo"),
+            (" https://linear.app/demo ", "https://linear.app/demo"),
+            (
+                "https://linear.app#@evil.example/",
+                "https://linear.app/#@evil.example/",
+            ),
+            (
+                "https://linear.app/demo issue",
+                "https://linear.app/demo%20issue",
+            ),
+        ] {
+            assert_eq!(opened(text).as_deref(), Some(normalized), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_that_cannot_be_opened_says_why() {
+        let outcome = open_linear_link("https://linear.app/", |_| {
+            Err(anyhow::anyhow!("no browser"))
+        });
+        assert!(
+            matches!(&outcome, Err(NotOpened::Failed(e)) if format!("{e:#}") == "no browser"),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_killed_mcp_get_is_an_error_never_another_name() {
+        let command = "claude mcp get linear-server";
+        assert_eq!(named(command, Some(0)), Ok(true));
+        assert_eq!(named(command, Some(1)), Ok(false));
+        // Ended by a signal it says nothing about the name: an error the panel offers to retry,
+        // not "registered under another name" with the manual command. The error is cleaned.
+        assert_eq!(
+            named("claude\x1b[2J mcp get linear-server", None),
+            Err("`claude [2J mcp get linear-server` was ended by a signal".to_string())
+        );
+    }
+
+    /// How long a login test waits for an answer that should come at once.
+    const LOGIN_LIMIT: Duration = Duration::from_secs(5);
+
+    /// A login that waits for ever (for the browser), and a flag that its drop sets.
+    fn endless_login() -> (
+        impl Future<Output = anyhow::Result<Viewer>> + Send,
+        Arc<AtomicBool>,
+    ) {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(dropped.clone());
+        let login = async move {
+            let _guard = guard;
+            std::future::pending::<anyhow::Result<Viewer>>().await
+        };
+        (login, dropped)
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_login_stops_waiting_and_is_abandoned() {
+        let pending = PendingLogin::default();
+        let (login, dropped) = endless_login();
+        let waiting = tokio::spawn(cancellable(login, pending.begin()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the login waits for the browser");
+        // The panel's Cancel (`linear_cancel_login`).
+        pending.cancel();
+        let answer = tokio::time::timeout(LOGIN_LIMIT, waiting)
+            .await
+            .expect("a cancelled login answers at once")
+            .unwrap();
+        assert_eq!(answer, Err(LOGIN_CANCELLED.to_string()));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the login's future is dropped, which abandons it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_login_wins() {
+        let viewer = Viewer {
+            id: "user-1".into(),
+            name: "Jane Doe".into(),
+        };
+        let finished = || std::future::ready(anyhow::Ok(viewer.clone()));
+        let answer = cancellable(finished(), CancellationToken::new());
+        assert_eq!(
+            tokio::time::timeout(LOGIN_LIMIT, answer).await.unwrap(),
+            Ok(viewer.clone())
+        );
+        // Finished when the cancel comes: the host uses the new login already, so its answer is
+        // what happened. Repeated, because a race that picked either would fail about half the
+        // time.
+        for _ in 0..32 {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let answer = cancellable(finished(), cancel);
+            assert_eq!(
+                tokio::time::timeout(LOGIN_LIMIT, answer).await.unwrap(),
+                Ok(viewer.clone())
+            );
+        }
+        // A login that failed gives its error, cleaned.
+        let failed = cancellable(
+            std::future::ready(Err::<Viewer, _>(anyhow::anyhow!(
+                "Linear refused\nthe login"
+            ))),
+            CancellationToken::new(),
+        );
+        assert_eq!(
+            tokio::time::timeout(LOGIN_LIMIT, failed).await.unwrap(),
+            Err("Linear refused the login".to_string())
+        );
     }
 
     #[test]
