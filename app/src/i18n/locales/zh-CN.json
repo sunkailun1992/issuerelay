@@ -127,7 +127,8 @@
       "linear_reconnect": "无法重新连接 Linear",
       "setup_action": "配置命令执行失败",
       "set_autostart": "无法更改开机自启设置",
-      "open_linear": "无法打开 Linear"
+      "open_linear": "无法打开 Linear",
+      "copy": "无法复制"
     }
   },
   "errors": {
@@ -202,5 +203,49 @@
     "log_out": "退出登录",
     "waiting_browser": "请在浏览器里完成授权…",
     "cancel_login": "取消"
+  },
+  "runs": {
+    "all": "全部",
+    "field": {
+      "state": "状态",
+      "issue": "编号",
+      "title": "标题",
+      "executor": "执行者",
+      "started": "开始时间",
+      "duration": "时长",
+      "note": "说明",
+      "directory": "目录",
+      "created": "创建时间",
+      "finished": "结束时间",
+      "summary": "摘要"
+    },
+    "empty": "还没有运行记录",
+    "empty_description": "IssueRelay 开始处理需求后，运行会显示在这里。",
+    "empty_filtered": "这个状态下没有运行记录",
+    "empty_filtered_description": "选择其他状态可以看到更多运行。",
+    "load_failed": "无法读取运行记录",
+    "detail_failed": "无法读取这次运行",
+    "not_found": "没有这次运行",
+    "not_found_description": "请回到运行记录，找到你要看的那一次。",
+    "back_to_runs": "回到运行记录",
+    "reason_title": {
+      "failed": "这次运行失败了",
+      "canceled": "这次运行已取消",
+      "waiting_binding": "这次运行在等待绑定",
+      "other": "IssueRelay 的说明"
+    },
+    "timeline": "时间线",
+    "raw_log": "原始日志",
+    "copy_all": "复制全部",
+    "log_removed": "这次运行的日志已被日志清理删除",
+    "log_failed": "无法读取日志",
+    "no_output": "暂时没有可显示的内容"
+  },
+  "timeline": {
+    "session_started": "会话开始",
+    "note": "IssueRelay",
+    "stderr": "stderr",
+    "result": "结果",
+    "error": "错误"
   }
 }

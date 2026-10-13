@@ -25,3 +25,25 @@ export function newestRuns(jobs: readonly Job[]): Job[] {
 export function isNewestRun(job: Job, jobs: readonly Job[]): boolean {
   return !jobs.some((other) => other.issue_uuid === job.issue_uuid && other.id > job.id);
 }
+
+/**
+ * What `/runs?state=` accepts: every state a run can be in, or "all". The overview's reminder links
+ * to `/runs?state=failed`.
+ */
+export const RUN_FILTERS = [
+  "all",
+  "waiting_binding",
+  "queued",
+  "running",
+  "awaiting_acceptance",
+  "needs_info",
+  "done",
+  "failed",
+  "canceled",
+] as const;
+export type RunFilter = (typeof RUN_FILTERS)[number];
+
+/** The filter an address asks for; anything the page does not know means every run. */
+export function parseRunFilter(value: string | null): RunFilter {
+  return RUN_FILTERS.find((filter) => filter === value) ?? "all";
+}

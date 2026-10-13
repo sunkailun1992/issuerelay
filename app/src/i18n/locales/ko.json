@@ -127,7 +127,8 @@
       "linear_reconnect": "Linear에 다시 연결하지 못했습니다",
       "setup_action": "설정 명령이 실패했습니다",
       "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다",
-      "open_linear": "Linear를 열지 못했습니다"
+      "open_linear": "Linear를 열지 못했습니다",
+      "copy": "복사하지 못했습니다"
     }
   },
   "errors": {
@@ -202,5 +203,49 @@
     "log_out": "로그아웃",
     "waiting_browser": "브라우저에서 인증을 마쳐 주세요…",
     "cancel_login": "취소"
+  },
+  "runs": {
+    "all": "전체",
+    "field": {
+      "state": "상태",
+      "issue": "이슈",
+      "title": "제목",
+      "executor": "실행기",
+      "started": "시작",
+      "duration": "소요 시간",
+      "note": "비고",
+      "directory": "폴더",
+      "created": "생성",
+      "finished": "종료",
+      "summary": "요약"
+    },
+    "empty": "아직 실행 기록이 없습니다",
+    "empty_description": "IssueRelay가 이슈 작업을 시작하면 실행이 여기에 표시됩니다.",
+    "empty_filtered": "이 상태의 실행이 없습니다",
+    "empty_filtered_description": "다른 상태를 선택하면 더 많은 실행을 볼 수 있습니다.",
+    "load_failed": "실행 기록을 읽지 못했습니다",
+    "detail_failed": "이 실행을 읽지 못했습니다",
+    "not_found": "이 실행은 존재하지 않습니다",
+    "not_found_description": "실행 기록으로 돌아가 원하는 실행을 찾아보세요.",
+    "back_to_runs": "실행 기록으로 돌아가기",
+    "reason_title": {
+      "failed": "실행이 실패했습니다",
+      "canceled": "실행이 취소되었습니다",
+      "waiting_binding": "실행이 설정을 기다리고 있습니다",
+      "other": "IssueRelay의 안내"
+    },
+    "timeline": "타임라인",
+    "raw_log": "원본 로그",
+    "copy_all": "모두 복사",
+    "log_removed": "이 실행의 로그는 로그 정리로 삭제되었습니다",
+    "log_failed": "로그를 읽지 못했습니다",
+    "no_output": "아직 표시할 내용이 없습니다"
+  },
+  "timeline": {
+    "session_started": "세션 시작",
+    "note": "IssueRelay",
+    "stderr": "stderr",
+    "result": "결과",
+    "error": "오류"
   }
 }

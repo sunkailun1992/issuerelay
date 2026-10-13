@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
-import { isActive, isNewestRun, newestRuns } from "./runs";
+import { isActive, isNewestRun, newestRuns, parseRunFilter, RUN_FILTERS } from "./runs";
+import { JOB_STATES } from "./types";
 
 test("the newest run of an issue is the one with the greatest id", () => {
   // The demo has two runs of DEMO-12: the old failed one (id 2) and the one running now (id 12).
@@ -40,4 +41,15 @@ test("a run is active while it waits, is queued or runs, like core's JobState::i
     done: false,
     canceled: false,
   });
+});
+
+test("the run list can be filtered by \"all\" or by any state of a run, and by nothing else", () => {
+  expect([...RUN_FILTERS]).toEqual(["all", ...JOB_STATES]);
+});
+
+test("the filter an address asks for is one of those, and anything else is \"all\"", () => {
+  for (const filter of RUN_FILTERS) expect(parseRunFilter(filter)).toBe(filter);
+  for (const unknown of [null, "", "bogus", "FAILED", "failed ", "failed,done", "__proto__", "toString"]) {
+    expect(parseRunFilter(unknown), String(unknown)).toBe("all");
+  }
 });

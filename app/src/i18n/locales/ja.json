@@ -127,7 +127,8 @@
       "linear_reconnect": "Linear に再接続できませんでした",
       "setup_action": "セットアップコマンドが失敗しました",
       "set_autostart": "ログイン時の自動起動を変更できませんでした",
-      "open_linear": "Linear を開けませんでした"
+      "open_linear": "Linear を開けませんでした",
+      "copy": "コピーできませんでした"
     }
   },
   "errors": {
@@ -202,5 +203,49 @@
     "log_out": "ログアウト",
     "waiting_browser": "ブラウザーで認可を完了してください…",
     "cancel_login": "キャンセル"
+  },
+  "runs": {
+    "all": "すべて",
+    "field": {
+      "state": "状態",
+      "issue": "課題",
+      "title": "タイトル",
+      "executor": "実行ツール",
+      "started": "開始",
+      "duration": "所要時間",
+      "note": "備考",
+      "directory": "フォルダー",
+      "created": "作成",
+      "finished": "終了",
+      "summary": "要約"
+    },
+    "empty": "実行履歴はまだありません",
+    "empty_description": "IssueRelay が課題に取り組み始めると、ここに実行が表示されます。",
+    "empty_filtered": "この状態の実行はありません",
+    "empty_filtered_description": "別の状態を選ぶと、ほかの実行を表示できます。",
+    "load_failed": "実行履歴を読み込めませんでした",
+    "detail_failed": "この実行を読み込めませんでした",
+    "not_found": "この実行は存在しません",
+    "not_found_description": "実行履歴に戻って、見たい実行を探してください。",
+    "back_to_runs": "実行履歴に戻る",
+    "reason_title": {
+      "failed": "実行は失敗しました",
+      "canceled": "実行はキャンセルされました",
+      "waiting_binding": "実行はセットアップを待っています",
+      "other": "IssueRelay からのメモ"
+    },
+    "timeline": "タイムライン",
+    "raw_log": "生ログ",
+    "copy_all": "すべてコピー",
+    "log_removed": "この実行のログはログの整理で削除されました",
+    "log_failed": "ログを読み込めませんでした",
+    "no_output": "表示できる内容はまだありません"
+  },
+  "timeline": {
+    "session_started": "セッション開始",
+    "note": "IssueRelay",
+    "stderr": "stderr",
+    "result": "結果",
+    "error": "エラー"
   }
 }

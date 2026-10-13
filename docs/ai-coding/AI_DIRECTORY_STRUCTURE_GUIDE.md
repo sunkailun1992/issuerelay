@@ -40,7 +40,7 @@
 
 | 路径 | 职责 |
 |---|---|
-| `app/package.json`、`vite.config.ts`、`tsconfig*.json`、`eslint.config.js`、`components.json`、`index.html` | 前端工程与工具链 |
+| `app/package.json`、`vite.config.ts`、`tsconfig*.json`、`eslint.config.js`、`components.json`、`index.html` | 前端工程与工具链（`vite.config.ts` 只在测试运行时允许读仓库根目录，开发服务器仍只服务 `app/`） |
 | `app/src/test-setup.ts`、`app/src/lib/clock.ts` | 测试公共设置（Radix 需要的 jsdom 桩、每个测试后复位固定时钟并收掉没消失的提示 toast、缺翻译键守卫）；假后端与测试共用的固定时钟 |
 | `app/src/components/ui/` | shadcn/ui 生成的组件（照原样提交，不手改；不按本仓库的 ESLint 规则检查） |
 | `app/src-tauri/Cargo.toml`、`build.rs`、`tauri.conf.json`、`capabilities/default.json` | Tauri crate 与配置（`build.rs` 在应用清单里登记面板的全部命令，Tauri 因此按能力文件检查本程序的命令；能力文件只给主窗口每条命令一个 `allow-<命令>`，加事件的 `listen`、`unlisten`，不给插件权限） |
@@ -53,7 +53,7 @@
 | `app/src/components/{StatusBadge,states,PageHeader,QuitDialog,StartupError,StartupGate,FirstRunGate,EngineEventsBridge,ErrorBoundary}.tsx`、`app/src/components/layout/AppShell.tsx`、`app/src/styles.css`、`app/src/App.tsx`、`app/src/main.tsx` | 面板外框、设计变量（状态色按 4.5:1 对比度定，`styles.test.ts` 核对）、状态标识、空 / 加载 / 错误状态、启动失败页、退出提示、渲染出错时的错误页 |
 | `app/src/test/` | 组件测试的辅助（`render.tsx`；`time.ts` 在假时钟下按时间往前推；`colour.ts` 颜色与对比度的计算）；测试文件本身与被测文件放在一起（`*.test.ts`、`*.test.tsx`） |
 | `app/src/pages/Overview.tsx`、`Issues.tsx`、`app/src/components/{JobActions,LinearStatus,IssueLink}.tsx`、`app/src/hooks/{useTick,useLang,useTriggerNames,useOpenLinear}.ts`、`app/src/lib/runs.ts`、`app/src/lib/trigger-defaults.json` | 概览、需求、共用的任务操作、Linear 连接卡与「编号即在 Linear 中打开」；按时钟重绘（时长、「几分钟前」）、界面语言、触发用的标签与状态名（设置读到之前用 `trigger-defaults.json` 的默认名，`app/src-tauri/src/commands.rs` 的测试把它对照 core 的 `TriggerNames::default()`）、打开 Linear 链接、哪条运行是需求最新的一次、运行是否还在进行 |
-| `app/src/pages/Runs.tsx`、`RunDetail.tsx`、`app/src/lib/timeline.ts` | 运行记录与时间线 |
+| `app/src/pages/Runs.tsx`、`RunDetail.tsx`、`app/src/components/{RunTimeline,RawLog,RunDuration}.tsx`、`app/src/hooks/useCopyText.ts`、`app/src/lib/timeline.ts`、`RUN_FILTERS`（在 `app/src/lib/runs.ts`） | 运行记录（按状态筛选，状态记在地址的 `?state=`）与运行详情；由运行日志的行解析出的时间线（解析与清洗在 `timeline.ts`，测试直接读 core 的两份执行者输出夹具）、原始日志（跟随末尾、复制全部）、时长、复制到剪贴板并提示结果 |
 | `app/src/pages/Bindings.tsx`、`BindingDialog.tsx`、`app/src/components/FullAccessWarning.tsx`、`app/src/lib/model-name.ts`、`app/src/lib/model-name-cases.json` | 项目绑定；模型名用例表（Rust 与 TS 共用） |
 | `app/src/pages/Doctor.tsx`、`Settings.tsx`、`Help.tsx`、`app/src/components/{ExecutorCheck,WorkspaceCheck}.tsx`、`app/src/lib/mask.ts`、`app/src/lib/mask-cases.json` | 环境检查、设置、使用说明；打码用例表（Rust 与 TS 共用） |
 | `app/src/pages/onboarding/` | 首次引导 |

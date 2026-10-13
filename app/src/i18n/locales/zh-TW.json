@@ -127,7 +127,8 @@
       "linear_reconnect": "無法重新連線至 Linear",
       "setup_action": "設定指令執行失敗",
       "set_autostart": "無法變更開機自動啟動的設定",
-      "open_linear": "無法開啟 Linear"
+      "open_linear": "無法開啟 Linear",
+      "copy": "無法複製"
     }
   },
   "errors": {
@@ -202,5 +203,49 @@
     "log_out": "登出",
     "waiting_browser": "請在瀏覽器中完成授權…",
     "cancel_login": "取消"
+  },
+  "runs": {
+    "all": "全部",
+    "field": {
+      "state": "狀態",
+      "issue": "編號",
+      "title": "標題",
+      "executor": "執行者",
+      "started": "開始時間",
+      "duration": "時長",
+      "note": "說明",
+      "directory": "資料夾",
+      "created": "建立時間",
+      "finished": "結束時間",
+      "summary": "摘要"
+    },
+    "empty": "還沒有執行紀錄",
+    "empty_description": "IssueRelay 開始處理需求後，執行紀錄會顯示在這裡。",
+    "empty_filtered": "這個狀態下沒有執行紀錄",
+    "empty_filtered_description": "選擇其他狀態可以看到更多執行紀錄。",
+    "load_failed": "無法讀取執行紀錄",
+    "detail_failed": "無法讀取這次執行",
+    "not_found": "沒有這次執行",
+    "not_found_description": "請回到執行紀錄，找到你要查看的那一次。",
+    "back_to_runs": "回到執行紀錄",
+    "reason_title": {
+      "failed": "這次執行失敗了",
+      "canceled": "這次執行已取消",
+      "waiting_binding": "這次執行正在等待綁定",
+      "other": "IssueRelay 的說明"
+    },
+    "timeline": "時間軸",
+    "raw_log": "原始日誌",
+    "copy_all": "複製全部",
+    "log_removed": "這次執行的日誌已被日誌清理刪除",
+    "log_failed": "無法讀取日誌",
+    "no_output": "暫時沒有可顯示的內容"
+  },
+  "timeline": {
+    "session_started": "工作階段開始",
+    "note": "IssueRelay",
+    "stderr": "stderr",
+    "result": "結果",
+    "error": "錯誤"
   }
 }

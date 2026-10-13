@@ -127,7 +127,8 @@
       "linear_reconnect": "Could not reconnect to Linear",
       "setup_action": "The setup command failed",
       "set_autostart": "Could not change start at login",
-      "open_linear": "Could not open Linear"
+      "open_linear": "Could not open Linear",
+      "copy": "Could not copy"
     }
   },
   "errors": {
@@ -202,5 +203,49 @@
     "log_out": "Log out",
     "waiting_browser": "Finish the authorization in your browser…",
     "cancel_login": "Cancel"
+  },
+  "runs": {
+    "all": "All",
+    "field": {
+      "state": "Status",
+      "issue": "Issue",
+      "title": "Title",
+      "executor": "Executor",
+      "started": "Started",
+      "duration": "Duration",
+      "note": "Note",
+      "directory": "Folder",
+      "created": "Created",
+      "finished": "Finished",
+      "summary": "Summary"
+    },
+    "empty": "No runs yet",
+    "empty_description": "A run shows up here when IssueRelay starts work on an issue.",
+    "empty_filtered": "No runs in this state",
+    "empty_filtered_description": "Choose another state to see more runs.",
+    "load_failed": "Could not read the runs",
+    "detail_failed": "Could not read the run",
+    "not_found": "This run does not exist",
+    "not_found_description": "Open the list of runs to find the one you want.",
+    "back_to_runs": "Back to the runs",
+    "reason_title": {
+      "failed": "The run failed",
+      "canceled": "The run was canceled",
+      "waiting_binding": "The run waits for setup",
+      "other": "A note from IssueRelay"
+    },
+    "timeline": "Timeline",
+    "raw_log": "Raw log",
+    "copy_all": "Copy all",
+    "log_removed": "The log of this run was removed by the log cleanup",
+    "log_failed": "Could not read the log",
+    "no_output": "Nothing to show yet"
+  },
+  "timeline": {
+    "session_started": "Session started",
+    "note": "IssueRelay",
+    "stderr": "stderr",
+    "result": "Result",
+    "error": "Error"
   }
 }
