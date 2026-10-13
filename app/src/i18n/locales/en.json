@@ -477,5 +477,50 @@
       "logs_q": "Where are the logs?",
       "logs_a": "Open a run on the Runs page: the Raw log tab shows its log, and Copy all copies it. The files are in the logs folder inside IssueRelay's data folder (macOS: ~/Library/Application Support/com.sunkailun.issuerelay, Windows: %LOCALAPPDATA%\\com.sunkailun.issuerelay). The program's own log, app.<date>.log, is there too."
     }
+  },
+  "onboarding": {
+    "steps_label": "Setup steps",
+    "step_of": "Step {{current}} of {{total}}",
+    "step_done": "{{step}} (done)",
+    "back": "Back",
+    "next": "Next",
+    "later": "I'll add them later",
+    "bind_later": "Bind later",
+    "start": "Start using IssueRelay",
+    "step": {
+      "language": "Language",
+      "linear": "Linear",
+      "workspace": "Workspace",
+      "executors": "Executors",
+      "binding": "First project",
+      "finish": "How it works"
+    },
+    "title": {
+      "language": "Choose your language",
+      "linear": "Connect Linear",
+      "workspace": "Check your Linear workspace",
+      "executors": "Check Claude Code and Codex",
+      "binding": "Bind your first project",
+      "finish": "How IssueRelay works"
+    },
+    "description": {
+      "language": "The panel, the tray menu and the notifications use it. You can change it later in Settings.",
+      "linear": "IssueRelay reads your issues through your Linear account. Marking an issue done in the panel is the only change it makes there. You authorize it in your browser.",
+      "workspace": "IssueRelay needs the {{label}} label, and the statuses it moves an issue through, in your Linear workspace. It does not create them for you.",
+      "executors": "IssueRelay hands each issue to Claude Code or Codex. At least one of them has to be installed, logged in and connected to Linear.",
+      "binding": "Tell IssueRelay which folder on this computer belongs to a Linear project. Bindings can be added, edited and removed later on the Bindings page.",
+      "finish": "What an issue needs before IssueRelay takes it on, and how it moves from there."
+    },
+    "checking": "Checking the connection to Linear…",
+    "authorize": "Authorize Linear in the browser",
+    "use_api_key": "Use a personal API key",
+    "no_executor": "Install and log in to Claude Code or Codex first",
+    "no_executor_hint": "Follow what each card says below, then check again.",
+    "bound_title": "Bound projects",
+    "binding_saved": "The binding is saved",
+    "add_another": "Add another",
+    "add_another_title": "Add another binding",
+    "no_binding_note": "No project is bound yet, so IssueRelay will not take on any issue. Bind one on the Bindings page when you are ready.",
+    "control_server_note": "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs load it too, and its tools can pause monitoring."
   }
 }

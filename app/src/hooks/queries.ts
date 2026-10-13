@@ -235,13 +235,18 @@ export function useRemoveBinding() {
   });
 }
 
-/** The saved settings are read again before this is over, so the page that goes on (the guide to the overview) finds them. */
-export function useSaveSettings() {
+/**
+ * The saved settings are read again before this is over, so the page that goes on (the guide to the
+ * overview) finds them. `quiet` is for the caller that tells a failure itself, after it has put
+ * back what it changed for the sake of the save (the guide's language), so that the failure is
+ * told in the language the panel is in again.
+ */
+export function useSaveSettings({ quiet = false }: { quiet?: boolean } = {}) {
   return useAction<Settings, void>(
     (backend, settings) => backend.saveSettings(settings),
     [queryKeys.status, queryKeys.issues, queryKeys.doctor],
     "actions.failed.save_settings",
-    { reread: [queryKeys.settings] },
+    { reread: [queryKeys.settings], quiet: quiet ? () => true : undefined },
   );
 }
 

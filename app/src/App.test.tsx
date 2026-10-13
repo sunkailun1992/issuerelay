@@ -10,11 +10,15 @@ import type { StartupState, StatusView } from "@/lib/types";
 import App from "./App";
 
 afterEach(async () => {
-  // App routes by the address's fragment and follows the language setting.
-  window.location.hash = "";
   document.documentElement.classList.remove("dark");
   onlineManager.setOnline(true);
-  await setLanguage("en");
+  // The page is still on screen (the cleanup comes after this), so the change reaches it inside act.
+  await act(async () => {
+    await setLanguage("en");
+  });
+  // App routes by the address's fragment and follows the language setting. The address goes last:
+  // the router acts on a change of it, and must be gone from the screen by the time it is told.
+  window.location.hash = "";
 });
 
 test("the panel opens on the overview inside the shell", async () => {
@@ -98,9 +102,11 @@ test("a run's address shows the runs page, and an unknown address goes to the ov
 test("a first run goes to the guide, which has no sidebar", async () => {
   await initI18nOnce("en");
   render(<App backend={createMockBackend("fresh", { latencyMs: 0 })} />);
-  expect(await screen.findByRole("heading", { name: "IssueRelay" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { level: 1, name: "Choose your language" })).toBeInTheDocument();
   expect(window.location.hash).toBe("#/onboarding");
   expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
+  // Wait for what the first step reads, so that it does not arrive after the test.
+  expect(await screen.findByRole("radio", { name: "Follow the system" })).toBeChecked();
 });
 
 test("the language chosen in the settings is followed once they are read", async () => {

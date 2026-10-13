@@ -285,6 +285,25 @@ test("a status that cannot be read is an error with a retry, not a card on a gue
   expect(await screen.findByText("Jane Doe")).toBeInTheDocument();
 });
 
+test("a page can word the login button and the connection under way its own way, and nothing else changes", async () => {
+  const labels = { login: "Authorize Linear in the browser", connecting: "Checking the connection to Linear…" };
+  const fresh = await renderWithProviders(<LinearStatus labels={labels} />, { backend: createMockBackend("fresh", { latencyMs: 0 }) });
+  expect(await screen.findByText("Not logged in to Linear")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Authorize Linear in the browser" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Log in to Linear" })).not.toBeInTheDocument();
+  fresh.unmount();
+
+  const connecting = await renderWithProviders(<LinearStatus labels={labels} />, { backend: createMockBackend("connecting", { latencyMs: 0 }) });
+  expect(await screen.findByText("Checking the connection to Linear…")).toBeInTheDocument();
+  expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
+  expect(screen.queryAllByRole("button")).toHaveLength(0);
+  connecting.unmount();
+
+  // Without labels the card words them as before; a label for one of them leaves the other as it was.
+  await renderWithProviders(<LinearStatus labels={{ connecting: "Checking…" }} />, { backend: createMockBackend("fresh", { latencyMs: 0 }) });
+  expect(await screen.findByRole("button", { name: "Log in to Linear" })).toBeInTheDocument();
+});
+
 test("the card reads in the interface language", async () => {
   await renderWithProviders(<LinearStatus />, { lang: "zh-CN" });
   expect(await screen.findByText(/^已连接/)).toBeInTheDocument();

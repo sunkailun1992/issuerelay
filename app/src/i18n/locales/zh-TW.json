@@ -477,5 +477,50 @@
       "logs_q": "日誌在哪裡？",
       "logs_a": "在「執行紀錄」頁打開一次執行：「原始日誌」分頁裡是它的日誌，「複製全部」可以複製。檔案在 IssueRelay 資料目錄的 logs 資料夾裡（macOS：~/Library/Application Support/com.sunkailun.issuerelay，Windows：%LOCALAPPDATA%\\com.sunkailun.issuerelay）；程式自己的日誌 app.<日期>.log 也在那裡。"
     }
+  },
+  "onboarding": {
+    "steps_label": "引導步驟",
+    "step_of": "第 {{current}} 步，共 {{total}} 步",
+    "step_done": "{{step}}（已完成）",
+    "back": "上一步",
+    "next": "下一步",
+    "later": "稍後再加",
+    "bind_later": "稍後再綁定",
+    "start": "開始使用",
+    "step": {
+      "language": "語言",
+      "linear": "Linear",
+      "workspace": "工作區",
+      "executors": "執行者",
+      "binding": "第一個專案",
+      "finish": "使用說明"
+    },
+    "title": {
+      "language": "選擇介面語言",
+      "linear": "連線 Linear",
+      "workspace": "檢查 Linear 工作區",
+      "executors": "檢查 Claude Code 與 Codex",
+      "binding": "綁定第一個專案",
+      "finish": "IssueRelay 如何運作"
+    },
+    "description": {
+      "language": "面板、系統匣選單與通知都會使用它，之後可以在「設定」中修改。",
+      "linear": "IssueRelay 透過你的 Linear 帳號讀取需求；在面板中標記完成，是它在 Linear 裡做的唯一變更。授權在瀏覽器中完成。",
+      "workspace": "IssueRelay 需要你的 Linear 工作區裡有 {{label}} 標籤，以及它流轉需求時用到的狀態。程式不會替你建立。",
+      "executors": "IssueRelay 會把每則需求交給 Claude Code 或 Codex 處理。至少要有一個已安裝、已登入，並已連線至 Linear。",
+      "binding": "告訴 IssueRelay，Linear 的哪個專案對應本機的哪個資料夾。之後可以在「專案綁定」頁新增、修改與移除綁定。",
+      "finish": "需求要符合什麼條件才會被接走，以及接走之後如何流轉。"
+    },
+    "checking": "正在檢查與 Linear 的連線…",
+    "authorize": "在瀏覽器中授權 Linear",
+    "use_api_key": "改用個人 API key",
+    "no_executor": "請先安裝並登入 Claude Code 或 Codex",
+    "no_executor_hint": "依下面各張卡片上的提示處理，然後重新檢查。",
+    "bound_title": "已綁定的專案",
+    "binding_saved": "綁定已儲存",
+    "add_another": "再新增一個",
+    "add_another_title": "再新增一個綁定",
+    "no_binding_note": "還沒有綁定任何專案，所以 IssueRelay 暫時不會處理任何需求。準備好之後，到「專案綁定」頁綁定一個。",
+    "control_server_note": "可以在設定中讓 Claude Code / Codex 呼叫 IssueRelay 的 MCP 控制服務；它依使用者範圍註冊，無人值守的執行也會載入它，它的工具包含「暫停監控」。"
   }
 }

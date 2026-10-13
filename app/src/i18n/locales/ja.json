@@ -477,5 +477,50 @@
       "logs_q": "ログはどこにありますか？",
       "logs_a": "「実行履歴」ページで実行を開くと、「生ログ」タブにログが表示され、「すべてコピー」でコピーできます。ファイルは IssueRelay のデータフォルダーの logs フォルダーにあります（macOS: ~/Library/Application Support/com.sunkailun.issuerelay、Windows: %LOCALAPPDATA%\\com.sunkailun.issuerelay）。プログラム自身のログ app.<日付>.log も同じ場所にあります。"
     }
+  },
+  "onboarding": {
+    "steps_label": "セットアップの手順",
+    "step_of": "ステップ {{current}} / {{total}}",
+    "step_done": "{{step}}（完了）",
+    "back": "戻る",
+    "next": "次へ",
+    "later": "あとで追加する",
+    "bind_later": "あとで紐付ける",
+    "start": "IssueRelay を使い始める",
+    "step": {
+      "language": "言語",
+      "linear": "Linear",
+      "workspace": "ワークスペース",
+      "executors": "実行ツール",
+      "binding": "最初のプロジェクト",
+      "finish": "使い方"
+    },
+    "title": {
+      "language": "表示言語を選ぶ",
+      "linear": "Linear に接続する",
+      "workspace": "Linear のワークスペースをチェック",
+      "executors": "Claude Code と Codex をチェック",
+      "binding": "最初のプロジェクトを紐付ける",
+      "finish": "IssueRelay の仕組み"
+    },
+    "description": {
+      "language": "パネル、トレイメニュー、通知で使われます。あとから「設定」で変更できます。",
+      "linear": "IssueRelay は Linear のアカウントを通じて課題を読み取ります。パネルで完了にすることが、Linear に対して行う唯一の変更です。認可はブラウザーで行います。",
+      "workspace": "IssueRelay には、Linear のワークスペースに {{label}} ラベルと、課題を進めるときに使うステータスが必要です。これらは自動では作成されません。",
+      "executors": "IssueRelay は課題を Claude Code か Codex に渡して処理します。どちらか一方は、インストールとログインを済ませ、Linear に接続されている必要があります。",
+      "binding": "Linear のどのプロジェクトが、このコンピューターのどのフォルダーに対応するかを IssueRelay に伝えます。紐付けは、あとから「プロジェクト紐付け」ページで追加・編集・削除できます。",
+      "finish": "IssueRelay が課題を引き受ける条件と、その後の進み方です。"
+    },
+    "checking": "Linear との接続をチェックしています…",
+    "authorize": "ブラウザーで Linear を認可",
+    "use_api_key": "個人用 API キーを使う",
+    "no_executor": "まず Claude Code または Codex をインストールしてログインしてください",
+    "no_executor_hint": "下のカードの案内に従って対処し、もう一度チェックしてください。",
+    "bound_title": "紐付け済みのプロジェクト",
+    "binding_saved": "紐付けを保存しました",
+    "add_another": "もう 1 つ追加",
+    "add_another_title": "紐付けをもう 1 つ追加",
+    "no_binding_note": "まだプロジェクトが紐付けられていないため、IssueRelay は課題を処理しません。準備ができたら「プロジェクト紐付け」ページで紐付けてください。",
+    "control_server_note": "設定で、Claude Code や Codex から IssueRelay の MCP コントロールサーバーを呼び出せるようにできます。ユーザー単位で登録されるため、無人実行でも読み込まれ、そのツールには監視の一時停止も含まれます。"
   }
 }

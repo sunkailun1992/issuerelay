@@ -401,6 +401,50 @@ describe("acting", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  test("a settings save that the caller reports itself is not told as a toast as well, and the failure comes back to the caller", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.saveSettings = async () => {
+      throw new BackendError("config.toml is read-only");
+    };
+    function Save({ quiet }: { quiet: boolean }) {
+      const save = useSaveSettings({ quiet });
+      const [told, setTold] = useState("");
+      const run = async () => {
+        try {
+          await save.mutateAsync(await backend.settings());
+        } catch (error) {
+          setTold((error as Error).message);
+        }
+      };
+      return (
+        <>
+          <Act run={() => void run()} />
+          {told !== "" && <p>failed: {told}</p>}
+        </>
+      );
+    }
+    await renderWithProviders(<Save quiet />, { backend });
+    const error = vi.spyOn(toast, "error");
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    expect(await screen.findByText("failed: config.toml is read-only")).toBeInTheDocument();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test("a settings save that is not quiet is told as a toast", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.saveSettings = async () => {
+      throw new BackendError("config.toml is read-only");
+    };
+    function Save() {
+      const save = useSaveSettings();
+      return <Act run={async () => save.mutate(await backend.settings())} />;
+    }
+    await renderWithProviders(<Save />, { backend });
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    expect(await screen.findByText("Could not save the settings")).toBeInTheDocument();
+    expect(screen.getByText("config.toml is read-only")).toBeInTheDocument();
+  });
+
   test("every action names itself when it fails", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const refuse = async () => {

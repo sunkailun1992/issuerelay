@@ -45,9 +45,16 @@ function Layout({ icon: Icon, tone, spin, children, actions }: { icon: LucideIco
  * headline comes from structured data (`StatusView.linear`, the login that is under way); the
  * engine's own sentence, if there is one, is the detail line under it. `manage` is for the
  * environment check, where a connection (a working one, or one that failed) can also be
- * authorized again or ended.
+ * authorized again or ended. `labels` is for a page that words the first connection its own way
+ * (the first-run guide): the text of the login button, and of the connection being under way.
  */
-export function LinearStatus({ manage = false }: { manage?: boolean }) {
+export function LinearStatus({
+  manage = false,
+  labels,
+}: {
+  manage?: boolean;
+  labels?: { login?: string; connecting?: string };
+}) {
   const { t } = useTranslation();
   const lang = useLang();
   const status = useStatus();
@@ -103,7 +110,7 @@ export function LinearStatus({ manage = false }: { manage?: boolean }) {
     case "connecting":
       return (
         <Layout icon={LoaderCircle} tone="busy" spin>
-          <p className="font-medium">{t("linear.connecting")}</p>
+          <p className="font-medium">{labels?.connecting ?? t("linear.connecting")}</p>
         </Layout>
       );
     case "not_configured":
@@ -114,7 +121,7 @@ export function LinearStatus({ manage = false }: { manage?: boolean }) {
           actions={
             <Button size="sm" onClick={() => login.mutate()}>
               <LogIn aria-hidden />
-              {t("linear.log_in")}
+              {labels?.login ?? t("linear.log_in")}
             </Button>
           }
         >
