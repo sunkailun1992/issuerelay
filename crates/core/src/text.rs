@@ -12,8 +12,20 @@ const MAX_TEXT_CHARS: usize = 500;
 /// are trimmed and at most `MAX_TEXT_CHARS` characters are kept, with `…` added when the text was
 /// cut.
 pub fn clean_text(text: &str) -> String {
-    let flat: String = text
-        .chars()
+    let flat = strip_control(text);
+    let flat = flat.trim();
+    match flat.char_indices().nth(MAX_TEXT_CHARS) {
+        Some((cut, _)) => format!("{}…", &flat[..cut]),
+        None => flat.to_string(),
+    }
+}
+
+/// `text` with every control character (newline and tab included) turned into a space and every
+/// invisible character (`is_invisible`) removed; nothing is trimmed and nothing cut. The one
+/// implementation of the character rule: `clean_text` trims and caps what it returns, the log
+/// scrub (`logscrub::CleanLines`) and the root cause at the end of an error chain need the ends.
+pub fn strip_control(text: &str) -> String {
+    text.chars()
         .filter_map(|c| {
             if c.is_control() {
                 Some(' ')
@@ -23,12 +35,7 @@ pub fn clean_text(text: &str) -> String {
                 Some(c)
             }
         })
-        .collect();
-    let flat = flat.trim();
-    match flat.char_indices().nth(MAX_TEXT_CHARS) {
-        Some((cut, _)) => format!("{}…", &flat[..cut]),
-        None => flat.to_string(),
-    }
+        .collect()
 }
 
 /// Characters that show nothing yet change how text reads: zero-width spaces, direction marks,
@@ -193,5 +200,30 @@ mod tests {
         // Escapes that are not CSI are not touched here.
         assert_eq!(strip_ansi("a\u{1b}]8;;x\u{7}b"), "a\u{1b}]8;;x\u{7}b");
         assert_eq!(strip_ansi("a\u{1b}Mb"), "a\u{1b}Mb");
+    }
+
+    #[test]
+    fn the_error_line_keeps_the_root_cause_however_long_the_chain() {
+        let error = anyhow::anyhow!("root cause\u{1b}[2J")
+            .context("x".repeat(600))
+            .context("outer\n");
+        let line = strip_control(&format!("{error:#}"));
+        assert!(line.starts_with("outer : xxx"), "{line}");
+        assert!(line.ends_with(": root cause [2J"), "{line}");
+        assert_eq!(
+            line.chars().count(),
+            "outer : ".len() + 600 + ": root cause [2J".len()
+        );
+    }
+
+    #[test]
+    fn clean_text_is_the_character_rule_trimmed_and_capped() {
+        // One implementation: `strip_control` keeps the ends and the length, `clean_text` trims
+        // and caps what it returns.
+        assert_eq!(strip_control(" a\tb\u{200b} "), " a b ");
+        assert_eq!(
+            clean_text(" a\tb\u{200b} "),
+            strip_control(" a\tb\u{200b} ").trim()
+        );
     }
 }
