@@ -58,6 +58,8 @@
 
 ### Task 1: 执行者环境（登录 shell 的 PATH 与代理）
 
+> 执行说明（2026-10-13，最终修复波）：下文 Windows 的 `login_shell_vars` 返回空表、PATH 沿用宿主启动时那份，重查时读不到新装的执行者（最终评审 I1）。现在 Windows 从注册表读系统和用户的 `Path`（`REG_EXPAND_SZ` 展开 `%变量%`），按「系统在前、用户在后、再补宿主独有的项」合并，比较时不分大小写、忽略结尾的反斜杠，来源记为 `SystemSettings`；读注册表失败时记一条问题，照旧用宿主的 PATH。`resolve` 拆成读取各来源（`read_sources`）与合并（`combine`）两步：「环境检查」重查时，某个来源这次读取失败，就沿用它在上一份环境里给出的 PATH 或代理，并照样记下问题（最终评审 M1），免得一次慢的 rc 文件把好的登录 shell PATH 换成 launchd 的最小 PATH、再被缓存 5 分钟。
+
 设计第 8 节：图形程序只有最小 PATH，Claude Code 不读系统代理（M1 验收 H1）。新模块 `env` 一次算出子进程该拿到的环境，运行器和环境检查都用它；环境检查顺带在用户主目录运行、整组结束超时的检查命令（M1 计划「本计划不覆盖」6.4 行）。
 
 **Files:**
@@ -3203,6 +3205,8 @@ git commit -m "feat(core): add engine events, the issue list and live Linear rec
 
 ### Task 6: Linear 修补与按团队检查工作区
 
+> 执行说明（2026-10-13）：已落地代码以提交 `e49ae8e` 与修复 `1b62e0e` 为准，与下文有这些不同。① `check_workspace` 只在已绑定项目给出的团队里有 Linear 仍列出的团队时才缩小范围，否则检查所有团队：项目的 `teams` 为 null、缺省或空，Linear 不再列出该项目（修复轮，裁决 R19），以及项目给出的团队 Linear 已不再列出、例如已归档（最终修复波）——一个团队都不查就会把缺状态的工作区报成齐全。② `Engine::doctor` 交出的授权人姓名、`teams_checked` 与 `missing_states` 都经 `clean_text` 清洗（`display_viewer`、`display_workspace`，R19 的 I1）。③ 连接时检查 `fields` 枚举后，假服务端的 `tools/list` 要带上 Linear 记录下来的 `fields` 枚举，否则新检查会拒绝它；原有三处期望随之改为「参数名，再加 13 个取值」。④ 重复游标的错误带上工具名（``reading `list_issues`: …``）；命令行在 `teams_checked` 为空时显示 `Teams checked: none`。⑤ `safe_url` 的注释写明「不带 slug 的链接能打开同一条需求」待实机确认（R19 的 M3）。`drop(listener)` 没有自动测试（要在 `linear::auth` 加接缝），一条 `teams` 格式不对就让整个项目列表失败（下文的「失败即关闭」取舍），两者都记在文末「评审遗留的小项」。
+
 M1 验收 H2（中文标题的链接被丢掉）与评审遗留：翻页对重复游标默默停下、连接时只查参数名不查 `fields` 枚举、回环端口在换令牌期间仍被占着、不可见字符漏网（标签字符、U+061C、软连字符、韩文填充字符；而去掉 ZWJ / ZWNJ 会弄坏 emoji 和印度系文字）、工作区检查覆盖所有团队。
 
 **Files:**
@@ -3537,6 +3541,8 @@ git commit -m "fix(core): keep Chinese issue links, check fields and only bound 
 
 ### Task 7: 配置、命令行与执行者的小修
 
+> 执行说明（2026-10-13）：已落地代码以提交 `0260f1d` 与修复 `9e15ce5` 为准，与下文有这些不同。① MCP 工具的结果和失败信息都过命令行用的 `format::clean`（控制字符，含 DEL 与 C1，变成空格；不可见字符去掉；不截断；JSON 仍然有效），取代下文只去不可见字符的 `visible()`：serde_json 只转义 U+001F 以下的字符，失败信息又不是 JSON（裁决 R20 的 I1）。② 引擎缓存授权人时就清洗姓名（`Engine::viewer` 存 `display_viewer` 的结果），`status`、IPC、MCP 与面板拿到的都是清洗过的姓名，用来比对的 id 不变（R20、R21）。③ 触发名称也拒绝不可见字符（R20 的 M5）。④ `doctor` 的等待提示写成 `announce_wait(command, writer, is_terminal)`，写到给定的输出，写失败不报错（R20 的 M4）。⑤ `bind add` 找不到目录时报「<绝对路径> is not a folder」，两条旧测试随之更新。⑥ `unknown_keys` 按字母序返回（`toml` 没开 `preserve_order`），测试排序后比较；临时文件清扫对不带目录的文件名也有效。
+
 评审遗留：未知配置键静默丢弃、保存中途崩溃留下的临时文件无人清扫、语言值能混进不可见字符、仓库子目录不被识别为 git 仓库、MCP 输出未清洗且缺工具注解、`bind add` 不规范化路径、`doctor` 等待时没有任何提示。顺带加入面板要用的设置项：四种通知的开关与自动更新开关（设计 9.5、12）。
 
 **Files:**
@@ -3865,6 +3871,8 @@ git commit -m "fix(core,cli): warn about unknown config keys and tidy MCP output
 
 ### Task 8: 一键配置命令
 
+> 执行说明（2026-10-13）：已落地代码以提交 `0bb6439` 与修复 `efe12c2` 为准，与下文有这些不同。① `arguments` 拒绝不是绝对路径的命令行程序路径（`--` 之后的那个参数），测试按平台写绝对路径。② 被信号结束（`code: None`）在 `run` 与 `control_server_registered` 里都是错误，「未注册」只认正常的非零退出。③ 失败输出先 `strip_ansi`（从 `doctor.rs` 移到 `text.rs` 共用）再 `clean_text`；两路输出都有时各占 200 字符，截断处加 `…`；没有输出时写 `no output`；运行器的错误带上命令本身（``did not run to completion``）。④ 60 秒与 5 分钟写成常量 `COMMAND_LIMIT`、`LOGIN_LIMIT`；doctor 的注册提示与 `setup::arguments` 用一致性测试锁定，没有直接调用（`arguments` 返回 `Result`，doctor 调它还会造成模块循环）。⑤ `AGENTS.md` 与安全规范为这个路径写明窄例外（裁决 R22），最终修复波把它与读取登录 shell 一起写成「仅有两处例外」；`mcp get` 退出码的说明改为「记录于 M2 第一部分计划（2026-10-13）」，`arguments` 的文档写明绝对路径的约定（最终修复波）。
+
 设计第 8 节第 4 步：执行者没配 Linear MCP 时，可一键执行官方添加命令，再引导用户在浏览器里完成授权；第 10.3 节：是否把 IssueRelay 的 MCP 控制服务注册到 Claude Code / Codex 由用户在设置里选，可一键注册或移除。这里只做命令本身（固定参数、可测试），按钮在第二部分。实测（Claude Code 2.1.285、codex-cli 0.159.2）：两个执行者都有 `mcp login <名称>`；`mcp get <名称>` 找不到时退出码 1，找到时 0。
 
 **Files:**
@@ -4140,6 +4148,8 @@ git commit -m "feat(core): add the one-click executor setup commands"
 ---
 
 ### Task 9: 可复用的宿主 `core::host`，devhost 改用它
+
+> 执行说明（2026-10-13）：已落地代码以提交 `588ede5` 与修复 `da172e2` 为准，最终修复波又补了停止与 devhost 退出的几处；与下文的接口和写法有这些不同。① 启动不等 Linear（裁决 R24 的 M10）：`LinearSetup` 多一种 `Connecting`（`{"kind":"connecting"}`），引擎先以「connecting to Linear」的 `Disconnected` 起步，首次连接与失败后的重试是同一个后台任务，每次都走 `reconnect`；devhost 在首次连接有结果时记一行日志。② 引擎与 IPC 各有停止令牌，IPC 最后停，单实例锁要等运行都结束、结果记录完才释放（R18）；`join` 让任务句柄留在槽里直到任务结束，所以 `stop` 可以重复、并发调用，被丢弃的调用不会丢掉句柄；`stop(StopRuns)` 能结束仍在等待的 `stop(WaitForRuns)`（R23）。③ 用户的改动（登录、API key、登出）由 `user_actions` 互斥锁一次一个，`stop` 不拿它；连接尝试按开始顺序编号（`next_attempt`、`current_from`），用户改过连接、或更晚开始的尝试已经生效时，旧尝试不再生效——字面的「只认最新一次」会让一个卡住的新尝试拖住一切，复审接受了这个改法（R24 的 M5）。④ 引擎任务死掉时，`stop` 经引擎的公开接口让运行停下，最多等 `HostParts::dead_engine_wait`（默认 60 秒）后照样释放锁，`Host::engine_failure()` 让程序以失败退出（R24 的 M7）；最终修复波补上：正在等待的 `WaitForRuns` 在引擎任务结束时转入这条路径（不再无限等），停止引擎的那段在 `catch_unwind` 下运行，引擎的锁中毒导致的 panic 不再挡住 IPC 停止与锁的释放。⑤ `Connector::login` 的回调写成 `OpenUrl = Box<dyn for<'a> Fn(&'a str) + Send + Sync>`（下文的写法在 `async_trait` 下编译不过）；`login`、`use_api_key` 先切换宿主再读授权人，读失败时返回错误、宿主已跟上钥匙串；它们的错误是连接器原样的 `anyhow` 链，由面板的命令层清洗（R24 的 M2、M3）。⑥ devhost 的 `login`、`api-key` 也经 `SystemConnector`，换登录方式时清掉另一种凭据（R24 的 I1），一条结构测试钉住这一点；最终修复波：devhost 的运行时退出时最多等阻塞线程池 5 秒（钥匙串读取卡在没人回答的 macOS 授权框上也能用 Ctrl+C 退出），第二次 Ctrl+C 时引擎已死同样以失败退出，首次连接任务优先看停止令牌（`biased`），启动后马上停止不会再去读钥匙串，`Host::env()` 的文档写明代理值没打码、只用于启动进程。⑦ 每个宿主测试都有 20 秒的总上限，CI 的任务加了 `timeout-minutes`（R24 的 M4）。
 
 把 devhost 里组装引擎的代码抽成 `Host`，桌面应用直接复用。宿主在没有 Linear 凭据、连接失败或 Linear 接口已变化时照常启动（用 `Disconnected` 占位，设计第 13 节），连接失败时每分钟自动重试；运行中可以登录、改用 API key、登出（换连接用 Task 5 的 `set_linear`）；停止分「等待完成」与「立即停止」两种（设计 6.2）。改用一种登录方式时清掉另一种保存的凭据，免得重启后用了旧的。
 
@@ -4841,3 +4851,59 @@ git commit -m "feat(core): extract the host so the tray app and the devhost shar
 - 设计覆盖：第 8 节 PATH 与代理（Task 1）、6.2 Windows 进程标志与崩溃残留（Task 2、4）、6.4 检查命令进程树（Task 1）、10.2 管道权限（Task 2）、11 日志清理（Task 3）、5.6 / 9.2 面板所需的引擎接口（Task 5）、7 中文链接与字段检查（Task 6）、8 第 3 步按团队检查（Task 6）、8 第 4 步与 10.3 一键命令（Task 8）、13 无连接照常运行与重连（Task 5、9）。界面、托盘、通知、开机自启、图标、多语言、首次引导、精简运行的评估都在 M2 第二部分。
 - 「评审遗留的小项」M2 两张表逐行认领：引擎与运行各行（Task 3、4、5）；Linear、环境检查、IPC、命令行与面板各行（Task 1、2、6、7、8）；`linear::mcp` 改用 rmcp 自带超时与取消一项不做——现有的 30 秒包装已覆盖超时，换实现没有新的行为收益，作为已知取舍保留；`ToolFailed` 原文转义在面板显示处做（第二部分）；面板「默认模型」与带 `[ ]` 的模型名说明在第二部分。测试打磨、扫描脚本、文档文字三组不在本计划，按原表保留。
 - 类型一致：`ExecEnv`/`SharedEnv`（Task 1）→ Task 4 `runner::run`、Task 9 `Host`；`JobRunner::run` 的 `on_spawn`（Task 4）→ Task 5、9 的测试 kit；`check_workspace` 第三个参数（Task 6）→ `Engine::doctor`；`CommandRunner::run_limited`（Task 8）由 Task 1 改写过的 `SystemRunner` 实现。
+
+## 评审遗留的小项
+
+本计划执行中，各任务评审与最终评审（`c5d497a..da172e2`）决定接受、没有修复的项，以及还要在真实机器上确认的事。按最终修复波（2026-10-13）之后的代码核对过。SDD 工作区在合并后删除，这里是唯一的记录；写后续计划或做验收时逐条认领，或写明不做及原因。
+
+**最终评审接受的遗留项**（编号是最终评审「Carried minors」的编号）
+
+| 编号 | 内容 | 接受的理由 | 认领 |
+|---|---|---|---|
+| 1 | `SharedEnv` 读锁、克隆、中毒处理的两行写法重复 5 处（`engine.rs`、`doctor.rs` 三处、`host.rs`） | 两行的惯用写法，各处处理一致；抽成函数只多出接口，行为不变，还要改四个 CODEOWNERS 文件 | 不做 |
+| 3 | 运行器的输出队列按行数限量（1024 行 × 每行最多 4 MiB），不按字节 | 最坏情况要 1024 行 4 MiB 的长行积压在写不动的本地日志后面；Task 3 的灌水测试（600 MB、4 MB 一行）内存只到 20 MB | M3：与单次运行的日志上限一起做（见下表） |
+| 4 | 结束运行（`guard.end()`）期间没有人读输出队列 | 只有已经塞满 1024 行和 64 KiB 管道的执行者会因此用不上 SIGTERM 宽限期；超时与卡住时队列是空的，5 秒后整棵树照样被结束；要边结束边读就得重排极高风险文件里的拆除流程 | M3 改输出队列（第 3 项）时一并看 |
+| 6 | 日志清理出错的分支（`logs.rs` 读目录、删文件失败）没有测试 | 这些分支只记日志然后继续，失败会出现在宿主日志里 | 测试打磨，不排里程碑 |
+| 7 | `LogFailures::note` 与函数 `note` 同名，它返回的布尔值只有测试用 | 只是命名 | 下次改 `runner.rs` 时顺手改名（M3 第 3 项） |
+| 8 | 一个正在写的日志超过 `log_max_total_mb` 时，其他日志全被删掉；单次运行的日志没有上限（`logs.rs` 把正在用的日志算进总量） | M2 里运行时长上限（默认 60 分钟）限住了失控的日志；上限到了留什么是产品决定 | M3：单次运行的日志上限（写一行说明），正在用的日志不算进总量 |
+| 10 | `end_leftovers` 共用一个截止时间 | 要丢掉一个后代，得同时有宿主崩溃、多个残留、其中一个不理 SIGTERM、另一个很快退出并在宽限期里留下孤儿；属于设计 6.2 写明的「找不到的孤儿」一类；逐个领头进程再走一遍会让清扫变复杂 | M3：清扫时逐个领头进程再走一遍后代（见下表） |
+| 12 | `auth::login` 里的 `drop(listener)` 没有测试 | 一行释放，明显放在换令牌之前；为它在 `linear::auth`（极高风险）里加接缝不值 | 不做；`linear::auth` 以后重构时补 |
+| 15 | `read_pipe` 没有总量上限（`SystemRunner`，检查命令与一键配置共用） | 命令是用户自己的 `claude` / `codex`，输出只有几 KB，每次调用都有时限（20 秒、60 秒，登录 5 分钟）；加上限可能截掉 `mcp list` 解析要的内容 | 不做 |
+| 16 | M0–M1 计划第 8889 行 `cli` 一行的标注只挂在 MCP 与 doctor 两项上；两条扩展过的 MCP 测试名仍只说「invisible characters」 | 计划文字只作背景；测试名只是命名 | 不做 |
+| 18 | 等浏览器的登录占着「一次一个改动」的锁，最长 600 秒，期间改用 API key 或登出都要等 | core 已写明丢掉 `Host::login` 的 future 就放弃登录，钥匙串只在回调之后才写 | M2 第二部分：等浏览器时提供「取消」，丢掉登录的 future；等待期间「改用 API key」不可用（第二部分 Task 4、5、6、9、10，已写进该计划） |
+
+**待实机的检查**
+
+| 内容 | 由谁认领 |
+|---|---|
+| macOS 登录 shell 在自己的会话里读环境：从访达启动（无终端）与从终端启动（devhost）两种情况下，PATH 来源都是登录 shell，且不卡到 10 秒上限（zsh 5.9、macOS 27 的测量见 `env::shell_vars` 的注释） | M2 实机验收（macOS，第二部分 Task 13 Step 2，含在终端里运行 devhost 的那一次） |
+| 中文标题的需求链接只保留到 `/issue/<编号>`，这个不带 slug 的链接在浏览器里能打开同一条需求 | M2 实机验收（第二部分 Task 13 Step 5a） |
+| `claude` / `codex` 的 `mcp add`、`mcp login`、`mcp get` 的真实输出与退出码（一键添加、浏览器授权、控制服务注册检查） | M2 实机验收（第二部分 Task 13 Step 5 的注册与移除覆盖 `mcp add`、`mcp get`、`mcp remove`；一键添加 Linear 与 `mcp login` 只在 Linear 的服务没配好或要重新授权时才会出现，当时没碰到就继续待实机） |
+| Windows：提权运行的托盘程序与未提权的 `issuerelay status`（客户端查服务端进程令牌可能被拒，按设计会拒绝通信） | Windows 实机验收（第二部分 Task 13 的 Windows 待实机清单；设计 18 第 4 条） |
+| Windows：没有已开的浏览器时，登录命令（`mcp login`）启动的浏览器可能随该命令的 Job Object 一起被关掉 | Windows 实机验收（同上） |
+| 登录命令超时后，它打印出的授权链接作废 | Windows 实机验收（同上；macOS 在 M2 实机验收时顺带看） |
+| Windows：托盘程序运行期间安装执行者，再在「环境检查」页重查，PATH 从注册表重新读取，执行者被找到 | Windows 实机验收（同上） |
+
+**以后的里程碑**
+
+| 内容 | 认领 |
+|---|---|
+| 单次运行的日志上限（到上限写一行说明）与输出队列的字节预算；正在用的日志不算进 `log_max_total_mb` 的总量（上面第 3、8 项） | M3 |
+| 清扫残留时逐个领头进程再走一遍后代（上面第 10 项） | M3 |
+
+**其他已接受的取舍**
+
+| 内容 | 理由 |
+|---|---|
+| 宿主被强杀（SIGKILL）后，执行者可能在下一个宿主启动前因 EPIPE 退出，清扫找不到领头进程，留在它进程组里的成员（例如离开进程组的后代）就够不着 | 设计 6.2、`AGENTS.md` 与 `end_leftover` 的文档写明的限制；由实机验收测量 |
+| `-l -i` 的登录 shell 在每次宿主启动和每次「环境检查」重查时都会运行用户的 rc 文件，rc 文件的副作用（启动代理程序等）每次都会发生 | 计划要求的读法（Task 1）；已作为「不经 shell」规则的第二处例外写明 |
+| 一个卡在没人回答的 macOS 授权框上的钥匙串调用，会拖住运行时的退出 | devhost 已限时（最多等 5 秒，最终修复波）；托盘程序的退出流程在 M2 第二部分实机验收时确认不会被它拖住 |
+| `Engine::issues()` 可能要等过期的就绪检查（最长约 60 秒），或排在一次持有就绪锁的环境检查后面 | 面板体验的问题，归 M2 第二部分 |
+| 查询串里的代理凭据、密码里未转义的 `/` 不会被打码 | 不在打码规则（URL 的用户信息部分，裁决 R16）之内，这样的值本身就不规范 |
+| M1 存下的记录是用 M1 较窄的 `is_invisible` 清洗的，读出时不再清洗 | 影响很小，M1 就有 |
+| 离开进程组的后代占着执行者的标准输出时，转发任务与管道描述符一直留着 | M1 的行为，随那个后代结束 |
+| 非目标平台的 Unix（Linux）没有后代查找，也不记录残留进程 | 只支持 macOS 与 Windows，代码里写明 |
+| 一条格式不对的 `teams` 让整个项目列表失败，也挡住选择绑定（Task 6） | 计划选的「失败即关闭」 |
+| 执行者与配置的测试假定临时目录的上级里没有 `.git`（Task 7） | 向上找 `.git` 的固有前提；本机与 CI 都满足 |
+| Windows 的 `Path` 展开 `%变量%` 时先看宿主自己的环境变量：宿主启动后才改过值的变量仍按旧值展开；宿主没有的变量从注册表（用户的、再系统的）取一层，变量的值里再引用的不再展开（最终修复波） | 宿主已有的变量按宿主的值展开，与 Windows 自己的 `ExpandEnvironmentStrings` 相同；宿主没有的变量另从注册表取，覆盖了「安装程序新加变量并写进 Path」的情形 |
+| 引擎任务在持有存储锁时 panic、锁已中毒时，`stop` 没法经引擎的公开接口让运行停下（要读存储），只照样停掉 IPC、释放锁；这些运行的进程树在程序退出、运行时丢弃它们的守卫时结束（最终修复波） | 两处故障叠加的情形；保证锁一定释放是这一项的目标 |

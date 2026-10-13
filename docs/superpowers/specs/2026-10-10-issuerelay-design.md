@@ -10,7 +10,7 @@
 - **谁来干活**：读需求、改代码、git、推测试分支、改 Linear 状态、写评论，全由 Claude Code / Codex 完成；程序只负责派活、核对、记录。唯一例外是用户在面板上点「标记完成」。
 - **状态流转**：Todo →（AI）In Progress →（AI）In Testing →（用户在面板上）Done。
 - **怎么读 Linear**：Linear 官方 MCP，OAuth 授权，令牌存系统钥匙串。
-- **安全底线**：提示词固定规则（不设 Done、不推主分支、不发正式环境）；子进程只用固定参数；默认权限「完全放开」，可按项目调低。
+- **安全底线**：提示词固定规则（不设 Done、不推主分支、不发正式环境）；子进程只用固定参数、不经 shell，仅有两处例外：① 一键配置命令（`setup.rs`）唯一的可变参数是 IssueRelay 自身命令行程序的绝对路径，放在 `--` 之后；② 读取执行者环境（`env.rs`）时运行用户的登录 shell（`$SHELL -l -i -c` 加一段固定脚本，不含任何外部文本），它在自己的会话里运行，读到结束标记或满 10 秒即被结束；默认权限「完全放开」，可按项目调低。
 - **平台与技术**：macOS 与 Windows；Rust + Tauri 2；开源（Apache-2.0）。
 - **里程碑**：M0 实测验证 → M1 引擎与命令行 → M2 桌面应用 → M3 安装与发布（第 17 节）。
 
@@ -232,12 +232,12 @@ issuerelay/
 
 1. 选择界面语言。
 2. 连接 Linear（浏览器授权），显示授权人。
-3. 检查工作区：有没有 `ai-ready` 标签；已绑定项目所属团队里有没有 In Progress、In Testing、Done（还没有绑定、或已绑定的项目没有给出团队时，检查所有团队）。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
+3. 检查工作区：有没有 `ai-ready` 标签；已绑定项目所属团队里有没有 In Progress、In Testing、Done（还没有绑定、或已绑定的项目没有给出 Linear 仍列出的团队时，检查所有团队）。缺失时说明在 Linear 哪里添加，并提供跳转链接（程序不代为创建）。
 4. 检查执行者：Claude Code、Codex 是否安装、登录、配好 Linear MCP。没配 Linear 时，可一键执行官方添加命令（`claude mcp add --scope user --transport http linear-server https://mcp.linear.app/mcp`、`codex mcp add linear --url https://mcp.linear.app/mcp`），再引导用户在浏览器里完成授权（`claude mcp login`、`codex mcp login`）。授权命令为 `claude mcp login linear-server`、`codex mcp login linear`（会打开浏览器，程序最多等 5 分钟）。
 5. 绑定第一个项目：选 Linear 项目 → 选本地目录 → 选执行者 → 选权限档位。首次选「完全放开」时明确提示风险（见第 14 节）。
 6. 使用说明：明确写出「需求要被自动处理，必须指派给自己、加 `ai-ready` 标签、状态为 Todo、所属项目已绑定」，并附示例。面板的「需求」页会为不满足条件的需求标出原因。
 
-macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不到装在 Homebrew 或 npm 全局目录里的 `claude`、`codex`（M0 推断，M2 实机验证）。托盘程序启动时经登录 shell 读取 PATH，用它查找执行者并传给子进程；读取失败时在「环境检查」页提示。执行者还需要代理设置：Claude Code 不读 macOS 的系统代理，只认 `HTTPS_PROXY` 等环境变量（M1 实测，宿主没带这些变量时，Claude 连不上 Linear MCP）。所以托盘程序要从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`，传给执行者。
+macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不到装在 Homebrew 或 npm 全局目录里的 `claude`、`codex`（M0 推断，M2 实机验证）。托盘程序启动时经登录 shell 读取 PATH，用它查找执行者并传给子进程；读取失败时在「环境检查」页提示。Windows 没有登录 shell，而程序的 PATH 停在它启动的那一刻：托盘程序从注册表读系统和用户的 `Path`（展开其中的 `%变量%`），再补上宿主自己 PATH 里独有的项，这样托盘程序运行期间新装的执行者，重查时也能找到（待 Windows 实机）。「环境检查」页重查时，某个来源这次读取失败，就沿用它上次读到的值，并照样提示读取失败。执行者还需要代理设置：Claude Code 不读 macOS 的系统代理，只认 `HTTPS_PROXY` 等环境变量（M1 实测，宿主没带这些变量时，Claude 连不上 Linear MCP）。所以托盘程序要从系统代理设置或登录 shell 取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`，传给执行者。
 
 ## 9. 面板与托盘
 

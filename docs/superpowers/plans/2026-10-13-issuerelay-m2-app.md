@@ -2539,7 +2539,7 @@ git commit -m "feat(app): host the engine in the tray app with notifications and
 
 **Interfaces:**
 - Produces（core）：`pub struct engine::HeldJob { pub job_id: i64, pub retry_at: DateTime<Utc> }`；`StatusSnapshot` 加 `#[serde(default)] pub held: Vec<HeldJob>`（因启动失败而暂缓、仍在排队的任务，按 `job_id` 升序；`retry_at` 是暂缓开始时按本机时钟算出的下次尝试时间，只供显示）；`pub enum trigger::WaitReasonView { ProjectNotBound, DirectoryMissing { directory: String }, ExecutorNotReady { executor: ExecutorKind } }`（serde `tag = "code"`：`{"code":"project_not_bound"}`、`{"code":"directory_missing","directory":"…"}`、`{"code":"executor_not_ready","executor":"claude"}`）、`pub fn WaitReason::view(&self) -> WaitReasonView`；`IssueStatus::Waiting { reason: WaitReasonView }`。`WaitReason::describe()` 不变：任务的 `reason` 与命令行照旧用这句英文。
-- Produces（Rust 命令名 = 前端 `invoke` 名；前端参数名用 camelCase，Tauri 自动转成 snake_case；共 33 条）：
+- Produces（Rust 命令名 = 前端 `invoke` 名；前端参数名用 camelCase，Tauri 自动转成 snake_case；共 34 条）：
 
 | 命令 | 参数 | 返回 |
 |---|---|---|
@@ -2558,7 +2558,8 @@ git commit -m "feat(app): host the engine in the tray app with notifications and
 | `projects` | — | `Vec<Project>` |
 | `settings` / `save_settings` | — / `settings: Settings` | `Settings` / `()` |
 | `doctor` | — | `DoctorReport` |
-| `linear_login` | — | `Viewer`（在系统浏览器里打开授权页；姓名已清洗） |
+| `linear_login` | — | `Viewer`（在系统浏览器里打开授权页；姓名已清洗；被 `linear_cancel_login` 取消时返回错误代码 `login_cancelled`） |
+| `linear_cancel_login` | — | `()`（放弃等浏览器的那次登录；没有在等的登录时什么也不做） |
 | `linear_use_api_key` | `key: String` | `Viewer`（姓名已清洗） |
 | `linear_logout` | — | `()` |
 | `linear_reconnect` | — | `LinearSetup` |
@@ -2571,6 +2572,7 @@ git commit -m "feat(app): host the engine in the tray app with notifications and
 | `quit` | `mode: QuitMode`（`"wait"` / `"stop"`） | `()`（交给 Task 3 的退出状态机：`QuitEvent::Wait` / `QuitEvent::StopNow`） |
 | `request_quit` | — | `()`（与托盘「退出」相同；宿主没起来时直接退出，供启动失败页用） |
 
+  - 命令的两条约定（第一部分最终修复波）：① `Host::env()` 给的是真实的代理值（URL 里的用户名和密码没有打码，见 core 里 `Host::env` 的文档），命令只拿它启动进程（`setup_action`、`control_servers`、`linear_server_named`），从不把它、也不把其中的代理值返回给面板；面板看到的环境只有 `doctor` 返回的、`Engine::doctor` 打过码的那一份。② 等浏览器的登录可以取消：`linear_login` 把这次登录的取消令牌记在 `PendingLogin`（Tauri 托管的状态）里，与 `Host::login` 的 future 竞速；`linear_cancel_login` 一取消，这个 future 就被丢掉（core 写明丢掉它就放弃这次登录，钥匙串只在浏览器回调之后才写），`linear_login` 返回错误代码 `login_cancelled`，面板不把它当失败显示；新的登录开始时，前一次还在等的登录先被取消。core 一次只做一个登录改动，等浏览器的登录最长占着它 10 分钟，所以面板在登录等待期间不让改用 API key（Task 6、9、10）。
   - 前端：`types.ts` 里与上面一一对应的类型（含 `HeldJob`、`WaitReason`、`StartupState`）；叶子模块 `backend.ts`：`interface Backend`（方法名为命令名的 camelCase，外加 `onEngineEvent`、`onResync`、`onQuitRequested`、`onStartupFailed` 四个订阅）、`class BackendError extends Error`（`code: ErrorCode | null`）、`ERROR_CODES`；`api.ts`：`isTauri()`、`tauriBackend`、`loadBackend(): Promise<Backend>`（在 Tauri 里用真实命令，否则用 `import()` 动态载入的假后端）；`api.ts` 与 `mock.ts` 都只从 `backend.ts`、`types.ts` 导入，彼此不互相导入；`createMockBackend(scenario: "demo" | "fresh" | "connecting", options?: { latencyMs?: number }): Backend`（`connecting`：demo 的本地数据，Linear 还在首次连接，`linearReconnect()` 之后连上；`latencyMs` 默认 120，测试传 0；构造时 `setFixedClock(MOCK_NOW)`）；`mock-fixtures.ts` 的 `ago`、`DEMO_*`、`FRESH_DOCTOR`、`DEFAULT_SETTINGS`；`clean.ts`：`cleanDisplayText(text: string): string`、`cleanDisplayLines(text: string): string`。
 - Consumes: Task 1 的 `MOCK_NOW`、`setFixedClock`；Task 3 的 `AppState`、`StartupState`、`quit::{handle, QuitEvent}`、`tray::refresh`、`events::*`、`test_support`；第一部分的 `setup::{self, SetupAction}`、`executor::resolve_program_in`、`doctor::{SystemRunner, CommandRunner}`、`host::*`（`LinearSetup` 含 AR51 的 `Connecting`）、`text::clean_text`（Task 3 起建在 `text::strip_control` 上）。
 
@@ -2863,6 +2865,19 @@ mod tests {
     }
 
     #[test]
+    fn a_new_login_cancels_the_one_still_waiting_and_cancel_ends_the_current_one() {
+        let pending = PendingLogin::default();
+        let first = pending.begin();
+        let second = pending.begin();
+        assert!(first.is_cancelled(), "one login waits at a time");
+        assert!(!second.is_cancelled());
+        pending.cancel();
+        assert!(second.is_cancelled());
+        // Nothing waits any more: a second cancel does nothing.
+        pending.cancel();
+    }
+
+    #[test]
     fn quit_modes_read_from_the_panel() {
         assert_eq!(serde_json::from_str::<QuitMode>("\"wait\"").unwrap(), QuitMode::Wait);
         assert_eq!(serde_json::from_str::<QuitMode>("\"stop\"").unwrap(), QuitMode::Stop);
@@ -2900,18 +2915,22 @@ Expected: 编译失败。
 - [ ] **Step 3: 实现 `commands.rs`**
 
 ```bash
-cargo add -p issuerelay-app url
+cargo add -p issuerelay-app url tokio-util
 ```
 
-（`is_linear_url` 用它解析链接；core 已在用同一个 crate，锁文件不引入新的包。）
+（`is_linear_url` 用 `url` 解析链接，`PendingLogin` 用 `tokio-util` 的 `CancellationToken`；core 已在用这两个 crate，锁文件不引入新的包。）
 
 ```rust
 //! The commands the panel calls. Each waits for the host, does one thing and returns something
 //! the panel can show; an error comes back as one cleaned line, or as a code the panel
-//! translates (`not_a_linear_link`). `mark_done`, `retry_job` and `cancel_job` exist only here
-//! (design 5.6): IPC, the CLI and MCP never offer them. Plugins (opener, dialog, autostart) are
-//! used from here, so the panel itself needs no plugin permission.
+//! translates (`not_a_linear_link`, `login_cancelled`). `mark_done`, `retry_job` and
+//! `cancel_job` exist only here (design 5.6): IPC, the CLI and MCP never offer them. Plugins
+//! (opener, dialog, autostart) are used from here, so the panel itself needs no plugin
+//! permission. `Host::env()` holds the real proxy values (user name and password unmasked): the
+//! commands use it only to start processes and never return it or anything taken from it; the
+//! environment the panel sees is `Engine::doctor`'s, with the proxy values masked.
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -2931,6 +2950,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_opener::OpenerExt as _;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     quit::{self, QuitEvent},
@@ -2939,6 +2959,40 @@ use crate::{
 };
 
 type CmdResult<T> = Result<T, String>;
+
+/// The error code `linear_login` answers with when `linear_cancel_login` dropped it; the panel
+/// shows no failure for it.
+const LOGIN_CANCELLED: &str = "login_cancelled";
+
+/// The browser login that is waiting, so that `linear_cancel_login` can drop it (Tauri managed
+/// state, next to `AppState`).
+#[derive(Default)]
+pub struct PendingLogin(Mutex<Option<CancellationToken>>);
+
+impl PendingLogin {
+    /// The token of a login that starts now. A login still waiting is cancelled first: the panel
+    /// offers one login at a time.
+    fn begin(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        let earlier = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(token.clone());
+        if let Some(earlier) = earlier {
+            earlier.cancel();
+        }
+        token
+    }
+
+    /// Cancels the login that is waiting, if there is one.
+    fn cancel(&self) {
+        let waiting = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(waiting) = waiting {
+            waiting.cancel();
+        }
+    }
+}
 
 /// The most jobs one list returns.
 const MAX_JOBS: usize = 500;
@@ -3176,24 +3230,38 @@ pub async fn doctor(state: State<'_, AppState>) -> CmdResult<DoctorReport> {
 }
 
 #[tauri::command]
-pub async fn linear_login(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Viewer> {
+pub async fn linear_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pending: State<'_, PendingLogin>,
+) -> CmdResult<Viewer> {
     let host = host(&state).await?;
     let opener = app.clone();
-    let viewer = host
-        .login(move |url| {
-            // The same check as `open_linear`: the browser opens nothing but Linear.
-            if !is_linear_url(url) {
-                tracing::warn!(url = %clean_text(url), "refused to open an authorization page outside linear.app");
-                return;
-            }
-            if let Err(e) = opener.opener().open_url(url, None::<&str>) {
-                tracing::warn!(error = %e, "could not open the authorization page");
-            }
-        })
-        .await
-        .map_err(error)?;
+    // `linear_cancel_login` drops the login while it waits for the browser, which abandons it:
+    // core writes the keychain only after the browser has answered (`Host::login`).
+    let cancelled = pending.begin();
+    let login = host.login(move |url| {
+        // The same check as `open_linear`: the browser opens nothing but Linear.
+        if !is_linear_url(url) {
+            tracing::warn!(url = %clean_text(url), "refused to open an authorization page outside linear.app");
+            return;
+        }
+        if let Err(e) = opener.opener().open_url(url, None::<&str>) {
+            tracing::warn!(error = %e, "could not open the authorization page");
+        }
+    });
+    let viewer = tokio::select! {
+        viewer = login => viewer.map_err(error)?,
+        () = cancelled.cancelled() => return Err(LOGIN_CANCELLED.into()),
+    };
     tray::refresh(&app, &host);
     Ok(viewer)
+}
+
+/// Gives up the browser login that is waiting (the panel's Cancel); nothing happens when none is.
+#[tauri::command]
+pub fn linear_cancel_login(pending: State<'_, PendingLogin>) {
+    pending.cancel();
 }
 
 #[tauri::command]
@@ -3309,7 +3377,7 @@ pub fn request_quit(app: AppHandle) {
 }
 ```
 
-（`quit::handle` 的返回值只有窗口钩子用得上，这里不需要。）`lib.rs` 的 `.invoke_handler(commands::handler())` 换成全部命令的列表，并删掉 `commands.rs` 里 Task 3 的空 `handler()`：
+（`quit::handle` 的返回值只有窗口钩子用得上，这里不需要。）`lib.rs` 在 `.manage(state::AppState::new(autostarted))` 之后加 `.manage(commands::PendingLogin::default())`，把 `.invoke_handler(commands::handler())` 换成全部命令的列表，并删掉 `commands.rs` 里 Task 3 的空 `handler()`：
 
 ```rust
         .invoke_handler(tauri::generate_handler![
@@ -3334,6 +3402,7 @@ pub fn request_quit(app: AppHandle) {
             commands::save_settings,
             commands::doctor,
             commands::linear_login,
+            commands::linear_cancel_login,
             commands::linear_use_api_key,
             commands::linear_logout,
             commands::linear_reconnect,
@@ -3376,7 +3445,11 @@ describe("backend selection", () => {
 
   test("command errors become BackendError with the backend's text, and codes are recognised", async () => {
     vi.resetModules();
-    const invoke = vi.fn().mockRejectedValueOnce("job 7 not found").mockRejectedValueOnce("not_a_linear_link");
+    const invoke = vi
+      .fn()
+      .mockRejectedValueOnce("job 7 not found")
+      .mockRejectedValueOnce("not_a_linear_link")
+      .mockRejectedValueOnce("login_cancelled");
     vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     const { loadBackend } = await import("./api");
@@ -3387,6 +3460,8 @@ describe("backend selection", () => {
     expect(failed).toMatchObject({ message: "job 7 not found", code: null });
     const refused = await backend.openLinear("https://evil.example/").catch((error: unknown) => error);
     expect(refused).toMatchObject({ code: "not_a_linear_link" });
+    const cancelled = await backend.linearLogin().catch((error: unknown) => error);
+    expect(cancelled).toMatchObject({ code: "login_cancelled" });
   });
 });
 ```
@@ -3755,7 +3830,7 @@ import type {
 } from "./types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
-export const ERROR_CODES = ["not_a_linear_link"] as const;
+export const ERROR_CODES = ["not_a_linear_link", "login_cancelled"] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** A command failed. `message` is the backend's one cleaned line; `code` is set when it is one of `ERROR_CODES`. */
@@ -3791,6 +3866,7 @@ export interface Backend {
   saveSettings(settings: Settings): Promise<void>;
   doctor(): Promise<DoctorReport>;
   linearLogin(): Promise<Viewer>;
+  linearCancelLogin(): Promise<void>;
   linearUseApiKey(key: string): Promise<Viewer>;
   linearLogout(): Promise<void>;
   linearReconnect(): Promise<LinearSetup>;
@@ -3854,6 +3930,7 @@ export const tauriBackend: Backend = {
   saveSettings: (settings) => call("save_settings", { settings }),
   doctor: () => call("doctor"),
   linearLogin: () => call("linear_login"),
+  linearCancelLogin: () => call("linear_cancel_login"),
   linearUseApiKey: (key) => call("linear_use_api_key", { key }),
   linearLogout: () => call("linear_logout"),
   linearReconnect: () => call("linear_reconnect"),
@@ -4319,6 +4396,9 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       }),
     doctor: () => reply(() => structuredClone(doctor)),
     linearLogin: () => reply(() => connect("oauth")),
+    // The fake's logins answer at once, so nothing is ever waiting to be cancelled; tests that
+    // need a waiting login replace `linearLogin` and `linearCancelLogin`.
+    linearCancelLogin: () => reply(() => undefined),
     linearUseApiKey: (key) => reply(() => (key === "lin_api_bad" ? fail("Linear did not accept the API key") : connect("api_key"))),
     linearLogout: () =>
       reply(() => {
@@ -4409,7 +4489,7 @@ git commit -m "feat(app): add the panel commands and the typed front-end backend
   - `BackendProvider({ backend, children })`、`useBackend(): Backend`（没有 `BackendProvider` 时抛错）
   - 查询键常量 `queryKeys`：`startup`、`status`、`jobs`、`job(id)`、`log(id)`、`issues`、`bindings`、`projects`、`settings`、`doctor`、`controlServers`、`linearServerNamed(executor)`、`autostart`、`appInfo`
   - 查询钩子：`useStartupState()`（启动中每秒再问一次）、`useStatus()`、`useJobs(limit = 200)`、`useJob(id)`、`useJobLog(id, { live })`（运行中每 1.5 秒刷新）、`useIssues()`、`useBindings()`、`useProjects(enabled)`、`useSettings()`、`useDoctor(enabled)`、`useControlServers()`、`useLinearServerNamed(executor, enabled)`、`useAutostart()`、`useAppInfo()`
-  - 变更钩子（成功后按需失效相关查询；失败时 sonner 提示：标题是该操作的 `actions.failed.*` 译文，说明是 `describeError` 给出的细节）：`usePause`、`useResume`、`usePollNow`、`useCancelJob`、`useRetryJob`、`useMarkDone`、`useSaveBinding`、`useRemoveBinding`、`useSaveSettings`、`useLinearLogin`、`useLinearApiKey`、`useLinearLogout`、`useLinearReconnect`、`useSetupAction`、`useSetAutostart`
+  - 变更钩子（成功后按需失效相关查询；失败时 sonner 提示：标题是该操作的 `actions.failed.*` 译文，说明是 `describeError` 给出的细节）：`usePause`、`useResume`、`usePollNow`、`useCancelJob`、`useRetryJob`、`useMarkDone`、`useSaveBinding`、`useRemoveBinding`、`useSaveSettings`、`useLinearLogin`、`useLinearApiKey`、`useLinearLogout`、`useLinearReconnect`、`useSetupAction`、`useSetAutostart`。`useLinearLogin` 的 `mutationKey` 为 `["linear_login"]`，返回值另带 `cancel()`（调 `linearCancelLogin()`，Task 4）；它以 `login_cancelled` 失败时是用户自己取消的，不提示。`useLinearLoginWaiting(): boolean`（`useIsMutating({ mutationKey: ["linear_login"] }) > 0`）：浏览器登录正在等待，凡是提供「改用 API key」的地方据此让它不可用（core 一次只做一个登录改动）
   - `useEngineEvents()`：`status` → 失效 `status`（`StatusView` 里带着 Linear 的连接状态 `linear`：宿主在首次连接结束、重新连接、登录或登出时用 `Engine::set_linear` 换连接，它发出 `Status`，所以面板不用刷新页面就能看到 `connecting` 变成 `connected` 或 `connect_failed`，AR51）；`job` → 失效 `status`、`jobs`、`job(id)`、`issues`；`config` → 失效 `settings`、`bindings`、`status`；`resync` → 失效全部。由 `<EngineEventsBridge/>` 挂在 `QueryClientProvider` 之内。
   - `subscription(start: Promise<() => void>): () => void`（在 `useEffect` 里订阅后端事件，卸载早于订阅完成时也会退订）
   - `StatusBadge({ state })`、`STATE_STYLE: Record<JobState, { icon, className }>`
@@ -4986,9 +5066,14 @@ export function EngineEventsBridge() {
       "set_autostart": "Could not change start at login"
     }
   },
-  "errors": { "not_a_linear_link": "IssueRelay only opens Linear's own pages" }
+  "errors": {
+    "not_a_linear_link": "IssueRelay only opens Linear's own pages",
+    "login_cancelled": "The browser login was cancelled"
+  }
 }
 ```
+
+（`errors.login_cancelled` 的 `zh-CN` 为「已取消浏览器登录」；`useLinearLogin` 不为它提示，`describeError` 遇到时照样有译文。）
 
 （`zh-CN` 里本任务测试用到的：`shell.monitoring` 为「监控中」，`format.minutes_ago_one` / `_other` 为「{{count}} 分钟前」，`format.duration_ms` 为「{{m}} 分 {{s}} 秒」，`format.duration_hm` 为「{{h}} 小时 {{m}} 分」，`format.duration_s` 为「{{s}} 秒」。）
 
@@ -5017,10 +5102,10 @@ git commit -m "feat(app): add the panel shell, design tokens and data hooks"
 - Modify: `app/src/pages/Overview.tsx`、`app/src/pages/Issues.tsx`
 - Create: `app/src/components/JobActions.tsx`（停止 / 重新运行 / 标记完成 / 在 Linear 中打开，概览、需求、运行详情共用）、`app/src/components/LinearStatus.tsx`（概览与 Task 9 的环境检查页共用）
 - Modify: 五个翻译文件（新增 `overview`、`issues`、`linear` 命名空间；在 Task 5 建好的 `actions` 里补操作名与确认文案）
-- Test: `app/src/pages/Overview.test.tsx`、`app/src/pages/Issues.test.tsx`、`app/src/components/JobActions.test.tsx`
+- Test: `app/src/pages/Overview.test.tsx`、`app/src/pages/Issues.test.tsx`、`app/src/components/JobActions.test.tsx`、`app/src/components/LinearStatus.test.tsx`
 
 **Interfaces:**
-- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：首次连接还在进行（`connecting`，AR51）→ `linear.connecting`「Connecting to Linear…」，没有任何操作按钮；未登录 → `linear.not_configured` ＋「Log in to Linear」；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接状态另有「重新授权」与「退出登录」。
+- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：首次连接还在进行（`connecting`，AR51）→ `linear.connecting`「Connecting to Linear…」，没有任何操作按钮；未登录 → `linear.not_configured` ＋「Log in to Linear」；点了登录、浏览器还没回来时（`useLinearLogin` 进行中）→ `linear.waiting_browser`「Finish the authorization in your browser…」＋「Cancel」（`linear.cancel_login`），没有登录按钮；「Cancel」调 `useLinearLogin` 的 `cancel()` 丢掉这次登录（core 写明丢掉 `Host::login` 就放弃登录，钥匙串只在浏览器回调之后才写），卡片回到原来的样子，不提示失败；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接状态另有「重新授权」与「退出登录」，「重新授权」等浏览器时同样显示上面的等待状态与「Cancel」。
 - Consumes: Task 5 的钩子、`StatusBadge`、三种状态组件与 `DetailLine`、`PageHeader`、`trayState`/`problemCause`、`formatTime`、`state.retrying_at`；Task 4 的 `BackendError`、`StatusSnapshot.held`、`WaitReason`。
 
 页面规格：
@@ -5234,6 +5319,42 @@ test("without a Linear connection the list explains what to do", async () => {
 });
 ```
 
+`app/src/components/LinearStatus.test.tsx`：
+
+```tsx
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { vi } from "vitest";
+import { BackendError } from "@/lib/backend";
+import { createMockBackend } from "@/lib/mock";
+import { renderWithProviders } from "@/test/render";
+import { LinearStatus } from "./LinearStatus";
+
+// core takes one change of the login at a time, and a login waits for the browser for up to ten
+// minutes: the user must be able to give it up.
+test("a login that waits for the browser can be cancelled", async () => {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  let cancel = () => {};
+  backend.linearLogin = vi.fn(
+    () =>
+      new Promise<never>((_, reject) => {
+        cancel = () => reject(new BackendError("login_cancelled"));
+      }),
+  );
+  backend.linearCancelLogin = vi.fn(async () => cancel());
+  await renderWithProviders(<LinearStatus />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Log in to Linear" }));
+  expect(await screen.findByText("Finish the authorization in your browser…")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Log in to Linear" })).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(backend.linearCancelLogin).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("button", { name: "Log in to Linear" })).toBeInTheDocument();
+  // The user gave it up: no failure is shown.
+  expect(screen.queryByText("Could not log in to Linear")).not.toBeInTheDocument();
+});
+```
+
 Run: `pnpm --dir app test`
 Expected: 失败。
 
@@ -5244,7 +5365,7 @@ Expected: 失败。
 - `overview`：`monitoring` = `Monitoring`；`running` = `Running`、`queued` = `Queued`、`recent` = `Recent results`（区块名）；`no_running` = `Nothing is running`；`queue_empty` = `Nothing is waiting`；`recent_empty` = `No finished runs yet`；`alert_failed_one` = `{{count}} run failed`、`alert_failed_other` = `{{count}} runs failed`；`alert_awaiting_one` = `{{count}} issue awaits your acceptance`、`alert_awaiting_other` = `{{count}} issues await your acceptance`；`view` = `View`；`draining` = `Waiting for the runs in progress to finish; nothing new starts`；`open_doctor` = `Open the environment check`；`problem.not_configured` = `Not logged in to Linear`、`problem.interface_changed` = `Linear's tools changed: update IssueRelay`、`problem.connect_failed` = `Could not connect to Linear; IssueRelay tries again every minute`、`problem.check_failed` = `The last check of Linear failed`、`problem.start_failed` = `A run could not be started`；`status_failed` = `Could not read IssueRelay's status`；`jobs_failed` = `Could not read the runs`。复数用 i18next 的 `_one` / `_other`，五个文件都写两个键（中日韩两者内容相同）。
 - `issues`：`not_todo` = `Its status is {{state}}, not {{todo}}`；`eligible` = `The next check picks it up`；`waiting.project_not_bound` = `Its project is not bound to a local folder`、`waiting.directory_missing` = `The bound folder {{directory}} does not exist`、`waiting.executor_not_ready` = `{{executor}} is not ready; see the environment check`；`load_failed` = `Could not read the issues from Linear`；`open_guide` = `Open the guide`。
 - `actions`：`stop` = `Stop`、`run_again` = `Run again`、`mark_done` = `Mark done`、`open_in_linear` = `Open in Linear`、`poll_now` = `Check now`、`confirm` = `Confirm`；确认对话框文案 `actions.mark_done_confirm`：「把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。」（英文 `Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.`）。Task 8 的删除确认复用 `actions.confirm`。
-- `linear`：`connecting` = `Connecting to Linear…`、`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`。
+- `linear`：`connecting` = `Connecting to Linear…`、`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`、`waiting_browser` = `Finish the authorization in your browser…`、`cancel_login` = `Cancel`。
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
 Expected: PASS。在浏览器（`pnpm --dir app dev`）里看一遍两个页面的浅色与深色，截图附在报告里。
@@ -5748,7 +5869,7 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 | 通知 | 四个开关：开始运行、进入待验收、需要补充信息、失败 |
 | 系统 | 开机自启（`setAutostart`，立即生效，不经「保存」）；自动更新（开关存进设置，M3 起生效，旁注 `settings.auto_update_note`） |
 | MCP 控制服务 | Claude Code、Codex 各一行，按 `ControlServer`：`registered` 已注册 /`not_registered` 未注册 / `not_installed` 执行者未安装 / `unknown` 查不出（「Could not check」＋按钮「Check again」重查 `controlServers`，失败原因已在日志里）；按钮「注册」/「移除」（`setupAction({ kind: "register_control_server" / "remove_control_server", executor })`）；说明 `settings.control_server_note`：「按用户范围注册，无人值守的运行也会加载它；它的工具里有『暂停监控』」；命令行程序没找到时说明（开发版需先 `cargo build -p issuerelay-cli`） |
-| 高级 | 触发标签名与四个状态名；个人 API key（密码输入框＋「使用这个 key」，成功后显示「已改用 API key」）；日志保留天数与总大小（MB） |
+| 高级 | 触发标签名与四个状态名；个人 API key（密码输入框＋「使用这个 key」，成功后显示「已改用 API key」；浏览器登录正在等待时（`useLinearLoginWaiting()`）「使用这个 key」不可用，旁边一行 `settings.api_key_after_login`「Finish or cancel the browser login first」——core 一次只做一个登录改动，这时点它只会排在登录后面最长 10 分钟）；日志保留天数与总大小（MB） |
 
 字段校验与后端一致（数值下限、名字非空且不含引号与控制字符），不合法时字段下方提示，「保存」禁用。
 
@@ -5984,7 +6105,7 @@ Expected: 失败。
 
 - [ ] **Step 2: 实现**
 
-按规格实现。外部安装说明链接只作为可复制文本显示（`open_linear` 只开 Linear 的链接，这是有意的限制）。英文文案：`doctor.failed` = `Could not run the environment check`、`doctor.rerun_guide` = `Run the first-run guide again`、`doctor.linear_check_failed` = `The check of Linear failed`、`doctor.add_linear` = `Add Linear to {{executor}}`、`doctor.login_linear` = `Authorize Linear in {{executor}}`、`doctor.other_name` = `Added Linear under another name? Run {{list}} in a terminal to find it, then {{login}}.`（`list` 为 `claude mcp list` / `codex mcp list`，`login` 为 `claude mcp login <name>` / `codex mcp login <name>`）、`doctor.login_hint` = `Run {{command}} in a terminal and log in`（`command` 为 `claude` / `codex login`）、`doctor.workspace_unchecked` = `Connect to Linear first to check the workspace`、`doctor.no_bindings` = `No bindings yet`、`doctor.env_problems` = `Reading the environment had problems`、`settings.load_failed` = `Could not read the settings`、`settings.language` = `Interface language`、`settings.follow_system` = `Follow the system`、`settings.comment_language` = `AI comment language`、`settings.follow_ui` = `Follow the interface language`、`settings.poll_interval` = `Check every (seconds)`、`settings.min_value` = `Must be at least {{min}}`、`settings.notify_run_started` = `Run started`、`settings.notify_awaiting_acceptance` = `Ready for acceptance`、`settings.notify_needs_info` = `Needs information`、`settings.notify_failed` = `Run failed`、`settings.autostart` = `Start at login`、`settings.register` = `Register with {{executor}}`、`settings.remove_server` = `Remove from {{executor}}`、`settings.control_unknown` = `Could not check`、`settings.check_again` = `Check again`、`settings.api_key` = `Personal API key`、`settings.use_key` = `Use this key`、`settings.api_key_used` = `Using the API key now`、语言名 `languages.zh-CN` = `简体中文`、`languages.zh-TW` = `繁體中文`、`languages.en` = `English`、`languages.ja` = `日本語`、`languages.ko` = `한국어`（各语言用自己的名字，五个文件里相同；Task 10 的语言步骤也用）、`settings.control_server_note` = `It is registered for your user, so unattended runs load it too; its tools can pause monitoring.`、`help.trigger_title` = `Trigger conditions`、`help.conditions.assigned` = `The issue is assigned to you`、`help.conditions.label` = `It has the {{label}} label`、`help.conditions.todo` = `Its status is {{todo}}`、`help.conditions.bound` = `Its project is bound to a local folder and the executor is ready`、`help.defaults_note` = `Showing the default names: the settings could not be read.`（示例需求的英文里不要再出现 `assigned to you`，Task 10 按它找第 6 步）；`zh-CN` 的 `help.trigger_title` 为「触发条件」，四个条件的文案见上面的页面规格。
+按规格实现。外部安装说明链接只作为可复制文本显示（`open_linear` 只开 Linear 的链接，这是有意的限制）。英文文案：`doctor.failed` = `Could not run the environment check`、`doctor.rerun_guide` = `Run the first-run guide again`、`doctor.linear_check_failed` = `The check of Linear failed`、`doctor.add_linear` = `Add Linear to {{executor}}`、`doctor.login_linear` = `Authorize Linear in {{executor}}`、`doctor.other_name` = `Added Linear under another name? Run {{list}} in a terminal to find it, then {{login}}.`（`list` 为 `claude mcp list` / `codex mcp list`，`login` 为 `claude mcp login <name>` / `codex mcp login <name>`）、`doctor.login_hint` = `Run {{command}} in a terminal and log in`（`command` 为 `claude` / `codex login`）、`doctor.workspace_unchecked` = `Connect to Linear first to check the workspace`、`doctor.no_bindings` = `No bindings yet`、`doctor.env_problems` = `Reading the environment had problems`、`settings.load_failed` = `Could not read the settings`、`settings.language` = `Interface language`、`settings.follow_system` = `Follow the system`、`settings.comment_language` = `AI comment language`、`settings.follow_ui` = `Follow the interface language`、`settings.poll_interval` = `Check every (seconds)`、`settings.min_value` = `Must be at least {{min}}`、`settings.notify_run_started` = `Run started`、`settings.notify_awaiting_acceptance` = `Ready for acceptance`、`settings.notify_needs_info` = `Needs information`、`settings.notify_failed` = `Run failed`、`settings.autostart` = `Start at login`、`settings.register` = `Register with {{executor}}`、`settings.remove_server` = `Remove from {{executor}}`、`settings.control_unknown` = `Could not check`、`settings.check_again` = `Check again`、`settings.api_key` = `Personal API key`、`settings.use_key` = `Use this key`、`settings.api_key_used` = `Using the API key now`、`settings.api_key_after_login` = `Finish or cancel the browser login first`、语言名 `languages.zh-CN` = `简体中文`、`languages.zh-TW` = `繁體中文`、`languages.en` = `English`、`languages.ja` = `日本語`、`languages.ko` = `한국어`（各语言用自己的名字，五个文件里相同；Task 10 的语言步骤也用）、`settings.control_server_note` = `It is registered for your user, so unattended runs load it too; its tools can pause monitoring.`、`help.trigger_title` = `Trigger conditions`、`help.conditions.assigned` = `The issue is assigned to you`、`help.conditions.label` = `It has the {{label}} label`、`help.conditions.todo` = `Its status is {{todo}}`、`help.conditions.bound` = `Its project is bound to a local folder and the executor is ready`、`help.defaults_note` = `Showing the default names: the settings could not be read.`（示例需求的英文里不要再出现 `assigned to you`，Task 10 按它找第 6 步）；`zh-CN` 的 `help.trigger_title` 为「触发条件」，四个条件的文案见上面的页面规格。
 
 Run: `pnpm --dir app test && pnpm --dir app lint` 与 `cargo test -p issuerelay-app commands`
 Expected: PASS。浏览器里看三页的浅色与深色，截图附在报告里。
@@ -6018,7 +6139,7 @@ git commit -m "feat(app): add the environment check, settings and help pages"
 
 - 整页布局（不带侧栏）：左侧竖排步骤列表（当前步高亮，已完成打勾，可点回已完成的步骤），右侧当前步内容，底部「上一步 / 下一步」。顶部应用名与图标。
 - 第 1 步：语言单选（shadcn `RadioGroup`：跟随系统（`settings.follow_system`）＋五种语言（`languages.*`，各用自己的名字），选中立即切换界面并保存设置。
-- 第 2 步：首次连接还在进行（`linear.kind` 为 `connecting`，AR51）时显示「正在检查与 Linear 的连接…」（`onboarding.checking`），没有授权按钮，下一步不可用，连接结束（`Status` 事件刷新状态）后按结果显示；未连接时「在浏览器里授权 Linear」（`linearLogin()`，等待期间显示「请在浏览器里完成授权」与取消提示）；已连接时显示授权人；高级选项里可改用个人 API key。连上之前不能进下一步。
+- 第 2 步：首次连接还在进行（`linear.kind` 为 `connecting`，AR51）时显示「正在检查与 Linear 的连接…」（`onboarding.checking`），没有授权按钮，下一步不可用，连接结束（`Status` 事件刷新状态）后按结果显示；未连接时「在浏览器里授权 Linear」（`useLinearLogin`）；等浏览器期间显示 Task 6 的等待文案 `linear.waiting_browser` 与「Cancel」（`linear.cancel_login`，调 `useLinearLogin` 的 `cancel()` 丢掉这次登录，回到授权按钮，不提示失败）；已连接时显示授权人；高级选项里可改用个人 API key（按钮 `onboarding.use_api_key`「Use a personal API key」，点开后是与设置页相同的输入框），浏览器登录等待期间（`useLinearLoginWaiting()`）这个按钮不可用。连上之前不能进下一步。
 - 第 3 步：`WorkspaceCheck`（来自 `doctor()` 的工作区部分）；检查中 `LoadingState` 并说明最多约一分钟；`doctor()` 失败时 `ErrorState`（标题 `doctor.failed`，带重试），仍可「我稍后再加」继续；缺标签或状态时显示添加方法，但允许继续（「我稍后再加」）。
 - 第 4 步：两个 `ExecutorCheck`（一键授权只在 Linear 以默认名字注册时出现，见 Task 9）；至少一个执行者就绪才能进下一步；都没就绪时说明需要先装好并登录 Claude Code 或 Codex；`doctor()` 失败时同第 3 步的错误状态，不能进下一步。
 - 第 5 步：嵌入 `BindingForm`；保存成功后可「再加一个」或进下一步；也允许「稍后再绑定」。
@@ -6096,6 +6217,31 @@ test("without a ready executor the guide does not move on", async () => {
   expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
 });
 
+// core takes one change of the login at a time: while the browser login waits, the key waits too,
+// and the login can be given up.
+test("a login that waits for the browser can be cancelled, and the API key waits for it", async () => {
+  let cancel = () => {};
+  const { backend } = await start(async (backend) => {
+    backend.linearLogin = vi.fn(
+      () =>
+        new Promise<never>((_, reject) => {
+          cancel = () => reject(new BackendError("login_cancelled"));
+        }),
+    );
+    backend.linearCancelLogin = vi.fn(async () => cancel());
+  });
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Authorize Linear in the browser" }));
+  expect(await screen.findByText("Finish the authorization in your browser…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Use a personal API key" })).toBeDisabled();
+
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(backend.linearCancelLogin).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("button", { name: "Authorize Linear in the browser" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Use a personal API key" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+});
+
 test("while the first connection is under way the Linear step is checking", async () => {
   await start(async () => {}, "connecting");
   await userEvent.click(await screen.findByRole("button", { name: "Next" }));
@@ -6123,7 +6269,7 @@ Expected: 失败。
 
 - [ ] **Step 2: 实现**
 
-按规格实现。英文文案：`onboarding.next` = `Next`、`onboarding.checking` = `Checking the connection to Linear…`、`onboarding.authorize` = `Authorize Linear in the browser`、`onboarding.later` = `I'll add them later`、`onboarding.bind_later` = `Bind later`、`onboarding.no_executor` = `Install and log in to Claude Code or Codex first`、`onboarding.start` = `Start using IssueRelay`；第 6 步的触发条件沿用 Task 9 的 `help.conditions.*`（英文含 `assigned to you`）；语言名用 Task 9 的 `languages.*`（测试里的 `English`）。
+按规格实现。英文文案：`onboarding.next` = `Next`、`onboarding.checking` = `Checking the connection to Linear…`、`onboarding.authorize` = `Authorize Linear in the browser`、`onboarding.use_api_key` = `Use a personal API key`、`onboarding.later` = `I'll add them later`、`onboarding.bind_later` = `Bind later`、`onboarding.no_executor` = `Install and log in to Claude Code or Codex first`、`onboarding.start` = `Start using IssueRelay`；第 6 步的触发条件沿用 Task 9 的 `help.conditions.*`（英文含 `assigned to you`）；语言名用 Task 9 的 `languages.*`（测试里的 `English`）。
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
 Expected: PASS。浏览器里用 `http://localhost:1420/?mock=fresh#/onboarding` 走一遍，每一步截图附在报告里。
@@ -6293,12 +6439,12 @@ git commit -m "test(app): add key page screenshots and a local screenshot compar
 
 ### Task 13: M2 实机验收（macOS）
 
-由主智能体在本机执行（AGENTS.md：实机验收只由主智能体在沙箱项目与沙箱仓库上做）。设计第 15 节：完整流程（发现 → 运行 → In Testing → 标记完成），另外制造一次失败和一次超时；结果写 `docs/gates/<日期>-m2-acceptance.md`。Windows 待实机（设计第 18 节第 4 条），待实机清单至少包括：Windows 上整个流程与托盘、通知、开机自启；第一部分 Task 8 的两条——登录命令（`mcp login`）在没有已开浏览器时启动的浏览器，可能随该命令的 Job Object 结束而被关掉；登录超时后，打印出的授权链接作废。
+由主智能体在本机执行（AGENTS.md：实机验收只由主智能体在沙箱项目与沙箱仓库上做）。设计第 15 节：完整流程（发现 → 运行 → In Testing → 标记完成），另外制造一次失败和一次超时；结果写 `docs/gates/<日期>-m2-acceptance.md`。Windows 待实机（设计第 18 节第 4 条），待实机清单至少包括：Windows 上整个流程与托盘、通知、开机自启；第一部分 Task 8 的两条——登录命令（`mcp login`）在没有已开浏览器时启动的浏览器，可能随该命令的 Job Object 结束而被关掉；登录超时后，打印出的授权链接作废；第一部分最终修复波的一条——托盘程序运行期间安装执行者，再在「环境检查」页重查：PATH 从注册表重新读取，执行者被找到；以及第一部分计划末尾「评审遗留的小项」里其余待 Windows 实机的各条（提权运行的托盘程序与未提权的命令行）。
 
 **需要用户的地方：** 桌面应用第一次读钥匙串里的 Linear 凭据时 macOS 可能弹出授权框，或需要在浏览器里重新授权 Linear——这两件事涉及用户的凭据，由用户点；主智能体只在那一步请用户操作，其余自行完成。
 
 - [ ] **Step 1: 构建**：`pnpm --dir app tauri build --bundles app`（得到 `IssueRelay.app`；确认 `Contents/MacOS/` 里的主程序叫 `issuerelay-app`，即 `mainBinaryName` 生效）、`cargo build -p issuerelay-cli --release`，把命令行程序复制到 `IssueRelay.app/Contents/MacOS/issuerelay`（M3 由打包流程完成），复制后两个文件都在。
-- [ ] **Step 2: 从访达启动**（不经终端，验证登录 shell 的 PATH 与代理）：首次引导走一遍；环境检查页确认 PATH 来源为登录 shell、代理来源与值（打码）；Claude、Codex 都就绪。
+- [ ] **Step 2: 从访达启动**（不经终端，验证登录 shell 的 PATH 与代理）：首次引导走一遍；环境检查页确认 PATH 来源为登录 shell、代理来源与值（打码）；Claude、Codex 都就绪。另外退出托盘程序后在终端里运行一次 `issuerelay-devhost run`，用 `issuerelay doctor` 确认 PATH 来源同样是登录 shell、读取没有卡到 10 秒上限（登录 shell 在自己的会话里运行，第一部分 `env::shell_vars` 的注释记着这项测量），再 Ctrl+C 停掉。
 - [ ] **Step 3: 沙箱流程**：绑定沙箱项目（目录 `~/issuerelay-sandbox/demo`）；在沙箱项目建一条需求（Claude）→ 被接走（记时）→ 待验收 → 面板「标记完成」→ Linear 为 Done；换 Codex 再跑一条；四种通知各出现一次（开始运行、待验收、需要补充信息、失败）；托盘四种图标都出现过；暂停 / 恢复（托盘与面板）；设置里把运行时长上限改为 1 分钟制造一次超时（改完恢复 60）；一条故意做不到的需求制造失败；运行中停止一次；「重新运行」一次。
 - [ ] **Step 4: 退出流程**：有任务在跑时托盘「退出」→ 提示 → 选「等待完成」→ 结束后自动退出；再来一次选「立即停止」→ 运行记为已取消、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`）、没有 `.git/index.lock`；第三次：选「等待完成」，在运行还没结束时关掉面板窗口（程序不退出，托盘还在），从托盘「退出」或「打开面板」把面板带回来，等待中的提示还在，改选「立即停止」→ 运行记为已取消、程序随即退出、没有残留进程（Review Focus 2）；第四次：有任务在跑时在面板里按 Cmd+Q → 同样先问，选「保持运行」后程序与运行都还在（这一条检验退出钩子对 `ExitRequested.code` 的假设，Task 3 的单元测试测不到它）；可行的话再试有任务在跑时注销或关机：系统发来退出请求 → 程序先问（macOS 可能提示某个应用阻止了注销），选「立即停止」后运行记为已取消、注销继续；做不到或结果不同就把原因写进报告。
 - [ ] **Step 4a: 离线启动**（AR51）：退出程序，断开网络（或让 `mcp.linear.app` 不可达），再启动：面板立刻可用、终端里 `issuerelay status` 立刻有回应（宿主不再等 Linear）；面板与侧栏显示「正在连接 Linear…」，托盘不显示出问题；连接失败后面板显示连接失败与「重试」，托盘转为出问题；恢复网络后点「重试」→ 连上，面板不用刷新就显示授权人。
@@ -6319,7 +6465,7 @@ git commit -m "docs(m2): record the desktop app acceptance on macOS"
 - 设计覆盖：4.1（单实例、关窗不退出、退出询问）Task 3；5.6（标记完成只在面板）Task 4、6；6.2（等待完成 / 立即停止）Task 3、5；8（首次引导、环境检查、一键修复）Task 9、10；9.1 托盘 Task 3；9.2 七个页面 Task 6–9；9.3 外观 Task 5；9.4 多语言 Task 2；9.5 通知 Task 3、9；9.6 图标 Task 11；10.3 MCP 注册 Task 9；14 完全放开提示 Task 8；15 前端测试与截图比对 Task 2–12；16 验证命令 Task 1；17 M2 完成标志 Task 12、13；18.6 精简运行评估 Task 13。开机自启 Task 3、9。自动更新只放开关（M3 实现）。
 - 依赖第一部分：`host`、`EngineEvent`、`IssueView`、`Settings` 新字段（`notifications`、`auto_update`、`onboarding_completed`、`full_access_acknowledged`、`log_*`）、`setup`、`SystemRunner::with_env`、`AuthMethod` 的 serde 名 `oauth` / `api_key`。
 - 依赖第一部分 Task 9（`core::host`）的三条约定：宿主各部分用各自的停止令牌、IPC 最后停；`Host::login` 与 `Host::use_api_key` 返回清洗过姓名的授权人；`stop(StopRuns)` 会结束一个仍在等待的 `stop(WaitForRuns)`，两者都返回（Task 3 的退出状态机靠这一条从「等待」改为「立即停止」）。
-- 类型一致：前端 `types.ts` 与 Rust serde 输出逐字段对应（Task 4，含 `StatusSnapshot.held`、`WaitReasonView`、`StartupState`、`AppInfo.system_locale`）；命令名表（33 条，Task 4）与 `backend.ts`、`api.ts`、`generate_handler!` 一致；事件名常量（Task 3）与 `api.ts` 一致；三张共用用例表（`language-cases.json`、`problem-cases.json`、`clean-cases.json`）各由 Rust 与 TypeScript 两边的测试读取。
+- 类型一致：前端 `types.ts` 与 Rust serde 输出逐字段对应（Task 4，含 `StatusSnapshot.held`、`WaitReasonView`、`StartupState`、`AppInfo.system_locale`）；命令名表（34 条，Task 4）与 `backend.ts`、`api.ts`、`generate_handler!` 一致；事件名常量（Task 3）与 `api.ts` 一致；三张共用用例表（`language-cases.json`、`problem-cases.json`、`clean-cases.json`）各由 Rust 与 TypeScript 两边的测试读取。
 
 ### 2026-10-13 预检后修订
 
