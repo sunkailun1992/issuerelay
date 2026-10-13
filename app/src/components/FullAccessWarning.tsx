@@ -1,4 +1,5 @@
 import { TriangleAlert } from "lucide-react";
+import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AlertDialog,
@@ -10,6 +11,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { useFocusReturn } from "@/hooks/useFocusReturn";
 
 /**
  * What the first choice of full access means (design 14): the AI can run any command on this
@@ -17,9 +19,24 @@ import { Button } from "@/components/ui/button";
  * AGENTS.md are its only limits; a lower level is the way out. The caller decides what understanding
  * it does (the binding form saves the confirmation in the settings, `full_access_acknowledged`,
  * so that it is asked once) and what saying no does: `onCancel` is also what Escape does.
+ *
+ * It is open because the page says so, not because a trigger was pressed, so nothing returns the
+ * focus to where the user was (`useFocusReturn` does, whichever way it closes); `returnFocusTo`
+ * names another place for the case that what had the focus is gone.
  */
-export function FullAccessWarning({ open, onConfirm, onCancel }: { open: boolean; onConfirm: () => void; onCancel: () => void }) {
+export function FullAccessWarning({
+  open,
+  onConfirm,
+  onCancel,
+  returnFocusTo,
+}: {
+  open: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  returnFocusTo?: RefObject<HTMLElement | null>;
+}) {
   const { t } = useTranslation();
+  const returnFocus = useFocusReturn(open, () => returnFocusTo?.current ?? null);
   return (
     <AlertDialog
       open={open}
@@ -29,7 +46,7 @@ export function FullAccessWarning({ open, onConfirm, onCancel }: { open: boolean
         if (!next) onCancel();
       }}
     >
-      <AlertDialogContent>
+      <AlertDialogContent onCloseAutoFocus={returnFocus}>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2">
             <TriangleAlert aria-hidden className="size-5 shrink-0 text-state-failed" />

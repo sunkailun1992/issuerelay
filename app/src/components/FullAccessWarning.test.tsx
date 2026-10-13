@@ -1,5 +1,6 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useRef, useState } from "react";
 import { vi } from "vitest";
 import { renderWithProviders } from "@/test/render";
 import { FullAccessWarning } from "./FullAccessWarning";
@@ -45,4 +46,65 @@ test("the focus starts on the safe answer, so that Enter does not confirm by acc
   await renderWithProviders(<FullAccessWarning open onConfirm={() => {}} onCancel={() => {}} />);
   const cancel = await screen.findByRole("button", { name: "Cancel" });
   expect(cancel).toHaveFocus();
+});
+
+/**
+ * A page with a button that asks the warning, and a second button that the warning may be told to
+ * go back to. `removeAsker` takes the first button away while the warning is open.
+ */
+function Page({ withPlace = false, removeAsker = false }: { withPlace?: boolean; removeAsker?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const place = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      {!(open && removeAsker) && (
+        <button type="button" onClick={() => setOpen(true)}>
+          Ask
+        </button>
+      )}
+      <button type="button" ref={place}>
+        Elsewhere
+      </button>
+      <FullAccessWarning open={open} onConfirm={() => setOpen(false)} onCancel={() => setOpen(false)} returnFocusTo={withPlace ? place : undefined} />
+    </>
+  );
+}
+
+test.each(["Cancel", "Escape", "I understand"])("closing the warning with %s returns the focus to what had it when the warning opened", async (how) => {
+  await renderWithProviders(<Page />);
+  const ask = screen.getByRole("button", { name: "Ask" });
+  await userEvent.click(ask);
+  await screen.findByRole("alertdialog");
+  expect(ask).not.toHaveFocus();
+  if (how === "Escape") await userEvent.keyboard("{Escape}");
+  else await userEvent.click(screen.getByRole("button", { name: how }));
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  await waitFor(() => expect(ask).toHaveFocus());
+});
+
+test("the place the caller names is only used when what had the focus is gone", async () => {
+  // It comes second: while what had the focus is there, that is where the focus returns.
+  const first = await renderWithProviders(<Page withPlace />);
+  const ask = screen.getByRole("button", { name: "Ask" });
+  await userEvent.click(ask);
+  await screen.findByRole("alertdialog");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(ask).toHaveFocus());
+  expect(screen.getByRole("button", { name: "Elsewhere" })).not.toHaveFocus();
+  first.unmount();
+  // The button that asked went away while the warning was open: the named place gets the focus.
+  await renderWithProviders(<Page withPlace removeAsker />);
+  await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+  await screen.findByRole("alertdialog");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Elsewhere" })).toHaveFocus());
+});
+
+test("with nothing to return to the warning closes and the focus is left alone", async () => {
+  await renderWithProviders(<Page removeAsker />);
+  await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+  await screen.findByRole("alertdialog");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  expect(document.activeElement).toBe(document.body);
 });

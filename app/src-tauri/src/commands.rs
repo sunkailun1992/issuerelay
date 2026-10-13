@@ -949,7 +949,8 @@ mod tests {
         assert_eq!(panel, core);
     }
 
-    /// One row of app/src/lib/model-name-cases.json, which the panel's `isValidModelName` test reads.
+    /// One row of app/src/lib/model-name-cases.json, which the panel's `isValidModelName` test
+    /// (app/src/lib/model-name.test.ts) reads as well; a row's `note` is for the reader only.
     #[derive(Deserialize)]
     struct ModelNameCase {
         name: String,

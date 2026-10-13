@@ -183,12 +183,19 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     bindings: () => reply(() => structuredClone(bindings)),
     saveBinding: (binding) =>
       reply(() => {
-        const others = bindings.filter((b) => b.project_id !== binding.project_id && b.id !== binding.id);
-        // The engine refuses a folder that is not absolute; the demo's fictional folders start with ~/.
+        // As `Engine::add_binding` does: it replaces every binding with its id or its project and
+        // takes the place of the first of them (so that editing one does not move it); a binding
+        // that replaces none goes last.
+        const replaced = (b: Binding) => b.project_id === binding.project_id || b.id === binding.id;
+        const place = bindings.findIndex(replaced);
+        const next = bindings.filter((b) => !replaced(b));
+        next.splice(place === -1 ? next.length : place, 0, binding);
+        // The engine refuses a folder that is not absolute (the demo's fictional folders start with
+        // ~/) and names the binding by its place in the list.
         if (!binding.directory.startsWith("/") && !binding.directory.startsWith("~/")) {
-          fail(`bindings[${others.length}].directory must be an absolute path: ${JSON.stringify(binding.directory)}`);
+          fail(`bindings[${next.indexOf(binding)}].directory must be an absolute path: ${JSON.stringify(binding.directory)}`);
         }
-        bindings = [...others, binding];
+        bindings = next;
         emit({ kind: "config" });
       }),
     removeBinding: (id) =>

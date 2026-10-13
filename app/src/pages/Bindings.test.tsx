@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router";
 import { vi } from "vitest";
@@ -234,6 +234,8 @@ test("a binding is edited in a dialog that starts with what it has, and the card
   const edited = await screen.findByRole("region", { name: "Demo Project" });
   await waitFor(() => expect(within(edited).getByText("Codex")).toBeInTheDocument());
   expect(within(edited).queryByText("Default (Claude Code)")).not.toBeInTheDocument();
+  // The card stays where it was: the first one is still the first.
+  expect(cardNames()).toEqual(["Demo Project", "Demo Mobile"]);
 });
 
 test("a dialog opened for another binding does not keep what the last one had", async () => {
@@ -385,8 +387,10 @@ test("a check that was run elsewhere is shown at once", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const { client } = await renderWithProviders(<Bindings />, { backend });
   await screen.findByRole("region", { name: "Demo Project" });
-  // The environment check page reads the same cached report.
-  await client.fetchQuery({ queryKey: queryKeys.doctor, queryFn: () => backend.doctor() });
+  // The environment check page reads the same cached report. Changing the cache is what updates the page, so it is done inside act.
+  await act(async () => {
+    await client.fetchQuery({ queryKey: queryKeys.doctor, queryFn: () => backend.doctor() });
+  });
   const demo = await screen.findByRole("region", { name: "Demo Project" });
   expect(await within(demo).findByText("The folder exists")).toBeInTheDocument();
   expect(within(demo).queryByText("Not checked yet")).not.toBeInTheDocument();
@@ -499,4 +503,130 @@ test("a change to the bindings makes the last check outdated, and it is not show
   // And a new check brings the results back.
   await userEvent.click(within(edited).getByRole("button", { name: "Check again" }));
   expect(await within(edited).findByText("The folder exists")).toBeInTheDocument();
+});
+
+// Where the focus goes when a dialog closes: back to what opened it.
+
+/** Closes the open dialog with the Escape key or with its Cancel button. */
+async function closeTheDialog(how: "Escape" | "Cancel") {
+  if (how === "Escape") await userEvent.keyboard("{Escape}");
+  else await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+}
+
+/** A backend of someone who has logged in and has already confirmed the full-access warning, with no binding yet. */
+async function freshBackendThatAsksNoWarning() {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  await backend.linearLogin();
+  await backend.saveSettings({ ...(await backend.settings()), full_access_acknowledged: true });
+  return backend;
+}
+
+test.each(["Escape", "Cancel"] as const)("closing the edit dialog with %s returns the focus to the Edit button that opened it", async (how) => {
+  await renderWithProviders(<Bindings />);
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  const edit = within(mobile).getByRole("button", { name: "Edit" });
+  await userEvent.click(edit);
+  await screen.findByRole("dialog", { name: "Edit the binding" });
+  expect(edit).not.toHaveFocus();
+  await closeTheDialog(how);
+  // Without this the focus falls to the page, and a keyboard user starts again from its top.
+  await waitFor(() => expect(edit).toHaveFocus());
+});
+
+test("saving from the edit dialog returns the focus to its Edit button as well", async () => {
+  await renderWithProviders(<Bindings />);
+  const demo = await screen.findByRole("region", { name: "Demo Project" });
+  const edit = within(demo).getByRole("button", { name: "Edit" });
+  await userEvent.click(edit);
+  const dialog = await screen.findByRole("dialog", { name: "Edit the binding" });
+  await userEvent.click(await within(dialog).findByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  await waitFor(() => expect(edit).toHaveFocus());
+});
+
+test.each(["Escape", "Cancel"] as const)("closing the add dialog with %s returns the focus to the 'Add binding' button", async (how) => {
+  await renderWithProviders(<Bindings />);
+  await screen.findByRole("region", { name: "Demo Project" });
+  const add = screen.getByRole("button", { name: "Add binding" });
+  await userEvent.click(add);
+  await screen.findByRole("dialog", { name: "Add a binding" });
+  expect(add).not.toHaveFocus();
+  await closeTheDialog(how);
+  await waitFor(() => expect(add).toHaveFocus());
+});
+
+test.each(["Escape", "Cancel"] as const)("closing the add dialog of the empty page with %s returns the focus to the button that opened it", async (how) => {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  await backend.linearLogin();
+  await renderWithProviders(<Bindings />, { backend });
+  const first = await screen.findByRole("button", { name: "Add your first binding" });
+  await userEvent.click(first);
+  await screen.findByRole("dialog", { name: "Add a binding" });
+  await closeTheDialog(how);
+  await waitFor(() => expect(first).toHaveFocus());
+});
+
+test("the first binding, saved from the empty page, leaves the focus on the 'Add binding' button that took the place of the one that opened the dialog", async () => {
+  const backend = await freshBackendThatAsksNoWarning();
+  await renderWithProviders(<Bindings />, { backend });
+  const first = await screen.findByRole("button", { name: "Add your first binding" });
+  await userEvent.click(first);
+  const dialog = await screen.findByRole("dialog", { name: "Add a binding" });
+  await pick("Linear project", "Demo Project");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Choose…" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  // The button of the empty page is gone with the page; the header has one now.
+  expect(first).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add binding" })).toHaveFocus());
+});
+
+test("when nothing that opened the dialog is left, the focus goes to the heading of the page", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const { client } = await renderWithProviders(<Bindings />, { backend });
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  await userEvent.click(within(mobile).getByRole("button", { name: "Edit" }));
+  await screen.findByRole("dialog", { name: "Edit the binding" });
+  // Meanwhile the bindings are gone: no card, no header button, an empty page.
+  await act(async () => {
+    await backend.removeBinding("proj-1");
+    await backend.removeBinding("proj-2");
+    await client.invalidateQueries({ queryKey: queryKeys.bindings });
+  });
+  await screen.findByText("No bindings yet");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Bindings" })).toHaveFocus());
+});
+
+test("the warning inside the dialog gives the focus to the dialog's Save button, and the dialog gives it to what opened it", async () => {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  await backend.linearLogin();
+  await renderWithProviders(<Bindings />, { backend });
+  const first = await screen.findByRole("button", { name: "Add your first binding" });
+  await userEvent.click(first);
+  const dialog = await screen.findByRole("dialog", { name: "Add a binding" });
+  await pick("Linear project", "Demo Project");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Choose…" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+  await screen.findByRole("alertdialog");
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Save" })).toHaveFocus());
+  // The dialog is still open, and its own closing is a separate one.
+  expect(screen.getByRole("dialog", { name: "Add a binding" })).toBeInTheDocument();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  await waitFor(() => expect(first).toHaveFocus());
+});
+
+test("the buttons of a card are described by the project they belong to, under the same names", async () => {
+  await renderWithProviders(<Bindings />);
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  for (const name of ["Edit", "Remove"]) {
+    expect(within(mobile).getByRole("button", { name })).toHaveAccessibleDescription("Demo Mobile");
+  }
+  const demo = screen.getByRole("region", { name: "Demo Project" });
+  expect(within(demo).getByRole("button", { name: "Edit" })).toHaveAccessibleDescription("Demo Project");
 });

@@ -97,6 +97,41 @@ describe("mock backend", () => {
     expect((await backend.bindings()).map((b) => b.id)).toEqual(["proj-1", "proj-2", "proj-3"]);
   });
 
+  test("a binding that replaces another takes its place in the list, as the engine puts it", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const ids = async () => (await backend.bindings()).map((b) => b.id);
+    await backend.saveBinding({ id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs" });
+    expect(await ids()).toEqual(["proj-1", "proj-2", "proj-3"]);
+    // The first of three, edited, is still the first; so are the others.
+    const [first, second, third] = await backend.bindings();
+    await backend.saveBinding({ ...first, directory: "~/code/moved" });
+    expect(await ids()).toEqual(["proj-1", "proj-2", "proj-3"]);
+    expect((await backend.bindings())[0].directory).toBe("~/code/moved");
+    await backend.saveBinding({ ...second, model: "gpt-5" });
+    await backend.saveBinding({ ...third, directory: "~/code/docs-moved" });
+    expect(await ids()).toEqual(["proj-1", "proj-2", "proj-3"]);
+    // The same project under another id takes the place of the one it replaces.
+    await backend.saveBinding({ ...first, id: "bind-9" });
+    expect(await ids()).toEqual(["bind-9", "proj-2", "proj-3"]);
+    // One that replaces two (its id is one's, its project another's) takes the place of the first of them.
+    await backend.saveBinding({ ...first, id: "proj-3", project_id: "proj-1" });
+    expect(await ids()).toEqual(["proj-3", "proj-2"]);
+    // A binding that replaces nothing goes last.
+    await backend.saveBinding({ ...first, id: "proj-4", project_id: "proj-4" });
+    expect(await ids()).toEqual(["proj-3", "proj-2", "proj-4"]);
+  });
+
+  test("a refused folder names the binding by the place it would have in the list", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const [first, second] = await backend.bindings();
+    // The first binding is edited: it would stay the first, whatever else is in the list...
+    await expect(backend.saveBinding({ ...first, directory: "code/moved" })).rejects.toThrow('bindings[0].directory must be an absolute path: "code/moved"');
+    // ...and so would the second.
+    await expect(backend.saveBinding({ ...second, directory: "code/moved" })).rejects.toThrow('bindings[1].directory must be an absolute path: "code/moved"');
+    // Nothing was changed by either.
+    expect(await backend.bindings()).toEqual([first, second]);
+  });
+
   test("the fresh scenario is a first run", async () => {
     const backend = createMockBackend("fresh", { latencyMs: 0 });
     expect((await backend.status()).linear.kind).toBe("not_configured");

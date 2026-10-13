@@ -691,13 +691,20 @@ impl Engine {
 
     /// Adds the binding, replacing any existing one for the same project or id.
     ///
+    /// A binding that replaces another takes its place in the list (the panel lists the bindings
+    /// in this order, so editing one must not move it); one that replaces several stands where
+    /// the first of them stood, and one that replaces none goes last.
+    ///
     /// The result is checked like any configuration (`Config::validate`: an absolute folder,
     /// non-blank ids, no control characters in names), and a refused binding changes nothing.
     pub fn add_binding(&self, binding: Binding) -> Result<()> {
         self.update_config(|c| {
+            let replaced = |b: &Binding| b.project_id == binding.project_id || b.id == binding.id;
+            let place = c.bindings.iter().position(replaced);
+            c.bindings.retain(|b| !replaced(b));
+            // Everything before `place` was kept, so it is still a valid place to insert at.
             c.bindings
-                .retain(|b| b.project_id != binding.project_id && b.id != binding.id);
-            c.bindings.push(binding);
+                .insert(place.unwrap_or(c.bindings.len()), binding);
         })
     }
 

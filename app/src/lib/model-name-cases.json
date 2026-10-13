@@ -11,9 +11,9 @@
   {"name": "a b", "valid": false},
   {"name": "模型", "valid": false},
   {"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false},
-  {"name": "-", "valid": false},
-  {"name": ":latest", "valid": true},
-  {"name": "a-b.c_d:e", "valid": true},
-  {"name": "é", "valid": false},
-  {"name": "sonnet\n", "valid": false}
+  {"name": "-", "valid": false, "note": "a lone dash starts with the mark that may not start a name"},
+  {"name": ":latest", "valid": true, "note": "only the dash may not start a name; the other marks may"},
+  {"name": "a-b.c_d:e", "valid": true, "note": "every mark that is allowed, inside one name"},
+  {"name": "é", "valid": false, "note": "a letter outside ASCII"},
+  {"name": "sonnet\n", "valid": false, "note": "a line break at the end is no part of a name"}
 ]

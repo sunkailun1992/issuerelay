@@ -2302,6 +2302,82 @@ async fn bindings_are_replaced_removed_validated_and_saved() {
     assert!(h.engine.bindings().is_empty());
 }
 
+/// The ids of the bindings, in the order the panel lists them.
+fn binding_ids(h: &Harness) -> Vec<String> {
+    h.engine.bindings().into_iter().map(|b| b.id).collect()
+}
+
+#[tokio::test]
+async fn a_replaced_binding_keeps_its_place_in_the_list() {
+    let h = Harness::new(2, false);
+    let config_path = h.root.path().join("config.toml");
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.bind("proj-3", "c");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    // Editing the first of three (same id, same project, another folder) leaves it first, in the
+    // configuration file too: the panel lists the bindings in that order.
+    let moved = h.bind("proj-1", "d");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    assert_eq!(h.engine.bindings()[0].directory, moved);
+    assert_eq!(
+        Config::load(&config_path).unwrap().bindings,
+        h.engine.bindings()
+    );
+    // The middle one and the last one stay where they are as well.
+    h.bind("proj-2", "e");
+    h.bind("proj-3", "f");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    // A binding takes the place of the one it replaces whichever way it replaces it: the same id
+    // with another project, or the same project under another id.
+    let renamed = Binding {
+        project_id: "proj-7".into(),
+        ..h.engine.bindings()[1].clone()
+    };
+    h.engine.add_binding(renamed).unwrap();
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    assert_eq!(h.engine.bindings()[1].project_id, "proj-7");
+    let other_id = Binding {
+        id: "bind-9".into(),
+        ..h.engine.bindings()[0].clone()
+    };
+    h.engine.add_binding(other_id).unwrap();
+    assert_eq!(binding_ids(&h), ["bind-9", "proj-2", "proj-3"]);
+    // One that replaces two (its id is one's, its project another's) stands where the first of
+    // them stood, and the other goes.
+    let both = Binding {
+        id: "proj-3".into(),
+        project_id: "proj-1".into(),
+        ..h.engine.bindings()[0].clone()
+    };
+    assert_eq!(h.engine.bindings()[0].project_id, "proj-1");
+    h.engine.add_binding(both).unwrap();
+    assert_eq!(binding_ids(&h), ["proj-3", "proj-2"]);
+    // Only a binding that replaces nothing goes last.
+    h.bind("proj-4", "g");
+    h.bind("proj-5", "h");
+    assert_eq!(binding_ids(&h), ["proj-3", "proj-2", "proj-4", "proj-5"]);
+    assert_eq!(
+        Config::load(&config_path).unwrap().bindings,
+        h.engine.bindings()
+    );
+}
+
+#[tokio::test]
+async fn a_binding_that_is_refused_does_not_move_anything() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    let before = h.engine.bindings();
+    // An edit of the first one that the configuration refuses.
+    let refused = Binding {
+        directory: PathBuf::from("relative"),
+        ..before[0].clone()
+    };
+    assert!(h.engine.add_binding(refused).is_err());
+    assert_eq!(h.engine.bindings(), before);
+}
+
 #[tokio::test]
 async fn a_binding_needs_an_absolute_directory_and_plain_names() {
     let h = Harness::new(2, false);

@@ -585,6 +585,25 @@ test("Escape says no to full access too", async () => {
   expect(screen.getByRole("combobox", { name: "Default permission level" })).toHaveTextContent("Personal settings");
 });
 
+test("saying no to full access returns the focus to the permission list, where the user was", async () => {
+  const backend = await backendWith({ default_permission: "auto", full_access_acknowledged: false });
+  await renderWithProviders(<Settings />, { backend });
+  await pick("Default permission level", "Full access");
+  await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.queryByText("Full access runs without limits")).not.toBeInTheDocument());
+  // The page is some 2,200 px tall: with the focus on the body a keyboard user would be back at its top.
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Default permission level" })).toHaveFocus());
+});
+
+test("understanding full access returns the focus to the permission list as well", async () => {
+  const backend = await backendWith({ default_permission: "auto", full_access_acknowledged: false });
+  await renderWithProviders(<Settings />, { backend });
+  await pick("Default permission level", "Full access");
+  await userEvent.click(await screen.findByRole("button", { name: "I understand" }));
+  await waitFor(() => expect(screen.queryByText("Full access runs without limits")).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Default permission level" })).toHaveFocus());
+});
+
 test("full access that was understood before is not asked about again", async () => {
   const backend = await backendWith({ default_permission: "auto", full_access_acknowledged: true });
   const save = vi.spyOn(backend, "saveSettings");

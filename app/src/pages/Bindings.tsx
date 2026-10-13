@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, CircleCheck, CircleX, FolderOpen, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
-import { type ReactNode, useCallback, useId, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useCallback, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { MiddleEllipsis } from "@/components/MiddleEllipsis";
@@ -125,14 +125,17 @@ function CheckResult({ check, report }: { check: LastCheck; report: BindingRepor
   );
 }
 
-/** Asks before a binding goes: the issues of its project wait for a new one. */
-function RemoveButton({ binding }: { binding: Binding }) {
+/**
+ * Asks before a binding goes: the issues of its project wait for a new one. `describedBy` names
+ * the element that says which project this is, so that the button's description tells it.
+ */
+function RemoveButton({ binding, describedBy }: { binding: Binding; describedBy: string }) {
   const { t } = useTranslation();
   const remove = useRemoveBinding();
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button variant="outline" size="sm" disabled={remove.isPending}>
+        <Button variant="outline" size="sm" disabled={remove.isPending} aria-describedby={describedBy}>
           <Trash2 aria-hidden />
           {t("bindings.remove")}
         </Button>
@@ -176,7 +179,11 @@ function PromptOverride({ text, labelId }: { text: string | undefined; labelId: 
   );
 }
 
-/** One binding (design 9.2): its folder, executor, permission level, model, prompt override and what the last check found. */
+/**
+ * One binding (design 9.2): its folder, executor, permission level, model, prompt override and what the last check found.
+ * Edit and Remove are named for what they do and described by the project, which their name
+ * leaves out (they are one in every card).
+ */
 function BindingCard({ binding, labels, check, onEdit }: { binding: Binding; labels: BindingLabels; check: LastCheck; onEdit: () => void }) {
   const { t } = useTranslation();
   const titleId = useId();
@@ -191,11 +198,11 @@ function BindingCard({ binding, labels, check, onEdit }: { binding: Binding; lab
             {binding.project_name}
           </h2>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="outline" size="sm" onClick={onEdit}>
+            <Button variant="outline" size="sm" aria-describedby={titleId} onClick={onEdit}>
               <Pencil aria-hidden />
               {t("bindings.edit")}
             </Button>
-            <RemoveButton binding={binding} />
+            <RemoveButton binding={binding} describedBy={titleId} />
           </div>
         </div>
         <CardContent>
@@ -242,6 +249,11 @@ export default function Bindings() {
   const labels = bindingLabels(t, settings.data);
   // The binding being edited stays while the dialog fades out, so that it does not turn into a new one.
   const [dialog, setDialog] = useState<{ open: boolean; binding?: Binding }>({ open: false });
+  // Where the focus goes when the dialog closes and what opened it is gone (the button of the empty
+  // page goes once there is a binding, a card goes with its binding): the header's button, else the heading.
+  const addButton = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const fallbackFocus = useCallback(() => addButton.current ?? heading.current, []);
 
   let actions: ReactNode;
   let body: ReactNode;
@@ -266,7 +278,7 @@ export default function Bindings() {
     );
   } else {
     actions = (
-      <Button size="sm" onClick={() => setDialog({ open: true })}>
+      <Button size="sm" ref={addButton} onClick={() => setDialog({ open: true })}>
         <Plus aria-hidden />
         {t("bindings.add")}
       </Button>
@@ -282,9 +294,14 @@ export default function Bindings() {
 
   return (
     <>
-      <PageHeader title={t("nav.bindings")} description={t("bindings.description")} actions={actions} />
+      <PageHeader title={t("nav.bindings")} description={t("bindings.description")} actions={actions} headingRef={heading} />
       {body}
-      <BindingDialog open={dialog.open} initial={dialog.binding} onOpenChange={(open) => setDialog((current) => ({ ...current, open }))} />
+      <BindingDialog
+        open={dialog.open}
+        initial={dialog.binding}
+        onOpenChange={(open) => setDialog((current) => ({ ...current, open }))}
+        fallbackFocus={fallbackFocus}
+      />
     </>
   );
 }
