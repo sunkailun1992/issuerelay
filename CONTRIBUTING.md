@@ -7,7 +7,8 @@
 - Read [AGENTS.md](AGENTS.md) before you code. It is written for AI tools, and its rules apply to people too.
 - Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (the app crate's release build embeds `app/dist`); the panel needs Node.js 22 or later and pnpm. On Windows the scan needs Git Bash or WSL.
 - Write commit messages and PR titles as English Conventional Commits, for example `fix(runner): kill the whole process tree on timeout`. Do not change version numbers; maintainers do that when they release.
-- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts.
+- Changes to the desktop panel (`app/`) follow section 12 of [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md): every text goes through the five translation files, colours and sizes come from the design tokens, every page has loading, empty and error states, and every action stays reachable in the smallest window (900×600).
+- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts. AI tools never approve a contributor's PR, and never merge one that a maintainer has not approved.
 - This repository is public. Never post tokens, company information or real Linear content in issues, PRs, logs or screenshots.
 - Report security problems privately from the Security tab, never in a public issue. Contributions are licensed under Apache-2.0.
 
@@ -16,7 +17,7 @@
 - 问题报告：用 issue 模板提交，中文或英文都可以。
 - 文档、测试、修 bug。
 - 新功能：先开 issue 讨论，见「开始之前」。
-- 界面翻译：M2 起接受，每种语言一个翻译文件。语言清单见[设计文档](docs/superpowers/specs/2026-10-10-issuerelay-design.md)第 9.4 节，文件位置见[目录规范](docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md)。里程碑 M0–M3 的含义见 [README.md](README.md) 的状态说明和设计文档第 17 节。
+- 界面翻译：M2 起接受，每种语言一个翻译文件（`app/src/i18n/locales/`）。五个文件的键和占位符必须一一对应、不能留空，测试会检查。语言清单见[设计文档](docs/superpowers/specs/2026-10-10-issuerelay-design.md)第 9.4 节，文件位置见[目录规范](docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md)，写法见 [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md) 第 12 节。里程碑 M0–M3 的含义见 [README.md](README.md) 的状态说明和设计文档第 17 节。
 
 新人可以从带 `good first issue`（适合新人）或 `help wanted`（欢迎帮忙）标签的 issue 开始。
 
@@ -102,6 +103,7 @@ git merge upstream/main
 - 先读 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding/README.md](docs/ai-coding/README.md)。AGENTS.md 虽然写给 AI，对人同样适用。
 - macOS 和 Windows 同等对待，细则见 AGENTS.md 的「项目边界」。
 - 新行为要有测试。修 bug 先写一个能复现它的测试，分层和假实现见 [TESTING_SPEC.md](docs/ai-coding/TESTING_SPEC.md)。
+- 改面板（`app/`）先读 [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md) 第 12 节：文案走五种语言的翻译文件，颜色和尺寸只用设计变量，每个页面有加载、空、错误三种状态，最小窗口下每个操作都够得着；外来文本怎样显示见 [SECURITY_CODING_SPEC.md](docs/ai-coding/SECURITY_CODING_SPEC.md) 第 3 节。
 - 测试通过不等于实机验收。改动涉及真实 Linear、Claude Code 或 Codex 的行为时，在 PR 里写实机结果；做不了就写「待实机」和原因。
 - 设计、计划、验收报告用中文，`README.md` 中英双语。源码注释用英文，写法见 [AI_COMMENT_STYLE_GUIDE.md](docs/ai-coding/AI_COMMENT_STYLE_GUIDE.md)。
 - 改了行为，就同步改相关文档。

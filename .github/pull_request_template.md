@@ -33,4 +33,5 @@
 
 - [ ] 描述、截图、日志、夹具里没有令牌或凭据、公司名、内网地址、真实 Linear 内容、本机绝对路径
 - [ ] 行为变化已同步文档
+- [ ] 改了面板：文案走翻译键且五种语言齐全，有加载 / 空 / 错误状态，最小窗口（900×600）下每个操作都够得着 / Panel changes: translated in all five languages, loading, empty and error states, every action reachable at 900×600（没改面板就不勾）
 - [ ] 含 AI 生成的内容，我已逐行审过 / Contains AI-generated changes, reviewed line by line（不含就不勾）

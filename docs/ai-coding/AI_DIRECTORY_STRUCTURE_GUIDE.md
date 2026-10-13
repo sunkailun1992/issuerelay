@@ -36,7 +36,7 @@
 
 ## 4. app/（M2 起）
 
-`app/` 是 pnpm 前端工程（React + TypeScript + Vite + Tailwind CSS + shadcn/ui），`app/src-tauri/` 是工作区成员 `issuerelay-app`：Tauri 外壳（托盘、窗口、通知、开机自启、更新），内嵌 `issuerelay-core`。下表是 M2 完成后的布局，各文件由 M2 的各任务逐步落地。
+`app/` 是 pnpm 前端工程（React + TypeScript + Vite + Tailwind CSS + shadcn/ui），`app/src-tauri/` 是工作区成员 `issuerelay-app`：Tauri 外壳（托盘、窗口、通知、开机自启、更新），内嵌 `issuerelay-core`。下表是 M2 完成后的布局，各文件由 M2 的各任务逐步落地。表里现在还没有的：`ExecutorCheck`、`WorkspaceCheck`、`mask.ts`、`mask-cases.json`（M2 Task 9），`app/public/`、`app/icons-src/`、`app/scripts/icons.mjs`（Task 11），`app/playwright.config.ts`、`app/tests/`（Task 12）；`Doctor.tsx`、`Settings.tsx`、`Help.tsx` 与 `app/src/pages/onboarding/` 现在是占位页（Task 9、10）。
 
 | 路径 | 职责 |
 |---|---|
@@ -65,6 +65,8 @@
 约定：
 - 依赖版本由 `app/pnpm-lock.yaml` 和 `Cargo.lock` 锁定；pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 - 翻译文件的位置与格式见 `app/src/i18n/`（不是 `locales/`）。
+- 只有 `app/src/lib/api.ts` 引入 `@tauri-apps/api`；其余前端代码按职责放 `lib/`（数据层与纯函数）、`hooks/`（查询与钩子）、`components/`（共用组件）、`pages/`（页面和页面上的对话框，首次引导在 `pages/onboarding/`）。新页面在 `App.tsx` 加路由、在 `AppShell` 的 `PAGES` 加入口。
+- 面板与 core 共用的用例表放在使用它的前端模块旁边（`app/src/lib/*-cases.json`、`app/src/i18n/language-cases.json`），Rust 测试用 `include_str!` 读同一个文件；前端测试要用 core 的样本时直接读 `crates/core/tests/fixtures/`，不复制。
 
 ## 5. docs/
 
@@ -74,8 +76,8 @@
 | `docs/superpowers/specs/` | 设计文档，命名 `<日期>-<主题>-design.md` |
 | `docs/superpowers/plans/` | 实施计划，命名 `<日期>-<主题>.md` |
 | `docs/gates/` | 实机验收报告 `<日期>-<主题>.md`；脱敏样本放 `docs/gates/samples/<里程碑>/` |
-| `docs/gates/screenshots/` | 面板截图（`docs/gates/screenshots/m2/`，Playwright 比对用的基准图）；只含虚构数据，真实验收截图只留在本机 |
-| `docs/design/` | 设计素材的预览（`docs/design/icons/`：图标三套方案的预览） |
+| `docs/gates/screenshots/` | 面板截图（`docs/gates/screenshots/m2/`，Playwright 比对用的基准图）；只含虚构数据，真实验收截图只留在本机。M2 Task 12 落地，现在还没有 |
+| `docs/design/` | 设计素材的预览（`docs/design/icons/`：图标三套方案的预览）。M2 Task 11 落地，现在还没有 |
 
 ## 6. scripts/ 与 .github/
 
@@ -93,3 +95,4 @@
 2. 新增的目录或 crate 在本文件登记了吗？
 3. 有没有把生成物、本机数据、原始输出加进仓库？
 4. 测试与夹具和被测代码在同一个 crate 吗？
+5. 面板与 core 共用的用例表或样本，有没有被复制成第二份？

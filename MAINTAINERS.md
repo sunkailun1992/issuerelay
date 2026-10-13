@@ -7,7 +7,7 @@
 - The repository belongs to a personal account, so GitHub offers only two levels: the owner (admin rights) and collaborators with write access. Maintain and admin-style roles for others become available only if the project moves to a GitHub organization, and this file is updated then.
 - A maintainer other than the author approves a PR before it is squash-merged. Changes in the Critical (极高风险) areas need two maintainers once there are two; until then the admin reviews and writes the reason in the PR. The admin has the final say.
 - `main` is protected by a ruleset: PRs only, one approval, resolved conversations, squash merge only, and the checks `test (macos-latest)`, `test (windows-latest)` and `secrets` must pass.
-- The admin can bypass the ruleset in two cases only: the founder's direct commits during M0–M1, and merging the admin's own PRs while there is a single maintainer (see "分支保护"). Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
+- The admin can bypass the ruleset in two cases only: the founder's direct commits during M0–M1 (stopped when M1 closed; since then every change reaches `main` through a PR), and merging the admin's own PRs after CI is green while there is a single maintainer (see "分支保护"). An AI tool working in the admin's own session acts with the admin's rights: it may merge the admin's own PRs in that way, but it never approves anyone else's PR and never merges one that a maintainer has not reviewed and approved. Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
 - To become a maintainer: contribute steadily, get nominated by a maintainer and accepted by the admin, then be invited as a collaborator with write access. Maintainers inactive for 6 months become emeritus.
 - Releases start at M3. Maintainers bump the version when they release; contributors never do. The update-signing key lives only in GitHub Actions secrets.
 
@@ -46,6 +46,7 @@
 
 - **日常改动**：由作者以外的一名维护者批准即可合并。
 - **只有一名维护者期间**：管理员自己的 PR 在 CI 全绿后经绕过合并，并在 PR 里写明理由。
+- **AI 工具**：管理员在自己的会话里让 AI 工具代为操作时，AI 用的是管理员的权限：可以照上一条合并管理员自己的 PR（同样要 CI 全绿、在 PR 里写明），但不得批准其他任何人的 PR，也不得在维护者本人评审批准之前合并它们。替外部贡献者工作的 AI 只能推贡献者自己的 fork（见 [AGENTS.md](AGENTS.md)「贡献流程」）。
 - **极高风险范围**（见 [CONTRIBUTING.md](CONTRIBUTING.md) 的「开始之前」）：维护者达到两名后，需要两名维护者批准。只有一名维护者时，由管理员评审，并在 PR 里写明理由。GitHub 规则集只强制 1 人批准，第二个批准由维护者自己把关。
 - **squash 合并**：合并前确认 PR 标题符合英文 Conventional Commits，它就是 `main` 上的提交标题。再把提交正文精简成英文摘要，删掉模板里的中文标题、注释和未勾选项。
 - **设计变更**：先改 `docs/superpowers/specs/` 里的设计文档，并在 PR 里讨论。
@@ -71,8 +72,8 @@
 
 「仓库管理员可以绕过」只用于两种情况：
 
-1. M0–M1 期间，项目发起人直接提交开发进度。M1 收尾时停止，届时更新本节。
-2. 只有一名维护者期间，合并管理员自己的 PR。
+1. M0–M1 期间，项目发起人直接提交开发进度。已在 M1 收尾时停止，此后所有改动都经 PR 进 `main`。
+2. 只有一名维护者期间，CI 全绿后合并管理员自己的 PR（含管理员让 AI 工具代为合并的，见「决策与合并」）。
 
 除此之外不使用绕过。
 

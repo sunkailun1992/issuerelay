@@ -12,7 +12,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | 集成测试 | `crates/*/tests/`，加上 `tests/common/` 的假实现 | 运行器 + `fake-agent`、Linear MCP + 假服务端、引擎 + 假 Linear + 脚本化运行器、IPC | 每次提交 |
 | 平台测试 | `#[cfg(windows)]` / `#[cfg(unix)]` 的测试，CI 两个平台都跑 | `.cmd` 包装、命名管道、残留的套接字文件 | 推 main 与开 PR 时 |
 | 前端组件测试 | Vitest + Testing Library（jsdom；公共设置在 `app/src/test-setup.ts`），`pnpm --dir app test` | 面板的组件、页面与数据层，对着内置假后端，不连引擎 | 每次提交；CI 两个平台都跑 |
-| 截图比对 | Playwright，只在本机运行 | 面板各屏的基准截图（只含虚构数据） | 改界面时在本机跑；字体因机器而异，CI 不跑 |
+| 截图比对（M2 Task 12 落地，现在还没有） | Playwright，只在本机运行 | 面板各屏的基准截图（只含虚构数据） | 改界面时在本机跑；字体因机器而异，CI 不跑 |
 | 实机验收 | 开发宿主（M2 起是托盘程序）+ 真实 Linear + 真实 Claude / Codex | 完整流程、耗时、失败与超时 | 每个里程碑收尾，写 `docs/gates/` |
 
 ## 单元与集成测试规则
@@ -24,6 +24,32 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 应用 crate（`app/src-tauri`）链接了 Tauri：它的测试可执行文件在 Windows 上要带 Common Controls v6 清单，否则一启动就失败（`STATUS_ENTRYPOINT_NOT_FOUND`，tauri-apps/tauri#13419）。`build.rs` 已把清单嵌进该 crate 的所有可执行文件；这一点只有 CI 的 Windows 任务能验证。
 - 每个状态、每个错误分支至少一个测试；修 bug 先写一个能复现它的测试。
 - 测试数据只用虚构值：`DEMO-1`、`Demo Project`、`Jane Doe`、`user-1`、`proj-1`。
+
+## 前端测试规则
+
+- Vitest 只收 `app/src/**/*.test.{ts,tsx}`，测试文件与被测文件放在一起。`vite.config.ts` 开了 `globals: true`（`test`、`expect`、`vi`、`afterEach` 全局可用，Testing Library 也靠它在每个测试后自动清理）和 `restoreMocks: true`；从 `vitest` 显式导入也可以。
+- 公共设置 `app/src/test-setup.ts`：Radix 需要的 jsdom 桩和 `matchMedia` 桩；每个测试后复位固定时钟、收掉 sonner 的提示；用英文启动 i18next 并装上缺键守卫（`t()` 用到 `en.json` 没有的键就抛错）。
+- 要后端、查询缓存、路由或翻译的组件用 `app/src/test/render.tsx` 的 `renderWithProviders`：它用应用自己的 `createQueryClient()` 和不带延迟的假后端（`createMockBackend("demo", { latencyMs: 0 })`），可以指定 `backend`、`route`（起始地址）和 `lang`。只做展示的组件可以直接 `render`。
+- 假后端就是测试替身：场景用 `demo`、`fresh`、`connecting`；要某个调用失败，就把这一个方法换成 `vi.fn().mockRejectedValue(new BackendError("…"))`，要看调用就用 `vi.spyOn`。测试依赖的确切字符串都定义在 `mock-fixtures.ts`。除了检查边界的 `api.test.ts`，测试不 mock `@tauri-apps/api`。
+- 等条件，不等固定时间：用 `findBy…`、`waitFor`，或等查询缓存的状态（`client.getQueryState(…)`）；要推进时间就开假定时器，用 `app/src/test/time.ts` 的 `advanceUntil` 推到条件成立为止。不写固定时长的等待。和「几分钟前」、时长有关的断言依赖固定时钟（`MOCK_NOW`，假后端创建时设好，每个测试后复位）。
+- 按角色和可读名字找元素（`getByRole`、`getByLabelText`）；`data-testid` 只用于测试自己的探针组件（例如显示当前地址的那个）。
+- 测试默认用英文，按英文文案找元素：改英文文案要同步改钉住它的测试；别的语言用 `lang` 参数单独断言。
+- 每个读数据的页面至少有一个用失败的假后端驱动的错误状态测试（`AI_CODING_GUIDE.md` 第 12.6 节）。
+- `styles.test.ts` 以文本读 `styles.css?raw`（Vitest 只给这个文件保留 CSS 内容），核对状态色在两种主题下的对比度、布局常量与字体。
+
+## 面板与 core 共用的用例表
+
+面板重复 core 的规则时，规则写成一张 JSON 用例表，两边的测试读同一个文件：TS 直接导入 JSON，Rust 用 `include_str!("../../src/…")` 读，不复制成第二份。改规则时先改表，两边的测试都要过。
+
+| 用例表 | TS 一侧 | Rust 一侧 |
+|---|---|---|
+| `app/src/lib/clean-cases.json` | `clean.test.ts`（`cleanDisplayText`） | `app/src-tauri/src/commands.rs` 的测试，对照 core 的 `clean_text`（`ansi: true` 的转义序列用例只在面板） |
+| `app/src/lib/model-name-cases.json` | `model-name.test.ts`（`isValidModelName`） | `commands.rs` 的测试，对照 `config::is_valid_model_name` |
+| `app/src/lib/problem-cases.json` | `problem.test.ts`（侧栏的「需要处理」） | `app/src-tauri/src/tray.rs` 的测试（托盘图标） |
+| `app/src/i18n/language-cases.json` | `i18n.test.ts`（`resolveLanguage`） | `app/src-tauri/src/i18n.rs` 的测试（`resolve_language`） |
+| `app/src/lib/trigger-defaults.json` | `useTriggerNames`、假后端的默认设置 | `commands.rs` 的测试，对照 `TriggerNames::default()` |
+
+前端测试要用 core 的样本时直接读 `crates/core/tests/fixtures/`（`timeline.test.ts` 以 `?raw` 导入 `claude-stream.jsonl`、`codex-exec.jsonl`），`vite.config.ts` 只在测试运行时允许读仓库根目录。用例里的不可见字符写成转义（`SECURITY_CODING_SPEC.md` 第 7 节）。
 
 ## 假实现清单
 
