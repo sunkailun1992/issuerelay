@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" color="#000">
+  <!-- Option A (relay), macOS template: black ink only, so the system can tint it. -->
+  <rect x="9.35" y="11.1" width="18.5" height="7" rx="3.5" transform="rotate(-45 18.6 14.6)" fill="currentColor"/>
+  <g fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+    <path d="M7.2 8.8 H16.45"/>
+    <path d="M3.8 14.4 H10.85"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" color="#000">
+  <!-- Option B (handover), macOS template: black ink only, so the system can tint it. -->
+  <g fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7.4 23.6 A14.59 14.59 0 0 1 17.65 8.81"/>
+    <path d="M13.29 6.8 L17.65 8.81 L15.19 12.93"/>
+  </g>
+  <circle cx="7.4" cy="23.6" r="3.5" fill="currentColor"/>
+  <circle cx="24.6" cy="8.4" r="4.5" fill="currentColor"/>
+</svg>

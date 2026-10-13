@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Option C (ticket + start). macOS grid: an 824 px rounded square centred on the 1024 px canvas. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#666af9"/>
+      <stop offset="1" stop-color="#3633bf"/>
+    </linearGradient>
+    <filter id="lift" x="-10%" y="-10%" width="120%" height="125%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <filter id="glyph-shadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#1c1a70" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)" filter="url(#lift)"/>
+  <path fill="#fff" filter="url(#glyph-shadow)" d="M350 232 H674 A64 64 0 0 1 738 296 V418 A34 34 0 0 0 738 486 V728 A64 64 0 0 1 674 792 H350 A64 64 0 0 1 286 728 V486 A34 34 0 0 0 286 418 V296 A64 64 0 0 1 350 232 Z"/>
+  <rect x="346" y="288" width="250" height="34" rx="17" fill="#cdd5ff"/>
+  <rect x="346" y="346" width="160" height="34" rx="17" fill="#cdd5ff"/>
+  <path d="M352 452 H672" fill="none" stroke="#cdd5ff" stroke-width="8" stroke-dasharray="20 18" stroke-linecap="round"/>
+  <path fill="url(#plate)" d="M497 538.1 Q452 512 452 564 L452 680 Q452 732 497 705.9 L597.2 648 Q642 622 597.2 596 Z"/>
+</svg>

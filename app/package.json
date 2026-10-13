@@ -10,7 +10,8 @@
     "lint": "tsc -b --noEmit && eslint .",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons": "node scripts/icons.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.2",
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.12.2",
     "@testing-library/dom": "^10.4.2",
