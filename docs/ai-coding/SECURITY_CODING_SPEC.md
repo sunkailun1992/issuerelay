@@ -4,6 +4,8 @@
 
 - Linear 的 OAuth 令牌和 API key 只存在系统钥匙串（`keyring`，服务名 `com.sunkailun.issuerelay`），不写文件，不进日志，不出现在 IPC 响应和错误信息里。
 - 同一时刻只留一种登录方式：改用 API key 时先清掉 OAuth 凭据再存 key，OAuth 登录后清掉保存的 key（清不掉只警告，因为启动时 OAuth 优先；`host::SystemConnector`；开发宿主的 `login` / `api-key` 也走它，不得自己存凭据）。启动时先试 OAuth，留着旧的 OAuth 凭据会让重启后仍用旧登录。登录、换 key、登出一次只做一个（`Host` 里的一把锁），钥匙串和宿主才会停在同一个登录上。
+- 面板里的个人 API key 输入框（`ApiKeyForm`，设置与首次引导共用）是密码框，不提示记住：key 去掉前后空白后只发给引擎一次，引擎答复后（不论收下与否）立刻清空；面板从不回显它、不写日志、不放进失败提示；浏览器登录在等待时它不可用（core 一次只改一个登录）。
+- 代理地址里的用户名和密码：引擎报告环境前先打码（`ExecEnv::proxy_for_display`），面板显示前再打码一次（`app/src/lib/mask.ts`，与 core 的 `env::mask_credentials` 同规则，`mask-cases.json` 两边共读）；面板收不到未打码的值（`Host::env()` 不经任何命令交给面板）。
 - Claude Code、Codex、git、CI、测试环境的凭据，程序一概不碰，由各自的工具管理。
 - 测试不得读写真实钥匙串；必须碰的测试标 `#[ignore]`，并写明手动运行的方式。
 

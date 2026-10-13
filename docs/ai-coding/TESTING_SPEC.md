@@ -49,6 +49,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 提交前替换：姓名改为 `Jane Doe`，邮箱改为 `jane@example.com`，需求标识改为 `DEMO-N`，UUID 改为 `00000000-0000-0000-0000-00000000000N`，项目改为 `Demo Project`，团队改为 `Demo`，URL 改为 `https://linear.app/demo/issue/DEMO-N`，路径改为 `~/…`，会话 ID 改为全零。字段名与结构保持原样。
 - 不为了让测试通过去手改真实样本；需要别的形态就另写一份虚构夹具。
 - 前端测试需要同样的样本时直接读 `crates/core/tests/fixtures/`，不复制一份（例如 `app/src/lib/timeline.test.ts` 以 `?raw` 导入两份执行者输出）；`vite.config.ts` 只在测试运行时允许读仓库根目录。
+- 面板与 core（或托盘）必须同规则的函数，各有一张两边共读的用例表，不复制：显示文本清洗 `app/src/lib/clean-cases.json`、「需要处理」判定 `problem-cases.json`、模型名 `model-name-cases.json`、代理打码 `mask-cases.json`、语言解析 `app/src/i18n/language-cases.json`；TS 测试和 Rust 一侧对照 core 的测试（`app/src-tauri/src/commands.rs` 等）读同一个文件，改规则时两边一起改。
 
 ## 实机验收规则
 

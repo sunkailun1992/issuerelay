@@ -1,0 +1,21 @@
+[
+  {"value": "http://jane:s3cret@proxy.example:8080", "masked": "http://***@proxy.example:8080"},
+  {"value": "jane:s3cret@proxy.example:8080", "masked": "***@proxy.example:8080"},
+  {"value": " http://jane:s3cret@proxy.example:8080", "masked": " http://***@proxy.example:8080"},
+  {"value": "HTTPS_PROXY=http://jane:s3cret@proxy.example:8080", "masked": "HTTPS_PROXY=http://***@proxy.example:8080"},
+  {"value": "http://jane:p@ss@proxy.example:8080", "masked": "http://***@proxy.example:8080"},
+  {"value": "http://token@proxy.example:8080/path@x", "masked": "http://***@proxy.example:8080/path@x"},
+  {"value": "http://proxy.example:8080", "masked": "http://proxy.example:8080"},
+  {"value": "localhost,127.0.0.1", "masked": "localhost,127.0.0.1"},
+  {"value": "socks5h://jane:s3cret@proxy.example:1080", "masked": "socks5h://***@proxy.example:1080"},
+  {"value": "token@proxy.example:8080", "masked": "***@proxy.example:8080"},
+  {"value": "jane:s3cret@proxy.example:8080/path@x", "masked": "***@proxy.example:8080/path@x"},
+  {"value": "proxy.example:8080/path@x", "masked": "proxy.example:8080/path@x"},
+  {"value": "proxy.example:8080", "masked": "proxy.example:8080"},
+  {"value": "jane:s3cret@proxy.example/redirect?to=http://other.example", "masked": "***@proxy.example/redirect?to=http://other.example"},
+  {"value": "jane:s3cret@proxy.example:8080?to=http://other.example", "masked": "***@proxy.example:8080?to=http://other.example"},
+  {"value": "proxy.example/redirect?to=http://jane:visible@other.example", "masked": "proxy.example/redirect?to=http://jane:visible@other.example"},
+  {"value": "\"http://jane:s3cret@proxy.example:8080\"", "masked": "\"http://***@proxy.example:8080\""},
+  {"value": "\thttp://jane:s3cret@proxy.example:8080", "masked": "\thttp://***@proxy.example:8080"},
+  {"value": "", "masked": ""}
+]

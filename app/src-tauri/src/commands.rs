@@ -973,4 +973,29 @@ mod tests {
             );
         }
     }
+
+    /// One row of app/src/lib/mask-cases.json, which the panel's `maskCredentials` test reads.
+    #[derive(Deserialize)]
+    struct MaskCase {
+        value: String,
+        masked: String,
+    }
+
+    #[test]
+    fn mask_cases_follow_core() {
+        let cases: Vec<MaskCase> =
+            serde_json::from_str(include_str!("../../src/lib/mask-cases.json"))
+                .expect("mask-cases.json is valid");
+        // The engine masks a proxy value before the environment check carries it to the panel, and
+        // the panel masks what it shows once more: the two must never disagree about a value.
+        assert!(!cases.is_empty());
+        for case in cases {
+            assert_eq!(
+                issuerelay_core::env::mask_credentials(&case.value),
+                case.masked,
+                "{:?}",
+                case.value
+            );
+        }
+    }
 }

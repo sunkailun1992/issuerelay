@@ -136,7 +136,9 @@ export function useAppInfo() {
  * An action on the backend. When it succeeds the queries it changed are refreshed (given as keys,
  * or as a function of what the action was called with); when it fails the user is told with the
  * translated headline `failureKey` and the backend's line as the reason (`reportFailure`).
- * `quiet` can keep a failure that is no failure from being reported. The keys in `reread` are
+ * `quiet` can keep a failure that is no failure from being reported. `gcTime` is how long the
+ * action's record (what it was called with, and how it went) is kept once nothing shows it any more; the
+ * library keeps it five minutes unless told otherwise. The keys in `reread` are
  * also waited for: the action is over once those are read again, and read again wherever they
  * are cached, also when no page shows them right now (`refetchType: "all"`), so that whatever
  * the user opens next, the first-run gate included, finds the saved values and not the ones from
@@ -152,13 +154,15 @@ function useAction<Variables, Result>(
     mutationKey,
     quiet,
     reread = [],
-  }: { mutationKey?: QueryKey; quiet?: (error: unknown) => boolean; reread?: readonly QueryKey[] } = {},
+    gcTime,
+  }: { mutationKey?: QueryKey; quiet?: (error: unknown) => boolean; reread?: readonly QueryKey[]; gcTime?: number } = {},
 ) {
   const backend = useBackend();
   const client = useQueryClient();
   const { t } = useTranslation();
   return useMutation<Result, Error, Variables>({
     mutationKey,
+    ...(gcTime === undefined ? {} : { gcTime }),
     mutationFn: (variables) => run(backend, variables),
     onSuccess: async (_result, variables) => {
       for (const queryKey of typeof refreshes === "function" ? refreshes(variables) : refreshes) {
@@ -270,11 +274,16 @@ export function useLinearLoginWaiting(): boolean {
   return useIsMutating({ mutationKey: LINEAR_LOGIN }) > 0;
 }
 
+/**
+ * Connects with a personal API key. The key is what the action is called with, so its record is not
+ * kept at all once the form has let go of it (`reset()`), not even for the library's five minutes.
+ */
 export function useLinearApiKey() {
   return useAction<string, Viewer>(
     (backend, key) => backend.linearUseApiKey(key),
     linearChange,
     "actions.failed.linear_api_key",
+    { gcTime: 0 },
   );
 }
 
