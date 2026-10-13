@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
-import { isNewestRun, newestRuns } from "./runs";
+import { isActive, isNewestRun, newestRuns } from "./runs";
 
 test("the newest run of an issue is the one with the greatest id", () => {
   // The demo has two runs of DEMO-12: the old failed one (id 2) and the one running now (id 12).
@@ -26,4 +26,18 @@ test("a run is the newest unless a run of the same issue has a greater id", () =
   expect(isNewestRun(DEMO_JOBS.find((job) => job.id === 8)!, DEMO_JOBS)).toBe(true);
   // Nothing known of the issue's other runs: the run stands.
   expect(isNewestRun(older, [])).toBe(true);
+});
+
+test("a run is active while it waits, is queued or runs, like core's JobState::is_active", () => {
+  const states = Object.fromEntries(DEMO_JOBS.map((job) => [job.state, isActive(job)]));
+  expect(states).toEqual({
+    running: true,
+    queued: true,
+    waiting_binding: true,
+    awaiting_acceptance: false,
+    needs_info: false,
+    failed: false,
+    done: false,
+    canceled: false,
+  });
 });

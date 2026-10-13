@@ -935,4 +935,17 @@ mod tests {
             "only escape-sequence cases skip the core check"
         );
     }
+
+    #[test]
+    fn the_panels_default_trigger_names_are_cores() {
+        // The panel shows these names until its settings have been read, and the mock's default
+        // settings use them; app/src/lib/trigger-defaults.json is the only copy. Compared as JSON
+        // so that a missing or extra name fails too (`TriggerNames` fills missing ones in).
+        let panel: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/lib/trigger-defaults.json"))
+                .expect("trigger-defaults.json is valid");
+        let core = serde_json::to_value(issuerelay_core::config::TriggerNames::default())
+            .expect("the trigger names serialize");
+        assert_eq!(panel, core);
+    }
 }

@@ -13,15 +13,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { useCancelJob, useJobs, useMarkDone, useRetryJob } from "@/hooks/queries";
+import { useOpenLinear } from "@/hooks/useOpenLinear";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
-import { useBackend } from "@/lib/backend-context";
-import { reportFailure } from "@/lib/errors";
-import { isNewestRun } from "@/lib/runs";
+import { isActive, isNewestRun } from "@/lib/runs";
 import type { Job, JobState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/** The runs that can be stopped: they have not ended. */
-const STOPPABLE: readonly JobState[] = ["queued", "waiting_binding", "running"];
 /** The runs that can be run again: they ended without the result the issue needed. */
 const RETRYABLE: readonly JobState[] = ["failed", "canceled", "needs_info"];
 
@@ -84,24 +81,18 @@ function MarkDoneButton({ job, size }: { job: Job; size: Size }) {
   );
 }
 
-/**
- * Opens the issue in the browser. The link goes to the backend as it is: only the app decides
- * what is a Linear link and opens it (and says so when it is not), the panel opens nothing itself.
- */
+/** Opens the issue in the browser (`useOpenLinear`: the backend decides what may be opened). */
 function OpenInLinearButton({ url, compact }: { url: string; compact: boolean }) {
   const { t } = useTranslation();
-  const backend = useBackend();
+  const open = useOpenLinear();
   const label = t("actions.open_in_linear");
-  const open = () => {
-    backend.openLinear(url).catch((error: unknown) => reportFailure(error, t, "actions.failed.open_linear"));
-  };
   // Compact: an icon that keeps its name for screen readers and as a tooltip.
   return compact ? (
-    <Button variant="ghost" size="icon-sm" aria-label={label} title={label} onClick={open}>
+    <Button variant="ghost" size="icon-sm" aria-label={label} title={label} onClick={() => open(url)}>
       <ExternalLink aria-hidden />
     </Button>
   ) : (
-    <Button variant="outline" onClick={open}>
+    <Button variant="outline" onClick={() => open(url)}>
       <ExternalLink aria-hidden />
       {label}
     </Button>
@@ -110,14 +101,16 @@ function OpenInLinearButton({ url, compact }: { url: string; compact: boolean })
 
 /**
  * What can be done with a run, shared by the overview, the issue list and the run's page: only
- * the actions its state allows (stop while it has not ended; run again after a failure, a stop
- * or a question, if it is its issue's newest run; mark done once it awaits acceptance), and
- * "Open in Linear" when the issue's link is given. Without a run only the link is offered.
- * `compact` is for a row of a table or a list.
+ * the actions its state allows (stop while it is in hand; run again after a failure, a stop or a
+ * question, if it is its issue's newest run; mark done once it awaits acceptance), and "Open in
+ * Linear" when the issue's link is given. Without a run only the link is offered. `compact` is
+ * for a row of a table or a list: smaller buttons that keep to one line, and a link that is an
+ * icon. A table that cannot spare even that gives no `url` and makes the identifier the link
+ * (`IssueLink`), as the issue list does.
  */
 export function JobActions({ job, url, compact = false }: { job?: Job | null; url?: string; compact?: boolean }) {
   const size: Size = compact ? "sm" : "default";
-  const stoppable = job != null && STOPPABLE.includes(job.state);
+  const stoppable = job != null && isActive(job);
   const retryable = job != null && RETRYABLE.includes(job.state);
   const markable = job != null && job.state === "awaiting_acceptance";
   if (!stoppable && !retryable && !markable && !url) return null;

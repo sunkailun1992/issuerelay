@@ -210,7 +210,12 @@ pub struct IssueView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueStatus {
     /// It meets every condition. `IssueView::job` says what happened with it so far.
-    Eligible,
+    /// `picked_up` says whether the next check does anything with it. It is true for an issue
+    /// without a run, for one whose run is still in hand (waiting, queued or running), and for
+    /// one that Linear changed since its last run ended. It is false when that run is over and
+    /// Linear's `updatedAt` has not moved past what the run recorded: the poll leaves such an
+    /// issue alone (`trigger::should_enqueue`), and only running it again by hand starts it.
+    Eligible { picked_up: bool },
     /// Its status is not the trigger's Todo status; `state` is its status, cleaned for display.
     NotTodo { state: String },
     /// It does not match the trigger's label or assignee as IssueRelay compares them.
@@ -812,6 +817,9 @@ impl Engine {
         let (ready, _) = self.readiness().await;
         let mut views = Vec::with_capacity(issues.len());
         for issue in issues {
+            // Read first and released at once: the verdict below looks at the bound folder on
+            // disk, which must not happen while the store is locked.
+            let job = self.store().latest_for_issue(&issue.uuid)?;
             let status = if !same_name(&issue.state, &names.todo) {
                 IssueStatus::NotTodo {
                     state: clean_text(&issue.state),
@@ -819,16 +827,20 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                // Looks at the bound folder on disk, so it runs before the store is locked.
                 match trigger::evaluate(&issue, &cfg, &me.id, &ready) {
-                    Eligibility::Eligible(_) => IssueStatus::Eligible,
+                    Eligibility::Eligible(_) => IssueStatus::Eligible {
+                        // What the poll does with such an issue (`reconcile`): a run in hand stays
+                        // as it is, anything else is recorded anew only when `should_enqueue` says
+                        // so, which is the same function the poll asks.
+                        picked_up: job.as_ref().is_some_and(|job| job.state.is_active())
+                            || trigger::should_enqueue(job.as_ref(), &issue),
+                    },
                     Eligibility::Waiting(reason) => IssueStatus::Waiting {
                         reason: reason.view(),
                     },
                     Eligibility::NotCandidate => IssueStatus::NotCandidate,
                 }
             };
-            let job = self.store().latest_for_issue(&issue.uuid)?;
             views.push(IssueView {
                 issue: display_issue(issue),
                 job,

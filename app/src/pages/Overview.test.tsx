@@ -179,6 +179,30 @@ test("nothing is reported when there is nothing to report", async () => {
   await renderWithProviders(<Overview />, { backend });
   expect(await screen.findByText("Nothing is running")).toBeInTheDocument();
   expect(screen.queryAllByRole("alert")).toHaveLength(0);
+  expect(screen.queryAllByRole("status")).toHaveLength(0);
+});
+
+test("only the environment problem is an alert; the notices about runs and the wait are polite status notices", async () => {
+  const backend = await backendWithStatus({ last_error: "could not start DEMO-11: Linear did not answer", draining: true });
+  await renderWithProviders(<Overview />, { backend });
+  expect(await screen.findByText("1 run failed")).toBeInTheDocument();
+  expect(screen.getByText("A run could not be started").closest("[role=alert]")).not.toBeNull();
+  for (const text of ["1 run failed", "1 issue awaits your acceptance", "Waiting for the runs in progress to finish; nothing new starts"]) {
+    const notice = screen.getByText(text);
+    expect(notice.closest("[role=status]"), text).not.toBeNull();
+    expect(notice.closest("[role=alert]"), text).toBeNull();
+  }
+  // Screen readers announce an alert at once, so only one thing is allowed to be one.
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+});
+
+test("the icons of the notices carry their state colour, which the alert's own text-current must not undo", async () => {
+  await renderWithProviders(<Overview />);
+  const failed = (await screen.findByText("1 run failed")).closest("[data-slot=alert]")!;
+  // The alert sets `*:[svg]:text-current`; only an important utility outranks it.
+  expect(failed.querySelector("svg")).toHaveClass("text-state-failed!");
+  const awaiting = screen.getByText("1 issue awaits your acceptance").closest("[data-slot=alert]")!;
+  expect(awaiting.querySelector("svg")).toHaveClass("text-state-awaiting!");
 });
 
 test("an acceptance that a newer run of the issue replaced is no reminder", async () => {

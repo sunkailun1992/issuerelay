@@ -70,6 +70,9 @@ function problemDetail({ status, linear }: StatusView): string | null {
  * What needs the user: an environment problem (the tray's rule), runs whose newest try failed,
  * issues that await acceptance, and the wait for the runs in progress to end. `jobs` is not
  * there while the runs are being read (or cannot be): only the reminders that need them go.
+ * Only the problem is an alert, which a screen reader announces at once; the others are notices
+ * (`role="status"`, announced politely). An icon takes its state colour with an important
+ * utility (`!` at the end): the alert sets its icon to `text-current` and would win otherwise.
  */
 function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }) {
   const { t } = useTranslation();
@@ -99,8 +102,8 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
         </Alert>
       )}
       {failed > 0 && (
-        <Alert>
-          <CircleX aria-hidden className="text-state-failed" />
+        <Alert role="status">
+          <CircleX aria-hidden className="text-state-failed!" />
           <AlertTitle>{t("overview.alert_failed", { count: failed })}</AlertTitle>
           <AlertAction>
             <Link to="/runs?state=failed" className={VIEW_LINK}>
@@ -110,8 +113,8 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
         </Alert>
       )}
       {awaiting > 0 && (
-        <Alert>
-          <ClipboardCheck aria-hidden className="text-state-awaiting" />
+        <Alert role="status">
+          <ClipboardCheck aria-hidden className="text-state-awaiting!" />
           <AlertTitle>{t("overview.alert_awaiting", { count: awaiting })}</AlertTitle>
           <AlertAction>
             <Link to="/issues" className={VIEW_LINK}>
@@ -121,7 +124,7 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
         </Alert>
       )}
       {view.status.draining && (
-        <Alert>
+        <Alert role="status">
           <Hourglass aria-hidden />
           <AlertTitle>{t("overview.draining")}</AlertTitle>
         </Alert>

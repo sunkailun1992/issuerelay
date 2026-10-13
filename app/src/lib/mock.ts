@@ -4,8 +4,9 @@ import {
   DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LOGS,
   DEMO_PROJECTS, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
+import { isActive } from "./runs";
 import type {
-  Binding, ControlServers, DoctorReport, EngineEvent, HeldJob, IssueView, Job, LinearSetup, Settings,
+  Binding, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup, Settings,
   StartupState, StatusView, Viewer,
 } from "./types";
 
@@ -25,6 +26,20 @@ function isLinearUrl(text: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether the next check picks up an issue that meets every condition: the engine's rule
+ * (`Engine::issues`, which asks `trigger::should_enqueue`). It has no run, or its newest run is
+ * still in hand, or Linear changed it after the moment that run recorded. Otherwise only running
+ * it again starts it.
+ */
+export function pickedUp(issue: Issue, newest: Job | null): boolean {
+  return (
+    newest === null ||
+    isActive(newest) ||
+    Date.parse(issue.updated_at) > Date.parse(newest.verified_updated_at ?? newest.discovered_updated_at)
+  );
 }
 
 /**
@@ -103,7 +118,11 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const newestRun = (issueUuid: string): Job | undefined =>
     jobs.filter((job) => job.issue_uuid === issueUuid).sort((a, b) => b.id - a.id)[0];
   const issueViews = (): IssueView[] =>
-    (demo ? DEMO_ISSUES : []).map(({ issue, status }) => ({ issue, job: newestRun(issue.uuid) ?? null, status }));
+    (demo ? DEMO_ISSUES : []).map(({ issue, status }) => {
+      const job = newestRun(issue.uuid) ?? null;
+      // The verdict of an eligible issue follows its newest run, which stopping or running again changes.
+      return { issue, job, status: status.kind === "eligible" ? { kind: "eligible", picked_up: pickedUp(issue, job) } : status };
+    });
   const connect = (method: "oauth" | "api_key"): Viewer => {
     linear = { kind: "connected", method };
     viewer = DEMO_VIEWER;

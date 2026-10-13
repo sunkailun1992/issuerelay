@@ -44,7 +44,8 @@ function Layout({ icon: Icon, tone, spin, children, actions }: { icon: LucideIco
  * The connection to Linear (design 7): how it stands and what can be done about it. Every
  * headline comes from structured data (`StatusView.linear`, the login that is under way); the
  * engine's own sentence, if there is one, is the detail line under it. `manage` is for the
- * environment check, where a working connection can also be authorized again or ended.
+ * environment check, where a connection (a working one, or one that failed) can also be
+ * authorized again or ended.
  */
 export function LinearStatus({ manage = false }: { manage?: boolean }) {
   const { t } = useTranslation();
@@ -64,6 +65,22 @@ export function LinearStatus({ manage = false }: { manage?: boolean }) {
   }
   if (status.data === undefined) return <LoadingState rows={1} />;
   const { status: snapshot, linear } = status.data;
+
+  // What the environment check adds to a connection that exists but is not what it should be: a
+  // new authorization (the stored token may have been revoked, which trying again cannot mend)
+  // and logging out. The waiting state above is the same whichever card started the login.
+  const managing = manage && (
+    <>
+      <Button variant="outline" size="sm" onClick={() => login.mutate()}>
+        <LogIn aria-hidden />
+        {t("linear.log_in_again")}
+      </Button>
+      <Button variant="outline" size="sm" disabled={logout.isPending} onClick={() => logout.mutate()}>
+        <LogOut aria-hidden />
+        {t("linear.log_out")}
+      </Button>
+    </>
+  );
 
   if (waiting) {
     return (
@@ -110,10 +127,13 @@ export function LinearStatus({ manage = false }: { manage?: boolean }) {
           icon={TriangleAlert}
           tone="bad"
           actions={
-            <Button variant="outline" size="sm" disabled={reconnect.isPending} onClick={() => reconnect.mutate()}>
-              <RefreshCw aria-hidden className={cn(reconnect.isPending && "animate-spin")} />
-              {t("linear.retry")}
-            </Button>
+            <>
+              <Button variant="outline" size="sm" disabled={reconnect.isPending} onClick={() => reconnect.mutate()}>
+                <RefreshCw aria-hidden className={cn(reconnect.isPending && "animate-spin")} />
+                {t("linear.retry")}
+              </Button>
+              {managing}
+            </>
           }
         >
           <p className="font-medium">{t("linear.connect_failed")}</p>
@@ -132,20 +152,7 @@ export function LinearStatus({ manage = false }: { manage?: boolean }) {
         <Layout
           icon={CircleCheck}
           tone="good"
-          actions={
-            manage && (
-              <>
-                <Button variant="outline" size="sm" onClick={() => login.mutate()}>
-                  <LogIn aria-hidden />
-                  {t("linear.log_in_again")}
-                </Button>
-                <Button variant="outline" size="sm" disabled={logout.isPending} onClick={() => logout.mutate()}>
-                  <LogOut aria-hidden />
-                  {t("linear.log_out")}
-                </Button>
-              </>
-            )
-          }
+          actions={managing}
         >
           {snapshot.viewer === null ? (
             <p className="font-medium">{t("linear.connected_plain")}</p>

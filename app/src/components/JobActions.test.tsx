@@ -1,6 +1,7 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
+import { queryKeys } from "@/hooks/queries";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import type { Job, JobState } from "@/lib/types";
@@ -73,9 +74,6 @@ test("only Linear links are offered for opening", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Open in Linear" }));
   expect(open).toHaveBeenCalledWith("https://linear.app/demo/issue/DEMO-7");
 });
-
-/** Lets what is already under way (answers with no delay) finish. */
-const settle = () => act(() => new Promise<void>((done) => setTimeout(done, 10)));
 
 test("stop and run again act on the run beside them", async () => {
   const running = await jobIn("running");
@@ -156,18 +154,19 @@ test("a mark done the engine refuses is reported with its reason", async () => {
 
 test("until the list of runs is read, Run again is offered as usual", async () => {
   const { backend, job } = await jobIn("failed");
-  backend.listJobs = () => new Promise<Job[]>(() => {});
+  backend.listJobs = vi.fn(() => new Promise<Job[]>(() => {}));
   await renderWithProviders(<JobActions job={job} />, { backend });
-  await settle();
+  // The read is under way, and it never ends.
+  await waitFor(() => expect(backend.listJobs).toHaveBeenCalled());
   expect(screen.getByRole("button", { name: "Run again" })).toBeInTheDocument();
 });
 
 test("a list of runs that cannot be read does not take Run again away", async () => {
   const { backend, job } = await jobIn("failed");
   backend.listJobs = vi.fn().mockRejectedValue(new BackendError("the engine did not answer"));
-  await renderWithProviders(<JobActions job={job} />, { backend });
-  await waitFor(() => expect(backend.listJobs).toHaveBeenCalled());
-  await settle();
+  const { client } = await renderWithProviders(<JobActions job={job} />, { backend });
+  // Until the read has failed there is nothing to prove: it has, once the cache says so.
+  await waitFor(() => expect(client.getQueryState([...queryKeys.jobs, 200])?.status).toBe("error"));
   expect(screen.getByRole("button", { name: "Run again" })).toBeInTheDocument();
 });
 

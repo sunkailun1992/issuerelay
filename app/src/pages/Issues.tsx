@@ -2,6 +2,7 @@ import type { TFunction } from "i18next";
 import { Inbox, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
+import { IssueLink } from "@/components/IssueLink";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -11,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useIssues } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
+import { isActive } from "@/lib/runs";
 import type { IssueStatus, IssueView, TriggerNames } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -24,7 +26,7 @@ const COLUMNS = ["issue", "title", "linear_state", "local_state", "reason", "act
 function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction): string {
   switch (status.kind) {
     case "eligible":
-      return t("issues.eligible");
+      return status.picked_up ? t("issues.eligible") : t("issues.runs_again_after_change");
     case "not_todo":
       return t("issues.not_todo", { state: status.state, todo: names.todo });
     case "not_candidate":
@@ -43,24 +45,37 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
   }
 }
 
+/**
+ * One issue. The window can be as small as 900 px, which leaves the table about 600 px (a little
+ * less where the scrollbar takes room), and a row has to fit: the identifier is the link to Linear
+ * (`IssueLink`), so the actions are one button at most; the title and the reason wrap, a long word
+ * of them too (a folder's path, say); a state name wraps between words.
+ */
 function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
   const { t } = useTranslation();
   const { issue, job, status } = view;
+  // While a run is in hand its badge says it all; the issue's status is what holds back a run that
+  // has ended or has not begun.
+  const reason = status.kind === "not_todo" && job !== null && isActive(job) ? null : describeStatus(status, names, t);
+  const pickedUp = status.kind === "eligible" && status.picked_up;
   return (
     <TableRow>
-      <TableCell className="font-mono text-xs">{issue.identifier}</TableCell>
       <TableCell>
-        <div className="max-w-sm whitespace-normal">{issue.title}</div>
+        <IssueLink identifier={issue.identifier} url={issue.url} />
       </TableCell>
-      <TableCell>{issue.state}</TableCell>
+      <TableCell>
+        <div className="max-w-sm wrap-anywhere whitespace-normal">{issue.title}</div>
+      </TableCell>
+      <TableCell>
+        {/* A state name is a short word or two: it wraps between words, never inside one. */}
+        <div className="whitespace-normal">{issue.state}</div>
+      </TableCell>
       <TableCell>{job === null ? <span className="text-muted-foreground">—</span> : <StatusBadge state={job.state} />}</TableCell>
       <TableCell>
-        <div className={cn("max-w-xs whitespace-normal", status.kind !== "eligible" && "text-muted-foreground")}>
-          {describeStatus(status, names, t)}
-        </div>
+        {reason !== null && <div className={cn("max-w-xs wrap-anywhere whitespace-normal", !pickedUp && "text-muted-foreground")}>{reason}</div>}
       </TableCell>
       <TableCell>
-        <JobActions job={job} url={issue.url} compact />
+        <JobActions job={job} compact />
       </TableCell>
     </TableRow>
   );
@@ -140,7 +155,9 @@ export default function Issues() {
         <TableHeader>
           <TableRow>
             {COLUMNS.map((column) => (
-              <TableHead key={column}>{t(`issues.column.${column}`)}</TableHead>
+              <TableHead key={column}>
+                <span className="whitespace-normal">{t(`issues.column.${column}`)}</span>
+              </TableHead>
             ))}
           </TableRow>
         </TableHeader>

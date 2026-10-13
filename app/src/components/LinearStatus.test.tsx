@@ -61,7 +61,7 @@ test("a connected card names the user in an element of its own, and when Linear 
   const name = screen.getByText("Jane Doe");
   expect(name).not.toBe(label);
   expect(label.contains(name)).toBe(true);
-  expect(screen.getByText("Last check Just now")).toBeInTheDocument();
+  expect(screen.getByText("Last check: Just now")).toBeInTheDocument();
   // Nothing to do when everything works, unless the card is for managing the connection.
   expect(screen.queryAllByRole("button")).toHaveLength(0);
 });
@@ -70,12 +70,12 @@ test("the time of the last check is worked out again while the card stays on scr
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
     await renderWithProviders(<LinearStatus />);
-    expect(await screen.findByText("Last check Just now")).toBeInTheDocument();
+    expect(await screen.findByText("Last check: Just now")).toBeInTheDocument();
     setFixedClock(new Date(MOCK_NOW.getTime() + 5 * 60_000));
     act(() => {
       vi.advanceTimersByTime(30_000);
     });
-    expect(screen.getByText("Last check 5 minutes ago")).toBeInTheDocument();
+    expect(screen.getByText("Last check: 5 minutes ago")).toBeInTheDocument();
   } finally {
     vi.useRealTimers();
   }
@@ -146,6 +146,57 @@ test("the card for managing the connection can authorize again and log out; the 
   await userEvent.click(screen.getByRole("button", { name: "Log out" }));
   expect(logout).toHaveBeenCalledTimes(1);
   expect(await screen.findByRole("button", { name: "Log in to Linear" })).toBeInTheDocument();
+});
+
+test("the card for managing a connection that failed can also authorize again and log out; the plain card can only retry", async () => {
+  // A revoked or stale token does not recover by trying again: the way out is a new authorization,
+  // or logging out and in.
+  const failed: LinearSetup = { kind: "connect_failed", message: "Linear rejected the token" };
+  const plain = await renderWithProviders(<LinearStatus />, { backend: await backendSaying(failed) });
+  await screen.findByText("Could not connect to Linear");
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again"]);
+  plain.unmount();
+
+  const backend = await backendSaying(failed);
+  const logout = vi.spyOn(backend, "linearLogout");
+  await renderWithProviders(<LinearStatus manage />, { backend });
+  await screen.findByText("Could not connect to Linear");
+  expect(screen.getByText("Linear rejected the token")).toBeInTheDocument();
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Authorize again", "Log out"]);
+  await userEvent.click(screen.getByRole("button", { name: "Log out" }));
+  expect(logout).toHaveBeenCalledTimes(1);
+});
+
+test("authorizing again from a failed connection waits for the browser and can be cancelled", async () => {
+  const backend = await backendSaying({ kind: "connect_failed", message: "Linear rejected the token" });
+  waitingLogin(backend);
+  await renderWithProviders(<LinearStatus manage />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Authorize again" }));
+  expect(await screen.findByText("Finish the authorization in your browser…")).toBeInTheDocument();
+  for (const name of ["Try again", "Authorize again", "Log out"]) {
+    expect(screen.queryByRole("button", { name }), name).not.toBeInTheDocument();
+  }
+
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  // The card is as it was, and the user gave up: no failure is shown.
+  expect(await screen.findByRole("button", { name: "Authorize again" })).toBeInTheDocument();
+  expect(screen.getByText("Linear rejected the token")).toBeInTheDocument();
+  expect(screen.queryByText("Could not log in to Linear")).not.toBeInTheDocument();
+});
+
+test("a retry from the managing card of a failed connection still asks for the connection again", async () => {
+  const backend = await backendSaying({ kind: "connect_failed", message: "Linear did not answer" });
+  backend.linearReconnect = vi.fn().mockResolvedValue({ kind: "connect_failed", message: "Linear did not answer" });
+  await renderWithProviders(<LinearStatus manage />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+  expect(backend.linearReconnect).toHaveBeenCalledTimes(1);
+});
+
+test("changed tools of Linear have nothing to authorize again or log out of, managing or not", async () => {
+  const backend = await backendSaying({ kind: "interface_changed", message: "Linear no longer has the tool `list_issues`" });
+  await renderWithProviders(<LinearStatus manage />, { backend });
+  expect(await screen.findByText("Linear's tools changed: update IssueRelay")).toBeInTheDocument();
+  expect(screen.queryAllByRole("button")).toHaveLength(0);
 });
 
 test("authorizing again waits for the browser like the first login does, and can be cancelled", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { createMockBackend } from "./mock";
+import { createMockBackend, pickedUp } from "./mock";
+import { DEMO_ISSUES, DEMO_JOBS } from "./mock-fixtures";
 import type { EngineEvent } from "./types";
 
 describe("mock backend", () => {
@@ -44,6 +45,48 @@ describe("mock backend", () => {
     const waiting = (await backend.issues()).find((view) => view.issue.identifier === "DEMO-5")!;
     expect(waiting.status).toEqual({ kind: "waiting", reason: { code: "project_not_bound" } });
     expect(waiting.job?.state).toBe("waiting_binding");
+  });
+
+  test("an eligible issue is picked up unless its newest run ended and Linear has not changed it since", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const issueIsPickedUp = async (identifier: string) => {
+      const view = (await backend.issues()).find((candidate) => candidate.issue.identifier === identifier)!;
+      if (view.status.kind !== "eligible") throw new Error(`${identifier} is ${view.status.kind}`);
+      return view.status.picked_up;
+    };
+    expect(await issueIsPickedUp("DEMO-3")).toBe(true); // no run at all
+    expect(await issueIsPickedUp("DEMO-11")).toBe(true); // queued: in hand
+    expect(await issueIsPickedUp("DEMO-6")).toBe(false); // stopped by the user, the issue unchanged since
+    // Stopping the queued run leaves it as DEMO-6 is: the engine does not start it again by itself.
+    await backend.cancelJob(11);
+    expect(await issueIsPickedUp("DEMO-11")).toBe(false);
+    // Running a stopped run again puts it back in hand.
+    await backend.retryJob(11);
+    expect(await issueIsPickedUp("DEMO-11")).toBe(true);
+    await backend.retryJob(6);
+    expect(await issueIsPickedUp("DEMO-6")).toBe(true);
+  });
+
+  test("an ended run counts from what it verified, or else from what it discovered", () => {
+    const issue = { ...DEMO_ISSUES[0].issue, updated_at: "2026-10-12T08:00:00Z" };
+    const ended = { ...DEMO_JOBS[0], state: "failed" as const, discovered_updated_at: "2026-10-12T07:00:00Z", verified_updated_at: null };
+    // Linear changed the issue after the run found it: the next check picks it up again.
+    expect(pickedUp(issue, ended)).toBe(true);
+    // The run read the issue again after that change (the AI's own edits, say): nothing new.
+    expect(pickedUp(issue, { ...ended, verified_updated_at: "2026-10-12T08:00:00Z" })).toBe(false);
+    expect(pickedUp(issue, { ...ended, verified_updated_at: "2026-10-12T08:00:01Z" })).toBe(false);
+    // A change after what the run verified brings it back.
+    expect(pickedUp({ ...issue, updated_at: "2026-10-12T08:00:02Z" }, { ...ended, verified_updated_at: "2026-10-12T08:00:01Z" })).toBe(true);
+  });
+
+  test("the verdicts written into the fixtures are what the mock works out for them at the start", () => {
+    // The mock works the verdict of an eligible issue out again from its newest run (so that stopping
+    // or running again changes it); the flag in the fixture is the one it starts with.
+    for (const { issue, status } of DEMO_ISSUES) {
+      if (status.kind !== "eligible") continue;
+      const newest = DEMO_JOBS.filter((job) => job.issue_uuid === issue.uuid).sort((a, b) => b.id - a.id)[0] ?? null;
+      expect(status.picked_up, issue.identifier).toBe(pickedUp(issue, newest));
+    }
   });
 
   test("a binding whose folder is not absolute is refused with the engine's message", async () => {

@@ -107,6 +107,7 @@
     "run_again": "다시 실행",
     "mark_done": "완료로 표시",
     "open_in_linear": "Linear에서 열기",
+    "open_issue_in_linear": "Linear에서 {{identifier}} 열기",
     "poll_now": "지금 확인",
     "confirm": "확인",
     "mark_done_confirm": "{{identifier}}을(를) {{done}} 상태로 바꿀까요? IssueRelay가 Linear에서 변경하는 유일한 작업입니다.",
@@ -174,6 +175,7 @@
     },
     "not_todo": "상태가 {{todo}}이(가) 아니라 {{state}}입니다",
     "eligible": "다음 확인 때 가져갑니다",
+    "runs_again_after_change": "Linear에서 변경되면 다시 실행됩니다",
     "not_candidate": "나에게 할당되지 않았거나 라벨이 맞지 않습니다",
     "paused": "모니터링이 일시 중지되었습니다",
     "waiting": {

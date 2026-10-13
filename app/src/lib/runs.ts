@@ -1,4 +1,12 @@
-import type { Job } from "./types";
+import type { Job, JobState } from "./types";
+
+/** The states of a run that is still in hand: it waits, is queued or runs (core's `JobState::is_active`). */
+export const ACTIVE_STATES: readonly JobState[] = ["waiting_binding", "queued", "running"];
+
+/** Whether the run is in hand: it can be stopped, and the engine records no new run of its issue meanwhile. */
+export function isActive(job: Job): boolean {
+  return ACTIVE_STATES.includes(job.state);
+}
 
 /** The newest run (the greatest id) of each issue among `jobs`, whatever their order. */
 export function newestRuns(jobs: readonly Job[]): Job[] {

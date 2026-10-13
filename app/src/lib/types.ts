@@ -91,7 +91,11 @@ export type WaitReason =
   | { code: "directory_missing"; directory: string }
   | { code: "executor_not_ready"; executor: ExecutorKind };
 export type IssueStatus =
-  | { kind: "eligible" }
+  /**
+   * It meets every condition. `picked_up` is false only when its last run is over and Linear has not
+   * changed the issue since: the next check leaves it alone, and only running it again starts it.
+   */
+  | { kind: "eligible"; picked_up: boolean }
   | { kind: "not_todo"; state: string }
   | { kind: "not_candidate" }
   | { kind: "waiting"; reason: WaitReason }

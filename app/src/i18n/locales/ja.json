@@ -107,6 +107,7 @@
     "run_again": "もう一度実行",
     "mark_done": "完了にする",
     "open_in_linear": "Linear で開く",
+    "open_issue_in_linear": "{{identifier}} を Linear で開く",
     "poll_now": "今すぐチェック",
     "confirm": "確認",
     "mark_done_confirm": "{{identifier}} を {{done}} にしますか？これは IssueRelay が Linear に加える唯一の変更です。",
@@ -174,6 +175,7 @@
     },
     "not_todo": "ステータスは {{state}} で、{{todo}} ではありません",
     "eligible": "次のチェックで引き受けます",
+    "runs_again_after_change": "Linear で変更があると再度実行されます",
     "not_candidate": "自分に割り当てられていないか、ラベルが一致しません",
     "paused": "監視を一時停止中です",
     "waiting": {

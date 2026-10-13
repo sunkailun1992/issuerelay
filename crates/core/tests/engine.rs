@@ -4259,7 +4259,10 @@ async fn the_issue_list_explains_what_each_labeled_issue_is_waiting_for() {
             .status
             .clone()
     };
-    assert_eq!(status_of(&views, "1"), IssueStatus::Eligible);
+    assert_eq!(
+        status_of(&views, "1"),
+        IssueStatus::Eligible { picked_up: true }
+    );
     assert_eq!(
         status_of(&views, "2"),
         IssueStatus::NotTodo {
@@ -4283,6 +4286,79 @@ async fn the_issue_list_explains_what_each_labeled_issue_is_waiting_for() {
     h.engine.pause().unwrap();
     let views = h.engine.issues().await.unwrap();
     assert_eq!(status_of(&views, "3"), IssueStatus::Paused);
+}
+
+/// Whether the issue list says the next check picks the issue `uuid` up; it must be eligible.
+fn picked_up(views: &[IssueView], uuid: &str) -> bool {
+    match &views.iter().find(|v| v.issue.uuid == uuid).unwrap().status {
+        IssueStatus::Eligible { picked_up } => *picked_up,
+        other => panic!("DEMO-{uuid} should be eligible, not {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_issue_list_says_whether_the_next_check_picks_an_eligible_issue_up() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo-a");
+    // A run that ended without the result the issue needed; the issue stays in Todo.
+    h.runner.script("DEMO-2", Script::exit_code(3));
+    h.linear.upsert(issue("2", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("2").state, JobState::Failed);
+    // An issue that has had no run at all.
+    h.linear.upsert(issue("1", "proj-1"));
+
+    let views = h.engine.issues().await.unwrap();
+    assert!(
+        picked_up(&views, "1"),
+        "an issue without a run is picked up"
+    );
+    assert!(
+        !picked_up(&views, "2"),
+        "a finished run is not started again while Linear has not changed the issue"
+    );
+    // The poll does what the list says: it starts the one and leaves the other.
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-2", "DEMO-1"]);
+
+    // Linear moves the issue's updatedAt past what the run recorded.
+    h.linear.update("2", |_| {});
+    let views = h.engine.issues().await.unwrap();
+    assert!(
+        picked_up(&views, "2"),
+        "a change in Linear brings a finished issue back"
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-2", "DEMO-1", "DEMO-2"]);
+}
+
+#[tokio::test]
+async fn an_issue_with_a_run_in_hand_is_picked_up_and_a_stopped_one_is_not_until_linear_changes() {
+    let h = Harness::new(1, true);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-1"));
+    // One run per folder: DEMO-1 runs (held at the gate), DEMO-2 is queued behind it.
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Running);
+    assert_eq!(h.latest("2").state, JobState::Queued);
+    let views = h.engine.issues().await.unwrap();
+    assert!(picked_up(&views, "1"), "a run under way is in hand");
+    assert!(picked_up(&views, "2"), "a queued run is in hand");
+
+    // The user stops the queued run: the engine does not start it again by itself.
+    h.engine.cancel_job(h.latest("2").id).unwrap();
+    let views = h.engine.issues().await.unwrap();
+    assert!(!picked_up(&views, "2"));
+    h.linear.update("2", |_| {});
+    let views = h.engine.issues().await.unwrap();
+    assert!(picked_up(&views, "2"));
+
+    h.runner.gate.add_permits(2);
+    h.settle().await;
 }
 
 #[tokio::test]
@@ -4846,8 +4922,12 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
     );
     let shapes = [
         (
-            IssueStatus::Eligible,
-            serde_json::json!({"kind": "eligible"}),
+            IssueStatus::Eligible { picked_up: true },
+            serde_json::json!({"kind": "eligible", "picked_up": true}),
+        ),
+        (
+            IssueStatus::Eligible { picked_up: false },
+            serde_json::json!({"kind": "eligible", "picked_up": false}),
         ),
         (
             IssueStatus::NotTodo {

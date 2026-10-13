@@ -79,22 +79,30 @@ test("a row has the title, Linear's status and the local state of its newest run
   expect(withoutRun.getByText("—")).toBeInTheDocument();
 });
 
-test("each row offers what its run allows, and Open in Linear", async () => {
+test("each row offers what its run allows, and the actions column never holds a second button", async () => {
   await renderWithProviders(<Issues />);
   await screen.findByText("DEMO-4");
   expect(within(rowOf("DEMO-10")).getByRole("button", { name: "Mark done" })).toBeInTheDocument();
   expect(within(rowOf("DEMO-12")).getByRole("button", { name: "Stop" })).toBeInTheDocument();
   expect(within(rowOf("DEMO-8")).getByRole("button", { name: "Run again" })).toBeInTheDocument();
-  const without = within(rowOf("DEMO-4"));
-  expect(without.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Open in Linear"]);
+  // At the smallest window the table has about 600 px: a row's actions are one button at most (an
+  // issue without a run has none), because Open in Linear is the identifier and not another button.
+  for (const row of screen.getAllByRole("row").slice(1)) {
+    const actions = within(row).getAllByRole("cell").at(-1)!;
+    expect(within(actions).queryAllByRole("button").length, row.textContent ?? "").toBeLessThanOrEqual(1);
+  }
+  expect(within(within(rowOf("DEMO-4")).getAllByRole("cell").at(-1)!).queryAllByRole("button")).toHaveLength(0);
 });
 
-test("opening an issue in Linear goes through the backend with the issue's link", async () => {
+test("the identifier of an issue is what opens it in Linear, through the backend, with the issue's link", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const open = vi.spyOn(backend, "openLinear");
   await renderWithProviders(<Issues />, { backend });
   await screen.findByText("DEMO-4");
-  await userEvent.click(within(rowOf("DEMO-4")).getByRole("button", { name: "Open in Linear" }));
+  const identifier = within(rowOf("DEMO-4")).getByRole("button", { name: "Open DEMO-4 in Linear" });
+  expect(identifier).toHaveTextContent("DEMO-4");
+  expect(within(rowOf("DEMO-4")).getAllByRole("cell")[0]).toContainElement(identifier);
+  await userEvent.click(identifier);
   expect(open).toHaveBeenCalledWith("https://linear.app/demo/issue/DEMO-4");
 });
 
@@ -111,7 +119,8 @@ test("marking an issue's run done asks first, from the issue list too", async ()
 
 test("every verdict of the engine is said in the interface's words", async () => {
   const cases: [IssueStatus, string][] = [
-    [{ kind: "eligible" }, "The next check picks it up"],
+    [{ kind: "eligible", picked_up: true }, "The next check picks it up"],
+    [{ kind: "eligible", picked_up: false }, "It runs again after a change in Linear"],
     [{ kind: "not_candidate" }, "It is not assigned to you, or its label does not match"],
     [{ kind: "paused" }, "Monitoring is paused"],
     [{ kind: "waiting", reason: { code: "project_not_bound" } }, "Its project is not bound to a local folder"],
@@ -126,6 +135,50 @@ test("every verdict of the engine is said in the interface's words", async () =>
     expect(within(rowOf("DEMO-4")).getByText(text), text).toBeInTheDocument();
     view.unmount();
   }
+});
+
+test("an eligible issue whose run ended is not picked up by itself, and the row says so beside Run again", async () => {
+  await renderWithProviders(<Issues />);
+  await screen.findByText("DEMO-4");
+  // DEMO-6's run was stopped and nothing changed in Linear since: only Run again starts it.
+  const stopped = within(rowOf("DEMO-6"));
+  expect(stopped.getByText("It runs again after a change in Linear")).toBeInTheDocument();
+  expect(stopped.queryByText("The next check picks it up")).not.toBeInTheDocument();
+  expect(stopped.getByRole("button", { name: "Run again" })).toBeInTheDocument();
+  // An issue that has had no run, and one whose run is queued, are picked up.
+  expect(within(rowOf("DEMO-3")).getByText("The next check picks it up")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-11")).getByText("The next check picks it up")).toBeInTheDocument();
+});
+
+test("stopping a queued run turns its row from picked up to not picked up", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-11")).getByText("The next check picks it up")).toBeInTheDocument();
+  await userEvent.click(within(rowOf("DEMO-11")).getByRole("button", { name: "Stop" }));
+  expect(await within(rowOf("DEMO-11")).findByText("It runs again after a change in Linear")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-11")).getByRole("button", { name: "Run again" })).toBeInTheDocument();
+});
+
+test.each(["queued", "waiting_binding", "running"] as const)("a %s run says it all: the status of its issue is not repeated", async (state) => {
+  // DEMO-4 has no run in the demo and is in Backlog: give it DEMO-12's run, in the state asked for.
+  const backend = backendWithIssues((views) => {
+    const run = views.find((view) => view.issue.identifier === "DEMO-12")!.job!;
+    return views.map((view) => (view.issue.identifier === "DEMO-4" ? { ...view, job: { ...run, state } } : view));
+  });
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-4")).queryByText(/Its status is/)).not.toBeInTheDocument();
+});
+
+test("an issue whose run has ended still says what status stops the next check", async () => {
+  await renderWithProviders(<Issues />);
+  await screen.findByText("DEMO-4");
+  // DEMO-8 failed and is In Progress; DEMO-12 is In Progress with its run running (shows nothing).
+  expect(within(rowOf("DEMO-8")).getByText("Its status is In Progress, not Todo")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-12")).queryByText(/Its status is/)).not.toBeInTheDocument();
+  expect(within(rowOf("DEMO-10")).getByText("Its status is In Testing, not Todo")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-4")).getByText("Its status is Backlog, not Todo")).toBeInTheDocument();
 });
 
 test("the engine's codes are never shown as they are", async () => {

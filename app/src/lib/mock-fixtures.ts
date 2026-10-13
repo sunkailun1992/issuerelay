@@ -1,4 +1,5 @@
 import { MOCK_NOW } from "./clock";
+import triggerDefaults from "./trigger-defaults.json";
 import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, Project, Settings, Viewer } from "./types";
 
 /** `MOCK_NOW` minus `minutes`, as the engine sends times. */
@@ -48,7 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
   prompt_template: "",
   comment_language: "follow-ui",
   paused: false,
-  trigger: { label: "ai-ready", todo: "Todo", in_progress: "In Progress", in_testing: "In Testing", done: "Done" },
+  trigger: triggerDefaults,
   notifications: { run_started: true, awaiting_acceptance: true, needs_info: true, failed: true },
   auto_update: true,
   onboarding_completed: false,
@@ -95,6 +96,10 @@ export const DEMO_JOBS: Job[] = [
 /** DEMO-11's start failed once; it is tried again two minutes after `MOCK_NOW`. */
 export const DEMO_HELD: HeldJob[] = [{ job_id: 11, retry_at: "2026-10-12T09:02:00Z" }];
 
+/**
+ * A labeled issue. Nothing changed in Linear since the demo's runs were recorded: `updated_at` is the
+ * moment their `discovered_updated_at` has, so the next check does not start a finished one again.
+ */
 function issue(n: number, title: string, state: string, project: Project): Issue {
   return {
     uuid: `issue-${n}`,
@@ -109,23 +114,27 @@ function issue(n: number, title: string, state: string, project: Project): Issue
     parent_identifier: null,
     priority: 2,
     created_at: ago(24 * 60),
-    updated_at: ago(30),
+    updated_at: ago(12 * 60),
   };
 }
 
 const [demoProject, demoMobile, docsSite] = DEMO_PROJECTS;
 
-/** The issue list (the issues with the label; DEMO-9 lost it when the AI asked back) and the engine's verdicts. */
+/**
+ * The issue list (the issues with the label; DEMO-9 lost it when the AI asked back) and the engine's
+ * verdicts. DEMO-6's run was stopped and nothing changed since, so the next check does not pick it up
+ * (`picked_up: false`); DEMO-11's run is queued, DEMO-3 has none: both are picked up.
+ */
 export const DEMO_ISSUES: { issue: Issue; status: IssueStatus }[] = [
   { issue: issue(12, "Add a health check endpoint", "In Progress", demoProject), status: { kind: "not_todo", state: "In Progress" } },
-  { issue: issue(11, "Translate the settings page", "Todo", demoMobile), status: { kind: "eligible" } },
+  { issue: issue(11, "Translate the settings page", "Todo", demoMobile), status: { kind: "eligible", picked_up: true } },
   { issue: issue(10, "Add hello.txt", "In Testing", demoProject), status: { kind: "not_todo", state: "In Testing" } },
   { issue: issue(8, "Speed up the search index", "In Progress", demoProject), status: { kind: "not_todo", state: "In Progress" } },
   { issue: issue(7, "Fix the login redirect", "Done", demoProject), status: { kind: "not_todo", state: "Done" } },
-  { issue: issue(6, "Remove the old banner", "Todo", demoProject), status: { kind: "eligible" } },
+  { issue: issue(6, "Remove the old banner", "Todo", demoProject), status: { kind: "eligible", picked_up: false } },
   { issue: issue(5, "Write the docs landing page", "Todo", docsSite), status: { kind: "waiting", reason: { code: "project_not_bound" } } },
   { issue: issue(4, "Migrate the build to the new runner", "Backlog", demoProject), status: { kind: "not_todo", state: "Backlog" } },
-  { issue: issue(3, "Update the README badges", "Todo", demoProject), status: { kind: "eligible" } },
+  { issue: issue(3, "Update the README badges", "Todo", demoProject), status: { kind: "eligible", picked_up: true } },
 ];
 
 export const DEMO_DOCTOR: DoctorReport = {

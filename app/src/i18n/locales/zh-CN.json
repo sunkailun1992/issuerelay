@@ -107,6 +107,7 @@
     "run_again": "重新运行",
     "mark_done": "标记完成",
     "open_in_linear": "在 Linear 中打开",
+    "open_issue_in_linear": "在 Linear 中打开 {{identifier}}",
     "poll_now": "立即检查",
     "confirm": "确认",
     "mark_done_confirm": "把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。",
@@ -174,6 +175,7 @@
     },
     "not_todo": "状态是 {{state}}，不是 {{todo}}",
     "eligible": "下一次检查会接走",
+    "runs_again_after_change": "在 Linear 上有改动后才会再次运行",
     "not_candidate": "没有指派给你，或标签不匹配",
     "paused": "监控已暂停",
     "waiting": {
