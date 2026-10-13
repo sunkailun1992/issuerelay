@@ -379,6 +379,28 @@ describe("acting", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  test("a save that the form reports itself is not told as a toast as well, and the failure stays on the mutation", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.saveBinding = async () => {
+      throw new BackendError("disk is full");
+    };
+    function Bind() {
+      const save = useSaveBinding({ quiet: true });
+      const binding: Binding = { id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs" };
+      return (
+        <>
+          <Act run={() => save.mutate(binding)} />
+          {save.isError && <p>failed: {save.error.message}</p>}
+        </>
+      );
+    }
+    await renderWithProviders(<Bind />, { backend });
+    const error = vi.spyOn(toast, "error");
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    expect(await screen.findByText("failed: disk is full")).toBeInTheDocument();
+    expect(error).not.toHaveBeenCalled();
+  });
+
   test("every action names itself when it fails", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const refuse = async () => {

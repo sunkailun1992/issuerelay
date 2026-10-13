@@ -1,0 +1,19 @@
+[
+  {"name": "sonnet", "valid": true},
+  {"name": "claude-sonnet-5-5", "valid": true},
+  {"name": "gpt-5-codex", "valid": true},
+  {"name": "o3:high", "valid": true},
+  {"name": "a.b_c", "valid": true},
+  {"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": true},
+  {"name": "", "valid": false},
+  {"name": "-rf", "valid": false},
+  {"name": "sonnet[1m]", "valid": false},
+  {"name": "a b", "valid": false},
+  {"name": "模型", "valid": false},
+  {"name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "valid": false},
+  {"name": "-", "valid": false},
+  {"name": ":latest", "valid": true},
+  {"name": "a-b.c_d:e", "valid": true},
+  {"name": "é", "valid": false},
+  {"name": "sonnet\n", "valid": false}
+]

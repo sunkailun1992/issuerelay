@@ -948,4 +948,29 @@ mod tests {
             .expect("the trigger names serialize");
         assert_eq!(panel, core);
     }
+
+    /// One row of app/src/lib/model-name-cases.json, which the panel's `isValidModelName` test reads.
+    #[derive(Deserialize)]
+    struct ModelNameCase {
+        name: String,
+        valid: bool,
+    }
+
+    #[test]
+    fn model_name_cases_follow_core() {
+        let cases: Vec<ModelNameCase> =
+            serde_json::from_str(include_str!("../../src/lib/model-name-cases.json"))
+                .expect("model-name-cases.json is valid");
+        // The panel rejects a model name before it is saved, the engine rejects it again when it
+        // is: the two must never disagree about a name.
+        assert!(!cases.is_empty());
+        for case in cases {
+            assert_eq!(
+                issuerelay_core::config::is_valid_model_name(&case.name),
+                case.valid,
+                "{:?}",
+                case.name
+            );
+        }
+    }
 }

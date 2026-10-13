@@ -213,9 +213,14 @@ export function useMarkDone() {
  */
 const bindingChange: readonly QueryKey[] = [queryKeys.issues, queryKeys.doctor, queryKeys.status];
 
-export function useSaveBinding() {
+/**
+ * `quiet` is for the form that shows a failure itself, where it was asked for (from the mutation's
+ * `error`), so that it is not also told as a toast.
+ */
+export function useSaveBinding({ quiet = false }: { quiet?: boolean } = {}) {
   return useAction<Binding, void>((backend, binding) => backend.saveBinding(binding), bindingChange, "actions.failed.save_binding", {
     reread: [queryKeys.bindings],
+    quiet: quiet ? () => true : undefined,
   });
 }
 
