@@ -39,4 +39,5 @@ tauri-build = { version = "2.7.2", features = [] }
 
 [dev-dependencies]
 chrono = "0.4.45"
+tauri = { version = "2.12.3", features = ["test"] }
 tempfile = "3.27.0"

@@ -35,10 +35,17 @@ pub async fn start(app: AppHandle) {
         }),
     };
     let state = app.state::<AppState>();
-    match &result {
+    match result {
         Ok(host) => {
+            // Recorded before anything else happens. From here on a quit (the tray's, Cmd+Q's,
+            // the system's) finds this host and stops it, an exit the system forces waits for its
+            // stop, and a panel the window below shows reads `Ready`. Recorded after the
+            // forwarder, the tray and the window instead, a quit in between would end the app
+            // without stopping a host whose engine already runs. (`start` needs a real host, so
+            // this order is argued here rather than tested.)
+            state.set_host(Ok(host.clone()));
             events::spawn_forwarder(app.clone(), host.clone());
-            tray::refresh(&app, host);
+            tray::refresh(&app, &host);
             // A login start stays in the tray (lib.rs hid it already); the first run always shows
             // the guide.
             if !state.autostarted || !host.engine().settings().onboarding_completed {
@@ -53,16 +60,16 @@ pub async fn start(app: AppHandle) {
             );
             tray::show_failed_start(&app);
             window::show(&app);
+            state.set_host(Err(failure));
+            // Recorded first, then announced: a panel that hears this and asks `startup_state`
+            // gets the same answer.
+            if let StartupState::Failed(failure) = state.startup_state() {
+                logging::debug_failed(
+                    app.emit(events::STARTUP_FAILED, StartupState::Failed(failure)),
+                    "telling the panel the start failed",
+                );
+            }
         }
-    }
-    state.set_host(result);
-    // Recorded first, then announced: a panel that hears this and asks `startup_state` gets the
-    // same answer.
-    if let StartupState::Failed(failure) = state.startup_state() {
-        logging::debug_failed(
-            app.emit(events::STARTUP_FAILED, StartupState::Failed(failure)),
-            "telling the panel the start failed",
-        );
     }
 }
 

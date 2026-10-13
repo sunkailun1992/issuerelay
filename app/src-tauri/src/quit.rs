@@ -17,10 +17,13 @@
 //! down) and Windows ending the session arrive only as `RunEvent::Exit`, which cannot be refused.
 //! So Cmd+Q is an item of IssueRelay's own (`app_menu`) that asks like the tray's Quit, and an
 //! exit that cannot be refused still stops the host first, for a bounded while.
-use std::{sync::PoisonError, time::Duration};
+use std::{
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use issuerelay_core::host::StopMode;
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 
 use crate::{events, logging, state::AppState, window};
 
@@ -115,7 +118,7 @@ pub fn may_exit(state: QuitState) -> bool {
 
 /// Applies `event`: moves quitting to its next state and does what the step says. Returns the
 /// step, which the window hook reads (`HideWindow`).
-pub fn handle(app: &AppHandle, event: QuitEvent) -> QuitStep {
+pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
     let state = app.state::<AppState>();
     let step = {
         let mut quit = state.quit.lock().unwrap_or_else(PoisonError::into_inner);
@@ -144,8 +147,8 @@ pub fn handle(app: &AppHandle, event: QuitEvent) -> QuitStep {
                     handle(&app, QuitEvent::Stopped);
                 });
             }
-            // Nothing to stop.
             None => {
+                no_host_to_stop(app, "asked to stop the host");
                 handle(app, QuitEvent::Stopped);
             }
         },
@@ -155,11 +158,15 @@ pub fn handle(app: &AppHandle, event: QuitEvent) -> QuitStep {
 }
 
 /// The tray's Quit, Cmd+Q and an exit request, with the host as it is now.
-pub fn request(app: &AppHandle) {
+pub fn request<R: Runtime>(app: &AppHandle<R>) {
     let host = app.state::<AppState>().try_host();
-    let running = host
-        .as_ref()
-        .map_or(0, |host| host.engine().status().running);
+    let running = match &host {
+        Some(host) => host.engine().status().running,
+        None => {
+            no_host_to_stop(app, "quitting");
+            0
+        }
+    };
     handle(
         app,
         QuitEvent::Requested {
@@ -169,8 +176,15 @@ pub fn request(app: &AppHandle) {
     );
 }
 
+/// Says that quitting found no host to stop: it may still be starting (`Host::start` has not
+/// returned, so what it began is left to the next start's sweep) or it failed to start.
+fn no_host_to_stop<R: Runtime>(app: &AppHandle<R>, what: &str) {
+    let startup = app.state::<AppState>().startup_state();
+    tracing::warn!(?startup, "{what}, but there is no host to stop");
+}
+
 /// Where quitting stands now.
-fn current(app: &AppHandle) -> QuitState {
+fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
     *app.state::<AppState>()
         .quit
         .lock()
@@ -180,9 +194,9 @@ fn current(app: &AppHandle) -> QuitState {
 /// The app's event loop hook. A request to exit (`ExitRequested`) goes ahead only once quitting is
 /// done (`may_exit`), which is when IssueRelay's own `exit(0)` comes; any other is held and goes
 /// through `request`, which asks while runs are in progress. An exit that cannot be held
-/// (`RunEvent::Exit` before quitting is done: the system is ending the app) stops the host first,
-/// waiting at most `FORCED_EXIT_STOP`, so that the runs end with their trees and are recorded.
-pub fn on_run_event(app: &AppHandle, event: RunEvent) {
+/// (`RunEvent::Exit` before quitting is done: the system is ending the app) stops the host first
+/// (`forced_exit`), so that the runs end with their trees and are recorded.
+pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
     match event {
         RunEvent::ExitRequested { api, code, .. } => {
             if may_exit(current(app)) {
@@ -193,27 +207,61 @@ pub fn on_run_event(app: &AppHandle, event: RunEvent) {
             request(app);
         }
         RunEvent::Exit => {
-            if may_exit(current(app)) {
-                return;
-            }
-            let Some(host) = app.state::<AppState>().try_host() else {
-                return;
-            };
-            tracing::warn!(
-                "the system is ending IssueRelay without asking; stopping the runs first"
-            );
-            let stopped = wait_bounded(
-                async move { host.stop(StopMode::StopRuns).await },
-                FORCED_EXIT_STOP,
-            );
-            if !stopped {
-                tracing::error!(
+            let state = app.state::<AppState>();
+            let stop = state
+                .try_host()
+                .map(|host| async move { host.stop(StopMode::StopRuns).await });
+            match forced_exit(&state.quit, stop, FORCED_EXIT_STOP) {
+                ForcedExit::Done => {}
+                ForcedExit::Stopped => tracing::info!("the host has stopped; IssueRelay ends"),
+                ForcedExit::NoHost => no_host_to_stop(app, "the system is ending IssueRelay"),
+                ForcedExit::TimedOut => tracing::error!(
                     seconds = FORCED_EXIT_STOP.as_secs(),
                     "the host did not stop in time; IssueRelay ends anyway"
-                );
+                ),
             }
         }
         _ => {}
+    }
+}
+
+/// What an exit that cannot be refused found, and how its stop went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedExit {
+    /// Quitting was done already: the host had stopped, or there never was one.
+    Done,
+    /// No host, still starting or failed to start: nothing to stop.
+    NoHost,
+    /// The host's stop returned in time.
+    Stopped,
+    /// The host's stop did not return within the limit.
+    TimedOut,
+}
+
+/// An exit that cannot be refused. Once quitting is done, or without a host to stop (`stop` is
+/// `None`), there is nothing to do. Otherwise quitting counts as stopping from here on, and
+/// `stop`, the host's `stop(StopRuns)`, runs on the async runtime while this thread, the event
+/// loop's, waits for it at most `limit`. Nothing that stop needs waits for the main thread in
+/// turn: the tray's updates are only handed to it (`tray::refresh`).
+fn forced_exit<F>(quit: &Mutex<QuitState>, stop: Option<F>, limit: Duration) -> ForcedExit
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let mut state = quit.lock().unwrap_or_else(PoisonError::into_inner);
+    if may_exit(*state) {
+        return ForcedExit::Done;
+    }
+    let Some(stop) = stop else {
+        return ForcedExit::NoHost;
+    };
+    *state = QuitState::Stopping;
+    // Not held while waiting: a stop the panel asked for earlier ends in `handle`, which takes it.
+    drop(state);
+    tracing::warn!("the system is ending IssueRelay without asking; stopping the runs first");
+    if wait_bounded(stop, limit) {
+        ForcedExit::Stopped
+    } else {
+        ForcedExit::TimedOut
     }
 }
 
@@ -228,10 +276,16 @@ fn wait_bounded(task: impl Future<Output = ()> + Send + 'static, limit: Duration
     wait.recv_timeout(limit).is_ok()
 }
 
+/// The application menu's Quit item (macOS), kept so that `tray::refresh` can give it the
+/// language the settings ask for, as it does the tray's items.
+#[cfg(target_os = "macos")]
+pub struct AppMenuQuit(pub tauri::menu::MenuItem<tauri::Wry>);
+
 /// macOS's application menu: Tauri's default one (`Menu::default` in tauri 2.12.3) except for
 /// Quit, which is an item of IssueRelay's own with Cmd+Q instead of the system's `terminate:`, so
-/// that quitting asks while runs are in progress (see the module comment). Windows has no
-/// application menu: there the tray's Quit is the way to quit.
+/// that quitting asks while runs are in progress (see the module comment). Its label is in the
+/// system language until the host has started (`AppMenuQuit`). Windows has no application menu:
+/// there the tray's Quit is the way to quit.
 #[cfg(target_os = "macos")]
 pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
@@ -265,6 +319,7 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
         true,
         Some("CmdOrCtrl+Q"),
     )?;
+    app.manage(AppMenuQuit(quit.clone()));
     Menu::with_items(
         app,
         &[
@@ -328,10 +383,23 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::{Duration, Instant},
+    };
+
+    use tauri::{
+        WebviewUrl, WebviewWindowBuilder,
+        test::{mock_builder, mock_context, noop_assets},
+    };
 
     use super::QuitEvent::{Requested, StopNow, Stopped, Wait, WindowClosed};
     use super::*;
+    use crate::test_support::run_mock_app;
 
     #[test]
     fn quitting_asks_only_while_runs_are_in_progress() {
@@ -551,5 +619,149 @@ mod tests {
             std::future::pending::<()>(),
             Duration::from_millis(50)
         ));
+    }
+
+    #[test]
+    fn a_forced_exit_marks_quitting_as_stopping_and_then_waits_for_the_stop() {
+        let quit = Arc::new(Mutex::new(QuitState::Asking));
+        let (seen, observed) = mpsc::channel();
+        let state = quit.clone();
+        let outcome = forced_exit(
+            &quit,
+            Some(async move {
+                // What quitting says while the stop runs, that is while the main thread waits.
+                seen.send(*state.lock().unwrap()).unwrap();
+            }),
+            Duration::from_secs(5),
+        );
+        assert_eq!(outcome, ForcedExit::Stopped);
+        assert_eq!(
+            observed.try_recv(),
+            Ok(QuitState::Stopping),
+            "the stop ran, and only once quitting was marked as stopping"
+        );
+    }
+
+    #[test]
+    fn a_forced_exit_gives_up_on_a_stop_that_does_not_end() {
+        let quit = Mutex::new(QuitState::Idle);
+        let began = Instant::now();
+        assert_eq!(
+            forced_exit(
+                &quit,
+                Some(std::future::pending::<()>()),
+                Duration::from_millis(100)
+            ),
+            ForcedExit::TimedOut
+        );
+        assert!(began.elapsed() < Duration::from_secs(5), "bounded");
+        assert_eq!(*quit.lock().unwrap(), QuitState::Stopping);
+    }
+
+    #[test]
+    fn a_forced_exit_once_quitting_is_done_or_without_a_host_stops_nothing() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let quit = Mutex::new(QuitState::Done);
+        let flag = ran.clone();
+        let outcome = forced_exit(
+            &quit,
+            Some(async move { flag.store(true, Ordering::SeqCst) }),
+            Duration::from_secs(5),
+        );
+        assert_eq!(outcome, ForcedExit::Done);
+        assert!(!ran.load(Ordering::SeqCst), "the host stopped already");
+        assert_eq!(*quit.lock().unwrap(), QuitState::Done);
+
+        let quit = Mutex::new(QuitState::Idle);
+        let outcome = forced_exit(
+            &quit,
+            None::<std::future::Ready<()>>,
+            Duration::from_secs(5),
+        );
+        assert_eq!(outcome, ForcedExit::NoHost);
+        assert_eq!(
+            *quit.lock().unwrap(),
+            QuitState::Idle,
+            "nothing to wait for"
+        );
+    }
+
+    #[test]
+    fn the_event_loop_hook_lets_a_forced_exit_without_a_host_end_at_once() {
+        // The hook itself, on tauri's mock runtime: with no host there is nothing to stop and
+        // nothing to wait for. (With a host it hands `forced_exit` the host's stop; making one
+        // takes a real host, which these tests do not start.)
+        let app = mock_builder()
+            .manage(AppState::new(false))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let began = Instant::now();
+        on_run_event(app.handle(), RunEvent::Exit);
+        assert!(began.elapsed() < Duration::from_secs(1));
+        assert_eq!(current(app.handle()), QuitState::Idle);
+    }
+
+    /// Runs the event loop of a mock app through `on_run_event` with quitting in `state`, closes
+    /// the panel window (destroys it: the last window, so the loop asks to exit), and once that
+    /// request was held lets quitting be done and closes a window again. Returns what reached the
+    /// hook, in order.
+    fn exit_requests_while(state: QuitState) -> Vec<String> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let mut released = false;
+        run_mock_app(
+            Duration::from_secs(30),
+            move |app| *app.state::<AppState>().quit.lock().unwrap() = state,
+            move |app, event| {
+                match &event {
+                    RunEvent::Ready => {
+                        WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                            .build()
+                            .unwrap()
+                            .destroy()
+                            .unwrap();
+                    }
+                    RunEvent::ExitRequested { .. } => log
+                        .lock()
+                        .unwrap()
+                        .push(format!("exit requested while {:?}", current(app))),
+                    // A held request leaves the loop running: the next round comes.
+                    RunEvent::MainEventsCleared if !released && !log.lock().unwrap().is_empty() => {
+                        released = true;
+                        *app.state::<AppState>().quit.lock().unwrap() = QuitState::Done;
+                        WebviewWindowBuilder::new(app, "again", WebviewUrl::default())
+                            .build()
+                            .unwrap()
+                            .destroy()
+                            .unwrap();
+                    }
+                    RunEvent::Exit => log.lock().unwrap().push("exit".into()),
+                    _ => {}
+                }
+                on_run_event(app, event);
+            },
+        );
+        let seen = seen.lock().unwrap();
+        seen.clone()
+    }
+
+    #[test]
+    fn every_exit_request_before_quitting_is_done_is_held() {
+        // Through the real hook on tauri's mock runtime. It can only ask to exit the way a last
+        // window going does (`code: None`): its `request_exit` is unimplemented, and so is every
+        // way that ends in `AppHandle::exit`. Idle and Asking are therefore left out: without a
+        // host, `request` there quits at once. The hook does not look at the state otherwise
+        // (`may_exit`, tested above).
+        for state in [QuitState::Waiting, QuitState::Stopping] {
+            assert_eq!(
+                exit_requests_while(state),
+                [
+                    format!("exit requested while {state:?}"),
+                    "exit requested while Done".to_string(),
+                    "exit".to_string()
+                ],
+                "the first request was not held"
+            );
+        }
     }
 }

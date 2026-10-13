@@ -7,7 +7,7 @@ use issuerelay_core::{
     host::{Host, LinearSetup},
 };
 use tauri::{
-    AppHandle, Manager,
+    AppHandle, Manager, Runtime,
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
@@ -192,17 +192,19 @@ pub fn show_failed_start(app: &AppHandle) {
         "system",
         sys_locale::get_locale().as_deref(),
     ));
-    match app.try_state::<TrayItems>() {
-        Some(items) => logging::warn_failed(
-            items.status.set_text(t.t("tray.status_problem")),
-            "updating the tray status",
-        ),
-        None => tracing::warn!("the tray menu is missing"),
-    }
-    match app.tray_by_id(TRAY_ID) {
-        Some(tray) => set_icon(&tray, TrayState::Problem),
-        None => tracing::warn!("the tray icon is missing"),
-    }
+    let status = t.t("tray.status_problem");
+    on_main_thread(app, move |app| {
+        match app.try_state::<TrayItems>() {
+            Some(items) => {
+                logging::warn_failed(items.status.set_text(&status), "updating the tray status")
+            }
+            None => tracing::warn!("the tray menu is missing"),
+        }
+        match app.tray_by_id(TRAY_ID) {
+            Some(tray) => set_icon(&tray, TrayState::Problem),
+            None => tracing::warn!("the tray icon is missing"),
+        }
+    });
 }
 
 /// Shows the icon of `state`. Setting an icon drops macOS's template flag (tray-icon 0.25.1 sets
@@ -215,10 +217,29 @@ fn set_icon(tray: &TrayIcon, state: TrayState) {
     );
 }
 
-/// Brings the tray in line with the engine, in the language the settings ask for.
+/// The texts `refresh` gives the menu items besides those of the view.
+struct Labels {
+    poll: String,
+    open: String,
+    quit: String,
+}
+
+/// Brings the tray in line with the engine, in the language the settings ask for: the tray's
+/// menu and icon, and on macOS the application menu's Quit. Works out what to show here and
+/// leaves the showing to the main thread (`on_main_thread`).
 pub fn refresh(app: &AppHandle, host: &Host) {
     let t = Translator::for_settings(&host.engine().settings());
     let view = tray_view(&host.engine().status(), &host.linear_setup(), &t);
+    let labels = Labels {
+        poll: t.t("tray.poll_now"),
+        open: t.t("tray.open_panel"),
+        quit: t.t("tray.quit"),
+    };
+    on_main_thread(app, move |app| show_view(app, &view, &labels));
+}
+
+/// Puts `view` and `labels` into the menus and the icon; on the main thread.
+fn show_view(app: &AppHandle, view: &TrayView, labels: &Labels) {
     match app.try_state::<TrayItems>() {
         Some(items) => {
             logging::warn_failed(
@@ -230,21 +251,21 @@ pub fn refresh(app: &AppHandle, host: &Host) {
                 "updating the tray menu",
             );
             logging::warn_failed(items.toggle.set_enabled(true), "updating the tray menu");
-            logging::warn_failed(
-                items.poll.set_text(t.t("tray.poll_now")),
-                "updating the tray menu",
-            );
+            logging::warn_failed(items.poll.set_text(&labels.poll), "updating the tray menu");
             logging::warn_failed(items.poll.set_enabled(true), "updating the tray menu");
-            logging::warn_failed(
-                items.open.set_text(t.t("tray.open_panel")),
-                "updating the tray menu",
-            );
-            logging::warn_failed(
-                items.quit.set_text(t.t("tray.quit")),
-                "updating the tray menu",
-            );
+            logging::warn_failed(items.open.set_text(&labels.open), "updating the tray menu");
+            logging::warn_failed(items.quit.set_text(&labels.quit), "updating the tray menu");
         }
         None => tracing::warn!("the tray menu is missing"),
+    }
+    // Only macOS has an application menu (`quit::app_menu`).
+    #[cfg(target_os = "macos")]
+    match app.try_state::<quit::AppMenuQuit>() {
+        Some(item) => logging::warn_failed(
+            item.0.set_text(&labels.quit),
+            "updating the application menu",
+        ),
+        None => tracing::warn!("the application menu's Quit is missing"),
     }
     match app.tray_by_id(TRAY_ID) {
         Some(tray) => set_icon(&tray, view.state),
@@ -252,13 +273,35 @@ pub fn refresh(app: &AppHandle, host: &Host) {
     }
 }
 
+/// Runs `apply` on the main thread, which menus and tray icons need, without waiting for it.
+/// Their setters called from another thread would wait for the main thread to run them, and an
+/// exit the system forces keeps the main thread waiting for the host's stop (`quit::forced_exit`),
+/// which runs on the async runtime's threads: the event forwarder or a panel command waiting there
+/// could hold up that stop. From the main thread itself, `apply` runs at once.
+fn on_main_thread<R: Runtime>(
+    app: &AppHandle<R>,
+    apply: impl FnOnce(&AppHandle<R>) + Send + 'static,
+) {
+    let handle = app.clone();
+    logging::warn_failed(
+        app.run_on_main_thread(move || apply(&handle)),
+        "handing the tray an update",
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
+
     use issuerelay_core::host::AuthMethod;
     use serde::Deserialize;
+    use tauri::{RunEvent, WebviewUrl, WebviewWindowBuilder};
 
     use super::*;
-    use crate::test_support::checked;
+    use crate::test_support::{checked, run_mock_app};
 
     fn connected() -> LinearSetup {
         LinearSetup::Connected {
@@ -366,5 +409,49 @@ mod tests {
             let image = icon(state);
             assert!(image.width() > 0 && image.height() > 0, "{state:?}");
         }
+    }
+
+    #[test]
+    fn a_tray_update_from_another_thread_never_waits_for_the_main_thread() {
+        // While the main thread is busy, as during an exit the system forces (it waits there for
+        // the host's stop, which runs on the async runtime's threads), an update sent from such a
+        // thread must return at once, or the stop could not go on. It runs on the main thread
+        // once that is free again. On tauri's mock runtime, whose loop thread is the main thread.
+        let ran_on = Arc::new(Mutex::new(None));
+        let main = Arc::new(Mutex::new(None));
+        let (record, main_id) = (ran_on.clone(), main.clone());
+        run_mock_app(
+            Duration::from_secs(30),
+            |_| {},
+            move |app, event| {
+                if let RunEvent::Ready = event {
+                    *main_id.lock().unwrap() = Some(std::thread::current().id());
+                    let (returned, wait) = mpsc::channel();
+                    let (handle, ran) = (app.clone(), record.clone());
+                    std::thread::spawn(move || {
+                        on_main_thread(&handle, move |_| {
+                            *ran.lock().unwrap() = Some(std::thread::current().id());
+                        });
+                        returned.send(()).unwrap();
+                    });
+                    // The main thread stays busy here until the update has returned.
+                    wait.recv_timeout(Duration::from_secs(10))
+                        .expect("the update waited for the main thread");
+                    assert!(
+                        record.lock().unwrap().is_none(),
+                        "it ran while the main thread was busy"
+                    );
+                    // The last window goes, which ends the loop once the update has run.
+                    WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                        .build()
+                        .unwrap()
+                        .destroy()
+                        .unwrap();
+                }
+            },
+        );
+        let main = *main.lock().unwrap();
+        assert!(main.is_some());
+        assert_eq!(*ran_on.lock().unwrap(), main, "it ran on the main thread");
     }
 }

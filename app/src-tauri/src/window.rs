@@ -2,7 +2,7 @@
 //! the window: a tray app shows no Dock icon while its panel is hidden, also after a login start
 //! (lib.rs hides through `hide` too). Windows needs nothing of the kind: a hidden window has no
 //! taskbar button.
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager, Runtime, WindowEvent};
 
 use crate::{
     logging,
@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Shows the panel, restored and focused; on macOS with its Dock icon.
-pub fn show(app: &AppHandle) {
+pub fn show<R: Runtime>(app: &AppHandle<R>) {
     // `AppHandle::set_activation_policy` returns a `Result` in tauri 2.12.3.
     #[cfg(target_os = "macos")]
     logging::warn_failed(
@@ -28,7 +28,7 @@ pub fn show(app: &AppHandle) {
 }
 
 /// Hides the panel; on macOS its Dock icon goes with it.
-pub fn hide(app: &AppHandle) {
+pub fn hide<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         logging::warn_failed(window.hide(), "hiding the panel");
     }
@@ -42,7 +42,7 @@ pub fn hide(app: &AppHandle) {
 /// Closing the panel hides it; monitoring goes on in the tray. The quit state machine decides:
 /// only once quitting is done may the window really close, so closing it while the app waits for
 /// runs neither ends the app early nor loses the "stop now" prompt.
-pub fn on_event(window: &tauri::Window, event: &WindowEvent) {
+pub fn on_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event
         && window.label() == "main"
         && quit::handle(window.app_handle(), QuitEvent::WindowClosed) == QuitStep::HideWindow

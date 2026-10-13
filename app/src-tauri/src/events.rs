@@ -80,8 +80,10 @@ pub fn forward(received: Result<EngineEvent, RecvError>) -> Forward {
 /// Forwards the host's engine events to the panel, the notifications and the tray until the
 /// engine is gone.
 pub fn spawn_forwarder(app: AppHandle, host: Host) {
+    // Subscribed here, before the task exists: what the engine sends until the task first runs
+    // waits in the receiver instead of being lost without a resync.
+    let mut events = host.engine().subscribe();
     tauri::async_runtime::spawn(async move {
-        let mut events = host.engine().subscribe();
         let mut known = seed(&host);
         loop {
             match forward(events.recv().await) {
