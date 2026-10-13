@@ -99,10 +99,20 @@ export function useSettings() {
   return useQuery({ queryKey: queryKeys.settings, queryFn: () => backend.settings() });
 }
 
-/** The environment check. It runs the executors and asks Linear, so only when `enabled`. */
-export function useDoctor(enabled = true) {
+/**
+ * The environment check. It runs the executors and asks Linear, so only when `enabled`. A page that
+ * asks for it again is shown the report it has, instead of a new check (which takes up to a
+ * minute), when the report is younger than `staleTime`. A report that a change has outdated (a fix,
+ * a binding, the settings, the Linear connection) is checked again whatever its age.
+ */
+export function useDoctor(enabled = true, { staleTime }: { staleTime?: number } = {}) {
   const backend = useBackend();
-  return useQuery({ queryKey: queryKeys.doctor, queryFn: () => backend.doctor(), enabled });
+  return useQuery({
+    queryKey: queryKeys.doctor,
+    queryFn: () => backend.doctor(),
+    enabled,
+    ...(staleTime === undefined ? {} : { staleTime }),
+  });
 }
 
 /** Whether each executor has IssueRelay's control server registered. */

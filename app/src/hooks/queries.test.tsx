@@ -150,6 +150,78 @@ describe("reading", () => {
     expect(doctor).toHaveBeenCalledTimes(1);
   });
 
+  test("the environment check is asked for again when a page asks for it, unless the report is younger than the time the page gives", async () => {
+    // Only the clock is the test's: a check is a read of the backend like another, and mounting the page again asks for it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const doctor = vi.spyOn(backend, "doctor");
+    function Check({ staleTime }: { staleTime?: number }) {
+      const check = useDoctor(true, { staleTime });
+      return <p>{check.data ? "report" : "reading"}</p>;
+    }
+    function Page({ staleTime }: { staleTime?: number }) {
+      const [shown, setShown] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setShown((now) => !now)}>
+            toggle
+          </button>
+          {shown && <Check staleTime={staleTime} />}
+        </>
+      );
+    }
+    /** Takes the page away and puts it back, which asks for the check again. */
+    const again = async () => {
+      await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+      await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    };
+
+    const { client } = await renderWithProviders(<Page staleTime={5 * 60_000} />, { backend });
+    expect(await screen.findByText("report")).toBeInTheDocument();
+    expect(doctor).toHaveBeenCalledTimes(1);
+    // Within the time the report counts as current.
+    vi.setSystemTime(Date.now() + 4 * 60_000);
+    await again();
+    expect(await screen.findByText("report")).toBeInTheDocument();
+    expect(doctor).toHaveBeenCalledTimes(1);
+    // Past it.
+    vi.setSystemTime(Date.now() + 2 * 60_000);
+    await again();
+    await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
+    // A report that a change outdated while no page showed it is checked again at once, however young it is.
+    await screen.findByText("report");
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    await client.invalidateQueries({ queryKey: queryKeys.doctor });
+    expect(doctor).toHaveBeenCalledTimes(2);
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    await waitFor(() => expect(doctor).toHaveBeenCalledTimes(3));
+  });
+
+  test("without a time given the environment check is asked for every time a page asks for it", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const doctor = vi.spyOn(backend, "doctor");
+    function Check() {
+      const check = useDoctor();
+      return <p>{check.data ? "report" : "reading"}</p>;
+    }
+    function Page() {
+      const [shown, setShown] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setShown((now) => !now)}>
+            toggle
+          </button>
+          {shown && <Check />}
+        </>
+      );
+    }
+    await renderWithProviders(<Page />, { backend });
+    expect(await screen.findByText("report")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    await userEvent.click(screen.getByRole("button", { name: "toggle" }));
+    await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
+  });
+
   test("a job's log is read again every second and a half while it is live, and not otherwise", async () => {
     // Every timer is the test's: the mock answers from a timer and so does the library's redraw, so
     // time is advanced by hand and nothing is waited for.

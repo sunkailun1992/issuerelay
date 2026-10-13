@@ -7,20 +7,34 @@ import { STEPS } from "./steps";
 const ROW = "flex w-full items-center gap-3 rounded-md px-3 py-2 text-left outline-none";
 
 /**
- * The steps of the guide, down the left: the one the user is on is highlighted (and is the
- * `aria-current` step), the steps behind are ticked and can be gone back to, the steps ahead are
- * text only. A step that is ahead is never an entry: it is reached with the forward button, which
- * a step can hold back until what it needs is there. `locked` holds the steps behind too.
+ * The steps of the guide, down the left. The step the user is on is highlighted (and is the
+ * `aria-current` step). `reached` is the furthest step the user has been to: the steps before it
+ * were passed, so they are ticked, and they and the furthest step itself are entries, wherever the
+ * user is now (going back takes no tick away). The steps beyond it are text only: they are reached
+ * with the forward button, which a step can hold back until what it needs is there. `locked` holds
+ * the entries too.
  */
-export function Stepper({ index, locked, onGo }: { index: number; locked: boolean; onGo: (index: number) => void }) {
+export function Stepper({
+  index,
+  reached,
+  locked,
+  onGo,
+}: {
+  index: number;
+  reached: number;
+  locked: boolean;
+  onGo: (index: number) => void;
+}) {
   const { t } = useTranslation();
   return (
     <nav aria-label={t("onboarding.steps_label")} className="w-(--sidebar-width) shrink-0 overflow-y-auto border-r border-sidebar-border bg-sidebar p-2 text-sidebar-foreground">
       <ol className="flex flex-col gap-1">
         {STEPS.map((step, at) => {
           const name = t(`onboarding.step.${step}`);
-          const done = at < index;
           const current = at === index;
+          // Ticked: passed, unless it is the step the user is on, which shows as the current one.
+          const done = at < reached && !current;
+          const entry = at <= reached && !current;
           const mark = (
             <span
               aria-hidden
@@ -36,10 +50,10 @@ export function Stepper({ index, locked, onGo }: { index: number; locked: boolea
           );
           return (
             <li key={step} aria-current={current ? "step" : undefined}>
-              {done ? (
+              {entry ? (
                 <button
                   type="button"
-                  aria-label={t("onboarding.step_done", { step: name })}
+                  aria-label={done ? t("onboarding.step_done", { step: name }) : undefined}
                   disabled={locked}
                   onClick={() => onGo(at)}
                   className={cn(ROW, "text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground focus-visible:ring-3 focus-visible:ring-sidebar-ring/50 disabled:pointer-events-none disabled:opacity-50")}

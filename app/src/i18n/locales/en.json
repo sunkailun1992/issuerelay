@@ -487,6 +487,8 @@
     "later": "I'll add them later",
     "bind_later": "Bind later",
     "start": "Start using IssueRelay",
+    "exit": "Exit the guide",
+    "set_up_later": "Set up later",
     "step": {
       "language": "Language",
       "linear": "Linear",

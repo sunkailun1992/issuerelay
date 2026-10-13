@@ -487,6 +487,8 @@
     "later": "あとで追加する",
     "bind_later": "あとで紐付ける",
     "start": "IssueRelay を使い始める",
+    "exit": "ガイドを終了",
+    "set_up_later": "あとで設定する",
     "step": {
       "language": "言語",
       "linear": "Linear",

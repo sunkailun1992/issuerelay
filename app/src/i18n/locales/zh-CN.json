@@ -487,6 +487,8 @@
     "later": "稍后再加",
     "bind_later": "稍后再绑定",
     "start": "开始使用",
+    "exit": "退出引导",
+    "set_up_later": "稍后再设置",
     "step": {
       "language": "语言",
       "linear": "Linear",

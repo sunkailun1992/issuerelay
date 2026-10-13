@@ -61,7 +61,7 @@ export function StepFrame({
           </Button>
           <Button
             variant={forward.quiet ? "outline" : "default"}
-            disabled={forward.disabled || forward.pending}
+            disabled={forward.disabled || forward.pending || nav.locked}
             onClick={forward.onClick ?? nav.onNext}
           >
             {forward.pending && <LoaderCircle aria-hidden className="animate-spin" />}

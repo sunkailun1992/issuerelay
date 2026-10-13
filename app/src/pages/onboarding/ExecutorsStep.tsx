@@ -1,6 +1,7 @@
 import { TriangleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ExecutorCheck } from "@/components/ExecutorCheck";
+import { Section } from "@/components/Section";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { CheckedReport } from "./CheckedReport";
 import { checkOf, type DoctorQuery, executorReady } from "./check";
@@ -34,12 +35,15 @@ export function ExecutorsStep({ nav, doctor }: { nav: StepNav; doctor: DoctorQue
                 <AlertDescription>{t("onboarding.no_executor_hint")}</AlertDescription>
               </Alert>
             )}
-            {/* One column at the smallest window, two where there is room. */}
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(20rem,1fr))] gap-4">
-              {report.executors.map((executor) => (
-                <ExecutorCheck key={executor.kind} report={executor} />
-              ))}
-            </div>
+            {/* The cards have headings of their own: they sit under one of this step's, as on the environment check page. */}
+            <Section title={t("doctor.executors_title")}>
+              {/* One column at the smallest window, two where there is room. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(20rem,1fr))] gap-4">
+                {report.executors.map((executor) => (
+                  <ExecutorCheck key={executor.kind} report={executor} />
+                ))}
+              </div>
+            </Section>
           </>
         )}
       </CheckedReport>

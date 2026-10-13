@@ -12,7 +12,7 @@ import zhCN from "@/i18n/locales/zh-CN.json";
 import { type Backend, BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import { DEMO_APP_INFO, DEMO_BINDINGS } from "@/lib/mock-fixtures";
-import type { Binding, DoctorReport, LinearSetup, StatusView } from "@/lib/types";
+import type { Binding, DoctorReport, LinearSetup, Settings, StatusView } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Onboarding from "./Onboarding";
 
@@ -207,6 +207,9 @@ async function reportWith(backend: Backend, patch: Partial<DoctorReport>): Promi
   return { ...(await backend.doctor()), ...patch };
 }
 
+/** The header of the page. (The `<header>` of a step's own title is a banner to jsdom too, but it comes after.) */
+const pageHeader = () => screen.getAllByRole("banner")[0];
+
 /** The fresh backend whose status says `linear`. */
 async function backendSaying(linear: LinearSetup): Promise<Backend> {
   const backend = createMockBackend("fresh", { latencyMs: 0 });
@@ -271,9 +274,170 @@ test("steps already passed are marked done and can be gone back to; the steps ah
   expect(steps.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Language (done)", "Linear (done)"]);
   await userEvent.click(steps.getByRole("button", { name: "Language (done)" }));
   expect(await stepHeading(TITLES[0])).toBeInTheDocument();
-  // From the first step nothing is behind, and the steps ahead are no entries.
-  expect(steps.queryAllByRole("button")).toHaveLength(0);
   expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
+});
+
+test("going back takes no tick away: the steps passed stay done and the furthest step reached stays an entry", async () => {
+  await guideOn(await loggedIn());
+  await goTo(4); // on the executors; the language, Linear and the workspace have been passed
+  const steps = within(screen.getByRole("navigation", { name: "Setup steps" }));
+  await userEvent.click(steps.getByRole("button", { name: "Language (done)" }));
+  await stepHeading(TITLES[0]);
+  const items = steps.getAllByRole("listitem");
+  // The step the user is on is the current one, whatever else it is.
+  expect(items[0]).toHaveAttribute("aria-current", "step");
+  expect(items[0].querySelector("svg")).toBeNull();
+  // Passed: ticked, and an entry, though the user is behind them now.
+  expect(steps.getByRole("button", { name: "Linear (done)" })).toBeInTheDocument();
+  expect(steps.getByRole("button", { name: "Workspace (done)" })).toBeInTheDocument();
+  expect(items[1].querySelector("svg")).not.toBeNull();
+  expect(items[2].querySelector("svg")).not.toBeNull();
+  // The furthest step reached was not passed, so it is not ticked; the user can go back to it. Nothing beyond it is an entry.
+  expect(steps.getByRole("button", { name: "Executors" })).toBeInTheDocument();
+  expect(items[3].querySelector("svg")).toBeNull();
+  expect(steps.getAllByRole("button")).toHaveLength(3);
+  await userEvent.click(steps.getByRole("button", { name: "Executors" }));
+  expect(await stepHeading(TITLES[3])).toBeInTheDocument();
+  expect(steps.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Language (done)",
+    "Linear (done)",
+    "Workspace (done)",
+  ]);
+});
+
+test("the furthest step reached moves on with the forward button, which a step can hold back; the list never gets past it", async () => {
+  const backend = await loggedIn();
+  const report = await backend.doctor();
+  vi.spyOn(backend, "doctor").mockResolvedValue({ ...report, executors: report.executors.map((e) => ({ ...e, logged_in: false })) });
+  await guideOn(backend);
+  await goTo(4); // the executors: no one is ready, so the guide stops here
+  const steps = within(screen.getByRole("navigation", { name: "Setup steps" }));
+  await userEvent.click(steps.getByRole("button", { name: "Workspace (done)" }));
+  await stepHeading(TITLES[2]);
+  expect(steps.queryByRole("button", { name: "First project" })).not.toBeInTheDocument();
+  expect(steps.queryByRole("button", { name: "How it works" })).not.toBeInTheDocument();
+  await userEvent.click(steps.getByRole("button", { name: "Executors" }));
+  await stepHeading(TITLES[3]);
+  expect(await screen.findByText("Install and log in to Claude Code or Codex first")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  expect(steps.queryByRole("button", { name: "First project" })).not.toBeInTheDocument();
+  expect(steps.queryByRole("button", { name: "How it works" })).not.toBeInTheDocument();
+});
+
+// The header: what the app is, and the way out.
+
+test("the header says what the app is: its icon, its name and its tagline", async () => {
+  await start();
+  const header = pageHeader();
+  expect(within(header).getByText("IssueRelay")).toBeInTheDocument();
+  expect(within(header).getByText("Hands your Linear issues to Claude Code and Codex")).toBeInTheDocument();
+});
+
+test("a first run can be left with 'Set up later', a re-run with 'Exit the guide'", async () => {
+  const first = await start();
+  expect(await screen.findByRole("button", { name: "Set up later" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Exit the guide" })).not.toBeInTheDocument();
+  first.unmount();
+  await guideOn(createMockBackend("demo", { latencyMs: 0 }));
+  expect(await screen.findByRole("button", { name: "Exit the guide" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Set up later" })).not.toBeInTheDocument();
+});
+
+test("the way out is in the header, outside the content that scrolls, on every step", async () => {
+  await guideOn(await loggedIn());
+  const banner = pageHeader();
+  expect(screen.getByRole("main").contains(banner)).toBe(false);
+  for (let at = 0; at < TITLES.length; at++) {
+    if (at > 0) {
+      await press(FORWARD);
+      await stepHeading(TITLES[at]);
+    }
+    expect(await within(banner).findByRole("button", { name: "Set up later" })).toBeEnabled();
+  }
+});
+
+test("a re-run that cannot go on because Linear is not connected can be left with 'Exit the guide', which saves nothing", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.linearLogout();
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  await guideOn(backend);
+  await press("Next");
+  expect(await screen.findByText("Not logged in to Linear")).toBeInTheDocument();
+  // The dead end: the forward button is held back and there is no sidebar to leave by.
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  await press("Exit the guide");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+  expect(saveSettings).not.toHaveBeenCalled();
+});
+
+test("a re-run held at the executors by a check that keeps failing can be left too", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.doctor = vi.fn().mockRejectedValue(new BackendError("IssueRelay could not start"));
+  await guideOn(backend);
+  await goTo(4);
+  expect(await screen.findByText("Could not run the environment check")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  await press("Exit the guide");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+});
+
+test("'Set up later' saves the settings with the guide completed, keeping everything else, and goes to the overview", async () => {
+  const backend = await loggedIn();
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  const before = await backend.settings();
+  await guideOn(backend);
+  await press("Set up later");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+  expect(saveSettings).toHaveBeenCalledTimes(1);
+  expect(saveSettings).toHaveBeenCalledWith({ ...before, onboarding_completed: true });
+});
+
+test("a save that fails keeps a first run in the guide and says why; trying again leaves", async () => {
+  const backend = await loggedIn();
+  backend.saveSettings = vi.fn().mockRejectedValueOnce(new BackendError("config.toml was changed while IssueRelay was running"));
+  await guideOn(backend);
+  await press("Set up later");
+  expect(await screen.findByText("Could not save the settings")).toBeInTheDocument();
+  expect(screen.getByText("config.toml was changed while IssueRelay was running")).toBeInTheDocument();
+  expect(screen.queryByText("overview page")).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1, name: TITLES[0] })).toBeInTheDocument();
+  await press("Set up later");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+});
+
+test("while 'Set up later' is saving nothing else can be pressed", async () => {
+  const backend = await loggedIn();
+  const save = deferred<void>();
+  backend.saveSettings = vi.fn(() => save.promise);
+  await guideOn(backend);
+  await goTo(3);
+  await press("Set up later");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Set up later" })).toBeDisabled());
+  expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  const steps = within(screen.getByRole("navigation", { name: "Setup steps" }));
+  expect(steps.getAllByRole("button")).toHaveLength(2);
+  for (const button of steps.getAllByRole("button")) expect(button).toBeDisabled();
+  await act(async () => save.resolve());
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+});
+
+test("while the settings are read the header does not guess which way out to offer", async () => {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  backend.settings = vi.fn(() => new Promise<Settings>(() => {}));
+  await guideOn(backend);
+  await stepHeading(TITLES[0]);
+  expect(screen.queryByRole("button", { name: "Set up later" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Exit the guide" })).not.toBeInTheDocument();
+});
+
+test("settings that cannot be read leave 'Exit the guide', for the panel, whose first-run gate says why", async () => {
+  const backend = createMockBackend("fresh", { latencyMs: 0 });
+  backend.settings = vi.fn().mockRejectedValue(new BackendError("the config file is unreadable"));
+  await guideOn(backend);
+  expect(screen.queryByRole("button", { name: "Set up later" })).not.toBeInTheDocument();
+  await press("Exit the guide");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
 });
 
 // The language step.
@@ -571,7 +735,9 @@ test("Check again asks again and keeps the report in view meanwhile", async () =
   expect(screen.getByRole("button", { name: "Check again" })).toBeEnabled();
 });
 
-test("the environment is checked once for the workspace and the executors, and again when they are entered afresh", async () => {
+const CHECKING = "Checking Linear, Claude Code and Codex. This takes up to a minute.";
+
+test("the environment is checked once for the workspace and the executors, and not again when they are entered afresh soon after", async () => {
   const backend = await loggedIn();
   const doctor = vi.spyOn(backend, "doctor");
   await guideOn(backend);
@@ -582,11 +748,74 @@ test("the environment is checked once for the workspace and the executors, and a
   await press("Next");
   await stepHeading(TITLES[3]);
   expect(doctor).toHaveBeenCalledTimes(1);
-  // Out of the two steps and back in: the user may have mended something meanwhile.
+  // Out of the two steps and back in: the report is a few minutes young, and a check takes up to a minute.
   await press("Next");
   await stepHeading(TITLES[4]);
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
   await stepHeading(TITLES[3]);
+  expect(screen.getByText("Claude Code")).toBeInTheDocument();
+  expect(screen.queryByText(CHECKING)).not.toBeInTheDocument();
+  expect(doctor).toHaveBeenCalledTimes(1);
+});
+
+test("a report younger than five minutes is not checked again when the steps are entered, one older than that is", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const backend = await loggedIn();
+    const doctor = vi.spyOn(backend, "doctor");
+    await guideOn(backend);
+    await goTo(4);
+    expect(doctor).toHaveBeenCalledTimes(1);
+    await press("Next");
+    await stepHeading(TITLES[4]);
+    vi.setSystemTime(Date.now() + 4 * 60_000);
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await stepHeading(TITLES[3]);
+    expect(screen.queryByText(CHECKING)).not.toBeInTheDocument();
+    expect(doctor).toHaveBeenCalledTimes(1);
+    await press("Next");
+    await stepHeading(TITLES[4]);
+    // Six minutes since the check.
+    vi.setSystemTime(Date.now() + 2 * 60_000);
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await stepHeading(TITLES[3]);
+    await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a binding made in the guide outdates the check, whatever its age: the next entry checks again", async () => {
+  const backend = await loggedIn();
+  const settings = await backend.settings();
+  await backend.saveSettings({ ...settings, full_access_acknowledged: true });
+  const doctor = vi.spyOn(backend, "doctor");
+  await guideOn(backend);
+  await goTo(5);
+  expect(doctor).toHaveBeenCalledTimes(1);
+  await pick("Linear project", "Demo Project");
+  await userEvent.click(screen.getByRole("button", { name: "Choose…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await screen.findByText("The binding is saved");
+  // A binding changes what the check looks at.
+  await userEvent.click(screen.getByRole("button", { name: "Back" }));
+  await stepHeading(TITLES[3]);
+  await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
+});
+
+test("a change of the Linear connection outdates the check, whatever its age", async () => {
+  const backend = await loggedIn();
+  const doctor = vi.spyOn(backend, "doctor");
+  const { client } = await guideOn(backend);
+  await goTo(4);
+  expect(doctor).toHaveBeenCalledTimes(1);
+  await userEvent.click(within(screen.getByRole("navigation", { name: "Setup steps" })).getByRole("button", { name: "Linear (done)" }));
+  await screen.findByText("Jane Doe");
+  await userEvent.click(screen.getByRole("button", { name: "Authorize again" }));
+  // The login is made again, and what was checked under the old one is outdated.
+  await waitFor(() => expect(client.getQueryState(queryKeys.doctor)?.isInvalidated).toBe(true));
+  await press("Next");
+  await stepHeading(TITLES[2]);
   await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
 });
 
@@ -669,6 +898,36 @@ test("authorizing Linear in an executor from the guide checks again, and the exe
   expect(backend.doctor).toHaveBeenCalledTimes(2);
 });
 
+test("no step skips a level of heading: the title of the step, then the headings of its parts, then the ones inside them", async () => {
+  await guideOn(await loggedIn("demo"));
+  const levels = () => within(screen.getByRole("main")).getAllByRole("heading").map((heading) => Number(heading.tagName.slice(1)));
+  const noLevelSkipped = () => {
+    const found = levels();
+    expect(found[0]).toBe(1);
+    found.forEach((level, at) => {
+      if (at > 0) expect(level - found[at - 1], `the headings are ${found.join(", ")}`).toBeLessThanOrEqual(1);
+    });
+  };
+  noLevelSkipped(); // the language
+  await press("Next");
+  await screen.findByText("Jane Doe");
+  noLevelSkipped(); // Linear
+  await press("Next");
+  await screen.findByText("The label ai-ready exists");
+  noLevelSkipped(); // the workspace
+  await press("Next");
+  await screen.findByText("Claude Code");
+  noLevelSkipped(); // the executors, under a heading of their own
+  expect(screen.getByRole("heading", { level: 2, name: "Executors" })).toBeInTheDocument();
+  expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual(["Claude Code", "Codex"]);
+  await press("Next");
+  await screen.findByRole("list", { name: "Bound projects" });
+  noLevelSkipped(); // the binding
+  await press("Next");
+  await screen.findByText("It has the ai-ready label");
+  noLevelSkipped(); // the end
+});
+
 // The binding step.
 
 test("the first binding is made in the guide: the risk of full access is asked once, then the binding is listed and another can follow", async () => {
@@ -746,6 +1005,28 @@ test("a second binding is made in the guide too, and listed with the first", asy
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(within(screen.getByRole("list", { name: "Bound projects" })).getAllByRole("listitem")).toHaveLength(2));
   expect(screen.getByText("The binding is saved")).toBeInTheDocument();
+});
+
+test.each([
+  ["the button of the last step", "Start using IssueRelay"],
+  ["the button in the header", "Set up later"],
+])("the settings that end the guide with %s still carry the full-access confirmation the binding step saved", async (_how, button) => {
+  const backend = await loggedIn();
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  await guideOn(backend);
+  await goTo(5);
+  await pick("Linear project", "Demo Project");
+  await userEvent.click(screen.getByRole("button", { name: "Choose…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "I understand" }));
+  await screen.findByText("The binding is saved");
+  await press("Next");
+  await stepHeading(TITLES[5]);
+  await userEvent.click(screen.getByRole("button", { name: button }));
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+  // The guide's own copy of the settings is the one with the confirmation, not the one it read first.
+  expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ onboarding_completed: true, full_access_acknowledged: true }));
+  expect(await backend.settings()).toMatchObject({ onboarding_completed: true, full_access_acknowledged: true });
 });
 
 test("bindings that exist already are listed instead of a form, and the guide says Next", async () => {
@@ -979,6 +1260,43 @@ test("the environment check leads back to the guide, which starts at the first s
   await overviewSettled();
 });
 
+test("a first run that cannot go on, because Linear's tools changed, leaves with 'Set up later': the flag is saved and the first-run gate lets the user through", async () => {
+  await initI18nOnce("en");
+  const backend = await backendSaying({ kind: "interface_changed", message: "tool list_issues has no cursor" });
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  openApp("", backend);
+  await stepHeading(TITLES[0]);
+  await press("Next");
+  expect(await screen.findByText("Linear's tools changed: update IssueRelay")).toBeInTheDocument();
+  // The dead end: nothing to press on the step, the forward button held back, no sidebar.
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  await press("Set up later");
+  await overviewSettled();
+  expect(window.location.hash).toBe("#/");
+  expect(saveSettings).toHaveBeenCalledTimes(1);
+  expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({ onboarding_completed: true }));
+  // The gate read the saved settings: the guide does not come back, and the overview says what is the matter.
+  expect(screen.queryByRole("heading", { level: 1, name: TITLES[0] })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open the environment check" })).toBeInTheDocument();
+});
+
+test("in the app, a re-run that cannot go on, because Linear is not connected, leaves with 'Exit the guide' for the overview", async () => {
+  await initI18nOnce("en");
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.linearLogout();
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  openApp("#/doctor", backend);
+  await userEvent.click(await screen.findByRole("link", { name: "Run the first-run guide again" }));
+  await press("Next");
+  expect(await screen.findByText("Not logged in to Linear")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  await press("Exit the guide");
+  await overviewSettled();
+  expect(window.location.hash).toBe("#/");
+  expect(screen.getByRole("link", { name: "Runs" })).toBeInTheDocument();
+  expect(saveSettings).not.toHaveBeenCalled();
+});
+
 // The guide in the other languages.
 
 test.each([
@@ -995,6 +1313,8 @@ test.each([
   );
   expect(await screen.findByRole("heading", { level: 1, name: table.onboarding.title.language })).toBeInTheDocument();
   expect(screen.getByRole("navigation", { name: table.onboarding.steps_label })).toBeInTheDocument();
+  expect(within(pageHeader()).getByText(table.app.tagline)).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: table.onboarding.set_up_later })).toBeInTheDocument();
   // The names of the languages are the same whatever the interface speaks.
   expect(await screen.findByRole("radio", { name: "English" })).toBeInTheDocument();
   expect(screen.getByRole("radio", { name: table.settings.follow_system })).toBeChecked();
@@ -1002,4 +1322,18 @@ test.each([
   expect(await screen.findByRole("heading", { level: 1, name: table.onboarding.title.linear })).toBeInTheDocument();
   expect(await screen.findByText("Jane Doe")).toBeInTheDocument();
   expect(screen.getByText(table.onboarding.step_of.replace("{{current}}", "2").replace("{{total}}", "6"))).toBeInTheDocument();
+});
+
+test.each([
+  ["zh-CN", zhCN],
+  ["ja", ja],
+  ["ko", ko],
+] as const)("the way out of a re-run reads in %s", async (lang, table) => {
+  await renderWithProviders(
+    <Routes>
+      <Route path="/onboarding" element={<Onboarding />} />
+    </Routes>,
+    { backend: createMockBackend("demo", { latencyMs: 0 }), route: "/onboarding", lang },
+  );
+  expect(await screen.findByRole("button", { name: table.onboarding.exit })).toBeInTheDocument();
 });

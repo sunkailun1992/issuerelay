@@ -487,6 +487,8 @@
     "later": "나중에 추가하기",
     "bind_later": "나중에 연결하기",
     "start": "IssueRelay 시작하기",
+    "exit": "안내 종료",
+    "set_up_later": "나중에 설정하기",
     "step": {
       "language": "언어",
       "linear": "Linear",
