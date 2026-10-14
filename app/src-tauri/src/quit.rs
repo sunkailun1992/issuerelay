@@ -221,7 +221,9 @@ fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
 /// done (`may_exit`), which is when IssueRelay's own `exit(0)` comes; any other is held and goes
 /// through `request`, which asks while runs are in progress. An exit that cannot be held
 /// (`RunEvent::Exit` before quitting is done: the system is ending the app) stops the host first
-/// (`forced_exit`), so that the runs end with their trees and are recorded.
+/// (`forced_exit`), so that the runs end with their trees and are recorded. Not about quitting, but
+/// the only other run event the app acts on: on macOS the system opening the app again (`Reopen`)
+/// brings the panel back (`window::on_reopen`).
 pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
     match event {
         RunEvent::ExitRequested { api, code, .. } => {
@@ -247,6 +249,17 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
                 ),
             }
         }
+        // macOS only. Opening the app again while it runs (Finder, Spotlight, `open`, a click on
+        // the Dock icon) starts no second process: Launch Services sends the running one this
+        // event instead, so the single-instance callback (lib.rs) never runs. Windows has no such
+        // event: a second launch there is a second process, which that callback handles. (tauri
+        // 2.12.3 and tao 0.37.1, read on 2026-10-14: the variant is `#[non_exhaustive]`, hence
+        // the `..`; tao raises it from the app delegate's `applicationShouldHandleReopen`.)
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => window::on_reopen(app, has_visible_windows),
         _ => {}
     }
 }

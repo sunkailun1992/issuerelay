@@ -30,7 +30,9 @@ pub fn run() {
     let mut log_guard = logging::init(logs_dir.as_deref());
     logging::install_panic_hook();
     let builder = tauri::Builder::default()
-        // Must come first: a second launch only brings the running instance's panel forward.
+        // Must come first: a second launch only brings the running instance's panel forward. (On
+        // macOS, opening the app again through Launch Services starts no second process and never
+        // gets here: the system's reopen event reaches `window::on_reopen` through the run loop.)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             window::show(app)
         }))
