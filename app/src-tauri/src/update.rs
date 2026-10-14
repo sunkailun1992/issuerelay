@@ -801,6 +801,27 @@ mod tests {
     }
 
     #[test]
+    fn the_plugin_builds_an_updater_from_the_apps_own_configuration() {
+        // The plugin as lib.rs registers it, reading the `plugins.updater` section of the real
+        // tauri.conf.json: without that section, or with a key it cannot read, the app would not
+        // even start. (Asking for an update would reach GitHub: not done here.)
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mut context = mock_context(noop_assets());
+        context
+            .config_mut()
+            .plugins
+            .0
+            .insert("updater".into(), config["plugins"]["updater"].clone());
+        let app = mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .expect("the plugin starts with the app's configuration");
+        let updater = app.handle().updater_builder().timeout(CHECK_LIMIT).build();
+        assert!(updater.is_ok(), "{:?}", updater.err());
+    }
+
+    #[test]
     fn the_quit_flow_helpers_run_on_any_runtime() {
         // Generic over the runtime like quit.rs, so the quit flow that calls them runs on tauri's
         // mock runtime in quit.rs's tests: without updater state nothing is pending.

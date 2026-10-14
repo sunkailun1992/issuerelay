@@ -101,6 +101,35 @@ fn updates_come_signed_from_the_fixed_manifest() {
 }
 
 #[test]
+fn the_updater_plugin_reads_the_configuration_as_it_is_written() {
+    // Through the plugin's own parser, not a copy of its rules: a misspelt key is ignored without
+    // a word, and would leave a check off or the endpoint unset.
+    let updater = config("tauri.conf.json")["plugins"]["updater"].clone();
+    let read: tauri_plugin_updater::Config =
+        serde_json::from_value(updater).expect("the plugin accepts the section");
+    assert!(read.require_signed_version);
+    assert!(!read.allow_downgrades);
+    assert!(!read.dangerous_insecure_transport_protocol);
+    assert!(!read.dangerous_accept_invalid_certs);
+    assert!(!read.dangerous_accept_invalid_hostnames);
+    assert_eq!(
+        read.endpoints
+            .iter()
+            .map(url::Url::as_str)
+            .collect::<Vec<_>>(),
+        ["https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json"]
+    );
+    assert_eq!(
+        read.windows
+            .expect("the Windows settings")
+            .install_mode
+            .to_string(),
+        "passive"
+    );
+    assert!(!read.pubkey.is_empty());
+}
+
+#[test]
 fn release_builds_add_the_cli_and_the_update_payloads() {
     let release = &config("tauri.updater.conf.json")["bundle"];
     assert_eq!(
