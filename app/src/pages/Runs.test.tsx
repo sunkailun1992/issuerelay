@@ -430,3 +430,17 @@ test("how long ago a run started is worked out again as time passes", async () =
     vi.useRealTimers();
   }
 });
+
+test("a list as long as the panel reads says that only the latest runs are shown", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const [newest] = await backend.listJobs(1);
+  backend.listJobs = vi.fn(async (limit: number) => Array.from({ length: limit }, (_, n) => ({ ...newest, id: 1000 - n })));
+  await renderWithProviders(<Runs />, { backend });
+  expect(await screen.findByText("Showing the latest 200 runs; older ones are not listed.")).toBeInTheDocument();
+});
+
+test("a list shorter than that says nothing about its length", async () => {
+  await renderWithProviders(<Runs />);
+  await screen.findByText("DEMO-7");
+  expect(screen.queryByText(/Showing the latest/)).not.toBeInTheDocument();
+});

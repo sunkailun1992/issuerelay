@@ -1,4 +1,4 @@
-import { ChevronRight, CircleX, SquareTerminal, Wrench } from "lucide-react";
+import { ChevronRight, CircleX, FilePen, SquareTerminal, Wrench } from "lucide-react";
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -76,6 +76,30 @@ function ResultCard({ entry }: { entry: TimelineEntry }) {
   );
 }
 
+/** The files Codex changed, each with what happened to it; a change it could not apply is failed. */
+function FilesCard({ entry }: { entry: TimelineEntry }) {
+  const { t } = useTranslation();
+  const label = useId();
+  return (
+    <div role="group" aria-labelledby={label} className={cn(card(entry.failed), "px-3 py-2")}>
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <FilePen aria-hidden className="size-4 shrink-0" />
+        <span id={label}>{t("timeline.files")}</span>
+        {entry.failed && <FailedMark />}
+      </div>
+      <ul className="flex flex-col gap-0.5 font-mono text-xs">
+        {(entry.changes ?? []).map((change, index) => (
+          // A change's place in the list is its identity, as a row's is in the timeline.
+          <li key={index} className="flex min-w-0 items-baseline gap-2">
+            {change.kind !== null && <span className="shrink-0 text-muted-foreground">{t(`timeline.change.${change.kind}`)}</span>}
+            <span className="min-w-0 wrap-anywhere">{change.path}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** Where a labelled line came from, by the key of the label that says so. */
 const LINE_LABEL = { error: "timeline.error", stderr: "timeline.stderr", note: "timeline.note" } as const;
 
@@ -115,6 +139,8 @@ function Row({ entry }: { entry: TimelineEntry }) {
     case "tool":
     case "command":
       return <CallCard entry={entry} />;
+    case "files":
+      return <FilesCard entry={entry} />;
     case "result":
       return <ResultCard entry={entry} />;
     case "error":
@@ -126,8 +152,8 @@ function Row({ entry }: { entry: TimelineEntry }) {
 
 /**
  * A run's timeline (design 9.2): what the AI said as text, each tool call and command as a card
- * that opens, the end of the run as a card of its own. Everything in it was cleaned when the
- * entries were made (`parseTimeline`) and is shown as text, never as markup.
+ * that opens, the files Codex changed, the end of the run as a card of its own. Everything in it
+ * was cleaned when the entries were made (`parseTimeline`) and is shown as text, never as markup.
  */
 export function RunTimeline({ entries }: { entries: TimelineEntry[] }) {
   return (

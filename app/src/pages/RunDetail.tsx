@@ -13,7 +13,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useIssues, useJob, useJobLog } from "@/hooks/queries";
+import { LOG_LINES, useIssues, useJob, useJobLog } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
@@ -111,30 +111,47 @@ function Reason({ job }: { job: Job }) {
   );
 }
 
-/** What stands in a tab when the log has nothing to show: whether the log is gone or just not written yet. */
+/**
+ * What stands in a tab when the log has nothing to show: whether the log is gone, not written yet
+ * (the run is still in hand), or the run ended with nothing worth showing.
+ */
 function NothingToShow({ job, noLines }: { job: Job; noLines: boolean }) {
   const { t } = useTranslation();
   // A run that ended and started had a log (a run that was stopped in the queue never did): when it
   // reads as empty, the cleanup removed it.
   const removed = noLines && !isActive(job) && job.started_at !== null;
-  return <p className="rounded-lg border border-dashed p-6 text-center text-muted-foreground">{t(removed ? "runs.log_removed" : "runs.no_output")}</p>;
+  const key = removed ? "runs.log_removed" : isActive(job) ? "runs.no_output" : "runs.no_output_ended";
+  return <p className="rounded-lg border border-dashed p-6 text-center text-muted-foreground">{t(key)}</p>;
 }
 
-/** Both tabs read the same log: its placeholders while it is read, its error, and the empty cases. */
+/**
+ * Both tabs read the same log: its placeholders while it is read, its error, and the empty cases. A
+ * log read as long as the panel reads (`LOG_LINES`) is only its tail: the run began before what is
+ * shown, and both tabs say so. When reading the log again fails (a live log is read every 1.5 s),
+ * the lines read before stay, with the error above them, so the page does not swap the one for the
+ * other on every try.
+ */
 function LogTabs({ job }: { job: Job }) {
   const { t } = useTranslation();
+  const lang = useLang();
   const live = job.state === "running";
   const log = useJobLog(job.id, { live });
   const lines = log.data;
   const entries = useMemo(() => (lines === undefined ? [] : parseTimeline(lines, job.executor)), [lines, job.executor]);
+  const failure = <ErrorState error={log.error} headline="runs.log_failed" onRetry={() => void log.refetch()} />;
 
   /** The tab's content: what the log is like now, or `show` once it has something. */
   const panel = (show: (lines: string[]) => ReactNode) => {
-    if (log.isError && !log.isFetching) {
-      return <ErrorState error={log.error} headline="runs.log_failed" onRetry={() => void log.refetch()} />;
-    }
-    if (lines === undefined) return <LoadingState rows={3} />;
-    return show(lines);
+    if (lines === undefined) return log.isError && !log.isFetching ? failure : <LoadingState rows={3} />;
+    return (
+      <div className="flex flex-col gap-3">
+        {log.isError && failure}
+        {lines.length >= LOG_LINES && (
+          <p className="text-sm text-muted-foreground">{t("runs.log_capped", { lines: new Intl.NumberFormat(lang).format(LOG_LINES) })}</p>
+        )}
+        {show(lines)}
+      </div>
+    );
   };
 
   return (

@@ -185,7 +185,10 @@
       "start_failed": "A run could not be started"
     },
     "status_failed": "Could not read IssueRelay's status",
-    "jobs_failed": "Could not read the runs"
+    "jobs_failed": "Could not read the runs",
+    "setup_title": "Nothing can run yet: no executor is ready and no project is bound",
+    "setup_body": "Set up Claude Code or Codex in the environment check, then bind a Linear project to a folder.",
+    "bind_project": "Bind a project"
   },
   "issues": {
     "description": "Issues assigned to you with the {{label}} label, the 50 most recently updated",
@@ -265,14 +268,23 @@
     "copy_all": "Copy all",
     "log_removed": "The log of this run was removed by the log cleanup",
     "log_failed": "Could not read the log",
-    "no_output": "Nothing to show yet"
+    "no_output": "Nothing to show yet",
+    "log_capped": "Only the last {{lines}} lines of the log are shown; the run began before them.",
+    "list_capped": "Showing the latest {{runs}} runs; older ones are not listed.",
+    "no_output_ended": "This run left nothing to show"
   },
   "timeline": {
     "session_started": "Session started",
     "note": "IssueRelay",
     "stderr": "stderr",
     "result": "Result",
-    "error": "Error"
+    "error": "Error",
+    "files": "Files changed",
+    "change": {
+      "add": "Added",
+      "delete": "Deleted",
+      "update": "Changed"
+    }
   },
   "bindings": {
     "description": "A binding ties a Linear project to a folder on this computer and sets how the AI runs there.",
@@ -345,7 +357,7 @@
     "states_ok": "The statuses IssueRelay uses exist",
     "states_missing": "Missing statuses: {{states}}",
     "teams_checked": "Teams checked: {{teams}}",
-    "add_label_hint": "Create the label {{label}} in Linear (Settings → Labels). IssueRelay does not create it for you.",
+    "add_label_hint": "Create the label {{label}} in Linear (Settings → Workspace → Labels, or a team's own labels). IssueRelay does not create it for you.",
     "add_states_hint": "Add the missing statuses in Linear under Settings → Teams → Workflow. IssueRelay does not create them for you.",
     "open_linear": "Open Linear",
     "executors_title": "Executors",
@@ -446,7 +458,9 @@
     "logs": "Run logs",
     "log_retention": "Keep run logs for (days)",
     "log_max_total": "Run logs may take at most (MB)",
-    "unsaved": "You have unsaved changes"
+    "unsaved": "You have unsaved changes",
+    "reread_failed": "Saved, but the settings could not be read back",
+    "fix_to_save": "Correct the marked fields to save"
   },
   "help": {
     "description": "When IssueRelay takes an issue on, how an issue moves, how to write one, and what to do when something does not work.",

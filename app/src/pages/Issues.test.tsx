@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router";
 import { vi } from "vitest";
@@ -33,9 +33,11 @@ test("while the first connection to Linear is under way the page says so, not th
   expect(screen.queryByText("Could not read the issues from Linear")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Open the guide" })).not.toBeInTheDocument();
   // Connected: the list is read again (the app's connection refresh does that), and shows.
-  await backend.linearReconnect();
-  await client.invalidateQueries({ queryKey: ["status"] });
-  await client.invalidateQueries({ queryKey: ["issues"] });
+  await act(async () => {
+    await backend.linearReconnect();
+    await client.invalidateQueries({ queryKey: ["status"] });
+    await client.invalidateQueries({ queryKey: ["issues"] });
+  });
   expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
   expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
 });

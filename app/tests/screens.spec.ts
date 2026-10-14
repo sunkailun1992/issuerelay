@@ -347,14 +347,20 @@ for (const { width, height } of SMALLEST) {
       }
     }
 
-    // On every step of the guide the way out in the header and the Back and forward buttons are in reach.
+    // On every step of the guide the way out in the header and the Back and forward buttons are in reach. On the
+    // last step the forward button ("Start using") is the way out, and the header does not repeat it.
     for (const language of ["en", "zh-CN"] as const) {
       test(`the guide in ${language} keeps its exit and its Back and forward buttons in reach`, async ({ page }) => {
         const t = words(language);
-        await walkGuide(page, language, async () => {
+        await walkGuide(page, language, async (step) => {
           const buttons = page.locator("main footer").getByRole("button");
           const exit = page.getByRole("button", { name: t("onboarding.set_up_later"), exact: true });
-          await expectWithinWindow(exit, buttons.first(), buttons.last());
+          if (step === GUIDE.length) {
+            await expect(exit).toHaveCount(0);
+            await expectWithinWindow(buttons.first(), buttons.last());
+          } else {
+            await expectWithinWindow(exit, buttons.first(), buttons.last());
+          }
         });
       });
     }

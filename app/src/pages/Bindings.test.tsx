@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router";
 import { vi } from "vitest";
@@ -278,6 +278,45 @@ test("a confirmed removal takes the card away", async () => {
   expect(screen.getByRole("region", { name: "Demo Mobile" })).toBeInTheDocument();
 });
 
+test("after a confirmed removal the focus goes to the 'Add binding' button, not to the document", async () => {
+  await renderWithProviders(<Bindings />);
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  await userEvent.click(within(mobile).getByRole("button", { name: "Remove" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+  // The Remove button that opened the question went with its card.
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Demo Mobile" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add binding" })).toHaveFocus());
+});
+
+test("after the last binding is removed the focus goes to the heading of the page", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.removeBinding("proj-2");
+  await renderWithProviders(<Bindings />, { backend });
+  const demo = await screen.findByRole("region", { name: "Demo Project" });
+  await userEvent.click(within(demo).getByRole("button", { name: "Remove" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+  await screen.findByRole("button", { name: "Add your first binding" });
+  await waitFor(() => expect(screen.getByRole("heading", { level: 1, name: "Bindings" })).toHaveFocus());
+});
+
+test("a removal that fails leaves the focus where Radix puts it, on the Remove button", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.removeBinding = vi.fn().mockRejectedValue(new BackendError("config.toml was changed while IssueRelay was running"));
+  await renderWithProviders(<Bindings />, { backend });
+  const demo = await screen.findByRole("region", { name: "Demo Project" });
+  const remove = within(demo).getByRole("button", { name: "Remove" });
+  await userEvent.click(remove);
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+  expect(await screen.findByText("Could not remove the binding")).toBeInTheDocument();
+  await waitFor(() => expect(remove).toHaveFocus());
+});
+
+test("each card's Re-check button is described by the card's project, like Edit and Remove", async () => {
+  await renderWithProviders(<Bindings />);
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  expect(within(mobile).getByRole("button", { name: "Check again" })).toHaveAccessibleDescription("Demo Mobile");
+});
+
 test("removing the last binding leaves the invitation to add one", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   await backend.removeBinding("proj-2");
@@ -531,6 +570,18 @@ test.each(["Escape", "Cancel"] as const)("closing the edit dialog with %s return
   expect(edit).not.toHaveFocus();
   await closeTheDialog(how);
   // Without this the focus falls to the page, and a keyboard user starts again from its top.
+  await waitFor(() => expect(edit).toHaveFocus());
+});
+
+test.each(["Escape", "Cancel"] as const)("an Edit button that a click did not focus (as in WebKit) still gets the focus back with %s", async (how) => {
+  await renderWithProviders(<Bindings />);
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  const edit = within(mobile).getByRole("button", { name: "Edit" });
+  // A mouse click in WebKit does not focus the button it clicks: the document keeps the focus.
+  expect(document.activeElement).toBe(document.body);
+  fireEvent.click(edit);
+  await screen.findByRole("dialog", { name: "Edit the binding" });
+  await closeTheDialog(how);
   await waitFor(() => expect(edit).toHaveFocus());
 });
 

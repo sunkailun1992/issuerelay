@@ -501,8 +501,17 @@ test("a run that never started never had a log to remove", async () => {
   const canceled = (await backend.job(6))!;
   backend.job = vi.fn().mockResolvedValue({ ...canceled, started_at: null, executor: null });
   await openRun(6, backend);
-  expect(await screen.findByText("Nothing to show yet")).toBeInTheDocument();
+  // It has ended: nothing more will come, so not "yet".
+  expect(await screen.findByText("This run left nothing to show")).toBeInTheDocument();
+  expect(screen.queryByText("Nothing to show yet")).not.toBeInTheDocument();
   expect(screen.queryByText("The log of this run was removed by the log cleanup")).not.toBeInTheDocument();
+});
+
+test("a run that ended with events but none worth a row left nothing to show in the timeline", async () => {
+  const log = [JSON.stringify({ type: "thread.started", thread_id: "t" }), JSON.stringify({ type: "turn.started" })];
+  await openRun(10, backendWithLog(log));
+  expect(await screen.findByText("This run left nothing to show")).toBeInTheDocument();
+  expect(screen.queryByText("Nothing to show yet")).not.toBeInTheDocument();
 });
 
 test("a run that is going and has written nothing yet has nothing to show yet", async () => {
@@ -549,6 +558,40 @@ test("when the log cannot be read the page goes on without it and says so where 
   expect(screen.queryByText("Could not read the log")).not.toBeInTheDocument();
 });
 
+test("a log as long as the panel reads says that only its last lines are shown, in both tabs", async () => {
+  // Lines that make no row keep the timeline short; the raw log has them all.
+  const lines = Array.from({ length: 5000 }, () => JSON.stringify({ type: "turn.started" }));
+  await openRun(10, backendWithLog(lines));
+  const note = "Only the last 5,000 lines of the log are shown; the run began before them.";
+  expect(await screen.findByText(note)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "Raw log" }));
+  expect(screen.getByText(note)).toBeInTheDocument();
+});
+
+test("a log the panel reads whole says nothing about its length", async () => {
+  const lines = [...Array.from({ length: 4998 }, () => JSON.stringify({ type: "turn.started" })), assistant({ type: "text", text: "All done." })];
+  await openRun(10, backendWithLog(lines));
+  expect(await screen.findByText("All done.")).toBeInTheDocument();
+  expect(screen.queryByText(/Only the last/)).not.toBeInTheDocument();
+});
+
+test("the files Codex changed are listed with what happened to each", async () => {
+  const log = [
+    completed({
+      type: "file_change",
+      changes: [
+        { path: "src/lib.rs", kind: "update" },
+        { path: "docs/usage.md", kind: "add" },
+      ],
+      status: "completed",
+    }),
+  ];
+  // DEMO-11 is run by Codex.
+  await openRun(11, backendWithLog(log));
+  const files = await screen.findByRole("group", { name: "Files changed" });
+  expect(within(files).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["Changedsrc/lib.rs", "Addeddocs/usage.md"]);
+});
+
 // ---- a run still going: its log is read again --------------------------------------------------
 
 test("the log of a run that is going is read again and shows what came since", async () => {
@@ -564,6 +607,29 @@ test("the log of a run that is going is read again and shows what came since", a
     expect(screen.queryByText("A new thought.")).not.toBeInTheDocument();
     await advanceUntil(() => screen.queryByText("A new thought.") !== null);
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a live log that cannot be read again keeps its lines, with the error above them and no flicker", async () => {
+  vi.useFakeTimers();
+  try {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.jobLog = vi
+      .fn()
+      .mockResolvedValueOnce([assistant({ type: "text", text: "Working on it." })])
+      .mockRejectedValue(new BackendError("cannot read /logs/12.jsonl"));
+    await renderWithProviders(page, { backend, route: "/runs/12" });
+    await advanceUntil(() => screen.queryByText("Working on it.") !== null);
+    await advanceUntil(() => screen.queryByText("Could not read the log") !== null);
+    // It is read again every 1.5 s and fails each time: between and during those reads the page
+    // shows the same, the lines it had and the error above them.
+    for (let round = 0; round < 6; round++) {
+      await act(() => vi.advanceTimersByTimeAsync(500));
+      expect(screen.getByText("Working on it.")).toBeInTheDocument();
+      expect(screen.getByText("Could not read the log")).toBeInTheDocument();
+    }
   } finally {
     vi.useRealTimers();
   }

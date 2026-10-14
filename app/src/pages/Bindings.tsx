@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, CircleCheck, CircleX, FolderOpen, LoaderCircle, Pencil, Plus, Trash2 } from "lucide-react";
-import { type ReactNode, useCallback, useId, useRef, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
 import { MiddleEllipsis } from "@/components/MiddleEllipsis";
@@ -73,12 +73,13 @@ function Verdict({ ok, children }: { ok: boolean; children: ReactNode }) {
 /**
  * What the last check found about a binding: its folder and its executor. Before any check there
  * is a button for one; an executor that is not ready and a folder that is missing are mended in the
- * environment check, which is one click away.
+ * environment check, which is one click away. `describedBy` names the element that says which
+ * project this is, as for the card's other buttons.
  */
-function CheckResult({ check, report }: { check: LastCheck; report: BindingReport | undefined }) {
+function CheckResult({ check, report, describedBy }: { check: LastCheck; report: BindingReport | undefined; describedBy: string }) {
   const { t } = useTranslation();
   const again = (
-    <Button variant="outline" size="sm" onClick={check.run}>
+    <Button variant="outline" size="sm" aria-describedby={describedBy} onClick={check.run}>
       {t("bindings.recheck")}
     </Button>
   );
@@ -128,8 +129,20 @@ function CheckResult({ check, report }: { check: LastCheck; report: BindingRepor
 /**
  * Asks before a binding goes: the issues of its project wait for a new one. `describedBy` names
  * the element that says which project this is, so that the button's description tells it.
+ * `onRemoving` and `onKept` tell the page that a removal was confirmed and that it failed: once the
+ * card is gone, its button is gone with the focus Radix gave back to it.
  */
-function RemoveButton({ binding, describedBy }: { binding: Binding; describedBy: string }) {
+function RemoveButton({
+  binding,
+  describedBy,
+  onRemoving,
+  onKept,
+}: {
+  binding: Binding;
+  describedBy: string;
+  onRemoving: () => void;
+  onKept: () => void;
+}) {
   const { t } = useTranslation();
   const remove = useRemoveBinding();
   return (
@@ -147,7 +160,13 @@ function RemoveButton({ binding, describedBy }: { binding: Binding; describedBy:
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={() => remove.mutate(binding.id)}>
+          <AlertDialogAction
+            variant="destructive"
+            onClick={() => {
+              onRemoving();
+              remove.mutate(binding.id, { onError: onKept });
+            }}
+          >
             {t("actions.confirm")}
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -179,12 +198,19 @@ function PromptOverride({ text, labelId }: { text: string | undefined; labelId: 
   );
 }
 
+/** What a card tells the page: its Edit was pressed (with the button), a removal was confirmed, or it failed. */
+interface CardActions {
+  onEdit: (opener: HTMLElement) => void;
+  onRemoving: () => void;
+  onKept: () => void;
+}
+
 /**
  * One binding (design 9.2): its folder, executor, permission level, model, prompt override and what the last check found.
- * Edit and Remove are named for what they do and described by the project, which their name
- * leaves out (they are one in every card).
+ * Edit, Remove and Check again are named for what they do and described by the project, which their
+ * name leaves out (they are one in every card).
  */
-function BindingCard({ binding, labels, check, onEdit }: { binding: Binding; labels: BindingLabels; check: LastCheck; onEdit: () => void }) {
+function BindingCard({ binding, labels, check, actions }: { binding: Binding; labels: BindingLabels; check: LastCheck; actions: CardActions }) {
   const { t } = useTranslation();
   const titleId = useId();
   const promptId = useId();
@@ -198,11 +224,11 @@ function BindingCard({ binding, labels, check, onEdit }: { binding: Binding; lab
             {binding.project_name}
           </h2>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="outline" size="sm" aria-describedby={titleId} onClick={onEdit}>
+            <Button variant="outline" size="sm" aria-describedby={titleId} onClick={(event) => actions.onEdit(event.currentTarget)}>
               <Pencil aria-hidden />
               {t("bindings.edit")}
             </Button>
-            <RemoveButton binding={binding} describedBy={titleId} />
+            <RemoveButton binding={binding} describedBy={titleId} onRemoving={actions.onRemoving} onKept={actions.onKept} />
           </div>
         </div>
         <CardContent>
@@ -227,7 +253,7 @@ function BindingCard({ binding, labels, check, onEdit }: { binding: Binding; lab
             </dd>
             <dt className="text-muted-foreground">{t("bindings.check")}</dt>
             <dd aria-live="polite" className="min-w-0">
-              <CheckResult check={check} report={report} />
+              <CheckResult check={check} report={report} describedBy={titleId} />
             </dd>
           </dl>
         </CardContent>
@@ -249,11 +275,36 @@ export default function Bindings() {
   const labels = bindingLabels(t, settings.data);
   // The binding being edited stays while the dialog fades out, so that it does not turn into a new one.
   const [dialog, setDialog] = useState<{ open: boolean; binding?: Binding }>({ open: false });
-  // Where the focus goes when the dialog closes and what opened it is gone (the button of the empty
-  // page goes once there is a binding, a card goes with its binding): the header's button, else the heading.
+  // The button that opened the dialog, taken from its click: in WebKit a mouse click does not
+  // focus a button, so the dialog would not know it from the focus it had when it opened.
+  const opener = useRef<HTMLElement | null>(null);
+  const open = (binding: Binding | undefined, from: HTMLElement) => {
+    opener.current = from;
+    setDialog({ open: true, binding });
+  };
+  // Where the focus goes when what had it is gone (the button of the empty page goes once there is
+  // a binding, a card goes with its binding): the header's button, else the heading.
   const addButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const fallbackFocus = useCallback(() => addButton.current ?? heading.current, []);
+  const pageFocus = useCallback(() => addButton.current ?? heading.current, []);
+  const fallbackFocus = useCallback(() => (opener.current?.isConnected ? opener.current : null) ?? pageFocus(), [pageFocus]);
+  // A confirmed removal takes the card away with its Remove button, which had the focus: once the
+  // bindings are read without it, and the focus fell to the document, it goes to the page's focus.
+  const removing = useRef(false);
+  useEffect(() => {
+    if (!removing.current) return;
+    removing.current = false;
+    if (document.activeElement === null || document.activeElement === document.body) pageFocus()?.focus();
+  }, [bindings.data, pageFocus]);
+  const actionsOf = (binding: Binding): CardActions => ({
+    onEdit: (from) => open(binding, from),
+    onRemoving: () => {
+      removing.current = true;
+    },
+    onKept: () => {
+      removing.current = false;
+    },
+  });
 
   let actions: ReactNode;
   let body: ReactNode;
@@ -269,7 +320,7 @@ export default function Bindings() {
         title={t("bindings.empty")}
         description={t("bindings.empty_description")}
         action={
-          <Button onClick={() => setDialog({ open: true })}>
+          <Button onClick={(event) => open(undefined, event.currentTarget)}>
             <Plus aria-hidden />
             {t("bindings.add_first")}
           </Button>
@@ -278,7 +329,7 @@ export default function Bindings() {
     );
   } else {
     actions = (
-      <Button size="sm" ref={addButton} onClick={() => setDialog({ open: true })}>
+      <Button size="sm" ref={addButton} onClick={(event) => open(undefined, event.currentTarget)}>
         <Plus aria-hidden />
         {t("bindings.add")}
       </Button>
@@ -286,7 +337,7 @@ export default function Bindings() {
     body = (
       <div className="flex flex-col gap-4">
         {bindings.data.map((binding) => (
-          <BindingCard key={binding.id} binding={binding} labels={labels} check={check} onEdit={() => setDialog({ open: true, binding })} />
+          <BindingCard key={binding.id} binding={binding} labels={labels} check={check} actions={actionsOf(binding)} />
         ))}
       </div>
     );

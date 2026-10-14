@@ -352,6 +352,72 @@ test("Codex's answers, commands and tool calls are rows once they are completed,
   ]);
 });
 
+test("the files Codex changed are a row of their own, each with what happened to it", () => {
+  // The shape of Codex's file_change item (codex-rs exec_events.rs, read on 2026-10-14).
+  const lines = [
+    completed({
+      type: "file_change",
+      changes: [
+        { path: "src/lib.rs", kind: "update" },
+        { path: "docs/usage.md", kind: "add" },
+        { path: "old.txt", kind: "delete" },
+      ],
+      status: "completed",
+    }),
+  ];
+  expect(parseTimeline(lines, "codex")).toEqual([
+    {
+      kind: "files",
+      text: "src/lib.rs\ndocs/usage.md\nold.txt",
+      changes: [
+        { kind: "update", path: "src/lib.rs" },
+        { kind: "add", path: "docs/usage.md" },
+        { kind: "delete", path: "old.txt" },
+      ],
+    },
+  ]);
+});
+
+test("a change Codex could not apply is a failed row; its paths are cleaned (an escape sequence goes) and empty ones dropped", () => {
+  const lines = [
+    completed({
+      type: "file_change",
+      changes: [{ path: `src/a${ESC}[2J.rs`, kind: "update" }, { path: "  ", kind: "add" }, { path: "b.rs", kind: "renamed" }, "x"],
+      status: "failed",
+    }),
+    // Nothing that names a file: no row.
+    completed({ type: "file_change", changes: [], status: "completed" }),
+    completed({ type: "file_change", status: "completed" }),
+  ];
+  expect(parseTimeline(lines, "codex")).toEqual([
+    {
+      kind: "files",
+      text: "src/a.rs\nb.rs",
+      changes: [
+        { kind: "update", path: "src/a.rs" },
+        // A kind the panel does not know is left unnamed.
+        { kind: null, path: "b.rs" },
+      ],
+      failed: true,
+    },
+  ]);
+});
+
+test("an error Codex reports as an item is an error row, like its error events", () => {
+  const lines = [completed({ type: "error", message: `model overloaded${ESC}[1m\ntrying again` }), completed({ type: "error", message: "" })];
+  expect(parseTimeline(lines, "codex")).toEqual([{ kind: "error", text: "model overloaded\ntrying again" }]);
+});
+
+test("a command line longer than a tool's output may be is cut the same way", () => {
+  const claude = [assistant({ type: "tool_use", id: "t1", name: "Bash", input: { command: "echo " + "x".repeat(5000) } })];
+  const codex = [completed({ type: "command_execution", command: "y".repeat(5000), aggregated_output: "", exit_code: 0 })];
+  for (const entry of [parseTimeline(claude, "claude")[0], parseTimeline(codex, "codex")[0]]) {
+    expect(entry.kind).toBe("command");
+    expect(entry.text).toHaveLength(2001);
+    expect(entry.text.endsWith("…")).toBe(true);
+  }
+});
+
 test("a Codex command fails by its exit code, or by its status when it has none", () => {
   const lines = [
     completed({ type: "command_execution", command: "a", aggregated_output: "", exit_code: 0, status: "failed" }),

@@ -3,24 +3,36 @@ import type { ExecutorKind } from "./types";
 
 /**
  * What a row of a run's timeline is. `note` is IssueRelay's own line in the log (a start that
- * failed, say), `stderr` a line the executor wrote to its error output or one the log cannot read.
+ * failed, say), `stderr` a line the executor wrote to its error output or one the log cannot read,
+ * `files` the files Codex changed.
  */
-export type TimelineKind = "message" | "tool" | "command" | "result" | "error" | "stderr" | "note" | "system";
+export type TimelineKind = "message" | "tool" | "command" | "files" | "result" | "error" | "stderr" | "note" | "system";
+
+/** A file Codex changed and how: added, deleted or changed, or `null` for a kind the panel does not know. */
+export interface FileChange {
+  kind: "add" | "delete" | "update" | null;
+  path: string;
+}
 
 /**
  * One row of the timeline the panel builds from a run's log (design 6.1, 9.2). Its texts are
  * cleaned (`cleanDisplayText`) and ready to show as they are. For `system` the text is the model's
  * name, or empty; the panel words the rest. A `tool` or `command` carries what went in and what
- * came out as `detail`, and `failed` when it did not work.
+ * came out as `detail`, and `failed` when it did not work. A `files` row lists its `changes` (its
+ * text is their paths, one per line).
  */
 export interface TimelineEntry {
   kind: TimelineKind;
   text: string;
   detail?: string;
   failed?: boolean;
+  changes?: FileChange[];
 }
 
-/** The most characters of a tool's input or result a row keeps, counted once cleaned; the raw log has the rest. */
+/**
+ * The most characters of a tool's input or result, or of a command line, a row keeps, counted once
+ * cleaned; the raw log has the rest. A card shows all of it once opened.
+ */
 const DETAIL_LIMIT = 2000;
 
 type Json = Record<string, unknown>;
@@ -44,17 +56,28 @@ function manyLines(text: string): string {
 }
 
 /**
+ * `text` cut to `DETAIL_LIMIT` characters with an ellipsis. A character that takes two UTF-16
+ * units is cut whole or not at all.
+ */
+function capped(text: string): string {
+  if (text.length <= DETAIL_LIMIT) return text;
+  let end = DETAIL_LIMIT;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
+/**
  * A tool's input or output: each line cleaned, the trailing blank space gone (the indent of the
- * first line is its own), and cut to `DETAIL_LIMIT` characters with an ellipsis. A character that
- * takes two UTF-16 units is cut whole or not at all.
+ * first line is its own), and cut to `DETAIL_LIMIT` characters (`capped`).
  */
 function detailOf(text: string): string {
-  const clean = cleanDisplayLines(text).trimEnd();
-  if (clean.length <= DETAIL_LIMIT) return clean;
-  let end = DETAIL_LIMIT;
-  const last = clean.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return `${clean.slice(0, end)}…`;
+  return capped(cleanDisplayLines(text).trimEnd());
+}
+
+/** A command line over one or more lines: cleaned like the AI's text and cut like a tool's output. */
+function commandLine(text: string): string {
+  return capped(manyLines(text));
 }
 
 /** The detail of a row: what went in, then what came out below it, whichever there is. */
@@ -113,9 +136,9 @@ function addToolUse(ctx: Context, block: Json): void {
   if (name === null || oneLine(name) === "") return;
   const id = asString(block.id);
   const command = name === "Bash" ? asString(asRecord(block.input)?.command) : null;
-  const commandLine = command === null ? "" : manyLines(command);
-  if (commandLine !== "") {
-    addCall(ctx, id, entry("command", commandLine), "");
+  const line = command === null ? "" : commandLine(command);
+  if (line !== "") {
+    addCall(ctx, id, entry("command", line), "");
     return;
   }
   const input = block.input === undefined || block.input === null ? "" : detailOf(JSON.stringify(block.input));
@@ -185,7 +208,7 @@ function codexItem(item: Json, ctx: Context): void {
       return;
     }
     case "command_execution": {
-      const command = manyLines(asString(item.command) ?? "");
+      const command = commandLine(asString(item.command) ?? "");
       if (command === "") return;
       // The exit code says it; a command that has none (it was stopped) is judged by its status.
       const failed = typeof item.exit_code === "number" ? item.exit_code !== 0 : item.status === "failed";
@@ -203,7 +226,29 @@ function codexItem(item: Json, ctx: Context): void {
       ctx.entries.push(entry("tool", server === "" ? tool : `${server}.${tool}`, { detail: joined(input, output), failed }));
       return;
     }
+    case "file_change": {
+      const changes = (Array.isArray(item.changes) ? item.changes : [])
+        .map(asRecord)
+        .filter((change) => change !== null)
+        .map((change): FileChange => ({ kind: changeKind(change.kind), path: oneLine(asString(change.path) ?? "") }))
+        .filter((change) => change.path !== "");
+      if (changes.length === 0) return;
+      const made: TimelineEntry = { kind: "files", text: changes.map((change) => change.path).join("\n"), changes };
+      if (item.status === "failed") made.failed = true;
+      ctx.entries.push(made);
+      return;
+    }
+    case "error": {
+      const message = manyLines(asString(item.message) ?? "");
+      if (message !== "") ctx.entries.push({ kind: "error", text: message });
+      return;
+    }
   }
+}
+
+/** What happened to a file, as Codex names it; another word is a kind the panel does not know. */
+function changeKind(kind: unknown): FileChange["kind"] {
+  return kind === "add" || kind === "delete" || kind === "update" ? kind : null;
 }
 
 function codex(event: Json, ctx: Context): void {
@@ -250,8 +295,10 @@ function parseLine(line: string): Json | null {
  *
  * The shapes are those of Claude Code 2.1.285 (`--output-format stream-json`) and of Codex's
  * `exec --json`, as sampled in crates/core/tests/fixtures (2026-10-10). Those samples hold no
- * `tool_result` and no failing Codex item, so these two shapes are taken from the tools' own
- * descriptions of their events and wait for a real run's log in the live acceptance.
+ * `tool_result`, no failing Codex item and none of Codex's `file_change` and `error` items, so
+ * these shapes are taken from the tools' own descriptions of their events (for Codex, the item
+ * types of codex-rs `exec_events.rs`, read on 2026-10-14) and wait for a real run's log in the
+ * live acceptance.
  */
 export function parseTimeline(lines: string[], executor: ExecutorKind | null): TimelineEntry[] {
   const ctx: Context = { entries: [], calls: new Map(), latest: null };
