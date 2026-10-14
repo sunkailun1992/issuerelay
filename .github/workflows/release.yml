@@ -5,13 +5,19 @@ name: release
 # request that changes the packaging are dry runs: the same gates (scripts/release-checks.mjs, for
 # the tag that would be pushed and for the dry run's bundles), tests and bundles, kept as workflow
 # artifacts, and no release. Only the jobs of a tag push can write to the repository; optional
-# secrets are used only when they are set, and never in a pull request. A manual run can be
+# secrets are used only when they are set, and this workflow passes none to a pull request. (A
+# pull request from a fork gets none from GitHub either. One from a branch of this repository
+# does, and runs its own copy of this workflow, as a manual run does: anyone with write access can
+# read the release secrets through a workflow they changed, MAINTAINERS.md.) A manual run can be
 # started on any branch: it runs that branch's workflow and scripts and does get the secrets (with
 # a read-only token), so start one only on a branch you wrote or reviewed.
 on:
   push:
     tags: ["v*"]
   pull_request:
+    # What changes the installers: the packaging itself, the scripts and configs that drive it, the
+    # CLI that goes into them, the manifests, lockfiles and toolchain pin that decide what builds
+    # them, and the icons.
     paths:
       - .github/workflows/release.yml
       - .github/workflows/bundle.yml
@@ -22,6 +28,13 @@ on:
       - app/src-tauri/tauri.conf.json
       - app/src-tauri/tauri.bundle.conf.json
       - app/src-tauri/tauri.updater.conf.json
+      - app/src-tauri/Cargo.toml
+      - app/src-tauri/icons/**
+      - app/package.json
+      - app/pnpm-lock.yaml
+      - crates/cli/**
+      - Cargo.lock
+      - rust-toolchain.toml
   workflow_dispatch:
 
 permissions:
@@ -53,11 +66,21 @@ jobs:
         with:
           node-version: 24
       - name: The release gates pass their own tests
-        run: node scripts/release-checks.mjs self-test
+        # A self-test that fails fails the step (pipefail). One that printed nothing is no pass
+        # either: it means the entry-point check misjudged and no gate runs at all, so every gate
+        # after it would exit 0 without checking anything.
+        run: |
+          set -o pipefail
+          node scripts/release-checks.mjs self-test | tee /dev/stderr | grep -x 'ok command line' > /dev/null
       - name: Read the workspace version
         id: version
         run: |
           version=$(node scripts/release-checks.mjs workspace-version)
+          # Empty when the script ran nothing; anything but X.Y.Z is no version a release can have.
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::workspace-version did not print an X.Y.Z version (got $(printf '%q' "${version:0:60}"))"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "workspace version: $version"
       - name: The tag names the workspace version
@@ -211,10 +234,12 @@ jobs:
   bundle-dry-run:
     needs: [verify, test]
     if: github.event_name != 'push'
-    # Read-only: a pull request's own build scripts run here. A pull request gets no secret at all.
-    # A manual run can be started on any branch and then gets the secrets (that branch's scripts
-    # run with them, behind a read-only token), so the update signatures are checked too. (A job
-    # that calls a reusable workflow cannot set timeout-minutes; bundle.yml's job has the limit.)
+    # Read-only: a pull request's own build scripts run here. This workflow passes a pull request
+    # no secret at all (GitHub gives none to one from a fork; one that changes this workflow could
+    # pass them on, MAINTAINERS.md, "发布用的 secrets"). A manual run can be started on any branch
+    # and then gets the secrets (that branch's scripts run with them, behind a read-only token), so
+    # the update signatures are checked too. (A job that calls a reusable workflow cannot set
+    # timeout-minutes; bundle.yml's job has the limit.)
     permissions:
       contents: read
     uses: ./.github/workflows/bundle.yml

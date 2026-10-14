@@ -4,7 +4,8 @@ name: bundle
 # time: into the draft release when `release-id` is set (the calling job then has
 # `contents: write`), as workflow artifacts otherwise (a dry run, called read-only). Optional
 # secrets reach only the steps that use them, as step-level env, and are never written to
-# $GITHUB_ENV; a dry run of a pull request is called without any.
+# $GITHUB_ENV; release.yml calls a dry run of a pull request without any (a pull request that
+# changes release.yml could call it with them: MAINTAINERS.md, "发布用的 secrets").
 on:
   workflow_call:
     inputs:
@@ -66,11 +67,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The heaviest job of a release: on macOS the app and the CLI are compiled in release mode for
     # both architectures, from a cold cache at worst, then signed (and, with a certificate, sent to
-    # Apple for notarization). The first dry runs measured about 7 min 20 s (macOS universal) and
-    # 15 min 43 s (Windows x64) for the bundle step; 45 minutes leaves room for the rest of the
-    # job, a cold cache and a slow runner, and is far below GitHub's default of six hours. Those
-    # runs had no Apple certificate, so they did not wait for notarization: if the first notarized
-    # release comes near the limit, raise it.
+    # Apple for notarization). The first dry runs took about 7 min 20 s (macOS universal) and
+    # 15 min 43 s (Windows x64) for the whole job, from cold caches; 45 minutes is about three
+    # times the slowest, which leaves room for a slow runner and is far below GitHub's default of
+    # six hours. Those runs had no Apple certificate, so they did not wait for notarization: if
+    # the first notarized release comes near the limit, raise it.
     timeout-minutes: 45
     env:
       VERSION: ${{ inputs.version }}
