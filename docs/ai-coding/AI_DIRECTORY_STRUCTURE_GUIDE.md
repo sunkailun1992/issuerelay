@@ -76,7 +76,7 @@
 | `docs/superpowers/specs/` | 设计文档，命名 `<日期>-<主题>-design.md` |
 | `docs/superpowers/plans/` | 实施计划，命名 `<日期>-<主题>.md` |
 | `docs/gates/` | 实机验收报告 `<日期>-<主题>.md`；脱敏样本放 `docs/gates/samples/<里程碑>/` |
-| `docs/gates/screenshots/` | 面板截图（`docs/gates/screenshots/m2/`：2 种语言 × 浅色深色 × 12 屏共 48 张，`<语言>-<主题>-<屏>.png`，Playwright 比对用的基准图，README 引用其中四张）；只含虚构数据，真实验收截图只留在本机 |
+| `docs/gates/screenshots/` | 面板截图（`docs/gates/screenshots/m2/`：2 种语言 × 浅色深色 × 12 屏共 48 张，`<语言>-<主题>-<屏>.png`，Playwright 比对用的基准图，应用图标遮住；`m2/readme/`：README 用的 4 张，`<语言>-<屏>.png`，浅色、图标照原样，不参与比对）；只含虚构数据，真实验收截图只留在本机 |
 | `docs/design/` | 设计素材的预览。`docs/design/icons/preview.png` 是图标三套方案的对比图（`pnpm --dir app icons --preview` 生成） |
 
 ## 6. scripts/ 与 .github/
