@@ -9,7 +9,7 @@
 - `main` is protected by a ruleset: PRs only, one approval, resolved conversations, squash merge only, and the checks `test (macos-latest)`, `test (windows-latest)` and `secrets` must pass.
 - The admin can bypass the ruleset in two cases only: the founder's direct commits during M0–M1 (stopped when M1 closed; since then every change reaches `main` through a PR), and merging the admin's own PRs after CI is green while there is a single maintainer (see "分支保护"). An AI tool working in the admin's own session acts with the admin's rights: it may merge the admin's own PRs in that way, but it never approves anyone else's PR and never merges one that a maintainer has not reviewed and approved. Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
 - To become a maintainer: contribute steadily, get nominated by a maintainer and accepted by the admin, then be invited as a collaborator with write access. Maintainers inactive for 6 months become emeritus.
-- Releases start at M3. Maintainers bump the version when they release; contributors never do. The update-signing key lives only in GitHub Actions secrets.
+- Releases start at M3: a maintainer bumps the version in a PR, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets.
 
 ## 当前维护者
 
@@ -63,7 +63,7 @@
 | 合并方式 | 必须经 PR，只允许 squash |
 | 批准 | 至少 1 人批准；批准后再有新推送，需要重新批准 |
 | 评审对话 | 必须全部解决 |
-| 必需检查 | `test (macos-latest)`、`test (windows-latest)`、`secrets`（GitHub Actions，见 `.github/workflows/ci.yml`） |
+| 必需检查 | `test (macos-latest)`、`test (windows-latest)`、`secrets`（含 actionlint 检查工作流）（GitHub Actions，见 `.github/workflows/ci.yml`） |
 | 代码所有者 | `.github/CODEOWNERS` 自动请求评审，不强制代码所有者批准 |
 | 绕过 | 仓库管理员可以绕过 |
 | 仓库合并设置 | 只允许 squash 合并；提交标题取 PR 标题，正文取 PR 描述；合并后自动删除分支 |
@@ -79,7 +79,33 @@
 
 ## 发布
 
-M3 起，由维护者推送 `vX.Y.Z` 标签，触发 GitHub Actions 打包发布。发布时由维护者升版本号，外部贡献者的 PR 不改版本号。更新包的签名私钥只放在 GitHub Actions secrets，只有管理员能改。
+M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.github/workflows/release.yml`（打包在 `bundle.yml`），门禁 `scripts/release-checks.mjs`，安装说明 `docs/install.md`，更新签名密钥 `docs/release/updater-key.md`。
+
+1. **升版本号**：开一个普通的 PR，把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本，再运行 `cargo update -w`（只更新本仓库 crate 在 `Cargo.lock` 里的版本），两个文件一起提交；0.x 阶段升次版本号时，`crates/cli`、`crates/devhost`、`app/src-tauri` 对 `issuerelay-core` 的版本要求一起改（`AI_CODING_GUIDE.md` 第 10 节）。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；CI 全绿后合入 `main`。不在本地临时改版本号再改回。
+2. **推标签**（本地会话）：
+
+   ```bash
+   git fetch origin
+   version=$(git show origin/main:Cargo.toml | sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p')
+   git tag -a "v$version" origin/main -m "IssueRelay v$version"
+   git push origin "v$version"
+   ```
+
+3. **等工作流全绿**：`verify`（门禁自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `test`（macOS、Windows 六条验证命令）→ `create-release`（建一个草稿）→ `bundle-release`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名、地址指向本 Release 的资产）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。这些门禁在每次试打包里已经对将要打的标签跑过。
+4. **检查草稿**：资产有 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`；有更新签名私钥时还有 `_universal.app.tar.gz` 与三个 `.sig`、`latest.json`。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
+5. **公开**：在 GitHub 的草稿页点「Publish release」。这是对外动作，只由维护者亲手点，工作流和 AI 都不公开。公开后 `…/releases/latest/download/latest.json` 才指向新版本，已安装的程序在下次检查时看到更新。
+6. **失败或放弃**：没公开的草稿可以删掉（Releases 页面删除草稿，再 `git push origin --delete "v$version"` 删远端标签、`git tag -d "v$version"` 删本地标签），修好后重推同一个标签；已经公开的版本号永不重用，修复用下一个版本号。
+
+### 发布用的 secrets
+
+| Secret | 是否必需 | 作用 | 没有时 |
+|---|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | 自动更新需要 | 更新签名私钥（`docs/release/updater-key.md`） | 不生成更新包与 `latest.json`，发布说明写明「不含自动更新包」 |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 否 | 私钥密码；现在的密钥没有密码，不建这个 secret | — |
+| `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | 否（六个齐全才用） | Developer ID 签名与公证 | ad-hoc 签名、不公证：用户第一次打开要在「隐私与安全性」里放行一次 |
+| `WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD` | 否（两个齐全才用） | Windows 代码签名（PFX 文件的 base64 与密码） | 不签名：SmartScreen 提示一次 |
+
+secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤；拉取请求触发的试打包拿不到它们，试打包只有只读权限。
 
 ## 离任
 
