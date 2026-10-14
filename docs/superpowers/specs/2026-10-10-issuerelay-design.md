@@ -322,7 +322,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 ## 12. 安装包、更新与发布
 
 - Tauri 打包：macOS 出一个通用 `.dmg`（Apple 芯片与 Intel 通用，最低 macOS 13.3），Windows 出 NSIS `.exe`（按用户安装，不需要管理员，推荐）和 `.msi`（为所有用户安装，需要管理员）。命令行小程序作为附带程序（`externalBin`）装在主程序 `issuerelay-app` 旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录下的 `issuerelay.exe`。`externalBin` 只写在打包专用的 `app/src-tauri/tauri.bundle.conf.json` 里，由 `scripts/stage-cli.sh` / `stage-cli.ps1` 先把命令行程序编译好放进 `app/src-tauri/binaries/`；开发构建不需要它。打包前确认内嵌的是真正的面板（`scripts/release-checks.mjs panel`），不是 `build.rs` 的占位页。没有 Apple 证书时 macOS 包做 ad-hoc 签名（未签名的 arm64 应用下载后会被报「已损坏」）；设置里提供「把命令行加入 PATH」。
-- GitHub Actions：推送版本标签时，在 macOS 和 Windows 上分别构建、测试、打包，发布到 GitHub Releases。
+- GitHub Actions（`release.yml`）：推送版本标签时先跑门禁（`scripts/release-checks.mjs`：标签与版本、标签提交在 `main` 上）并扫描密钥，在 macOS 和 Windows 上跑全部验证命令，建一个草稿 Release，逐个平台打包上传，最后核对资产与 `latest.json` 齐全；由维护者确认后公开。手动运行与改了打包配置的 PR 只试打包（只读，拉取请求拿不到 secrets），对将要打的标签与试打包产物跑同样的门禁。
 - 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只放在 GitHub Actions secrets），从 GitHub Releases 拉取；仓库已公开，M3 起即可启用。
 - 代码签名：见第 18 节。未签名时，README 写清 macOS「右键 → 打开」和 Windows「更多信息 → 仍要运行」的放行步骤。
 - 版本号：语义化版本，标签为 `vX.Y.Z`；只由维护者在发布时升，推送前按 `origin/main` 上的最新版本顺延；外部贡献者不改版本号。
@@ -390,7 +390,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 ## 18. 待定问题
 
 1. **产品名与图标**：产品名 IssueRelay（不含「Linear」，避开商标问题）。图标在 M2 出了三套方案，由主智能体代选 A「接力」（2026-10-14），用户可以改选：改用 `pnpm --dir app icons --option <x>` 后重新生成（见 9.6）。
-2. **代码签名**：是否购买 Apple Developer ID（用于公证）和 Windows 代码签名证书；没有的话先发未签名包。
+2. **代码签名**：是否购买 Apple Developer ID（用于公证）和 Windows 代码签名证书；没有的话先发未签名包。现状（M3）：没有证书时 macOS 包做 ad-hoc 签名（不是完全不签：未签名的 arm64 包下载后会被报「已损坏」），Windows 不签名；secrets 里放齐 Apple 或 Windows 证书后，发布工作流自动改用正式签名（macOS 同时公证）。
 3. **仓库公开**：已于 2026-10-10 按用户要求公开，并开启密钥扫描、推送拦截、私密漏洞报告与 `main` 分支保护（见 16.1）。
 4. **Windows 验证环境**：用户暂无 Windows 机器（2026-10-10）。M0 的 Windows 实测已跳过，Windows 先只靠 CI 覆盖；M2、M3 的 Windows 实机验收待有机器后补做。
 5. **第一版语言清单**（9.4）是否合适。

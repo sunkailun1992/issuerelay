@@ -1,0 +1,308 @@
+name: release
+
+# A `vX.Y.Z` tag on a commit of main builds the installers and puts them in ONE draft GitHub
+# release; a maintainer publishes it by hand (MAINTAINERS.md, "发布"). A manual run and a pull
+# request that changes the packaging are dry runs: the same gates (scripts/release-checks.mjs, for
+# the tag that would be pushed and for the dry run's bundles), tests and bundles, kept as workflow
+# artifacts, and no release. Only the jobs of a tag push can write to the repository; optional
+# secrets are used only when they are set, and never in a pull request.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/bundle.yml
+      - scripts/stage-cli.sh
+      - scripts/stage-cli.ps1
+      - scripts/verify-update-signature.mjs
+      - scripts/release-checks.mjs
+      - app/src-tauri/tauri.conf.json
+      - app/src-tauri/tauri.bundle.conf.json
+      - app/src-tauri/tauri.updater.conf.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # A checkout with the full history, a few git commands, the secret scan and the gates'
+    # self-test, no compile: a minute or two is expected. The limit only stops a hung step long
+    # before GitHub's default of six hours.
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      updater: ${{ steps.secrets.outputs.updater }}
+      apple: ${{ steps.secrets.outputs.apple }}
+      windows: ${{ steps.secrets.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: The release gates pass their own tests
+        run: node scripts/release-checks.mjs self-test
+      - name: Read the workspace version
+        id: version
+        run: |
+          version=$(node scripts/release-checks.mjs workspace-version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "workspace version: $version"
+      - name: The tag names the workspace version
+        env:
+          # A release checks its own tag; a dry run the tag that would be pushed (MAINTAINERS.md).
+          TAG: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+        run: node scripts/release-checks.mjs tag --tag "$TAG"
+      - name: The tagged commit is on main
+        env:
+          IS_RELEASE: ${{ github.event_name == 'push' }}
+        # A release checks the tagged commit; a dry run the commit a tag would be put on (origin/main).
+        run: |
+          git fetch --no-tags origin main
+          if [[ "$IS_RELEASE" == true ]]; then commit=$GITHUB_SHA; else commit=$(git rev-parse FETCH_HEAD); fi
+          node scripts/release-checks.mjs on-main --commit "$commit" --ref FETCH_HEAD
+      - run: bash scripts/check-secrets.sh --strict
+      - name: Which optional secrets are set
+        id: secrets
+        # Only whether each secret is empty is tested; no value is printed. Pull requests never use any.
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_APPLE: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+          HAS_WINDOWS: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          use() { if [[ "$IS_PR" != true && "$1" == true ]]; then echo true; else echo false; fi; }
+          {
+            echo "updater=$(use "$HAS_UPDATER_KEY")"
+            echo "apple=$(use "$HAS_APPLE")"
+            echo "windows=$(use "$HAS_WINDOWS")"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  test:
+    needs: verify
+    # The six checks, as ci.yml's test job: 45 minutes there for the first uncached compile of the
+    # Tauri app (Windows slowest); the same here.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: pnpm --dir app install --frozen-lockfile
+      - run: pnpm --dir app lint
+      - run: pnpm --dir app test
+      # The Tauri crate embeds the built panel, as in ci.yml.
+      - run: pnpm --dir app build
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: bash scripts/check-secrets.sh --strict
+        shell: bash
+
+  create-release:
+    needs: [verify, test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Two API calls: seconds. The limit only stops a hung call.
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      id: ${{ steps.create.outputs.id }}
+    steps:
+      - name: Create the draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          UPDATER: ${{ needs.verify.outputs.updater }}
+          APPLE: ${{ needs.verify.outputs.apple }}
+          WINDOWS: ${{ needs.verify.outputs.windows }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "$TAG" '.[] | select(.tag_name == $tag) | .id')
+          if [[ -n "$existing" ]]; then
+            echo "::error::a release for $TAG exists already (id $existing); delete that draft first, or release the next version"
+            exit 1
+          fi
+          notes=$(mktemp)
+          trap 'rm -f "$notes"' EXIT
+          {
+            echo "Install guide / 安装说明: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/install.md"
+            echo
+            echo "- macOS (Apple silicon and Intel, macOS 13.3 or later): \`IssueRelay_${VERSION}_universal.dmg\`"
+            echo "- Windows: \`IssueRelay_${VERSION}_x64-setup.exe\` (recommended: installs for your user, no administrator rights) or \`IssueRelay_${VERSION}_x64_en-US.msi\` (installs for all users, needs administrator rights)"
+            echo
+            if [[ "$APPLE" == true ]]; then
+              echo "- macOS: signed with a Developer ID and notarized by Apple."
+            else
+              echo "- macOS: not notarized by Apple (signed ad hoc). The first start needs one approval: System Settings → Privacy & Security → Open Anyway. / 未经 Apple 公证：第一次打开要在「系统设置 → 隐私与安全性」里点「仍要打开」。"
+            fi
+            if [[ "$WINDOWS" == true ]]; then
+              echo "- Windows: the installers are code-signed."
+            else
+              echo "- Windows: the installers are not code-signed; SmartScreen asks once (More info → Run anyway). / 安装包未签名：SmartScreen 提示时点「更多信息 → 仍要运行」。"
+            fi
+            if [[ "$UPDATER" != true ]]; then
+              echo "- This release has no automatic-update package: installed copies do not update to it by themselves; download and install it by hand. / 本版本不含自动更新包：已安装的程序不会自动更新到这个版本，请手动下载安装。"
+            fi
+          } > "$notes"
+          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" -f name="IssueRelay $TAG" -F draft=true -F prerelease=false \
+            -F body=@"$notes" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release $id created for $TAG"
+
+  bundle-release:
+    needs: [verify, test, create-release]
+    if: github.event_name == 'push'
+    # Uploads into the draft. (A job that calls a reusable workflow cannot set timeout-minutes;
+    # bundle.yml's job has the limit.)
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      updater: ${{ needs.verify.outputs.updater }}
+      apple: ${{ needs.verify.outputs.apple }}
+      windows: ${{ needs.verify.outputs.windows }}
+      release-id: ${{ needs.create-release.outputs.id }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+  bundle-dry-run:
+    needs: [verify, test]
+    if: github.event_name != 'push'
+    # Read-only: a pull request's own build scripts run here. A pull request gets no secret at all;
+    # a manual run (on the default branch) gets them, so the update signatures are checked too.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      updater: ${{ needs.verify.outputs.updater }}
+      apple: ${{ needs.verify.outputs.apple }}
+      windows: ${{ needs.verify.outputs.windows }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+      APPLE_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+      APPLE_SIGNING_IDENTITY: ${{ github.event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+      APPLE_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_ID || '' }}
+      APPLE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
+      WINDOWS_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.WINDOWS_CERTIFICATE || '' }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+
+  verify-release:
+    needs: [verify, create-release, bundle-release]
+    if: ${{ always() && needs.create-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    # A few API calls, one small download (latest.json) and the gates: seconds. The limit only
+    # stops a hung call.
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ needs.create-release.outputs.id }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      UPDATER: ${{ needs.verify.outputs.updater }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: The draft has every asset and latest.json every platform
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft)
+          if [[ "$draft" != true ]]; then
+            echo "::error::release $RELEASE_ID is no longer a draft"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | "\(.id)\t\(.name)"' > "$work/assets.tsv"
+          cut -f2 "$work/assets.tsv" | tee "$work/names.txt"
+          failed=0
+          node scripts/release-checks.mjs assets --version "$VERSION" --updater "$UPDATER" --mode release --names "$work/names.txt" || failed=1
+          if [[ "$UPDATER" == true ]]; then
+            id=$(awk -F '\t' '$2 == "latest.json" { print $1 }' "$work/assets.tsv")
+            if [[ -n "$id" ]]; then
+              gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" -H "Accept: application/octet-stream" > "$work/latest.json"
+              node scripts/release-checks.mjs latest-json --version "$VERSION" --latest "$work/latest.json" --assets "$work/assets.tsv" || failed=1
+            fi
+          fi
+          exit "$failed"
+      - name: Mark an incomplete draft
+        if: failure()
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f name="IssueRelay $GITHUB_REF_NAME (incomplete: do not publish)" > /dev/null
+          echo "::error::the draft is incomplete and was renamed; see MAINTAINERS.md, 发布"
+
+  verify-dry-run:
+    needs: [verify, bundle-dry-run]
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # Downloads the dry run's bundles and runs the gates, no compile: far shorter than the bundling
+    # jobs. The limit only stops a hung download.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      UPDATER: ${{ needs.verify.outputs.updater }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bundles-*
+          path: dry-run
+      - name: The bundles a release of this version would have, and its latest.json
+        run: |
+          set -euo pipefail
+          names=$(mktemp)
+          trap 'rm -f "$names"' EXIT
+          find dry-run -type f -exec basename {} \; | sort | tee "$names"
+          failed=0
+          node scripts/release-checks.mjs assets --version "$VERSION" --updater "$UPDATER" --mode dry-run --names "$names" || failed=1
+          if [[ "$UPDATER" == true ]]; then
+            node scripts/release-checks.mjs latest-json-dry-run --version "$VERSION" --dir dry-run || failed=1
+          fi
+          exit "$failed"

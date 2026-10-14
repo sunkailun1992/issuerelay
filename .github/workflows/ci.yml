@@ -48,3 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash scripts/check-secrets.sh --strict
+      # actionlint checks every workflow: expressions, job outputs and needs, reusable workflow
+      # inputs, and the shell in `run:` steps through shellcheck. It is the author's container
+      # image, pinned to a release; move the tag when a newer one comes out.
+      - name: Lint the workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color

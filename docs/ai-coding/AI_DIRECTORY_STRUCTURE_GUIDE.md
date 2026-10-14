@@ -84,8 +84,11 @@
 
 - `scripts/check-secrets.sh`：扫描密钥和本机信息。新脚本的文件头写清用途、用法、退出码。
 - `scripts/stage-cli.sh`、`scripts/stage-cli.ps1`：编译命令行程序，放到 Tauri 的 `externalBin` 找它的地方（`app/src-tauri/binaries/issuerelay-<三元组>[.exe]`）。
-- `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门（用法见文件头）；现在有 `panel`：打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；标签、资产与 `latest.json` 的门禁随发布工作流再加。
-- `.github/workflows/ci.yml`：在 macOS 与 Windows 上先装前端依赖、跑前端检查与测试并构建面板，再跑 Rust 的格式、静态检查、测试；另在 Ubuntu 上扫描密钥。
+- `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门，通过与不通过的用例都有（用法见文件头）：`panel` 打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；`tag` 标签等于 `v` 加工作区版本，版本只有 `X.Y.Z` 三段（`workspace-version` 只读出这个版本，不是门）；`on-main` 标签提交在 `origin/main` 上；`assets` 资产齐全；`latest-json`、`latest-json-dry-run` 核对 `latest.json` 的版本、每个平台键的签名与地址（试打包核对的是由产物得出的「将会写出的」那份）。
+- `scripts/verify-update-signature.mjs`：用提交的公钥（`app/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`）核对更新包的签名，并核对签名里记的版本；`tauri build` 在私钥与公钥不匹配时只警告，所以发布工作流对每个更新包都跑它。
+- `.github/workflows/ci.yml`：在 macOS 与 Windows 上先装前端依赖、跑前端检查与测试并构建面板，再跑 Rust 的格式、静态检查、测试；另在 Ubuntu 上扫描密钥，并用 actionlint 检查全部工作流。
+- `.github/workflows/release.yml`：版本标签触发的打包与草稿 Release；手动运行与改了打包配置的 PR 只试打包。
+- `.github/workflows/bundle.yml`：两种打包共用的可复用工作流（权限由调用它的任务给）。
 - `.github/copilot-instructions.md`：只转发到 `AGENTS.md`。
 - `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。
 - `.github/pull_request_template.md`、`.github/ISSUE_TEMPLATE/`：PR 与 issue 模板，带「已脱敏」确认项。

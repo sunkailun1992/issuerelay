@@ -1,0 +1,239 @@
+name: bundle
+
+# Builds the installers for release.yml, on macOS (universal) and Windows (x64), one platform at a
+# time: into the draft release when `release-id` is set (the calling job then has
+# `contents: write`), as workflow artifacts otherwise (a dry run, called read-only). Optional
+# secrets reach only the steps that use them, as step-level env, and are never written to
+# $GITHUB_ENV; a dry run of a pull request is called without any.
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      updater:
+        description: '"true" when the update-signing key is set and may be used'
+        type: string
+        required: true
+      apple:
+        type: string
+        required: true
+      windows:
+        type: string
+        required: true
+      release-id:
+        description: The draft release to upload to; empty in a dry run
+        type: string
+        required: false
+        default: ""
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      # One at a time: tauri-action merges latest.json by downloading, editing and uploading it
+      # again, and two jobs doing that together can lose one platform's entries.
+      max-parallel: 1
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+            target: universal-apple-darwin
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    # The heaviest job of a release: on macOS the app and the CLI are compiled in release mode for
+    # both architectures, from a cold cache at worst, then signed (and, with a certificate, sent to
+    # Apple for notarization). No release build has run in CI yet, so 90 minutes is a guess with
+    # plenty of room, far below GitHub's default of six hours; tighten it once real run times are
+    # known.
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+      UPDATER: ${{ inputs.updater }}
+      RELEASE: ${{ inputs.release-id != '' }}
+      # One --config at a time: externalBin only, or externalBin and the update payloads.
+      CONFIG: ${{ inputs.updater == 'true' && 'src-tauri/tauri.updater.conf.json' || 'src-tauri/tauri.bundle.conf.json' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Rust toolchain and targets
+        shell: bash
+        # The toolchain rust-toolchain.toml pins; `stable` would get the targets instead.
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            rustup toolchain install 1.99.0 --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+          else
+            rustup toolchain install 1.99.0 --profile minimal --target x86_64-pc-windows-msvc
+          fi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: bundle-${{ matrix.target }}
+      - run: pnpm --dir app install --frozen-lockfile
+      - name: Stage the CLI (macOS, both architectures and the universal file)
+        if: runner.os == 'macOS'
+        run: bash scripts/stage-cli.sh --universal
+      - name: Stage the CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/stage-cli.ps1
+      - name: Build the panel and check it is not build.rs's placeholder
+        shell: bash
+        run: |
+          pnpm --dir app build
+          node scripts/release-checks.mjs panel
+      - name: Use the Windows signing certificate
+        if: runner.os == 'Windows' && inputs.windows == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        # Tauri merges tauri.windows.conf.json by itself when it builds on Windows; the file holds
+        # the certificate's thumbprint, not a secret. The PFX is removed once imported.
+        run: |
+          $config = 'app/src-tauri/tauri.windows.conf.json'
+          if (Test-Path $config) { throw "$config is in the repository; merge the signing settings into it instead" }
+          $pfx = Join-Path $env:RUNNER_TEMP 'issuerelay-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com' } } } |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $config
+      - name: Build the bundles
+        id: tauri
+        # Every build but a macOS one with an Apple certificate: macOS signs ad hoc ("-" in
+        # tauri.conf.json), Windows signs with the thumbprint above when there is one.
+        if: runner.os != 'macOS' || inputs.apple != 'true'
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Only read when tauri.updater.conf.json switches the update payloads on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        with:
+          projectPath: app
+          args: --target ${{ matrix.target }} --config ${{ env.CONFIG }}
+          # Empty in a dry run: then the action only builds.
+          releaseId: ${{ inputs.release-id }}
+          uploadUpdaterJson: ${{ inputs.updater == 'true' }}
+          updaterJsonPreferNsis: true
+          retryAttempts: 1
+      - name: Build the bundles (Developer ID signed and notarized)
+        id: tauri-apple
+        if: runner.os == 'macOS' && inputs.apple == 'true'
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          # APPLE_SIGNING_IDENTITY overrides the ad hoc "-"; the CLI imports the certificate into a
+          # temporary keychain and notarizes with the Apple ID.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: app
+          args: --target ${{ matrix.target }} --config ${{ env.CONFIG }}
+          releaseId: ${{ inputs.release-id }}
+          uploadUpdaterJson: ${{ inputs.updater == 'true' }}
+          updaterJsonPreferNsis: true
+          retryAttempts: 1
+      - name: The files the build produced
+        id: built
+        shell: bash
+        env:
+          PLAIN: ${{ steps.tauri.outputs.artifactPaths }}
+          SIGNED: ${{ steps.tauri-apple.outputs.artifactPaths }}
+        run: echo "paths=${PLAIN:-$SIGNED}" >> "$GITHUB_OUTPUT"
+      - name: Check the macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/IssueRelay.app
+          ls -l "$app/Contents/MacOS"
+          for exe in issuerelay-app issuerelay; do
+            archs=$(lipo -archs "$app/Contents/MacOS/$exe")
+            echo "$exe: $archs"
+            if [[ "$archs" != *x86_64* || "$archs" != *arm64* ]]; then
+              echo "::error::$exe in the bundle is not universal ($archs)"
+              exit 1
+            fi
+          done
+          codesign --verify --deep --strict --verbose=2 "$app"
+          printed=$("$app/Contents/MacOS/issuerelay" --version)
+          if [[ "$printed" != "issuerelay $VERSION" ]]; then
+            echo "::error::the bundled CLI says '$printed'"
+            exit 1
+          fi
+      - name: Check the Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = 'target/x86_64-pc-windows-msvc/release/bundle'
+          $setup = Get-ChildItem "$bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $listing = & 7z l $setup.FullName
+          foreach ($name in 'issuerelay-app.exe', 'issuerelay.exe') {
+            if (-not ($listing -match [regex]::Escape($name))) { throw "$name is not in $($setup.Name)" }
+          }
+          if (-not (Get-ChildItem "$bundle/msi/*.msi")) { throw 'no .msi was built' }
+          $printed = & 'target/x86_64-pc-windows-msvc/release/issuerelay.exe' --version
+          if ($printed -ne "issuerelay $env:VERSION") { throw "the CLI says '$printed'" }
+      - name: Check the update signatures against the committed public key
+        if: env.UPDATER == 'true'
+        shell: bash
+        env:
+          ARTIFACTS: ${{ steps.built.outputs.paths }}
+        run: node scripts/verify-update-signature.mjs --version "$VERSION" --artifacts "$ARTIFACTS"
+      - name: List the bundles to keep
+        if: env.RELEASE != 'true'
+        id: bundles
+        shell: bash
+        env:
+          ARTIFACTS: ${{ steps.built.outputs.paths }}
+        # The .app folder is left out: a zipped folder loses its Unix permissions; the .dmg holds it.
+        run: |
+          {
+            echo "paths<<ISSUERELAY_EOF"
+            node -e 'for (const p of JSON.parse(process.env.ARTIFACTS)) if (!p.endsWith(".app")) console.log(p)'
+            echo "ISSUERELAY_EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Keep the bundles as workflow artifacts
+        if: env.RELEASE != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundles-${{ matrix.name }}
+          path: ${{ steps.bundles.outputs.paths }}
+          if-no-files-found: error
+          retention-days: 7
