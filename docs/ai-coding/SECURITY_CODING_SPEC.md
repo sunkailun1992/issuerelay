@@ -51,7 +51,7 @@
 ## 7. 开源卫生
 
 - 仓库是公开的。代码、测试、夹具、文档、提交信息里不得出现令牌、API key、公司名、内网地址、真实 Linear 工作区或需求内容、本机绝对路径。
-- 每次提交前跑 `bash scripts/check-secrets.sh --strict`，必须无输出、退出码为 0（CI 同样用 `--strict`；退出码 2 表示扫描本身出错，要先修好）；GitHub 已开启密钥扫描与推送拦截。
+- 每次提交前跑 `bash scripts/check-secrets.sh --strict`，必须无输出、退出码为 0（CI 同样用 `--strict`；退出码 2 表示扫描本身出错，要先修好）；改 `check-secrets.sh` 的模式时，同步改 `check-secrets-self-test.sh` 里的样本并运行它（CI 的 `secrets` 任务先跑自测，再扫仓库）；GitHub 已开启密钥扫描与推送拦截。
 - 来自真实运行的样本先脱敏再提交（见 `TESTING_SPEC.md`）。
 - 发现疑似泄露只报告文件和行号；是否改写历史由用户决定。
 - 被跟踪的文本文件里不放原样的不可见字符、方向控制字符和控制字符（制表、换行、回车除外），一律写成转义（不可见字符的范围与 core 的 `text::is_invisible` 相同：零宽不连字与零宽连字 U+200C、U+200D 可以原样出现，表情序列和印度系文字要用它们，它们也不能改变文字的顺序）：TS 与 JSON 写 `\u200b`（补充平面的字符写成代理对），Rust 写 `\u{200b}`。这类字符在编辑器和 diff 里看不见，能让评审看到的代码与实际执行的不同，也可能被编辑器悄悄吞掉而用例照样通过。`bash scripts/check-secrets.sh --strict` 会跑下面这条扫描（需要带 PCRE2 的 git；没有时扫描本身失败，退出码 2），命中时报文件和行号并以 1 退出，所以本地检查与 CI 都会拦住；要单独查时也可以直接跑，应无输出：
@@ -66,7 +66,7 @@
 - 前端依赖（`app/`）用 `pnpm add` 引入，并说明用途；`app/pnpm-lock.yaml` 入库，CI 用 `pnpm install --frozen-lockfile` 安装，版本更新由 Dependabot 每周检查并延迟 7 天。
 - GitHub Actions 只用官方或广泛使用的 action，并固定主版本。M3 起的发布工作流（`release.yml`）里，第三方 action 按提交 SHA 固定并在行尾注明版本。
 - 不在构建脚本或 CI 里下载并执行来历不明的脚本。
-- 自动更新（M3）：程序只向 GitHub Releases 发出检查更新的请求（清单 `…/releases/latest/download/latest.json`，安装包经 `api.github.com` 的资产地址下载），不带任何用户数据，也不算遥测。`tauri.conf.json` 的 `plugins.updater.pubkey` 是更新的信任根：只安装用这把公钥验签通过、签名里记的版本与清单一致（`requireSignedVersion`）且比当前版本新的更新包，从不安装未签名或更旧的版本，也不在开发版或从磁盘映像运行时安装；改这把公钥（`tauri.conf.json`、`tauri.*.conf.json`）要经 CODEOWNERS 评审。私钥只在维护者本机与 GitHub Actions secrets，`check-secrets.sh` 拦截它（`docs/release/updater-key.md`）。
+- 自动更新（M3）：程序只向 GitHub Releases 发出检查更新的请求（清单 `…/releases/latest/download/latest.json`，安装包经 `api.github.com` 的资产地址下载，GitHub 再把下载转到 `*.githubusercontent.com`），不带任何用户数据，也不算遥测。`tauri.conf.json` 的 `plugins.updater.pubkey` 是更新的信任根：只安装用这把公钥验签通过、签名里记的版本与清单一致（`requireSignedVersion`）且比当前版本新的更新包，从不安装未签名或更旧的版本，也不在开发版或从磁盘映像运行时安装；改这把公钥（`tauri.conf.json`、`tauri.*.conf.json`）要经 CODEOWNERS 评审。私钥只在维护者本机与 GitHub Actions secrets，`check-secrets.sh` 拦截它（`docs/release/updater-key.md`）。
 
 ## 9. AI 边界
 

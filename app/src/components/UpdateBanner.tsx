@@ -12,7 +12,8 @@ import { updateFailureKey } from "@/lib/errors";
  * restart, an update that could not be installed and why. Installing asks the Rust side, which
  * downloads and verifies the update and then goes through the quit flow: the panel itself never
  * quits or restarts. "Later" hides an offer for that version and "Dismiss" the failure, until the
- * panel is opened again. A failed check is left to the settings page: monitoring goes on, so it
+ * panel is reloaded or the app restarts: closing the panel only hides its window, and the page
+ * keeps what it remembers. A failed check is left to the settings page: monitoring goes on, so it
  * does not nag here.
  *
  * Wrapping: the alert is a grid whose text column would grow to the width of the longest word,
