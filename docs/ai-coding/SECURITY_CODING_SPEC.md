@@ -66,6 +66,7 @@
 - 前端依赖（`app/`）用 `pnpm add` 引入，并说明用途；`app/pnpm-lock.yaml` 入库，CI 用 `pnpm install --frozen-lockfile` 安装，版本更新由 Dependabot 每周检查并延迟 7 天。
 - GitHub Actions 只用官方或广泛使用的 action，并固定主版本。M3 起的发布工作流（`release.yml`）里，第三方 action 按提交 SHA 固定并在行尾注明版本。
 - 不在构建脚本或 CI 里下载并执行来历不明的脚本。
+- 自动更新（M3）：程序只向 GitHub Releases 发出检查更新的请求（清单 `…/releases/latest/download/latest.json`，安装包经 `api.github.com` 的资产地址下载），不带任何用户数据，也不算遥测。`tauri.conf.json` 的 `plugins.updater.pubkey` 是更新的信任根：只安装用这把公钥验签通过、签名里记的版本与清单一致（`requireSignedVersion`）且比当前版本新的更新包，从不安装未签名或更旧的版本，也不在开发版或从磁盘映像运行时安装；改这把公钥（`tauri.conf.json`、`tauri.*.conf.json`）要经 CODEOWNERS 评审。私钥只在维护者本机与 GitHub Actions secrets，`check-secrets.sh` 拦截它（`docs/release/updater-key.md`）。
 
 ## 9. AI 边界
 
