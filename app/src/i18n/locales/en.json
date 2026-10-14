@@ -455,6 +455,8 @@
     "autostart": "Start at login",
     "applies_at_once": "Takes effect at once; it is not part of Save.",
     "autostart_failed": "Could not read whether IssueRelay starts at login",
+    "show_in_dock": "Show in Dock",
+    "show_in_dock_note": "Off: the icon shows only while the panel is open. The menu bar icon always stays.",
     "cli": {
       "title": "Command line on PATH",
       "description": "Lets you type {{command}} in a terminal. No administrator rights needed.",

@@ -455,6 +455,8 @@
     "autostart": "開機自動啟動",
     "applies_at_once": "立即生效，不經「儲存」。",
     "autostart_failed": "無法讀取是否開機自動啟動",
+    "show_in_dock": "在程式塢顯示圖示",
+    "show_in_dock_note": "關閉後，只有面板開啟時才顯示圖示；選單列圖示一律保留。",
     "cli": {
       "title": "把命令列加入 PATH",
       "description": "之後在終端機裡可以直接輸入 {{command}}，不需要管理員權限。",

@@ -66,6 +66,10 @@ pub async fn start(app: AppHandle, panel_requested: bool) {
             let onboarded = host.engine().settings().onboarding_completed;
             if shows_panel(state.autostarted, onboarded, panel_requested) {
                 window::show(&app);
+            } else {
+                // The panel stays hidden and the settings are read at last: "Show in Dock" says
+                // whether the Dock icon, which lib.rs took away while they were unknown, returns.
+                window::refresh_dock(&app);
             }
         }
         Err(failure) => {

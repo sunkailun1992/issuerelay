@@ -39,6 +39,7 @@ use crate::{
     state::{AppState, StartupState},
     tray,
     update::{self, AppUpdates, UpdateStatus},
+    window,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -419,8 +420,10 @@ pub async fn save_settings(
 ) -> CmdResult<()> {
     let host = host(&state).await?;
     host.engine().update_settings(settings).map_err(error)?;
-    // The language may have changed: the tray menu follows at once.
+    // The language may have changed: the tray menu follows at once. So may "Show in Dock": the
+    // icon follows too (macOS; Windows has none).
     tray::refresh(&app, &host);
+    window::refresh_dock(&app);
     Ok(())
 }
 

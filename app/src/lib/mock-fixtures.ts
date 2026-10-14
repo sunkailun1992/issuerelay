@@ -74,6 +74,7 @@ export const DEFAULT_SETTINGS: Settings = {
   auto_update: true,
   onboarding_completed: false,
   full_access_acknowledged: false,
+  show_in_dock: true,
 };
 
 /** A demo job: what every demo job shares, then `fields`. */

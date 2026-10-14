@@ -455,6 +455,8 @@
     "autostart": "로그인 시 자동 시작",
     "applies_at_once": "바로 적용되며 '저장'과는 별개입니다.",
     "autostart_failed": "로그인 시 자동 시작 여부를 읽지 못했습니다",
+    "show_in_dock": "Dock에 아이콘 표시",
+    "show_in_dock_note": "끄면 패널이 열려 있는 동안에만 아이콘이 표시됩니다. 메뉴 막대 아이콘은 항상 남아 있습니다.",
     "cli": {
       "title": "명령줄을 PATH에 추가",
       "description": "터미널에서 {{command}}을(를) 바로 입력해 쓸 수 있게 됩니다. 관리자 권한은 필요하지 않습니다.",

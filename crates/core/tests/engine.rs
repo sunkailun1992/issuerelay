@@ -4467,12 +4467,17 @@ async fn the_panels_own_settings_are_saved_like_the_others() {
     let before = h.engine.settings();
     assert!(before.auto_update && before.notifications.failed);
     assert!(!before.onboarding_completed && !before.full_access_acknowledged);
+    assert!(
+        before.show_in_dock,
+        "the Dock icon stays unless it is switched off"
+    );
     let mut settings = before.clone();
     settings.notifications.run_started = false;
     settings.notifications.failed = false;
     settings.auto_update = false;
     settings.onboarding_completed = true;
     settings.full_access_acknowledged = true;
+    settings.show_in_dock = false;
     h.engine.update_settings(settings.clone()).unwrap();
     assert_eq!(h.engine.settings(), settings);
     // They are in the file, so a restarted host sees them, and a pause leaves them alone.
