@@ -4,8 +4,8 @@
 
 *Hand the Linear issues assigned to you to Claude Code or Codex on your own machine.*
 
-> **状态：开发中，尚未发布。** M0（实测验证）、M1（引擎与命令行）、M2（桌面面板）已完成，M3（安装包与发布）进行中；第一个版本发布之前，Releases 页面是空的。
-> *Status: under development, not released yet. M0 to M2 are done and M3 (installers and releases) is in progress; the Releases page stays empty until the first release.*
+> **状态：开发中。** M0（实测验证）、M1（引擎与命令行）、M2（桌面面板）、M3（安装包与发布）已完成：桌面应用与安装包已在 macOS 实机验收，Windows 还没有在真机上验收。第一个版本是 v0.1.0。
+> *Status: under development. M0 to M3 are done: the desktop app and the installers have been accepted on a real Mac; Windows has not been tested on a real machine yet. The first version is v0.1.0.*
 
 ## 安装 / Install
 
