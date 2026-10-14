@@ -11,12 +11,14 @@ type Language = "zh-CN" | "zh-TW" | "en" | "ja" | "ko";
 type Words = (key: string) => string;
 
 /**
- * The comparison. Renders on the same machine are near identical, so at most 30 pixels may differ,
- * each by a colour distance of at most 0.1 (Playwright's scale, 0 to 1): a changed state colour,
- * primary colour or sidebar tint, or a page moved by a few pixels, is well past that. Animations
- * are frozen.
+ * The comparison. Renders on the same machine are near identical (measured on 2026-10-14: with no
+ * tolerance at all only one screen ever differed, by 8 or 9 pixels), so at most 30 pixels may
+ * differ by more than a colour distance of 0.05 (Playwright's scale, 0 to 1). At 0.1 a state
+ * colour turned 55 degrees in hue at the same lightness went through unnoticed; at 0.05 it fails, as
+ * do a changed primary colour or sidebar tint and a page moved by a few pixels. Animations are
+ * frozen.
  */
-const SHOT = { maxDiffPixels: 30, threshold: 0.1, animations: "disabled" } as const;
+const SHOT = { maxDiffPixels: 30, threshold: 0.05, animations: "disabled" } as const;
 
 const SCREENSHOT_LANGUAGES: Language[] = ["zh-CN", "en"];
 /** English has the widest table; Chinese and Japanese are another script, without spaces between words. */
@@ -97,8 +99,13 @@ async function shot(page: Page, language: Language, name: string): Promise<void>
   // A click leaves the pointer where it was: put it where it hovers over nothing.
   await page.mouse.move(0, 0);
   // The app icon (the sidebar's, the guide's header) is masked: Chrome draws its gradients and
-  // shadow a few dozen pixels differently from one run to the next.
-  await expect(page).toHaveScreenshot(`${language}-${theme}-${name}.png`, { ...SHOT, mask: [page.locator('img[src="/icon.svg"]')] });
+  // shadow a few dozen pixels differently from one run to the next. The mask is the icon's own
+  // indigo rather than Playwright's magenta, as the README shows some of these pictures.
+  await expect(page).toHaveScreenshot(`${language}-${theme}-${name}.png`, {
+    ...SHOT,
+    mask: [page.locator('img[src="/icon.svg"]')],
+    maskColor: "#4e4edc",
+  });
 }
 
 /** The eight screens of the panel's pages. `ready` waits for what shows the page has its data (the same in every language). */
