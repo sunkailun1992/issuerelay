@@ -29,6 +29,24 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 3. 状态是 `Todo`；
 4. 所属 Linear 项目已在 IssueRelay 里绑定了本地目录。
 
+## 界面预览 / Screenshots
+
+桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者与权限档位）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+
+*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor and permission level of each Linear project). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+
+**中文界面**
+
+![需求：每条需求的 Linear 状态、本地状态、原因与操作](docs/gates/screenshots/m2/readme/zh-CN-issues.png)
+
+![项目绑定：每个项目的目录、执行者、权限档位与检查](docs/gates/screenshots/m2/readme/zh-CN-bindings.png)
+
+**English interface**
+
+![Issues: each issue's Linear status, local status, reason and action](docs/gates/screenshots/m2/readme/en-issues.png)
+
+![Bindings: each project's folder, executor, permission level and check](docs/gates/screenshots/m2/readme/en-bindings.png)
+
 ## 安全须知
 
 - **默认以「完全放开」权限无人值守运行 AI**：它能执行任意命令、使用你电脑上的全部凭据。只在你信任的仓库和需求上使用；可以按项目调低档位。
@@ -38,13 +56,19 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 开发
 
-需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。
+需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。桌面面板（`app/`）还需要 Node.js 22.22.2+、24.15+ 或 26 及以上和 pnpm（版本见 `app/package.json` 的 `engines` 与 `packageManager`）。
 
 ```bash
 cargo test --workspace
 cargo run -p issuerelay-devhost -- --help   # 开发用无界面宿主（不发布）；启动不等 Linear（连接在后台进行，结果写进日志），没有登录时也会启动，并提示先登录
 cargo run -p issuerelay-cli -- --help       # 命令行
+pnpm --dir app install                      # 面板的前端依赖
+pnpm --dir app tauri dev                    # 启动桌面应用开发版
+pnpm --dir app dev                          # 只在浏览器里看面板，用假数据
+pnpm --dir app test:screens                 # 面板截图比对与版面检查，只在本机运行，不进 CI
 ```
+
+`pnpm --dir app build` 排在 cargo 命令之前：`pnpm --dir app tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`，它会自己先构建；`tauri dev`、`cargo test` 等调试构建不内嵌、连开发服务器。
 
 提交前的检查、代码规范与开发流程见 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding](docs/ai-coding/README.md)。
 

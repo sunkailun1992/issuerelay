@@ -130,7 +130,8 @@ pub struct Settings {
     pub notifications: NotificationSettings,
     /// Check for and install updates automatically (from M3).
     pub auto_update: bool,
-    /// The desktop panel's first-run guide was finished.
+    /// The desktop panel's first-run guide was finished, or set aside with "Set up later": either
+    /// way the panel no longer opens on it (it can still be run again from the environment check).
     pub onboarding_completed: bool,
     /// The user confirmed the full-access warning (design section 14) once.
     pub full_access_acknowledged: bool,

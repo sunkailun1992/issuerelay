@@ -1,0 +1,21 @@
+[
+  { "setting": "system", "system": "zh-CN", "expected": "zh-CN" },
+  { "setting": "system", "system": "zh-Hans-CN", "expected": "zh-CN" },
+  { "setting": "system", "system": "zh-Hans-HK", "expected": "zh-CN" },
+  { "setting": "system", "system": "zh-Hans-MO", "expected": "zh-CN" },
+  { "setting": "system", "system": "zh-TW", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh_TW", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh-Hant", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh-Hant-HK", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh-HK", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh-MO", "expected": "zh-TW" },
+  { "setting": "system", "system": "zh", "expected": "zh-CN" },
+  { "setting": "system", "system": "ja-JP", "expected": "ja" },
+  { "setting": "system", "system": "ko-KR", "expected": "ko" },
+  { "setting": "system", "system": "en-GB", "expected": "en" },
+  { "setting": "system", "system": "de-DE", "expected": "en" },
+  { "setting": "system", "system": null, "expected": "en" },
+  { "setting": "ja", "system": "zh-CN", "expected": "ja" },
+  { "setting": "zh-TW", "system": "en-US", "expected": "zh-TW" },
+  { "setting": "fr", "system": "zh-CN", "expected": "en" }
+]

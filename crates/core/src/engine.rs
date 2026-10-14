@@ -52,7 +52,7 @@ use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
 use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
-use crate::trigger::{self, Eligibility, WaitReason, same_name};
+use crate::trigger::{self, Eligibility, WaitReason, WaitReasonView, same_name};
 
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
@@ -161,6 +161,18 @@ pub struct StatusSnapshot {
     /// Nothing new starts while the runs in progress finish (the "wait for completion" exit).
     #[serde(default)]
     pub draining: bool,
+    /// Queued jobs passed over after a failed start, with when each is tried again (this
+    /// machine's clock, for display only), by job id. A host from before this field sends none.
+    #[serde(default)]
+    pub held: Vec<HeldJob>,
+}
+
+/// A queued job whose start failed and that waits before it is tried again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldJob {
+    pub job_id: i64,
+    /// When the job may start again: the wall-clock time worked out when the pause began.
+    pub retry_at: DateTime<Utc>,
 }
 
 /// What changed in the engine, for the desktop panel. A subscriber that falls behind gets
@@ -198,13 +210,19 @@ pub struct IssueView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueStatus {
     /// It meets every condition. `IssueView::job` says what happened with it so far.
-    Eligible,
+    /// `picked_up` says whether the next check does anything with it. It is true for an issue
+    /// without a run, for one whose run is still in hand (waiting, queued or running), and for
+    /// one that Linear changed since its last run ended. It is false when that run is over and
+    /// Linear's `updatedAt` has not moved past what the run recorded: the poll leaves such an
+    /// issue alone (`trigger::should_enqueue`), and only running it again by hand starts it.
+    Eligible { picked_up: bool },
     /// Its status is not the trigger's Todo status; `state` is its status, cleaned for display.
     NotTodo { state: String },
     /// It does not match the trigger's label or assignee as IssueRelay compares them.
     NotCandidate,
-    /// It waits for a binding, a folder or a ready executor.
-    Waiting { reason: String },
+    /// It waits for a binding, a folder or a ready executor; `reason` says which, as a code the
+    /// panel translates.
+    Waiting { reason: WaitReasonView },
     /// Monitoring is paused.
     Paused,
 }
@@ -225,6 +243,8 @@ struct RunningJob {
 struct StartBackoff {
     failures: u32,
     until: tokio::time::Instant,
+    /// The same moment as `until`, on the wall clock, for the panel.
+    retry_at: DateTime<Utc>,
 }
 
 /// What `dispatch` remembers about failed starts.
@@ -536,14 +556,19 @@ impl Engine {
             .clone()
             .map(|(_, viewer)| viewer);
         let running = self.inner.running.lock().expect("running lock").len();
-        let counts = self
-            .count(JobState::Queued)
-            .and_then(|queued| Ok((queued, self.count(JobState::WaitingBinding)?)));
-        let (queued, waiting, store_error) = match counts {
-            Ok((queued, waiting)) => (queued, waiting, None),
+        // The queued jobs are read in a statement of their own, so the store lock is free again
+        // before the waiting count takes it and before `held` takes the backoff table's lock.
+        let queued = self.store().list_by_state(&[JobState::Queued]);
+        let counts = queued.and_then(|queued| Ok((queued, self.count(JobState::WaitingBinding)?)));
+        let (queued, waiting, held, store_error) = match counts {
+            Ok((queued, waiting)) => {
+                let ids: HashSet<i64> = queued.iter().map(|job| job.id).collect();
+                (queued.len(), waiting, self.held(&ids), None)
+            }
             Err(e) => (
                 0,
                 0,
+                Vec::new(),
                 Some(clean_text(&format!("cannot read the job records: {e:#}"))),
             ),
         };
@@ -557,6 +582,7 @@ impl Engine {
             queued,
             waiting,
             draining: self.draining(),
+            held,
         }
     }
 
@@ -665,13 +691,20 @@ impl Engine {
 
     /// Adds the binding, replacing any existing one for the same project or id.
     ///
+    /// A binding that replaces another takes its place in the list (the panel lists the bindings
+    /// in this order, so editing one must not move it); one that replaces several stands where
+    /// the first of them stood, and one that replaces none goes last.
+    ///
     /// The result is checked like any configuration (`Config::validate`: an absolute folder,
     /// non-blank ids, no control characters in names), and a refused binding changes nothing.
     pub fn add_binding(&self, binding: Binding) -> Result<()> {
         self.update_config(|c| {
+            let replaced = |b: &Binding| b.project_id == binding.project_id || b.id == binding.id;
+            let place = c.bindings.iter().position(replaced);
+            c.bindings.retain(|b| !replaced(b));
+            // Everything before `place` was kept, so it is still a valid place to insert at.
             c.bindings
-                .retain(|b| b.project_id != binding.project_id && b.id != binding.id);
-            c.bindings.push(binding);
+                .insert(place.unwrap_or(c.bindings.len()), binding);
         })
     }
 
@@ -791,6 +824,9 @@ impl Engine {
         let (ready, _) = self.readiness().await;
         let mut views = Vec::with_capacity(issues.len());
         for issue in issues {
+            // Read first and released at once: the verdict below looks at the bound folder on
+            // disk, which must not happen while the store is locked.
+            let job = self.store().latest_for_issue(&issue.uuid)?;
             let status = if !same_name(&issue.state, &names.todo) {
                 IssueStatus::NotTodo {
                     state: clean_text(&issue.state),
@@ -798,16 +834,20 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                // Looks at the bound folder on disk, so it runs before the store is locked.
                 match trigger::evaluate(&issue, &cfg, &me.id, &ready) {
-                    Eligibility::Eligible(_) => IssueStatus::Eligible,
+                    Eligibility::Eligible(_) => IssueStatus::Eligible {
+                        // What the poll does with such an issue (`reconcile`): a run in hand stays
+                        // as it is, anything else is recorded anew only when `should_enqueue` says
+                        // so, which is the same function the poll asks.
+                        picked_up: job.as_ref().is_some_and(|job| job.state.is_active())
+                            || trigger::should_enqueue(job.as_ref(), &issue),
+                    },
                     Eligibility::Waiting(reason) => IssueStatus::Waiting {
-                        reason: reason.describe(),
+                        reason: reason.view(),
                     },
                     Eligibility::NotCandidate => IssueStatus::NotCandidate,
                 }
             };
-            let job = self.store().latest_for_issue(&issue.uuid)?;
             views.push(IssueView {
                 issue: display_issue(issue),
                 job,
@@ -1164,6 +1204,25 @@ impl Engine {
         Ok(started)
     }
 
+    /// The queued jobs passed over after a failed start whose pause has not ended, by job id.
+    /// Only jobs in `queued` count: a pause outlives its job's stay in the queue until the next
+    /// dispatch prunes it.
+    fn held(&self, queued: &HashSet<i64>) -> Vec<HeldJob> {
+        let now = tokio::time::Instant::now();
+        let backoff = self.inner.start_backoff.lock().expect("backoff lock");
+        let mut held: Vec<HeldJob> = backoff
+            .held
+            .iter()
+            .filter(|(id, pause)| pause.until > now && queued.contains(*id))
+            .map(|(id, pause)| HeldJob {
+                job_id: *id,
+                retry_at: pause.retry_at,
+            })
+            .collect();
+        held.sort_by_key(|job| job.job_id);
+        held
+    }
+
     /// How often the user retried the job while it was queued; `hold_back` compares it.
     fn retries_of(&self, job_id: i64) -> u64 {
         self.inner
@@ -1196,9 +1255,13 @@ impl Engine {
         let entry = backoff.held.entry(job_id).or_insert(StartBackoff {
             failures: 0,
             until: now,
+            retry_at: Utc::now(),
         });
         entry.failures = entry.failures.saturating_add(1);
-        entry.until = now + start_pause(entry.failures);
+        let pause = start_pause(entry.failures);
+        entry.until = now + pause;
+        entry.retry_at = Utc::now()
+            + chrono::Duration::from_std(pause).expect("a start pause is at most five minutes");
     }
 
     async fn start_job(

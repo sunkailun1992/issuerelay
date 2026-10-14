@@ -5,9 +5,10 @@
 - Issues and pull requests are welcome, in English or Chinese. Ask questions with the Question issue form (Discussions are off and blank issues are disabled).
 - Open an issue first for large changes and new features, and for anything that touches the six Critical areas: executor flags and permission tiers, the prompt's fixed rules, ending the process tree, credential storage and authorization, the IPC method table, and mark-done.
 - Read [AGENTS.md](AGENTS.md) before you code. It is written for AI tools, and its rules apply to people too.
-- Run the four checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test` and `bash scripts/check-secrets.sh --strict` (on Windows the scan needs Git Bash or WSL).
+- Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (a `tauri build`, that is a build with the `custom-protocol` feature, embeds `app/dist`); the panel needs Node.js 22.22.2+, 24.15+ or 26+ (`engines` in `app/package.json`) and pnpm. On Windows the scan needs Git Bash or WSL.
 - Write commit messages and PR titles as English Conventional Commits, for example `fix(runner): kill the whole process tree on timeout`. Do not change version numbers; maintainers do that when they release.
-- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts.
+- Changes to the desktop panel (`app/`) follow section 12 of [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md): every text goes through the five translation files, colours and sizes come from the design tokens, every page has loading, empty and error states, and every action stays reachable in the smallest window (900×600).
+- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts. AI tools never approve a contributor's PR, and never merge one that a maintainer has not approved.
 - This repository is public. Never post tokens, company information or real Linear content in issues, PRs, logs or screenshots.
 - Report security problems privately from the Security tab, never in a public issue. Contributions are licensed under Apache-2.0.
 
@@ -16,7 +17,7 @@
 - 问题报告：用 issue 模板提交，中文或英文都可以。
 - 文档、测试、修 bug。
 - 新功能：先开 issue 讨论，见「开始之前」。
-- 界面翻译：M2 起接受，每种语言一个翻译文件。语言清单见[设计文档](docs/superpowers/specs/2026-10-10-issuerelay-design.md)第 9.4 节，文件位置见[目录规范](docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md)。里程碑 M0–M3 的含义见 [README.md](README.md) 的状态说明和设计文档第 17 节。
+- 界面翻译：M2 起接受，每种语言一个翻译文件（`app/src/i18n/locales/`）。五个文件的键和占位符必须一一对应、不能留空，测试会检查。语言清单见[设计文档](docs/superpowers/specs/2026-10-10-issuerelay-design.md)第 9.4 节，文件位置见[目录规范](docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md)，写法见 [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md) 第 12 节。里程碑 M0–M3 的含义见 [README.md](README.md) 的状态说明和设计文档第 17 节。
 
 新人可以从带 `good first issue`（适合新人）或 `help wanted`（欢迎帮忙）标签的 issue 开始。
 
@@ -40,25 +41,35 @@ rustup toolchain install   # 按 rust-toolchain.toml 装好 1.99.0 及 rustfmt�
 cargo build --workspace
 ```
 
+桌面面板（`app/`）还需要 [Node.js](https://nodejs.org/) 22.22.2+、24.15+ 或 26 及以上（`app/package.json` 的 `engines`）和 [pnpm](https://pnpm.io/)（版本见 `app/package.json` 的 `packageManager`）：
+
+```bash
+pnpm --dir app install
+pnpm --dir app build   # tauri build（custom-protocol）构建的应用内嵌 app/dist，所以先构建面板，再跑 cargo
+```
+
 单元测试和集成测试用假执行者和假 Linear MCP，所以不需要 Linear 账号，也不需要安装 Claude Code 或 Codex。
 
 实机验收才需要真实环境：你自己的 Linear 测试项目（不是真实业务项目），加上已登录的 Claude Code 或 Codex。步骤见 [docs/gates/](docs/gates/) 和 [TESTING_SPEC.md](docs/ai-coding/TESTING_SPEC.md)。
 
 ## 提交前检查
 
-提交前在仓库根目录跑这四条，全部通过再推送：
+提交前在仓库根目录跑这六条，全部通过再推送。先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`：`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`，CI 也是这个顺序（没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板）：
 
 ```bash
+pnpm --dir app build   # 前置步骤，不算在六条里
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+pnpm --dir app lint
+pnpm --dir app test
 bash scripts/check-secrets.sh --strict
 ```
 
 - 密钥扫描必须无输出、退出码为 0。新文件要先 `git add`，扫描才会覆盖它。
 - Windows 上运行 `bash scripts/check-secrets.sh --strict` 需要 Git Bash（随 Git for Windows 安装）或 WSL。
-- CI 在 macOS 和 Windows 上跑前三条（`test (macos-latest)`、`test (windows-latest)`），在 Ubuntu 上跑密钥扫描（`secrets`）。三项都通过才能合并。第一次给本仓库贡献时，GitHub 会先等维护者批准你的 PR 的工作流运行，CI 才会开始；这是仓库设置，耐心等一下即可。
-- 这四条与 [AGENTS.md](AGENTS.md) 的「验证命令」一致。如有出入，以 AGENTS.md 为准。
+- CI 在 macOS 和 Windows 上跑前五条（`test (macos-latest)`、`test (windows-latest)`；先安装前端依赖，`pnpm --dir app build` 排在 cargo 之前），在 Ubuntu 上跑密钥扫描（`secrets`）。三项都通过才能合并。第一次给本仓库贡献时，GitHub 会先等维护者批准你的 PR 的工作流运行，CI 才会开始；这是仓库设置，耐心等一下即可。
+- 这六条与 [AGENTS.md](AGENTS.md) 的「验证命令」一致。如有出入，以 AGENTS.md 为准。
 
 ## 分支、提交与 PR
 
@@ -92,6 +103,7 @@ git merge upstream/main
 - 先读 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding/README.md](docs/ai-coding/README.md)。AGENTS.md 虽然写给 AI，对人同样适用。
 - macOS 和 Windows 同等对待，细则见 AGENTS.md 的「项目边界」。
 - 新行为要有测试。修 bug 先写一个能复现它的测试，分层和假实现见 [TESTING_SPEC.md](docs/ai-coding/TESTING_SPEC.md)。
+- 改面板（`app/`）先读 [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md) 第 12 节：文案走五种语言的翻译文件，颜色和尺寸只用设计变量，每个页面有加载、空、错误三种状态，最小窗口下每个操作都够得着；外来文本怎样显示见 [SECURITY_CODING_SPEC.md](docs/ai-coding/SECURITY_CODING_SPEC.md) 第 3 节。
 - 测试通过不等于实机验收。改动涉及真实 Linear、Claude Code 或 Codex 的行为时，在 PR 里写实机结果；做不了就写「待实机」和原因。
 - 设计、计划、验收报告用中文，`README.md` 中英双语。源码注释用英文，写法见 [AI_COMMENT_STYLE_GUIDE.md](docs/ai-coding/AI_COMMENT_STYLE_GUIDE.md)。
 - 改了行为，就同步改相关文档。

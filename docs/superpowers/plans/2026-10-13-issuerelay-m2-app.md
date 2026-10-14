@@ -15,7 +15,7 @@
 - 第一部分的全部全局约束继续有效（硬规则、两平台、测试不碰网络与真实钥匙串、虚构测试数据、公开仓库红线、英文注释中文文档、四条验证命令、英文 Conventional Commits 与 `Co-Authored-By` 写实际模型、分支与 PR、禁止强推）。
 - 验证命令扩展为六条（设计第 16 节）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`pnpm --dir app lint`、`pnpm --dir app test`、`bash scripts/check-secrets.sh --strict`（无输出）。
 - 「标记完成」「重新运行」「停止」只经本程序的 Tauri 命令在进程内调用引擎（`Engine::mark_done`、`retry_job`、`cancel_job`）；IPC 方法表、命令行、MCP 控制服务保持不提供。
-- 前端不拿任何插件权限：`capabilities/default.json` 只给 `core:default`；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。浏览器只打开 Linear 的链接：用 `url::Url` 解析后，协议必须是 `https`、主机必须是 `linear.app` 或它的子域名（例如 OAuth 授权页所在的 `mcp.linear.app`）；`open_linear` 命令与 Linear 登录时打开授权页的回调共用这一个检查（Task 4 的 `is_linear_url`），其他链接一律拒绝并记日志。
+- 前端不拿任何插件权限：`capabilities/default.json` 只给本程序登记在 app manifest（`app/src-tauri/build.rs`）里的面板命令与面板用到的两条 core 事件权限（`core:event:allow-listen`、`core:event:allow-unlisten`），由 `app/src-tauri/src/lib.rs` 的测试与 `app/src/lib/api.test.ts` 逐条核对（2026-10-13 Task 4 起，取代最初的 `core:default`）；新增命令时同步改 app manifest、能力文件与测试；打开链接、选目录、通知、开机自启都由 Rust 侧命令完成。浏览器只打开 Linear 的链接：用 `url::Url` 解析后，协议必须是 `https`、主机必须是 `linear.app` 或它的子域名（例如 OAuth 授权页所在的 `mcp.linear.app`），且不带用户名或密码、主机里没有空标签（如结尾的点）；交给系统打开的是检查时解析出的规范化地址（`Url::as_str`），从不是传进来的原文（macOS 的 NSURL 与 `url` 对同一段原文可能读出不同的主机，例如 `https://linear.app\@evil.example/`）；`open_linear` 命令与 Linear 登录时打开授权页的回调共用这一个检查与打开方式（Task 4 的 `linear_url`、`open_linear_link`），其他链接一律拒绝并记日志。
 - 来自 Linear 与 AI 的文本只作为 React 文本节点渲染（自动转义），不用 `dangerouslySetInnerHTML`。执行者与 AI 的显示文本（时间线、原始日志、摘要）一律经 `cleanDisplayText`（Task 4）：去掉 ANSI 转义序列（CSI、以 BEL 或 ST 结尾的 OSC、两字符 ESC 序列），其余控制字符变空格，去掉 core `text::is_invisible` 去掉的字符；用例表 `app/src/lib/clean-cases.json` 由 Rust（对照 core 的 `clean_text`，字符规则在 core 里只有 `text::strip_control` 一份实现）与 TypeScript 两边的测试共同核对；用例里的不可见字符一律写成转义。
 - 引擎给的英文原文（任务原因、`last_error`、环境检查的 `problems`、`LinearSetup` 的说明、命令返回的错误链）从不单独出现：每处都先显示一条由结构化数据（状态、代码、布尔值）得出的已翻译标题，原文清洗后作为次要的细节行放在下面（Task 5 的 `describeError`、`DetailLine`）。系统通知只带已翻译的标题加需求编号与标题，从不带引擎原文。需求页的等待原因按代码翻译（Task 4 的 `WaitReasonView`）。
 - 面板与托盘的每段文案都走翻译键；五种语言（`zh-CN`、`zh-TW`、`en`、`ja`、`ko`）的键必须一一对应（CI 检查），组件里用到而 `en` 没有的键让测试失败（Task 2 的缺键守卫）。默认跟随系统语言：系统语言一律取 Rust 侧 `sys_locale` 报告的值（面板经 `AppInfo.system_locale` 拿到），托盘、通知与面板因此总是同一种语言；设置里随时切换并立即生效（含托盘菜单与通知）。
@@ -24,7 +24,7 @@
 - 应用标识 `com.sunkailun.issuerelay`，产品名 `IssueRelay`，主程序文件名固定为 `issuerelay-app`（`tauri.conf.json` 的 `mainBinaryName`），窗口默认 1100×720、最小 900×600。
 - 截图、示例与测试里的数据全部虚构（`DEMO-N`、`Demo Project`、`Jane Doe`、`~/code/demo-app`）；真实验收截图只留在本机，不进仓库。
 - 依赖版本：Tauri 及其插件取当前 2.x 最新版，前端依赖取当前最新稳定版；用 `cargo add` / `pnpm add` 解析后锁定。每个在 `cargo add` / `pnpm add` 之后的提交步骤都显式写出 `Cargo.lock` 与 `app/pnpm-lock.yaml`。`/app` 的 npm 依赖登记进 `.github/dependabot.yml`（与现有条目同样每周检查、版本更新延迟 7 天）。Tauri、shadcn/ui、Radix、i18next、tracing 等库的 API 名称与行为以实际解析到的版本文档（docs.rs、v2.tauri.app 等）为准，与本计划写法不同时照文档写并在报告里说明。
-- 本计划只在三处改 core（各自先写 core 的失败测试、守 core 的规则）：Task 3 把 devhost 的日志清洗移进 `issuerelay_core::logscrub`；Task 4 给 `StatusSnapshot` 加 `held`（暂缓任务的重试时间）、给 `IssueStatus::Waiting` 换成结构化的 `WaitReasonView`。命令行照旧打印 `WaitReason::describe()`，IPC 方法表不变。
+- 本计划只在四处改 core（各自先写 core 的失败测试、守 core 的规则）：Task 3 把 devhost 的日志清洗移进 `issuerelay_core::logscrub`；Task 4 给 `StatusSnapshot` 加 `held`（暂缓任务的重试时间）、给 `IssueStatus::Waiting` 换成结构化的 `WaitReasonView`；Task 6 修复轮（AR66）给 `IssueStatus::Eligible` 加 `picked_up`（上次运行已结束且 Linear 上没有变化时为假，由判定入队的同一个函数得出）。命令行照旧打印 `WaitReason::describe()`，IPC 方法表不变。
 - 分支 `feat/m2-app`（从合入第一部分之后的 `main` 切出），经 PR 合入。
 
 ## Review Focus
@@ -375,6 +375,8 @@ pub fn run() {
   "permissions": ["core:default"]
 }
 ```
+
+（这是 Task 1 落地时的写法；Task 4 的第二个提交起，权限收窄为 app manifest 里的面板命令加 `core:event:allow-listen`、`core:event:allow-unlisten`，见全局约束。）
 
 `.gitignore` 加 `app/node_modules/`、`app/dist/`、`app/src-tauri/gen/`，以及后续任务的生成物 `app/icons-src/build/`（Task 11 渲染的 1024px PNG）、`app/test-results/` 与 `app/playwright-report/`（Task 12 的 Playwright 输出）（若 `tauri init` 生成的 `.gitignore` 已覆盖就不重复）。
 
@@ -5105,7 +5107,7 @@ git commit -m "feat(app): add the panel shell, design tokens and data hooks"
 - Test: `app/src/pages/Overview.test.tsx`、`app/src/pages/Issues.test.tsx`、`app/src/components/JobActions.test.tsx`、`app/src/components/LinearStatus.test.tsx`
 
 **Interfaces:**
-- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：首次连接还在进行（`connecting`，AR51）→ `linear.connecting`「Connecting to Linear…」，没有任何操作按钮；未登录 → `linear.not_configured` ＋「Log in to Linear」；点了登录、浏览器还没回来时（`useLinearLogin` 进行中）→ `linear.waiting_browser`「Finish the authorization in your browser…」＋「Cancel」（`linear.cancel_login`），没有登录按钮；「Cancel」调 `useLinearLogin` 的 `cancel()` 丢掉这次登录（core 写明丢掉 `Host::login` 就放弃登录，钥匙串只在浏览器回调之后才写），卡片回到原来的样子，不提示失败；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接状态另有「重新授权」与「退出登录」，「重新授权」等浏览器时同样显示上面的等待状态与「Cancel」。
+- Produces: `JobActions({ job?: Job | null, url?: string, compact?: boolean })`：没有任务时只有「在 Linear 中打开」（有 `url` 时）；有任务时按状态只显示能用的操作——排队 / 等待 / 运行中：停止；失败 / 已取消 / 待补充信息：重新运行，且只在它是面板手上这条需求最新的一次运行时（`useJobs()` 里同一 `issue_uuid` 没有更大的 `id`；列表还没读到时照常显示，引擎也会拒绝旧的运行）；待验收：标记完成（确认对话框，按钮 `actions.confirm`）；有 `url` 时：在 Linear 中打开。`LinearStatus({ manage?: boolean })`：按 `StatusView.linear` 与 `status` 显示连接状态与对应操作，标题都由结构化数据得出：首次连接还在进行（`connecting`，AR51）→ `linear.connecting`「Connecting to Linear…」，没有任何操作按钮；未登录 → `linear.not_configured` ＋「Log in to Linear」；点了登录、浏览器还没回来时（`useLinearLogin` 进行中）→ `linear.waiting_browser`「Finish the authorization in your browser…」＋「Cancel」（`linear.cancel_login`），没有登录按钮；「Cancel」调 `useLinearLogin` 的 `cancel()` 丢掉这次登录（core 写明丢掉 `Host::login` 就放弃登录，钥匙串只在浏览器回调之后才写），卡片回到原来的样子，不提示失败；连接失败 → `linear.connect_failed` ＋ `DetailLine`（说明原文）＋重试；接口已变化 → `linear.interface_changed` ＋ `DetailLine`；已连接 → 「已连接」与授权人姓名（姓名单独一个元素）和上次检查时间；`manage` 为真时（环境检查页）已连接与连接失败两种状态另有「重新授权」与「退出登录」（令牌被撤销或过期时，重试好不了），「重新授权」等浏览器时同样显示上面的等待状态与「Cancel」；接口已变化时没有这两个按钮。
 - Consumes: Task 5 的钩子、`StatusBadge`、三种状态组件与 `DetailLine`、`PageHeader`、`trayState`/`problemCause`、`formatTime`、`state.retrying_at`；Task 4 的 `BackendError`、`StatusSnapshot.held`、`WaitReason`。
 
 页面规格：
@@ -5127,7 +5129,7 @@ git commit -m "feat(app): add the panel shell, design tokens and data hooks"
 | 区块 | 内容 |
 |---|---|
 | 页头 | 标题 `nav.issues`，说明 `issues.description`（「指派给你、带 {{label}} 标签的需求，最近更新的 50 条」）；右侧刷新按钮 |
-| 列表 | `Table`：编号（等宽）、标题、Linear 状态、本地状态（有任务时 `StatusBadge`，没有时淡色「—」）、原因（`IssueStatus`：`eligible` → `issues.eligible`「下一次检查会接走」；`not_todo` → `issues.not_todo`「状态是 {{state}}，不是 {{todo}}」；`not_candidate` → `issues.not_candidate`；`waiting` → 按代码翻译：`issues.waiting.project_not_bound`、`issues.waiting.directory_missing`（`{{directory}}`）、`issues.waiting.executor_not_ready`（`{{executor}}` 用 `executor.*` 的译名）；`paused` → `issues.paused`）、操作（`JobActions`，`job` 可为空，`url` 为需求链接） |
+| 列表 | `Table`：编号（等宽；它就是「在 Linear 中打开」的控件：一个样子像链接的按钮，调 `openLinear`，名字 `actions.open_issue_in_linear`——最小窗口下表格只有约 600 px，操作列不能再放第二个按钮）、标题、Linear 状态、本地状态（有任务时 `StatusBadge`，没有时淡色「—」）、原因（`IssueStatus`：`eligible { picked_up }`：`picked_up` 为真 → `issues.eligible`「下一次检查会接走」，为假（上次运行已结束且 Linear 上没有变化，轮询不会再入队，只有手动重新运行）→ `issues.runs_again_after_change`「Linear 上有改动后才会再次运行」；`not_todo` → `issues.not_todo`「状态是 {{state}}，不是 {{todo}}」，运行还在进行（等待 / 排队 / 运行中）时不显示，徽章已经说明；`not_candidate` → `issues.not_candidate`；`waiting` → 按代码翻译：`issues.waiting.project_not_bound`、`issues.waiting.directory_missing`（`{{directory}}`）、`issues.waiting.executor_not_ready`（`{{executor}}` 用 `executor.*` 的译名）；`paused` → `issues.paused`）、操作（`JobActions compact`，`job` 可为空，不传 `url`：至多一个按钮） |
 | 加载 | `LoadingState`（5 行） |
 | 空状态 | 没有需求时 `EmptyState`：`issues.empty_title`「还没有带 {{label}} 标签的需求」、说明触发条件、按钮跳 `/help` |
 | 错误状态 | `ErrorState`（标题 `issues.load_failed`；例如未登录时细节行是后端的「not connected to Linear: log in first」）＋ 按钮「Open the guide」跳 `/onboarding`、「Open the environment check」跳 `/doctor` |
@@ -5363,9 +5365,9 @@ Expected: 失败。
 按上面的页面规格实现。区块用 `<section aria-labelledby>` 包起来，标题即区块名（测试按 `role="region"` 找）。已运行时长用 `formatDuration(started_at, null, lang)`，每秒刷新一个本地计时器（组件卸载时清掉）。失败提醒的计数：把 `useJobs()` 的任务按 `issue_uuid` 分组、取每组 `id` 最大的一条，数其中 `failed` 的个数。英文文案：
 
 - `overview`：`monitoring` = `Monitoring`；`running` = `Running`、`queued` = `Queued`、`recent` = `Recent results`（区块名）；`no_running` = `Nothing is running`；`queue_empty` = `Nothing is waiting`；`recent_empty` = `No finished runs yet`；`alert_failed_one` = `{{count}} run failed`、`alert_failed_other` = `{{count}} runs failed`；`alert_awaiting_one` = `{{count}} issue awaits your acceptance`、`alert_awaiting_other` = `{{count}} issues await your acceptance`；`view` = `View`；`draining` = `Waiting for the runs in progress to finish; nothing new starts`；`open_doctor` = `Open the environment check`；`problem.not_configured` = `Not logged in to Linear`、`problem.interface_changed` = `Linear's tools changed: update IssueRelay`、`problem.connect_failed` = `Could not connect to Linear; IssueRelay tries again every minute`、`problem.check_failed` = `The last check of Linear failed`、`problem.start_failed` = `A run could not be started`；`status_failed` = `Could not read IssueRelay's status`；`jobs_failed` = `Could not read the runs`。复数用 i18next 的 `_one` / `_other`，五个文件都写两个键（中日韩两者内容相同）。
-- `issues`：`not_todo` = `Its status is {{state}}, not {{todo}}`；`eligible` = `The next check picks it up`；`waiting.project_not_bound` = `Its project is not bound to a local folder`、`waiting.directory_missing` = `The bound folder {{directory}} does not exist`、`waiting.executor_not_ready` = `{{executor}} is not ready; see the environment check`；`load_failed` = `Could not read the issues from Linear`；`open_guide` = `Open the guide`。
-- `actions`：`stop` = `Stop`、`run_again` = `Run again`、`mark_done` = `Mark done`、`open_in_linear` = `Open in Linear`、`poll_now` = `Check now`、`confirm` = `Confirm`；确认对话框文案 `actions.mark_done_confirm`：「把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。」（英文 `Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.`）。Task 8 的删除确认复用 `actions.confirm`。
-- `linear`：`connecting` = `Connecting to Linear…`、`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`、`waiting_browser` = `Finish the authorization in your browser…`、`cancel_login` = `Cancel`。
+- `issues`：`not_todo` = `Its status is {{state}}, not {{todo}}`；`eligible` = `The next check picks it up`、`runs_again_after_change` = `It runs again after a change in Linear`；`waiting.project_not_bound` = `Its project is not bound to a local folder`、`waiting.directory_missing` = `The bound folder {{directory}} does not exist`、`waiting.executor_not_ready` = `{{executor}} is not ready; see the environment check`；`load_failed` = `Could not read the issues from Linear`；`open_guide` = `Open the guide`。
+- `actions`：`stop` = `Stop`、`run_again` = `Run again`、`mark_done` = `Mark done`、`open_in_linear` = `Open in Linear`、`open_issue_in_linear` = `Open {{identifier}} in Linear`、`poll_now` = `Check now`、`confirm` = `Confirm`；确认对话框文案 `actions.mark_done_confirm`：「把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。」（英文 `Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.`）。Task 8 的删除确认复用 `actions.confirm`。
+- `linear`：`connecting` = `Connecting to Linear…`、`not_configured` = `Not logged in to Linear`、`log_in` = `Log in to Linear`、`connect_failed` = `Could not connect to Linear`、`interface_changed` = `Linear's tools changed: update IssueRelay`、`retry` = `Try again`、`connected` = `Connected as`、`last_check` = `Last check: {{time}}`、`log_in_again` = `Authorize again`、`log_out` = `Log out`、`waiting_browser` = `Finish the authorization in your browser…`、`cancel_login` = `Cancel`。
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
 Expected: PASS。在浏览器（`pnpm --dir app dev`）里看一遍两个页面的浅色与深色，截图附在报告里。
@@ -5852,7 +5854,7 @@ git commit -m "feat(app): add project bindings with the full-access warning"
 
 **环境检查**（`/doctor`）——打开页面时自动跑一次 `doctor()`（它会现查，最多约一分钟），页头有「重新检查」；检查中显示进度说明 `doctor.checking`（「正在检查 Linear、Claude Code 和 Codex，最多约一分钟」）；`doctor()` 失败时整页 `ErrorState`（标题 `doctor.failed`，带重试）。页头右侧另有链接「重新走一遍引导」（`doctor.rerun_guide`，到 `/onboarding`，Task 10 从第 1 步开始并显示各步的真实状态）。五个区块，各是一个 `<section aria-labelledby>`：
 
-1. Linear：复用 Task 6 的 `LinearStatus manage`（未登录 → 登录；连接失败 → 重试连接；接口已变化 → 说明需要升级；已连接 → 授权人，另有重新授权与退出登录），不另写一套状态判断；环境检查报了 `linear_error` 时，在下面加标题 `doctor.linear_check_failed` 与它的 `DetailLine`。
+1. Linear：复用 Task 6 的 `LinearStatus manage`（未登录 → 登录；连接失败 → 重试连接，另有重新授权与退出登录——令牌被撤销或过期时重试好不了，这两个按钮由 `LinearStatus manage` 提供，本任务不再自己写；接口已变化 → 说明需要升级；已连接 → 授权人，另有重新授权与退出登录），不另写一套状态判断；环境检查报了 `linear_error` 时，在下面加标题 `doctor.linear_check_failed` 与它的 `DetailLine`。
 2. 工作区：标签 `{{label}}` 是否存在；已检查的团队（`teams_checked`）与缺失的状态（`missing_states`）；缺失时说明在 Linear 的「设置 → 团队 → 工作流」里添加，并提供打开 `https://linear.app/` 的按钮（程序不代为创建）。没有工作区报告（`workspace` 为 `null`：还没连上 Linear）时，这一块是空状态 `doctor.workspace_unchecked`（「Connect to Linear first to check the workspace」）。
 3. 执行者：Claude Code、Codex 各一张 `ExecutorCheck` 卡：已安装（版本）、已登录、Linear MCP 已连通三项，每项通过 / 不通过的图标与由布尔值得出的已翻译标题；`problems` 的原文作为 `DetailLine` 列在下面；修复按钮——没装：显示官方安装说明链接（`https://docs.anthropic.com/en/docs/claude-code/setup`、`https://developers.openai.com/codex/cli`，经 `openLinear` 打不开的外链，改为显示可复制的地址，不直接打开）；没登录：说明在终端运行 `claude` 并登录 / `codex login`；Linear MCP 没连通时先问 `useLinearServerNamed(executor)`：Linear 以一键授权用的名字注册（Claude `linear-server`、Codex `linear`）→ 显示「在浏览器授权」（`setupAction({ kind: "login_linear_mcp", executor })`，提示最多等 5 分钟）；否则显示「一键添加」（`setupAction({ kind: "add_linear_mcp", executor })`，按钮名 `Add Linear to Claude Code` / `Add Linear to Codex`），并说明「已用别的名字添加过的，在终端运行 `claude mcp list` 找到名字后运行 `claude mcp login <名字>`」（Codex 同理）；`setupAction` 调用一律带 `executor`；每次修复完成后自动重新检查。
 4. 运行环境：PATH 来源、代理来源与代理值（`maskCredentials` 打码）；读取时的问题（`env.problems`）放在标题 `doctor.env_problems` 下作为 `DetailLine`；说明为什么需要它们（第 8 节最后一段的意思）。
@@ -6470,3 +6472,58 @@ git commit -m "docs(m2): record the desktop app acceptance on macOS"
 ### 2026-10-13 预检后修订
 
 计划在执行前做了一次只读的预检扫描（任务两两之间的共享文件与接口、各任务自身的一致性、对照已合入的 core 与第一部分 Task 9 的约定、评审规则、本计划的全局约束），主智能体对每条发现作了裁决（AR1–AR50），本次修订把它们全部写进了计划：测试基础设施（Vitest 全局 API 与只收 `src/**/*.test.*`、公共设置里的 jsdom 桩与固定时钟复位、`.gitignore`、shadcn 组件、Dependabot 的 npm 条目、文件结构表，AR1–AR8）；多语言（缺键守卫、`pub mod i18n`、一张语言用例表且先看文字子标签、真正走到英文回退的测试、自己的相对时间文案、「已取消」、系统语言取 Rust 的 `sys_locale`、锁文件随提交，AR9–AR16）；宿主接入（`chrono` 与写全字段的测试辅助、空壳 `commands.rs`、可查询的启动状态、纯函数的退出状态机、事件转发的落后路径、开机自启不出程序坞图标、日志清洗移进 core、不静默吞错、托盘与面板共用的问题用例表、翻译表只解析一次、`mainBinaryName`，AR17–AR28）；命令与数据层（叶子模块 `backend.ts` 与动态载入的假后端、core 加 `StatusSnapshot.held` 与 `WaitReasonView`、引擎原文只作细节行、`JobActions` 的可选任务与「只重跑最新一次」、写成数据表的假后端、TESTING_SPEC 登记假对象、`setupAction` 一律带执行者，AR29–AR36）；外框与页面（新的 `App` 测试与事件桥组件、等订阅而不是等变量、每页的加载 / 空 / 错误状态与错误测试、布局与状态色变量、共用命名空间与 `?state=` 取值、概览的环境提醒与只数最新一次失败、`cleanDisplayText`、时间线的运行记录行与结果合并规则并直接读 core 夹具、表单测试的输入转义与按区块查询、假后端拒绝非绝对目录、环境检查的五个区块与 `follow-ui` 与按名字决定的一键授权与控制服务的用户范围说明、引导测试等连接状态，AR37–AR47）；图标、截图与实机验收（`tauri icon` 的路径与移动端目录、截图的 `?lang=` 与证明比对会失败、等待改立即停止与登录启动无程序坞图标的实机步骤、Windows 待实机清单，AR48–AR50）。照原样接受、没有改计划的：R14（测试里的 `/Applications/IssueRelay.app/...` 与 `file://` 字面量是通用写法，不是本机路径）；G7（提交命令示例不写 `Co-Authored-By`，由派发时补上）；A14 余下的面板与 Rust 输入不一致一项（已由 AR15 关闭）；扫描第 6 节列的 Tauri、shadcn、Radix 等 API 名称不逐个核对，照全局约束以解析到的版本文档为准、不同处在报告里说明。同日的复扫（核对上述修订）又提出 4 条 H、5 条 M、17 条 L，连同新裁决 AR51（`Host::start` 不再等 Linear，`LinearSetup` 新增 `connecting`）一并写进了计划：`held()` 的类型错误、devhost 测试里遗留的导入、只给测试用的导入、事件转发的大枚举改为装箱；字符规则在 core 里合为 `text::strip_control` 一份实现、用例表对照 `clean_text`；退出钩子对 `ExitRequested.code` 的假设写明待核对并在 Task 13 实机检查 Cmd+Q；链接检查改为 `url::Url` 解析、登录回调同样只开 Linear；用例里的不可见字符改为转义；控制服务检查不再吞错（`unknown` 状态）；以及各条 L（版本跟随 Cargo、测试钉住的英文文案列出、模型名与打码各有共用用例表等）。另外修正了两处扫描没列的不一致：假后端的控制服务原来说 Codex「未安装」而环境检查说它已安装（现在两边都是已安装）；Task 3 的模块原为私有 `mod`，`AppState::host` 等在 Task 4 接上命令之前会被当成死代码（现在都是 `pub mod`）。
+
+## 评审遗留的小项
+
+本计划执行中，各任务评审、最终评审（`d213a78..3504126`）与最终修复波的复审决定接受、没有修复的项，以及实机验收（`docs/gates/2026-10-14-m2-acceptance.md`）留下的事。SDD 工作区在合并后删除，这里是这些结论唯一的存放处；规划下一个里程碑或验收时逐条认领或放弃。
+
+**最终评审接受的遗留项**（编号是最终评审「Carried minors」的组号）
+
+| 组 | 内容 | 接受的理由 | 认领 |
+|---|---|---|---|
+| 1 | `i18n::for_settings` 没有单独的测试 | 它只是对已测部件的一次调用，只解析一次由 `LazyLock` 保证 | 不做 |
+| 2 | 开发者工具权限保持不授予 | AI_CODING_GUIDE §7 写明 | 不做 |
+| 3 | 托盘与宿主之间两处极短的竞态窗口（C3 记日志；接收端在 `set_host` 之后订阅） | 毫秒以下的窗口，靠清扫、Job Object 与下一次状态事件自愈 | 不做 |
+| 4 | 假后端的链接检查较宽、可选的字符集规则、开发宿主的打开方式 | 只用于预览与开发工具，SECURITY §5 写明 | 不做 |
+| 6 | 测试里的 `TINT` 细节、计划里的颜色表 | 守卫有效；计划是历史 | 不做 |
+| 7 | 885 px 下标题在词中折行、计划代码块、运行中任务的原因说明 | 截图测试覆盖版面；其余是计划文字 | 不做 |
+| 8 | 时间线去重、下标 key、共用的「—」常量 | 只是写法 | 不做 |
+| 9 | Task 9 的 M2、M3、M6、M7 | 文案与计划层面的小项 | 不做 |
+| 12 | Windows `.ico` 带 macOS 的透明边、托盘只有 32 px 一种 | 需要 Windows 实机看效果；`app/icons-src/README.md` 已写明 | M3（有 Windows 机器时） |
+| 14 | 首次运行时设置一直存不进去，只能重启（C6） | 属于「配置在磁盘上被改、请重启宿主」的情形，报错已提示重启 | 不做 |
+| 15 | Task 1 的 M3 | 记在 M3 的台账 | M3 |
+
+**最终修复波复审后接受的小项**
+
+| 内容 | 认领 |
+|---|---|
+| 核心读日志只读最后 1 MiB，面板只在读满 5,000 行时提示「只显示最后 N 行」；长行多的日志先碰到字节窗口时不提示（要命令或 core 告诉面板「没有从头读」） | 下次改日志命令时 |
+| 日语表头为了不换行改成「Linear の状態」，其余日语文案仍把 Linear 的状态叫「ステータス」，需母语者复核 | 有日语使用者时 |
+| `screens.spec.ts` 里遮罩颜色的注释还说「README 显示这些图」（README 已改用自己的不遮罩图） | 下次改截图测试时 |
+| 外层页面边界（包住整个外框的那一层）没有常驻测试，现有测试覆盖内层 | 测试打磨 |
+| U+200C、U+200D 不再被密钥扫描拦截，代码标识符里夹带它们不会被发现 | 视需要在 SECURITY §7 写明或只对非代码文件放行 |
+| 一个测试文件最后一个测试检查完之后才到的 act 警告没有人报 | 测试打磨 |
+| 测试替换全局 panic hook，期间别的测试 panic 的消息会被吞掉 | 测试打磨 |
+
+**实机验收的发现**（编号是验收报告的编号）
+
+| 编号 | 内容 | 认领 |
+|---|---|---|
+| N2 | 环境检查对每个执行者运行 `mcp list`，Claude Code 会对用户配置的全部 MCP 服务做健康检查（验收机器上 38 个），一次检查十几秒 | 视需要：先取名字，只查 Linear 那一个 |
+| N3 | 取消原因（`no longer matches the trigger …`、`stopped by the user`）是英文原文；对 Linear 状态已不是 Todo 的需求点「重新执行」会立即被取消，界面只靠这句英文说明 | 下次改运行结果的文案时：改为结构化代码并翻译，「重新执行」给出提示 |
+| N4 | 点「重试」连上 Linear 后，授权人、「上次检查失败」横幅与托盘图标要等下一轮检查才更新 | 下次改连接状态时 |
+| N5 | 再次打开时面板可能出现在另一个桌面（Space）上 | 观察 |
+| 精简运行 | Claude 只加载 Linear MCP 可行、更快，并能隔开用户的其他连接器；Codex 没有简单做法（设计第 18 节第 6 条） | 另起任务，执行者参数属于极高风险，单独提交；默认值由维护者决定 |
+
+**待实机的检查**
+
+| 内容 | 由谁认领 |
+|---|---|
+| Windows 上的整个流程、托盘、通知、开机自启 | Windows 实机验收 |
+| 第一部分 Task 8 的两条：登录命令在没有已开浏览器时启动的浏览器可能随 Job Object 被关掉；登录超时后打印出的授权链接作废 | Windows 实机验收 |
+| 托盘程序运行期间安装执行者，在「环境检查」页重查能找到（PATH 从注册表重读） | Windows 实机验收 |
+| 提权运行的托盘程序与未提权的命令行 | Windows 实机验收 |
+| `:lang()` 字体栈在 Windows 上的实际渲染 | Windows 实机验收 |
+| 系统通知四种各一次（验收时首次授权提示没有被处理） | 维护者授予通知权限后补测，或 M3 验收时一并看 |
+| 有任务在跑时注销或关机（系统发起的退出不询问，10 秒内停止） | 在不跑其他常驻程序的机器上补测 |
+| 浅色菜单栏下的托盘图标、通知区域的屏幕阅读器名称（VoiceOver）、「正在连接 Linear…」这个中间状态 | 有机会时补看 |

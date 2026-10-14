@@ -30,6 +30,7 @@ use issuerelay_core::{
     model::{Issue, Job, JobState},
     runner::{ExitKind, RunLimits},
     store::{NewJob, Store},
+    trigger::WaitReasonView,
 };
 #[cfg(target_os = "macos")]
 use issuerelay_core::{model::ProcessTag, runner, store::Leftover};
@@ -2301,6 +2302,82 @@ async fn bindings_are_replaced_removed_validated_and_saved() {
     assert!(h.engine.bindings().is_empty());
 }
 
+/// The ids of the bindings, in the order the panel lists them.
+fn binding_ids(h: &Harness) -> Vec<String> {
+    h.engine.bindings().into_iter().map(|b| b.id).collect()
+}
+
+#[tokio::test]
+async fn a_replaced_binding_keeps_its_place_in_the_list() {
+    let h = Harness::new(2, false);
+    let config_path = h.root.path().join("config.toml");
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    h.bind("proj-3", "c");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    // Editing the first of three (same id, same project, another folder) leaves it first, in the
+    // configuration file too: the panel lists the bindings in that order.
+    let moved = h.bind("proj-1", "d");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    assert_eq!(h.engine.bindings()[0].directory, moved);
+    assert_eq!(
+        Config::load(&config_path).unwrap().bindings,
+        h.engine.bindings()
+    );
+    // The middle one and the last one stay where they are as well.
+    h.bind("proj-2", "e");
+    h.bind("proj-3", "f");
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    // A binding takes the place of the one it replaces whichever way it replaces it: the same id
+    // with another project, or the same project under another id.
+    let renamed = Binding {
+        project_id: "proj-7".into(),
+        ..h.engine.bindings()[1].clone()
+    };
+    h.engine.add_binding(renamed).unwrap();
+    assert_eq!(binding_ids(&h), ["proj-1", "proj-2", "proj-3"]);
+    assert_eq!(h.engine.bindings()[1].project_id, "proj-7");
+    let other_id = Binding {
+        id: "bind-9".into(),
+        ..h.engine.bindings()[0].clone()
+    };
+    h.engine.add_binding(other_id).unwrap();
+    assert_eq!(binding_ids(&h), ["bind-9", "proj-2", "proj-3"]);
+    // One that replaces two (its id is one's, its project another's) stands where the first of
+    // them stood, and the other goes.
+    let both = Binding {
+        id: "proj-3".into(),
+        project_id: "proj-1".into(),
+        ..h.engine.bindings()[0].clone()
+    };
+    assert_eq!(h.engine.bindings()[0].project_id, "proj-1");
+    h.engine.add_binding(both).unwrap();
+    assert_eq!(binding_ids(&h), ["proj-3", "proj-2"]);
+    // Only a binding that replaces nothing goes last.
+    h.bind("proj-4", "g");
+    h.bind("proj-5", "h");
+    assert_eq!(binding_ids(&h), ["proj-3", "proj-2", "proj-4", "proj-5"]);
+    assert_eq!(
+        Config::load(&config_path).unwrap().bindings,
+        h.engine.bindings()
+    );
+}
+
+#[tokio::test]
+async fn a_binding_that_is_refused_does_not_move_anything() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.bind("proj-2", "b");
+    let before = h.engine.bindings();
+    // An edit of the first one that the configuration refuses.
+    let refused = Binding {
+        directory: PathBuf::from("relative"),
+        ..before[0].clone()
+    };
+    assert!(h.engine.add_binding(refused).is_err());
+    assert_eq!(h.engine.bindings(), before);
+}
+
 #[tokio::test]
 async fn a_binding_needs_an_absolute_directory_and_plain_names() {
     let h = Harness::new(2, false);
@@ -4258,17 +4335,22 @@ async fn the_issue_list_explains_what_each_labeled_issue_is_waiting_for() {
             .status
             .clone()
     };
-    assert_eq!(status_of(&views, "1"), IssueStatus::Eligible);
+    assert_eq!(
+        status_of(&views, "1"),
+        IssueStatus::Eligible { picked_up: true }
+    );
     assert_eq!(
         status_of(&views, "2"),
         IssueStatus::NotTodo {
             state: "In Testing".into()
         }
     );
-    assert!(matches!(
+    assert_eq!(
         status_of(&views, "3"),
-        IssueStatus::Waiting { .. }
-    ));
+        IssueStatus::Waiting {
+            reason: WaitReasonView::ProjectNotBound
+        }
+    );
     h.engine.tick().await.unwrap();
     h.settle().await;
     let views = h.engine.issues().await.unwrap();
@@ -4280,6 +4362,79 @@ async fn the_issue_list_explains_what_each_labeled_issue_is_waiting_for() {
     h.engine.pause().unwrap();
     let views = h.engine.issues().await.unwrap();
     assert_eq!(status_of(&views, "3"), IssueStatus::Paused);
+}
+
+/// Whether the issue list says the next check picks the issue `uuid` up; it must be eligible.
+fn picked_up(views: &[IssueView], uuid: &str) -> bool {
+    match &views.iter().find(|v| v.issue.uuid == uuid).unwrap().status {
+        IssueStatus::Eligible { picked_up } => *picked_up,
+        other => panic!("DEMO-{uuid} should be eligible, not {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_issue_list_says_whether_the_next_check_picks_an_eligible_issue_up() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo-a");
+    // A run that ended without the result the issue needed; the issue stays in Todo.
+    h.runner.script("DEMO-2", Script::exit_code(3));
+    h.linear.upsert(issue("2", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("2").state, JobState::Failed);
+    // An issue that has had no run at all.
+    h.linear.upsert(issue("1", "proj-1"));
+
+    let views = h.engine.issues().await.unwrap();
+    assert!(
+        picked_up(&views, "1"),
+        "an issue without a run is picked up"
+    );
+    assert!(
+        !picked_up(&views, "2"),
+        "a finished run is not started again while Linear has not changed the issue"
+    );
+    // The poll does what the list says: it starts the one and leaves the other.
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-2", "DEMO-1"]);
+
+    // Linear moves the issue's updatedAt past what the run recorded.
+    h.linear.update("2", |_| {});
+    let views = h.engine.issues().await.unwrap();
+    assert!(
+        picked_up(&views, "2"),
+        "a change in Linear brings a finished issue back"
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-2", "DEMO-1", "DEMO-2"]);
+}
+
+#[tokio::test]
+async fn an_issue_with_a_run_in_hand_is_picked_up_and_a_stopped_one_is_not_until_linear_changes() {
+    let h = Harness::new(1, true);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.linear.upsert(issue("2", "proj-1"));
+    // One run per folder: DEMO-1 runs (held at the gate), DEMO-2 is queued behind it.
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Running);
+    assert_eq!(h.latest("2").state, JobState::Queued);
+    let views = h.engine.issues().await.unwrap();
+    assert!(picked_up(&views, "1"), "a run under way is in hand");
+    assert!(picked_up(&views, "2"), "a queued run is in hand");
+
+    // The user stops the queued run: the engine does not start it again by itself.
+    h.engine.cancel_job(h.latest("2").id).unwrap();
+    let views = h.engine.issues().await.unwrap();
+    assert!(!picked_up(&views, "2"));
+    h.linear.update("2", |_| {});
+    let views = h.engine.issues().await.unwrap();
+    assert!(picked_up(&views, "2"));
+
+    h.runner.gate.add_permits(2);
+    h.settle().await;
 }
 
 #[tokio::test]
@@ -4663,6 +4818,39 @@ async fn a_start_that_keeps_failing_is_tried_again_after_a_growing_pause() {
 }
 
 #[tokio::test]
+async fn a_job_held_back_after_a_failed_start_says_when_it_is_tried_again() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert!(h.engine.status().held.is_empty());
+    h.linear.fail_issue_reads("1");
+    let before = chrono::Utc::now();
+    h.engine.dispatch().await.unwrap();
+    let after = chrono::Utc::now();
+    let id = h.latest("1").id;
+    let held = h.engine.status().held;
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].job_id, id);
+    // The first pause is 30 s, given as a wall-clock time the panel can show.
+    let pause = chrono::Duration::seconds(30);
+    assert!(
+        held[0].retry_at >= before + pause && held[0].retry_at <= after + pause,
+        "{held:?}"
+    );
+    let json = serde_json::to_value(h.engine.status()).unwrap();
+    assert_eq!(json["held"][0]["job_id"], id);
+    // A stopped job is no longer listed, and a retry starts afresh.
+    h.engine.cancel_job(id).unwrap();
+    assert!(
+        h.engine.status().held.is_empty(),
+        "a stopped job is not held"
+    );
+    h.engine.retry_job(id).unwrap();
+    assert!(h.engine.status().held.is_empty(), "a retry starts afresh");
+}
+
+#[tokio::test]
 async fn a_retry_is_not_held_back_by_an_earlier_failed_start() {
     let h = Harness::new(1, false);
     h.bind("proj-1", "repo-a");
@@ -4810,8 +4998,12 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
     );
     let shapes = [
         (
-            IssueStatus::Eligible,
-            serde_json::json!({"kind": "eligible"}),
+            IssueStatus::Eligible { picked_up: true },
+            serde_json::json!({"kind": "eligible", "picked_up": true}),
+        ),
+        (
+            IssueStatus::Eligible { picked_up: false },
+            serde_json::json!({"kind": "eligible", "picked_up": false}),
         ),
         (
             IssueStatus::NotTodo {
@@ -4825,9 +5017,25 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
         ),
         (
             IssueStatus::Waiting {
-                reason: "project is not bound to a local directory".into(),
+                reason: WaitReasonView::ProjectNotBound,
             },
-            serde_json::json!({"kind": "waiting", "reason": "project is not bound to a local directory"}),
+            serde_json::json!({"kind": "waiting", "reason": {"code": "project_not_bound"}}),
+        ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::DirectoryMissing {
+                    directory: "demo-app".into(),
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "directory_missing", "directory": "demo-app"}}),
+        ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::ExecutorNotReady {
+                    executor: ExecutorKind::Claude,
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "executor_not_ready", "executor": "claude"}}),
         ),
         (IssueStatus::Paused, serde_json::json!({"kind": "paused"})),
     ];
@@ -4842,6 +5050,10 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
     }))
     .unwrap();
     assert!(!older.draining);
+    assert!(
+        older.held.is_empty(),
+        "a host from before `held` existed sends none"
+    );
 }
 
 #[tokio::test(start_paused = true)]

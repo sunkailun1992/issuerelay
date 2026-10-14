@@ -10,10 +10,12 @@ permissions:
   contents: read
 
 # A job that hangs would otherwise run for GitHub's default six hours. These limits are far above a
-# run (about six minutes at most so far, Windows being the slower job) and far below that.
+# run (about six minutes at most for the Rust-only runs so far, Windows being the slower job) and far
+# below that. The test job gets 45 minutes because the first uncached compile of the Tauri app is
+# heavy, Windows most of all; tighten it once real run times with the app are known.
 jobs:
   test:
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +25,19 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm --dir app install --frozen-lockfile
+      - run: pnpm --dir app lint
+      - run: pnpm --dir app test
+      # Before cargo, as AGENTS.md prescribes: a tauri build (custom-protocol) embeds app/dist.
+      - run: pnpm --dir app build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

@@ -1,0 +1,43 @@
+[package]
+name = "issuerelay-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "IssueRelay desktop tray app"
+
+[lib]
+name = "issuerelay_app"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "issuerelay-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+issuerelay-core = { version = "0.1.0", path = "../../crates/core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sys-locale = "0.3.2"
+tauri = { version = "2.12.3", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2.7.0"
+tauri-plugin-dialog = "2.8.2"
+tauri-plugin-notification = "2.6.0"
+tauri-plugin-opener = "2.7.1"
+tauri-plugin-single-instance = "2.5.3"
+tokio = { version = "1.53.2", features = ["full"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+
+[build-dependencies]
+tauri-build = { version = "2.7.2", features = [] }
+
+[dev-dependencies]
+chrono = "0.4.45"
+tauri = { version = "2.12.3", features = ["test"] }
+tempfile = "3.27.0"

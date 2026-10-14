@@ -16,9 +16,12 @@
 
 ## 验证 / Verification
 
+<!-- 先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`（tauri build，即打开 custom-protocol 特性的构建，内嵌 app/dist） -->
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
+- [ ] `pnpm --dir app lint`
+- [ ] `pnpm --dir app test`
 - [ ] `bash scripts/check-secrets.sh --strict`（无输出）
 - 本机测试过的平台 / Platforms tested locally: macOS / Windows / 仅 CI
 
@@ -30,4 +33,5 @@
 
 - [ ] 描述、截图、日志、夹具里没有令牌或凭据、公司名、内网地址、真实 Linear 内容、本机绝对路径
 - [ ] 行为变化已同步文档
+- [ ] 改了面板：文案走翻译键且五种语言齐全，有加载 / 空 / 错误状态，最小窗口（900×600）下每个操作都够得着 / Panel changes: translated in all five languages, loading, empty and error states, every action reachable at 900×600（没改面板就不勾）
 - [ ] 含 AI 生成的内容，我已逐行审过 / Contains AI-generated changes, reviewed line by line（不含就不勾）

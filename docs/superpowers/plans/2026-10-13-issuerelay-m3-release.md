@@ -4,34 +4,40 @@
 
 **Goal:** 让同事不用命令行就能装上 IssueRelay：推送 `vX.Y.Z` 标签时，GitHub Actions 在 macOS 与 Windows 上测试、打出 macOS 通用 `.dmg` 与 Windows NSIS `.exe`、`.msi`（都带命令行程序 `issuerelay`），放进**一个**草稿 Release，由维护者确认后公开；程序能检查并安装签过名的更新；设置里能不用管理员权限把命令行加入 PATH；安装说明写清未公证、未签名的包怎样放行。
 
-**Architecture:** 打包配置分两层：所有构建都读的 `app/src-tauri/tauri.conf.json`（打包目标、macOS ad-hoc 签名、NSIS 按用户安装、更新插件配置，不写 `version`，版本取工作区 `Cargo.toml`），和只在打包时用 `--config` 合并的 `tauri.bundle.conf.json` / `tauri.updater.conf.json`（`externalBin`，后者再打开更新包），所以 `tauri dev` 与 `ci.yml` 不需要先放好命令行程序。命令行程序由 `scripts/stage-cli.{sh,ps1}` 编译后放成 `app/src-tauri/binaries/issuerelay-<三元组>[.exe]`，Tauri 去掉后缀装在主程序 `issuerelay-app` 旁边。「把命令行加入 PATH」的判断全是 core `cli_path` 模块里的纯函数（macOS：`~/.local/bin` 里的符号链接；Windows：`HKCU\Environment\Path`），面板经三条新命令调用；`issuerelay start` 拉起托盘程序，MCP 服务从不拉起。自动更新用 `tauri-plugin-updater`：`update.rs` 里可测试的 `Updates<S: UpdateSource>` 管检查、下载验签与「每个版本只通知一次」，「安装并重启」先下载并验签，再交给 M2 的退出状态机（`quit::request_update`），有任务在跑时问同一个「等待完成 / 立即停止」。发布工作流：`verify` → `test` → `create-release`（只建一个草稿，输出 `releaseId`）→ `bundle`（矩阵，逐个运行，`tauri-apps/tauri-action` v1.0.0 按提交固定）→ `verify-release`（资产与 `latest.json` 齐全）；手动运行与改了打包配置的 PR 只试打包，产物存为工作流产物。
+**Architecture:** 打包配置分两层：所有构建都读的 `app/src-tauri/tauri.conf.json`（打包目标、macOS ad-hoc 签名、NSIS 按用户安装、更新插件配置，不写 `version`，版本取工作区 `Cargo.toml`），和只在打包时用 `--config` 合并的 `tauri.bundle.conf.json` / `tauri.updater.conf.json`（`externalBin`，后者再打开更新包），所以 `tauri dev` 与 `ci.yml` 不需要先放好命令行程序。命令行程序由 `scripts/stage-cli.{sh,ps1}` 编译后放成 `app/src-tauri/binaries/issuerelay-<三元组>[.exe]`，Tauri 去掉后缀装在主程序 `issuerelay-app` 旁边；打包前 `scripts/release-checks.mjs panel` 确认要内嵌的 `app/dist` 是真正的面板，不是 M2 `build.rs` 的占位页。「把命令行加入 PATH」的判断全是 core `cli_path` 模块里的纯函数（macOS：`~/.local/bin` 里的符号链接；Windows：`HKCU\Environment\Path`），面板经三条新命令调用；`issuerelay start` 拉起托盘程序，MCP 服务从不拉起。自动更新用 `tauri-plugin-updater`：`update.rs` 里可测试的 `Updates<S: UpdateSource>` 管检查、下载验签与「每个版本只通知一次」，应用一侧的函数与 M2 的退出代码一样对 `R: tauri::Runtime` 泛型；「安装并重启」先下载并验签，再交给 M2 的退出状态机（`quit::request_update`），有任务在跑时问同一个「等待完成 / 立即停止」，宿主停下后进入 `QuitState::Installing`，装完（或装不上）才重启，其间关窗或再次退出都不结束进程。发布工作流 `release.yml`：`verify`（门禁与密钥扫描）→ `test` → 正式发布走 `create-release`（只建一个草稿）→ `bundle-release` → `verify-release`，只有这三个任务有写权限；手动运行与改了打包配置的 PR 是试打包，走只读的 `bundle-dry-run` → `verify-dry-run`。两种打包共用可复用工作流 `bundle.yml`（矩阵逐个运行，`tauri-apps/tauri-action` v1.0.0 按提交固定）；发布门禁（标签等于版本、标签提交在 `origin/main` 上、资产齐全、`latest.json` 的平台键、签名与地址）都是 `scripts/release-checks.mjs` 里带自测的检查，试打包对将要打的标签 `v<版本>` 与试打包产物跑同样的检查，没有哪道门第一次运行就在正式标签上。
 
-**Tech Stack:** Tauri 2.12 bundler（dmg、msi、nsis）、`tauri-plugin-updater` 2.13、`semver`、`winreg` 与 `windows-sys`（用户 PATH）、GitHub Actions（`tauri-apps/tauri-action` v1.0.0、`pnpm/action-setup` v6.1.0、`actions/setup-node` v7、`Swatinem/rust-cache` v2.9.2、`actions/upload-artifact` v7）、`lipo`、Node 24（签名核对脚本）。
+**Tech Stack:** Tauri 2.12 bundler（dmg、msi、nsis）、`tauri-plugin-updater` 2.13、`semver`、`winreg` 与 `windows-sys`（用户 PATH）、GitHub Actions（`tauri-apps/tauri-action` v1.0.0、`pnpm/action-setup` v6.1.0、`actions/setup-node` v7、`Swatinem/rust-cache` v2.9.2、`actions/upload-artifact` v7、`actions/download-artifact` v8、actionlint）、`lipo`、Node 24（签名核对与发布门禁脚本）。
 
-**Spec:** `docs/superpowers/specs/2026-10-10-issuerelay-design.md` 第 2.1、2.2、4.1、10、12、16、16.1、17、18 节；依赖 M2 第一部分 `docs/superpowers/plans/2026-10-13-issuerelay-m2-core.md` 与第二部分 `docs/superpowers/plans/2026-10-13-issuerelay-m2-app.md` 产出的接口（各任务的 Interfaces 写明用到的名字）。技术调研（2026-10-13，带出处）只在本机 `.superpowers/sdd/2026-10-13-issuerelay-m3-release/research.md`，不进仓库；本计划用到的结论都已写进正文，执行时不必另读。
+**Spec:** `docs/superpowers/specs/2026-10-10-issuerelay-design.md` 第 2.1、2.2、4.1、9.5、10、12、16、16.1、17、18 节；依赖 M2 第一部分 `docs/superpowers/plans/2026-10-13-issuerelay-m2-core.md` 与第二部分 `docs/superpowers/plans/2026-10-13-issuerelay-m2-app.md` 产出的接口（各任务的 Interfaces 写明用到的名字，以 M2 落地的代码为准）。技术调研（2026-10-13，带出处）只在本机 `.superpowers/sdd/2026-10-13-issuerelay-m3-release/research.md`，不进仓库；本计划用到的结论都已写进正文，执行时不必另读。
 
 ## Global Constraints
 
-- M2 两部分的全部全局约束继续有效：硬规则、两个平台同等对待（每个 `#[cfg(unix)]` 都有 `#[cfg(windows)]` 实现）、测试不碰网络 / 真实钥匙串 / 真实注册表、虚构测试数据、公开仓库红线、英文注释中文文档、六条验证命令（`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`pnpm --dir app lint`、`pnpm --dir app test`、`bash scripts/check-secrets.sh --strict` 无输出）、英文 Conventional Commits 与写实际模型的 `Co-Authored-By`、分支与 PR、禁止强推。
+- M2 两部分的全部全局约束继续有效：硬规则、两个平台同等对待（每个 `#[cfg(unix)]` 都有 `#[cfg(windows)]` 实现）、测试不碰网络 / 真实钥匙串 / 真实注册表、虚构测试数据、公开仓库红线、英文注释中文文档、六条验证命令（`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`pnpm --dir app lint`、`pnpm --dir app test`、`bash scripts/check-secrets.sh --strict` 无输出；前面先跑 `pnpm --dir app build`）、英文 Conventional Commits 与写实际模型的 `Co-Authored-By`、分支与 PR、禁止强推。
 - 分支 `feat/m3-release`，从合入 M2 第二部分之后的 `main` 切出，经 PR 合入。
 - 计划里的 Rust 代码块不一定是 rustfmt 的排版：每次提交前先 `cargo fmt --all`，再跑六条验证命令。
-- 版本号只有一个来源：工作区 `Cargo.toml` 的 `[workspace.package] version`。`tauri.conf.json` 不写 `version`（Tauri 取 crate 版本，`issuerelay-app` 用 `version.workspace = true`，且在工作区 `members` 里，tauri-action 才找得到版本）。标签为 `v` 加这个版本，发布工作流核对，不一致就失败。版本只用 `X.Y.Z`：MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀。只由维护者在发布时升（设计 12、16.1）。
+- 用 M2 落地的真实名字与签名（2ebda38）：退出流程（`quit::{handle, request, on_run_event}`）对 `R: tauri::Runtime` 泛型，测试在 `tauri::test` 的 MockRuntime 上跑；M3 新加的 `update::*` 与改写的 `quit::{request, request_update, ask}` 同样泛型。前端的变更钩子照 `queries.ts` 里的 `useAction<Variables, Result>(run: (backend, variables) => Promise<Result>, refreshes, failureKey, options?)` 写在它旁边。M3 改 M2 的文件一律是编辑，不整份替换：M2 的测试一条不删，只按新的载荷或文案改写。
+- 面板命令：每加一条命令，同一步里同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`app/src-tauri/build.rs` 的 `PANEL_COMMANDS`、`app/src-tauri/capabilities/default.json` 的 `allow-<命令>`（下划线写成连字符），以及 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 的 `the_panel_is_granted_exactly_the_registered_commands`、`the_acl_the_build_resolves_allows_only_the_panels_commands` 与 `api.test.ts` 的边界测试照常通过（AI_CODING_GUIDE 第 7 节「面板命令」）。M2 有 34 条命令，Task 2 之后 37 条，Task 3 之后 40 条。
+- 版本号只有一个来源：工作区 `Cargo.toml` 的 `[workspace.package] version`。`tauri.conf.json` 不写 `version`（Tauri 取 crate 版本，`issuerelay-app` 用 `version.workspace = true`，且在工作区 `members` 里，tauri-action 才找得到版本）。标签为 `v` 加这个版本，发布工作流核对，不一致就失败。版本只用 `X.Y.Z`：MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀。只由维护者在发布时升（设计 12、16.1）：升版本是一个普通的 PR 提交（工作区 `version`，加上 `cargo update -w` 更新的 `Cargo.lock`），合入 `main` 之后才打标签。验收里的试打包用当前版本；任何步骤都不运行 `git checkout Cargo.toml Cargo.lock`（会丢掉别人对这两个文件的未提交改动）；本机更新测试需要更高版本时，在 `mktemp -d` 下的一次性 worktree 里改，从不改主检出。
 - 可执行文件名：主程序到处都是 `issuerelay-app`（Windows `issuerelay-app.exe`，M2 的 `mainBinaryName`），没有 `IssueRelay.exe`；命令行程序 `issuerelay`（`issuerelay.exe`）装在它旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录（NSIS 按用户安装默认 `%LOCALAPPDATA%\IssueRelay`）下的 `issuerelay.exe`。主程序名永远不能与 `issuerelay` 只差大小写（macOS 的 APFS 与 Windows 的 NTFS 不分大小写，两份文件会静默互相覆盖）。
-- `externalBin` 只写在打包专用的配置里；`tauri.conf.json` 本身必须在没有放好命令行程序时也能 `cargo build` / `cargo clippy` / `cargo test`（Task 1 的配置测试守住这一条）。`app/src-tauri/binaries/` 是生成目录，git 忽略。
-- 签名：没有 Apple 证书时 macOS 包一律 ad-hoc 签名（`bundle.macOS.signingIdentity: "-"`）——未签名的 arm64 应用缺少封存的资源，下载后会被报「已损坏」；有 Apple 证书（secrets 里六项都在）时改用正式签名并公证。Windows 没有证书时不签名。证书、私钥、密码只放在 GitHub Actions secrets，只在存在时传入，拉取请求触发的试打包从不使用；仓库、日志、提交信息、聊天里都不能出现。
-- 自动更新：清单地址固定为 `https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json`；只安装比当前版本新、且用仓库里那把公钥验签通过（并且签名里记的版本与清单一致，`requireSignedVersion: true`）的更新包；检查失败、清单缺本平台、验签失败、版本不新，都只提示，不安装，不影响监控；安装一律由用户点「安装并重启」，有任务在跑时走与退出相同的询问。
+- `externalBin` 只写在打包专用的配置里；`tauri.conf.json` 本身必须在没有放好命令行程序时也能 `cargo build` / `cargo clippy` / `cargo test`（Task 1 的配置测试守住这一条）。`app/src-tauri/binaries/` 是生成目录，git 忽略。打包之前先 `pnpm --dir app build`，再用 `node scripts/release-checks.mjs panel` 确认 `app/dist/index.html` 存在且不是 `build.rs` 的占位页（本机与 CI 都这样）。
+- 签名：没有 Apple 证书时 macOS 包一律 ad-hoc 签名（`bundle.macOS.signingIdentity: "-"`）——未签名的 arm64 应用缺少封存的资源，下载后会被报「已损坏」；有 Apple 证书（secrets 里六项都在）时改用正式签名并公证。Windows 没有证书时不签名。证书、私钥、密码只放在 GitHub Actions secrets，只经步骤级 `env:` 交给用到它们的那几步，从不写进 `$GITHUB_ENV`；拉取请求触发的试打包拿不到任何 secret。仓库、日志、提交信息、聊天里都不能出现它们。
+- 发布工作流的卫生：每个任务都有 `timeout-minutes` 和如实说明的注释（照 `ci.yml`；调用可复用工作流的任务不能写它，上限写在 `bundle.yml` 的任务里）；试打包只读（`contents: read`），只有标签触发的 `create-release`、`bundle-release`、`verify-release` 有 `contents: write`；外来值经 `--arg` 交给 jq，不拼进过滤器；临时目录一律 `mktemp -d` 建、用完删；shell 变量不跨步骤、不跨任务，每一步按同样的办法重新求出；`ci.yml` 用 actionlint 检查全部工作流。
+- 自动更新：清单地址固定为 `https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json`；只安装比当前版本新、且用仓库里那把公钥验签通过（并且签名里记的版本与清单一致，`requireSignedVersion: true`）的更新包；检查失败、清单缺本平台、验签失败、版本不新，都只提示，不安装，不影响监控；安装一律由用户点「安装并重启」，有任务在跑时走与退出相同的询问；安装期间关窗或再次退出都不结束进程。`tauri.conf.json` 与 `tauri.*.conf.json`（`plugins.updater.pubkey` 是更新的信任根）列进 `.github/CODEOWNERS`。
+- 通知：系统通知仍是设计 9.5 的四种运行通知，各自可关；「有新版本」的通知不另设开关，只在设置里「自动检查更新」打开时由后台检查发出（每个版本一次），沿用 `notify.rs` 的翻译与发送；安装失败只在面板里显示，不发通知。
 - 更新签名密钥：由主智能体在维护者本机生成（不交给子智能体，不在云端会话做），不设密码，私钥存 `~/.tauri/issuerelay.key`（权限 600），从不打印、不读进聊天、不提交、不进日志；只提交公钥。私钥由维护者自己用 `gh secret set` 上传。
 - 发布工作流只建草稿 Release；公开由维护者在 GitHub 页面上点（对外动作）。任何一个平台没打出来、或 `latest.json` 缺平台，工作流失败并把草稿标成「incomplete: do not publish」，不会出现被当成完整版本的半套资产。
 - 依赖版本（调研时的最新版，执行时用 `cargo add` / `pnpm add` 解析后锁定）：crate `tauri` 2.12.x、`tauri-plugin-updater` 2.13.x、`semver` 1.x；npm `@tauri-apps/cli` 不低于 2.12.0（从这版起签名里记录应用版本）。插件与 Tauri 的 API 名称以解析到的版本文档（docs.rs、v2.tauri.app）为准，与本计划写法不同时照文档写，并在报告里列出差异。
-- `release.yml` 里第三方的 action 一律按提交 SHA 固定并在行尾注明版本（`# v1.0.0`），GitHub 自己的 action（`actions/*`）用主版本标签，与 `ci.yml` 一致；Dependabot 的 github-actions 条目照常更新它们。
+- `release.yml` 与 `bundle.yml` 里第三方的 action 一律按提交 SHA 固定并在行尾注明版本（`# v1.0.0`），GitHub 自己的 action（`actions/*`）用主版本标签，与 `ci.yml` 一致；actionlint 用作者发布的容器镜像并写明版本号（执行时核对最新发布）；Dependabot 的 github-actions 条目照常更新它们。
+- 提交：每个提交步骤先 `git status --short`，`git add` 只加列出的路径（不 `git add docs`、`git add app` 这类整个目录），再 `git diff --cached --stat` 确认只有这些文件，提交信息结尾带写实际参与模型的 `Co-Authored-By` 行（下文写作 `Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>`，执行时换成真实模型名）。规则改动（在 `docs/ai-coding/`、`MAINTAINERS.md`、`CONTRIBUTING.md`、`AGENTS.md` 里新增、收紧或放宽规则）单独一个只含这些文件的 `docs` 提交（AI_CODING_GUIDE 第 11 节）；代码顺带的事实登记（目录表、关键文件索引、运行数据表、共用用例表与假实现清单、CODEOWNERS）跟代码同一个提交。
+- 面板布局：新加的行（PATH 一行、更新横幅、版本与检查更新一行）写明换行规则，在 620 px 与 605 px 两个内容宽度下各量一遍（浏览器视口宽 900 px 与 885 px，第 12.7 节），结果写进提交说明；M2 Task 12 的 Playwright 布局测试若已落地，把新行加进去。
 - Windows：没有 Windows 机器（设计 18.4）。Windows 代码必须在 CI 上编译通过、纯逻辑测试通过；注册表读写不在测试里碰真实注册表，Windows 实机行为一律记「待实机」。
 - 测试、文档、示例里不出现本机路径：不写用户目录（`/Users/…`、`/home/…`、`C:\Users\…`）或外置卷（`/Volumes/…`）下的具体路径，`check-secrets.sh` 会拦下它们；家目录用 `/tmp/demo-home`，Windows 目录用 `D:\Profiles\demo` 或 `%LOCALAPPDATA%`。
 
 ## Review Focus
 
-1. 有任务在跑时点「安装更新并重启」：要走与退出相同的询问（等待完成 / 立即停止，等待中仍可改为立即停止），不能直接重启丢掉运行；点「继续运行」后再从托盘退出，只退出、不装更新（Task 3：`quit.rs` 的 `QuitPrompt` 测试、`update.rs` 的 `a_verified_download_waits_for_the_quit_flow_and_is_reused`、前端 `QuitDialog` 与 `UpdateBanner` 测试；Task 6 第 5 步实机）。
-2. 更新清单拿不到（离线、代理、还没发布过）、清单里没有本平台、验签失败、版本不比当前新（含预发布与写坏的版本号）：只提示，不安装，不影响监控；后台检查失败不收回已经提示过的新版本（Task 3：`update.rs` 的 `only_a_newer_version_is_offered`、`a_failed_check_only_informs`、`a_bad_signature_keeps_nothing_to_install`、`a_failed_check_keeps_the_version_already_offered`；Task 6 第 6 步实机）。
-3. 标签与 `Cargo.toml` 版本不一致、标签提交不在 `origin/main` 上、同一标签已有 Release、secrets 缺失、某个平台没打出来、`latest.json` 缺平台或缺签名、签名私钥与提交的公钥不配对：工作流明确失败或明确降级，草稿不会带着半套资产被当成完整版本（Task 4：`verify` 任务三项检查、`create-release` 的重复检查、`bundle` 的包内容检查与签名核对、`verify-release` 的资产与平台检查；Task 4 第 7 步的试运行）。
+1. 有任务在跑时点「安装更新并重启」：要走与退出相同的询问（等待完成 / 立即停止，等待中仍可改为立即停止），不能直接重启丢掉运行；宿主停下后安装期间关窗或再次退出都不结束进程；等待中从托盘退出会丢掉已下载的更新，询问框随之改说「之后退出」；点「继续运行」后再从托盘退出，只退出、不装更新（Task 3：`quit.rs` 的 `the_quit_prompt_tells_the_panel_what_follows`、`a_verified_update_is_installed_where_quitting_would_exit`、`the_process_outlives_the_install_and_then_restarts` 与扩展到 `Installing` 的 `every_exit_request_before_quitting_is_done_is_held`，`update.rs` 的 `a_verified_download_waits_for_the_quit_flow_and_is_reused`，前端 `QuitDialog` 与 `UpdateBanner` 测试；Task 6 第 5 步实机）。
+2. 更新清单拿不到（离线、代理、还没发布过）、清单里没有本平台、验签失败、版本不比当前新（含预发布与写坏的版本号）：只提示，不安装，不影响监控；后台检查失败不收回已经提示过的新版本；宿主停下后才装不上的更新在重启后由面板说明（Task 3：`update.rs` 的 `only_a_newer_version_is_offered`、`a_failed_check_only_informs`、`a_bad_signature_keeps_nothing_to_install`、`a_failed_check_keeps_the_version_already_offered`、`a_failed_install_is_shown_once_after_the_restart`；Task 6 第 6 步实机）。
+3. 标签与 `Cargo.toml` 版本不一致、标签提交不在 `origin/main` 上、同一标签已有 Release、secrets 缺失、某个平台没打出来、`latest.json` 缺平台、缺签名或地址不指向本 Release 的资产、签名私钥与提交的公钥不配对、内嵌的是占位页：工作流明确失败或明确降级，草稿不会带着半套资产被当成完整版本；这些门禁在试打包里对将要打的标签与试打包产物同样运行（Task 1、4：`scripts/release-checks.mjs` 的自测含版本不符、提交不在 main 上、缺资产、缺平台键、地址不是资产、占位页；`verify`、`create-release` 的重复检查、`bundle.yml` 的包内容检查与签名核对、`verify-release` / `verify-dry-run`；Task 4 第 8 步的试运行）。
 4. 用户没有管理员权限、`~/.local/bin` 不存在或不在 PATH、那里已有别人的同名文件、应用从磁盘映像或临时副本运行、Windows 用户 PATH 是带 `%VAR%` 的 `REG_EXPAND_SZ` 或已经有这一项（大小写或结尾反斜杠不同）：不需要管理员、不覆盖、不重复、不改坏其他条目，移除时只删自己这一项（Task 2：core `cli_path` 的纯函数测试与 macOS 链接读写测试）。
 5. 托盘程序没运行时调用命令行（包括 AI 经 MCP 调用）：命令行说清楚并指向 `issuerelay start`；`issuerelay start` 把托盘程序拉起来（已在运行就只说明），等到它应答；MCP 服务只报错、不启动，也不叫 AI 自己去启动（避免 AI 静默启动有完全权限的程序）（Task 2：命令行 `start` 与提示的测试、`crates/cli/tests/mcp_tools.rs` 的断言）。
 
@@ -39,24 +45,29 @@
 
 | 文件 | 职责 | 任务 |
 |---|---|---|
-| `app/src-tauri/tauri.conf.json` | 所有构建都读的配置：打包目标、ad-hoc 签名、NSIS 按用户安装、去掉 `version`；Task 3 加 `plugins.updater` | 1、3 |
+| `app/src-tauri/tauri.conf.json` | 所有构建都读的配置：打包目标、ad-hoc 签名、最低 macOS 13.3、NSIS 按用户安装、去掉 `version`；Task 3 加 `plugins.updater` | 1、3 |
 | `app/src-tauri/tauri.bundle.conf.json`、`app/src-tauri/tauri.updater.conf.json` | 只在打包时 `--config` 合并：`externalBin`；后者另打开 `createUpdaterArtifacts` | 1、3 |
-| `app/src-tauri/tests/packaging.rs` | 配置守卫测试（基础配置不含 `externalBin`、主程序名、版本来源、更新配置） | 1、3 |
+| `app/src-tauri/tests/packaging.rs` | 配置守卫测试（基础配置不含 `externalBin`、主程序名、版本来源、最低系统版本、更新配置） | 1、3 |
 | `scripts/stage-cli.sh`、`scripts/stage-cli.ps1` | 编译命令行程序并放成 `binaries/issuerelay-<三元组>[.exe]`；`--universal` 时三份 | 1 |
+| `scripts/release-checks.mjs` | 发布门禁（带自测）：内嵌的面板不是占位页（Task 1）；标签与版本、标签提交在 `origin/main` 上、资产齐全、`latest.json`（Task 4） | 1、4 |
 | `.gitignore` | `app/src-tauri/binaries/` | 1 |
 | `crates/core/src/paths.rs` | `paths::APP_EXECUTABLE`（主程序文件名，配置测试与 `issuerelay start` 共用） | 1 |
 | `crates/core/src/cli_path.rs`、`crates/core/Cargo.toml` | 应用安装位置判断、「把命令行加入 PATH」的纯逻辑与 macOS 链接 / Windows 注册表读写 | 2 |
-| `app/src-tauri/src/commands.rs`、`app/src-tauri/src/lib.rs` | 新命令：`cli_on_path`、`install_cli_on_path`、`remove_cli_from_path`（Task 2）；`update_status`、`check_update`、`install_update`（Task 3） | 2、3 |
+| `app/src-tauri/src/commands.rs`、`app/src-tauri/src/lib.rs`、`app/src-tauri/build.rs`、`app/src-tauri/capabilities/default.json` | 新命令及其登记：`cli_on_path`、`install_cli_on_path`、`remove_cli_from_path`（Task 2）；`update_status`、`check_update`、`install_update`（Task 3） | 2、3 |
 | `crates/cli/src/main.rs`、`crates/cli/src/mcp.rs`、`crates/cli/tests/mcp_tools.rs` | `issuerelay start`、没运行时的提示；MCP 只报错不启动 | 2 |
-| `app/src-tauri/src/update.rs`、`app/src-tauri/src/quit.rs`、`app/src-tauri/src/events.rs`、`app/src-tauri/src/i18n.rs` | 自动更新；退出状态机接上「安装并重启」；`update-status` 事件；Rust 侧用到的翻译键 | 3 |
-| `app/src/lib/{types,backend,api,mock,mock-fixtures}.ts`、`app/src/hooks/{queries,useEngineEvents}.ts` | 前端类型、命令封装、假后端、查询与事件 | 2、3 |
+| `app/src-tauri/src/update.rs`、`app/src-tauri/src/quit.rs`、`app/src-tauri/src/events.rs`、`app/src-tauri/src/notify.rs`、`app/src-tauri/src/i18n.rs` | 自动更新；退出状态机接上「安装并重启」（`Installing`）；`update-status` 事件；新版本通知（沿用 `notify.rs`）；Rust 侧用到的翻译键 | 3 |
+| `app/src/lib/{types,backend,api,mock,mock-fixtures,errors}.ts`、`app/src/hooks/{queries,useEngineEvents}.ts` | 前端类型、命令封装、假后端、查询与事件 | 2、3 |
+| `app/src/lib/shell-line.json`、`app/src/lib/update-failure-cases.json` | 面板与 Rust 共读的用例表：shell 那一行；更新失败代码 ↔ 错误代码 ↔ 文案键 | 2、3 |
+| `app/src/lib/api.test.ts`、`app/src/App.test.tsx` | 边界测试（监听器 4 → 5 个）；启动失败页上的退出询问改用 `QuitPrompt` | 2、3 |
 | `app/src/pages/Settings.tsx`、`app/src/components/{UpdateBanner,QuitDialog}.tsx`、`app/src/components/layout/AppShell.tsx` | 设置页的 PATH 开关与检查更新；更新横幅；退出询问区分「退出」与「安装更新」 | 2、3 |
 | `app/src/i18n/locales/*.json` | 新文案（五种语言） | 2、3 |
 | `scripts/check-secrets.sh` | 拦截更新签名私钥的两种写法 | 3 |
 | `docs/release/updater-key.md` | 更新签名密钥的生成、保存、上传、轮换 | 3 |
-| `.github/workflows/release.yml`、`scripts/verify-update-signature.mjs` | 发布工作流；用提交的公钥核对更新包签名 | 4 |
-| `.github/workflows/ci.yml` | pnpm 与 Node 的 action 版本与发布工作流一致 | 4 |
-| `MAINTAINERS.md`、`docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md` | 发布步骤与 secrets；发布只从 `origin/main` 上的提交构建 | 4 |
+| `.github/workflows/release.yml`、`.github/workflows/bundle.yml`、`scripts/verify-update-signature.mjs` | 发布工作流与可复用的打包工作流；用提交的公钥核对更新包签名 | 4 |
+| `.github/workflows/ci.yml` | `secrets` 任务加一步 actionlint | 4 |
+| `.github/CODEOWNERS` | `cli_path.rs`；`tauri.conf.json` 与 `tauri.*.conf.json`；发布脚本 | 2、3、4 |
+| `docs/ai-coding/SECURITY_CODING_SPEC.md` | 由 PATH 得出的非秘密事实可以给面板（Task 2）；自动更新的信任根与外连（Task 3） | 2、3 |
+| `MAINTAINERS.md`、`docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md`、`docs/ai-coding/AI_CODING_GUIDE.md` | 发布步骤与 secrets；发布只从 `origin/main` 上的提交构建；版本规则（单独的规则提交） | 4 |
 | `docs/install.md`、`README.md` | 安装说明（中文）；README 中英文「安装」一节 | 5 |
 | `docs/gates/<日期>-m3-acceptance.md` | M3 实机验收报告 | 6 |
 
@@ -71,12 +82,13 @@
 - Create: `app/src-tauri/tauri.bundle.conf.json`
 - Create: `app/src-tauri/tests/packaging.rs`；Modify: `crates/core/src/paths.rs`（`APP_EXECUTABLE`）
 - Create: `scripts/stage-cli.sh`、`scripts/stage-cli.ps1`
+- Create: `scripts/release-checks.mjs`（本任务只有 `panel` 门禁与它的自测；Task 4 加其余门禁）
 - Modify: `.gitignore`（`app/src-tauri/binaries/`）
-- Modify: `docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 12 节）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 4、6 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 2 节）、`CONTRIBUTING.md`（「开发环境」一节）
+- Modify: `docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 12 节）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 4、6 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 2 节）、`CONTRIBUTING.md`（「开发环境」一节）——都是新文件与命令的事实登记，不是规则改动，跟代码同一个提交
 
 **Interfaces:**
-- Consumes（M2，不改）：`tauri.conf.json` 的 `productName: "IssueRelay"`、`mainBinaryName: "issuerelay-app"`、`identifier: "com.sunkailun.issuerelay"`、`bundle.icon`；`app/src-tauri/src/commands.rs` 的 `fn cli_next_to(exe: &Path) -> PathBuf`（`issuerelay` / `issuerelay.exe`，与主程序同目录）与 `fn cli_path() -> Option<PathBuf>`、`app_info()` 的 `AppInfo.cli_path`——Tauri 去掉三元组后缀后，命令行程序正好在 `cli_next_to(current_exe)`，这两个函数不用改；`app/src-tauri/build.rs` 的面板占位逻辑；根 `Cargo.toml` 的 `members = ["crates/*", "app/src-tauri"]`。
-- Produces：`pub const issuerelay_core::paths::APP_EXECUTABLE: &str = "issuerelay-app"`；`app/src-tauri/tauri.bundle.conf.json`（`{"bundle":{"externalBin":["binaries/issuerelay"]}}`，打包时 `--config src-tauri/tauri.bundle.conf.json`，路径相对 `app/`）；`bash scripts/stage-cli.sh [--target <三元组> | --universal]` 与 `pwsh scripts/stage-cli.ps1 [-Target <三元组>]`，输出 `staged app/src-tauri/binaries/issuerelay-<三元组>[.exe]`；本机打包命令 `pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`。
+- Consumes（M2，不改）：`tauri.conf.json` 的 `productName: "IssueRelay"`、`mainBinaryName: "issuerelay-app"`、`identifier: "com.sunkailun.issuerelay"`、`bundle.icon`、`build.beforeBuildCommand: "pnpm build"`；`app/src-tauri/src/commands.rs` 的 `fn cli_next_to(exe: &Path) -> PathBuf`（`issuerelay` / `issuerelay.exe`，与主程序同目录）与 `fn cli_path() -> Option<PathBuf>`、`app_info()` 的 `AppInfo.cli_path`——Tauri 去掉三元组后缀后，命令行程序正好在 `cli_next_to(current_exe)`，这两个函数不用改；`app/src-tauri/build.rs` 的面板占位逻辑：`../dist/index.html` 不存在时写一个占位页，其中的句子是 `Run <code>pnpm --dir app build</code> to build the panel.`（`panel` 门禁认的就是结尾的 `to build the panel.`，自测核对 `build.rs` 仍写这一句）；根 `Cargo.toml` 的 `members = ["crates/*", "app/src-tauri"]`。
+- Produces：`pub const issuerelay_core::paths::APP_EXECUTABLE: &str = "issuerelay-app"`；`app/src-tauri/tauri.bundle.conf.json`（`{"bundle":{"externalBin":["binaries/issuerelay"]}}`，打包时 `--config src-tauri/tauri.bundle.conf.json`，路径相对 `app/`）；`bash scripts/stage-cli.sh [--target <三元组> | --universal]` 与 `pwsh scripts/stage-cli.ps1 [-Target <三元组>]`，输出 `staged app/src-tauri/binaries/issuerelay-<三元组>[.exe]`；`node scripts/release-checks.mjs panel [--index <文件>]` 与 `node scripts/release-checks.mjs self-test`（退出码 0 = 通过，1 = 没通过，2 = 参数或读文件出错），导出 `PLACEHOLDER_MARKER`、`panelProblems(html)`；本机打包命令 `pnpm --dir app build && node scripts/release-checks.mjs panel && pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`。
 
 - [ ] **Step 1: 写失败的配置测试**
 
@@ -126,7 +138,9 @@ fn installers_are_per_user_and_mac_bundles_are_sealed() {
     // Without an Apple certificate the app is signed ad hoc: an arm64 app with only the linker's
     // signature has no sealed resources, and macOS calls a downloaded copy damaged.
     assert_eq!(bundle["macOS"]["signingIdentity"], "-");
-    assert_eq!(bundle["macOS"]["minimumSystemVersion"], "12.0");
+    // The panel uses Tailwind 4 (oklch, color-mix, @property), whose baseline is Safari 16.4:
+    // the system WebKit of macOS 13.3 (ruling M3-R4).
+    assert_eq!(bundle["macOS"]["minimumSystemVersion"], "13.3");
 }
 
 #[test]
@@ -157,7 +171,7 @@ Expected: FAIL：`every_build_works_without_the_staged_cli`（没有 `createUpda
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "createUpdaterArtifacts": false,
     "macOS": {
-      "minimumSystemVersion": "12.0",
+      "minimumSystemVersion": "13.3",
       "signingIdentity": "-"
     },
     "windows": {
@@ -168,7 +182,7 @@ Expected: FAIL：`every_build_works_without_the_staged_cli`（没有 `createUpda
   }
 ```
 
-（打包器在每个平台只保留能打的目标：macOS 打 `app`、`dmg`，Windows 打 `msi`、`nsis`，一张列表两边通用。`signingIdentity: "-"` 让打包器对附带程序、主程序、应用包依次执行 `codesign --force -s - --options runtime`；dmg 本身在 ad-hoc 时不签。环境变量 `APPLE_SIGNING_IDENTITY` 会覆盖这个值，Task 4 有证书时用它。NSIS 的 `currentUser` 本是默认值，写明是为了配置测试与 Review Focus 4。MSI 的官方模板固定为所有用户安装、需要管理员，没有按用户的选项，安装说明推荐 NSIS。）
+（打包器在每个平台只保留能打的目标：macOS 打 `app`、`dmg`，Windows 打 `msi`、`nsis`，一张列表两边通用。`minimumSystemVersion: "13.3"` 按裁定 M3-R4：面板用的 Tailwind 4 以 Safari 16.4 为基线，即 macOS 13.3 的系统 WebKit；执行时对照 Tailwind 4 文档里写的浏览器支持核对一次，不同就停下报告。`signingIdentity: "-"` 让打包器对附带程序、主程序、应用包依次执行 `codesign --force -s - --options runtime`；dmg 本身在 ad-hoc 时不签。环境变量 `APPLE_SIGNING_IDENTITY` 会覆盖这个值，Task 4 有证书时用它。NSIS 的 `currentUser` 本是默认值，写明是为了配置测试与 Review Focus 4。MSI 的官方模板固定为所有用户安装、需要管理员，没有按用户的选项，安装说明推荐 NSIS。）
 
 `app/src-tauri/tauri.bundle.conf.json`：
 
@@ -288,7 +302,137 @@ Copy-Item "target/$Target/release/issuerelay.exe" $dest -Force
 Write-Output "staged $dest"
 ```
 
-- [ ] **Step 5: 在本机核对脚本与打出的应用包**
+- [ ] **Step 5: `scripts/release-checks.mjs` 的自测（先失败）**
+
+发布门禁写成脚本里的纯函数，每道门都有通过与不通过的自测；本任务先放打包前的「面板不是占位页」一道（裁定 M3-AR6），Task 4 在同一个文件里加标签、`origin/main`、资产与 `latest.json` 几道（M3-AR7）。先写文件头、自测和命令行入口，门禁本身留到下一步：
+
+```js
+#!/usr/bin/env node
+// Release gates: checks a release must pass, as pure functions over what they are given, so that
+// `self-test` checks every gate, failing cases included, before any of them runs for real. The
+// release workflow (.github/workflows/release.yml, bundle.yml) runs them for a tag and, in a dry
+// run, for the tag that would be pushed and the dry run's bundles; developers run `panel` before
+// bundling on their own machine.
+//
+// Usage: node scripts/release-checks.mjs <gate> [options]
+//   panel [--index <file>]   the panel about to be embedded (app/dist/index.html by default) is the
+//                            real one, not the placeholder page app/src-tauri/build.rs writes when
+//                            the panel was not built
+//   self-test                every gate against made-up input
+// Exit codes: 0 = passed, 1 = a gate failed, 2 = bad arguments or unreadable input.
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// ---- gates (Step 6) ----------------------------------------------------------------------------
+
+// ---- self-test -----------------------------------------------------------------------------------
+
+/** The line of build.rs that holds its placeholder page: the gate is tested against the real thing. */
+function placeholderPage() {
+  const buildRs = readFileSync(path.join(root, "app/src-tauri/build.rs"), "utf8");
+  const line = buildRs.split("\n").find((text) => text.includes(PLACEHOLDER_MARKER));
+  assert.ok(line, `build.rs no longer writes "${PLACEHOLDER_MARKER}": update PLACEHOLDER_MARKER with it`);
+  return line;
+}
+
+const SELF_TESTS = {
+  panel() {
+    const built = '<!doctype html><html><head><title>IssueRelay</title><script type="module" src="/assets/index.js"></script></head><body><div id="root"></div></body></html>';
+    assert.deepEqual(panelProblems(built), []);
+    assert.match(panelProblems(null).join(), /is missing/);
+    assert.match(panelProblems(placeholderPage()).join(), /placeholder/);
+  },
+};
+
+function selfTest() {
+  let failed = 0;
+  for (const [name, test] of Object.entries(SELF_TESTS)) {
+    try {
+      test();
+      console.log(`ok ${name}`);
+    } catch (error) {
+      failed += 1;
+      console.log(`FAILED ${name}: ${error.message}`);
+    }
+  }
+  return failed === 0 ? 0 : 1;
+}
+
+// ---- command line --------------------------------------------------------------------------------
+
+/** Each gate's options, and what it does with them: the list of problems it found. */
+const GATES = {
+  panel: {
+    options: { index: { type: "string" } },
+    run: (values) => {
+      const file = path.resolve(values.index ?? path.join(root, "app/dist/index.html"));
+      return panelProblems(existsSync(file) ? readFileSync(file, "utf8") : null);
+    },
+  },
+};
+
+function main(argv) {
+  const [name, ...rest] = argv;
+  if (name === "self-test" && rest.length === 0) return selfTest();
+  const gate = GATES[name];
+  if (gate === undefined) throw new Error(`usage: node scripts/release-checks.mjs <${[...Object.keys(GATES), "self-test"].join("|")}> [options]`);
+  const { values } = parseArgs({ args: rest, options: gate.options, strict: true });
+  const problems = gate.run(values);
+  for (const problem of problems) console.log(`FAILED ${name}: ${problem}`);
+  if (problems.length === 0) console.log(`ok ${name}`);
+  return problems.length === 0 ? 0 : 1;
+}
+
+try {
+  process.exitCode = main(process.argv.slice(2));
+} catch (error) {
+  console.error(`release-checks: ${error.message}`);
+  process.exitCode = 2;
+}
+```
+
+Run: `node scripts/release-checks.mjs self-test; echo "exit $?"`
+Expected: `FAILED panel: panelProblems is not defined`、`exit 1`。
+
+- [ ] **Step 6: 实现 `panel` 门禁**
+
+在 `// ---- gates (Step 6)` 那一行下面加：
+
+```js
+/** A sentence only the placeholder page of app/src-tauri/build.rs has (`self-test` checks build.rs still writes it). */
+export const PLACEHOLDER_MARKER = "to build the panel.";
+
+/**
+ * What is wrong with the panel page about to be embedded into the app: missing, or the placeholder
+ * build.rs writes so that a build without `pnpm build` still compiles. `html` is null when the file
+ * does not exist. A release build embeds app/dist as it is, so the placeholder would ship.
+ */
+export function panelProblems(html) {
+  if (html === null) return ["app/dist/index.html is missing: run `pnpm --dir app build` first"];
+  if (html.includes(PLACEHOLDER_MARKER)) {
+    return ["app/dist/index.html is build.rs's placeholder page, not the panel: run `pnpm --dir app build` first"];
+  }
+  return [];
+}
+```
+
+Run:
+
+```bash
+node scripts/release-checks.mjs self-test; echo "exit $?"
+pnpm --dir app build && node scripts/release-checks.mjs panel; echo "exit $?"
+node scripts/release-checks.mjs panel --index app/src-tauri/build.rs; echo "exit $?"
+node scripts/release-checks.mjs nonsense; echo "exit $?"
+```
+
+Expected，依次：`ok panel`、`exit 0`；`ok panel`、`exit 0`（真正的面板）；`FAILED panel: app/dist/index.html is build.rs's placeholder page, not the panel: …`、`exit 1`（`build.rs` 里有那一句，借它当一个占位页）；`release-checks: usage: …`、`exit 2`。
+
+- [ ] **Step 7: 在本机核对脚本与打出的应用包**
 
 先给固定的工具链装上两个 Apple 目标（在仓库目录里运行，`rust-toolchain.toml` 固定的 1.99.0 才会拿到它们）：
 
@@ -301,10 +445,12 @@ ls app/src-tauri/binaries
 
 Expected: `usage: …`；三行 `staged app/src-tauri/binaries/issuerelay-aarch64-apple-darwin`、`…-x86_64-apple-darwin`、`…-universal-apple-darwin (x86_64 arm64)`；目录里正好这三个文件。
 
-再按本机三元组打一个应用包（通用包由 Task 4 的工作流打；本机只为看清包的结构）。`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，避免弹出「控制访达」的授权框（只影响 dmg 窗口的外观）：
+再按本机三元组打一个应用包（通用包由 Task 4 的工作流打；本机只为看清包的结构）。先从托盘退出本机正在运行的 IssueRelay 与开发宿主（下面的 `status` 要看到「没在运行」）。打包前先构建面板并确认它不是 `build.rs` 的占位页（`tauri build` 的 `beforeBuildCommand` 也会构建，这一步让占位页在任何情况下都进不了包）。`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，避免弹出「控制访达」的授权框（只影响 dmg 窗口的外观）：
 
 ```bash
 bash scripts/stage-cli.sh
+pnpm --dir app build
+node scripts/release-checks.mjs panel
 CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json
 app=target/release/bundle/macos/IssueRelay.app
 ls "$app/Contents/MacOS"
@@ -316,25 +462,43 @@ spctl --assess --type execute -vv "$app"; echo "spctl exit $?"
 ls target/release/bundle/dmg
 ```
 
-Expected：`Contents/MacOS` 里正好有 `issuerelay-app` 和 `issuerelay`（三元组后缀已去掉）；`issuerelay 0.1.0`（工作区版本）；托盘程序没运行时 `Error: IssueRelay is not running`、`exit 1`（Task 2 再补上指向 `issuerelay start` 的提示）；`codesign --verify` 输出 `valid on disk` 与 `satisfies its Designated Requirement`；`Signature=adhoc`，`CodeDirectory` 行的 flags 含 `adhoc,runtime`；`spctl` 说 `rejected`（未公证的正常结果，**不是** `code has no resources but signature indicates they must be present`）；`dmg` 目录里有 `IssueRelay_0.1.0_aarch64.dmg`。任何一项不同（例如主程序不叫 `issuerelay-app`、附带程序带着后缀、签名标志不同），停下来把实际输出写进报告。核对完删掉 `app/src-tauri/binaries/` 以外的打包产物不是必须的（都在 git 忽略的 `target/` 里）。
+Expected：`ok panel`；`Contents/MacOS` 里正好有 `issuerelay-app` 和 `issuerelay`（三元组后缀已去掉）；`issuerelay 0.1.0`（工作区版本）；托盘程序没运行时 `Error: IssueRelay is not running`、`exit 1`（Task 2 再补上指向 `issuerelay start` 的提示）；`codesign --verify` 输出 `valid on disk` 与 `satisfies its Designated Requirement`；`Signature=adhoc`，`CodeDirectory` 行的 flags 含 `adhoc,runtime`；`spctl` 说 `rejected`（未公证的正常结果，**不是** `code has no resources but signature indicates they must be present`）；`dmg` 目录里有 `IssueRelay_0.1.0_aarch64.dmg`。任何一项不同（例如主程序不叫 `issuerelay-app`、附带程序带着后缀、签名标志不同），停下来把实际输出写进报告。打包产物都在 git 忽略的 `target/` 里，`app/src-tauri/binaries/` 同样被忽略，不必删。
 
-- [ ] **Step 6: 文档**
+- [ ] **Step 8: 文档（事实登记，跟代码同一个提交）**
 
-- 设计第 12 节第一条改为：「Tauri 打包：macOS 出一个通用 `.dmg`（Apple 芯片与 Intel 通用），Windows 出 NSIS `.exe`（按用户安装，不需要管理员，推荐）和 `.msi`（为所有用户安装，需要管理员）。命令行小程序作为附带程序（`externalBin`）装在主程序 `issuerelay-app` 旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录下的 `issuerelay.exe`。`externalBin` 只写在打包专用的 `app/src-tauri/tauri.bundle.conf.json` 里，由 `scripts/stage-cli.sh` / `stage-cli.ps1` 先把命令行程序编译好放进 `app/src-tauri/binaries/`；开发构建不需要它。没有 Apple 证书时 macOS 包做 ad-hoc 签名（未签名的 arm64 应用下载后会被报「已损坏」）；设置里提供「把命令行加入 PATH」。」
-- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 4 节 `app/` 的布局加：`app/src-tauri/tauri.bundle.conf.json`（打包时合并的配置）、`app/src-tauri/binaries/`（生成目录，git 忽略，放 `stage-cli` 编译好的命令行程序）、`app/src-tauri/tests/`（配置守卫测试）；第 6 节加：`scripts/stage-cli.sh`、`scripts/stage-cli.ps1`：编译命令行程序并放到 Tauri 的 `externalBin` 找它的地方（用法见文件头）。
-- `docs/ai-coding/AI_CODING_GUIDE.md` 第 2 节的表加一行：`| 本机安装包（macOS） | bash scripts/stage-cli.sh && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json |`。
-- `CONTRIBUTING.md`「开发环境」一节末尾加一段：「想在本机打安装包：先 `bash scripts/stage-cli.sh`（Windows 上 `pwsh scripts/stage-cli.ps1`）把命令行程序放进 `app/src-tauri/binaries/`，再 `pnpm --dir app tauri build --config src-tauri/tauri.bundle.conf.json`。只开发面板与托盘时不需要这一步。」
+- 设计第 12 节第一条改为：「Tauri 打包：macOS 出一个通用 `.dmg`（Apple 芯片与 Intel 通用，最低 macOS 13.3），Windows 出 NSIS `.exe`（按用户安装，不需要管理员，推荐）和 `.msi`（为所有用户安装，需要管理员）。命令行小程序作为附带程序（`externalBin`）装在主程序 `issuerelay-app` 旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录下的 `issuerelay.exe`。`externalBin` 只写在打包专用的 `app/src-tauri/tauri.bundle.conf.json` 里，由 `scripts/stage-cli.sh` / `stage-cli.ps1` 先把命令行程序编译好放进 `app/src-tauri/binaries/`；开发构建不需要它。打包前确认内嵌的是真正的面板（`scripts/release-checks.mjs panel`），不是 `build.rs` 的占位页。没有 Apple 证书时 macOS 包做 ad-hoc 签名（未签名的 arm64 应用下载后会被报「已损坏」）；设置里提供「把命令行加入 PATH」。」
+- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 4 节 `app/` 的布局加：`app/src-tauri/tauri.bundle.conf.json`（打包时合并的配置）、`app/src-tauri/binaries/`（生成目录，git 忽略，放 `stage-cli` 编译好的命令行程序）、`app/src-tauri/tests/`（配置守卫测试）；第 6 节加：`scripts/stage-cli.sh`、`scripts/stage-cli.ps1`：编译命令行程序并放到 Tauri 的 `externalBin` 找它的地方；`scripts/release-checks.mjs`：发布门禁（打包前的面板检查，Task 4 起还有标签、资产与 `latest.json`），`self-test` 检查每道门（用法见文件头）。
+- `docs/ai-coding/AI_CODING_GUIDE.md` 第 2 节的表加一行：`| 本机安装包（macOS） | bash scripts/stage-cli.sh && pnpm --dir app build && node scripts/release-checks.mjs panel && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json |`。
+- `CONTRIBUTING.md`「开发环境」一节末尾加一段：「想在本机打安装包：先 `bash scripts/stage-cli.sh`（Windows 上 `pwsh scripts/stage-cli.ps1`）把命令行程序放进 `app/src-tauri/binaries/`，再 `pnpm --dir app build`、`node scripts/release-checks.mjs panel`（确认内嵌的是真正的面板），最后 `pnpm --dir app tauri build --config src-tauri/tauri.bundle.conf.json`。只开发面板与托盘时不需要这一步。」（这是操作说明，不新增、不改变规则。）
 
-Run: 六条验证命令
+Run: `pnpm --dir app build` 与六条验证命令
 Expected: 全部通过。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
+git status --short
 git add app/src-tauri/tauri.conf.json app/src-tauri/tauri.bundle.conf.json app/src-tauri/tests/packaging.rs \
-  crates/core/src/paths.rs scripts/stage-cli.sh scripts/stage-cli.ps1 .gitignore docs CONTRIBUTING.md
-git commit -m "feat(app): bundle the CLI next to the tray app"
+  crates/core/src/paths.rs scripts/stage-cli.sh scripts/stage-cli.ps1 scripts/release-checks.mjs .gitignore \
+  docs/superpowers/specs/2026-10-10-issuerelay-design.md docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md \
+  docs/ai-coding/AI_CODING_GUIDE.md CONTRIBUTING.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+feat(app): bundle the CLI next to the tray app
+
+The base tauri.conf.json stays buildable without the staged CLI: externalBin lives in
+tauri.bundle.conf.json, merged with --config only when bundling. Installers are per user
+(NSIS), mac bundles are signed ad hoc and need macOS 13.3 (Tailwind 4's Safari 16.4
+baseline). scripts/release-checks.mjs refuses to bundle build.rs's placeholder panel.
+
+Verified: the packaging tests, the release-checks self-test, a local app bundle (layout,
+ad hoc signature, CLI version) and the six checks.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 ```
+
+Expected：`git diff --cached --stat` 只列出上面这些文件（工作区里别人的未跟踪文件，例如 M2 留下的截图或 Playwright 文件，不在其中）。
 
 ---
 
@@ -350,13 +514,17 @@ git commit -m "feat(app): bundle the CLI next to the tray app"
 
 **Files:**
 - Create: `crates/core/src/cli_path.rs`；Modify: `crates/core/src/lib.rs`（`pub mod cli_path;`）、`crates/core/Cargo.toml`（Windows 的 `windows-sys` 加 `Win32_UI_WindowsAndMessaging` 特性）
-- Modify: `app/src-tauri/src/commands.rs`（三条命令）、`app/src-tauri/src/lib.rs`（注册）
+- Modify: `app/src-tauri/src/commands.rs`（三条命令、文件头一句、`shell-line.json` 的测试）、`app/src-tauri/src/lib.rs`（`generate_handler!`）、`app/src-tauri/build.rs`（`PANEL_COMMANDS`）、`app/src-tauri/capabilities/default.json`（三条 `allow-*`）
 - Modify: `crates/cli/src/main.rs`（`start` 子命令、没运行时的提示）、`crates/cli/src/mcp.rs`（只报错、不启动的提示）、`crates/cli/tests/mcp_tools.rs`
+- Create: `app/src/lib/shell-line.json`（shell 那一行，面板与 Rust 测试共读）
 - Modify: `app/src/lib/types.ts`、`app/src/lib/backend.ts`、`app/src/lib/api.ts`、`app/src/lib/mock.ts`、`app/src/lib/mock-fixtures.ts`、`app/src/hooks/queries.ts`、`app/src/pages/Settings.tsx`、`app/src/pages/Settings.test.tsx`、五个翻译文件
-- Modify: `docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 4.1、10.1、10.3、12 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 5 节）、`.github/CODEOWNERS`（`/crates/core/src/cli_path.rs`）
+- Test（不改，必须照常通过）：`app/src/lib/api.test.ts`（「calls exactly the commands its capability allows」：三条新命令同时在 `api.ts` 与能力文件里）、`app/src-tauri/src/lib.rs` 的两个绊线测试
+- Modify（事实登记，跟代码同一个提交）：`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 4.1、10.1、10.3、12 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 5 节）、`docs/ai-coding/TESTING_SPEC.md`（共用用例表加 `shell-line.json`）、`.github/CODEOWNERS`（`/crates/core/src/cli_path.rs`）
+- Modify（规则，单独的 `docs` 提交）：`docs/ai-coding/SECURITY_CODING_SPEC.md`（第 5 节 `Host::env()` 一句）
 
 **Interfaces:**
-- Consumes（M2）：`commands.rs` 的 `cli_path() -> Option<PathBuf>`、`CmdResult<T>`、`error(e)`、`host(&state) -> CmdResult<Host>`；`Host::env(&self) -> ExecEnv`；`issuerelay_core::env::{ExecEnv, EnvSource}`（`path: Option<String>`、`path_source: EnvSource::LoginShell`）；`paths::APP_ID`、`paths::APP_EXECUTABLE`（Task 1）；`ipc::client::{call, NotRunning}`；`crates/cli/src/main.rs` 的 `Cli`、`Command`、`request`、`write_line`、`fail`、`run`；`format::error_line`、`format::clean`；`mcp::ControlServer::forward`；前端 `Backend`、`tauriBackend`、`call`、`createMockBackend`、`queryKeys`、`useAction(fn, invalidate, failureKey)`（返回 TanStack 的 `useMutation` 结果）、`renderWithProviders`、`Settings` 页的「系统」分组、shadcn `Switch`。
+- Consumes（M2）：`commands.rs` 的 `cli_path() -> Option<PathBuf>`、`CmdResult<T>`、`error(e)`、`async fn host(state: &State<'_, AppState>) -> CmdResult<Host>`；`Host::env(&self) -> ExecEnv`；`issuerelay_core::env::{ExecEnv, EnvSource}`（`path: Option<String>`、`path_source: EnvSource::LoginShell`）；`paths::APP_ID`、`paths::APP_EXECUTABLE`（Task 1）；`ipc::client::{call, NotRunning}`；`crates/cli/src/main.rs` 的 `Cli`、`Command`、`request`、`write_line`、`fail`、`run`；`format::error_line`、`format::clean`；`mcp::ControlServer::forward`；`build.rs` 的 `PANEL_COMMANDS`（M2 34 条）与 `capabilities/default.json`；前端 `Backend`、`tauriBackend`、`call`、`createMockBackend`、`queryKeys`、`queries.ts` 里不导出的 `useAction<Variables, Result>(run: (backend, variables) => Promise<Result>, refreshes, failureKey, options?)`（返回 TanStack 的 `useMutation` 结果；新钩子写在它旁边）、`useCopyText()`、`cleanDisplayText`、`renderWithProviders`、`Settings.tsx` 的 `SwitchRow`、「系统」分组与 `Autostart`（先 `LoadingState` 后开关、读取失败是 `ErrorState` 的写法）、`ErrorState`、`LoadingState`、`Hint`、shadcn `Switch` 与 `Button`。
+- 规则（裁定 F14）：`cli_setup` 读 `Host::env().path` 只为得出不含秘密的事实（`~/.local/bin` 在不在登录 shell 的 PATH 里），命令只返回这些事实与固定的 shell 那一行；`Host::env()` 本身和代理值从不交给网页视图。`SECURITY_CODING_SPEC.md` 第 5 节与 `commands.rs` 的文件头按这个意思改一句。
 - Produces（core `issuerelay_core::cli_path`）：
   - `pub const SHELL_LINE: &str = r#"export PATH="$HOME/.local/bin:$PATH""#`、`pub const MAX_ENV_CHARS: usize = 32_767`
   - `pub enum AppLocation { Installed, NotInstalled, Development }`；`pub fn bundle_location(exe: &Path, read_only: bool) -> AppLocation`；`pub fn app_location(exe: &Path, read_only: bool, debug: bool) -> AppLocation`；`pub fn on_read_only_volume(path: &Path) -> bool`；`pub fn running_app_location() -> AppLocation`（Task 3 的更新也用它）
@@ -364,7 +532,7 @@ git commit -m "feat(app): bundle the CLI next to the tray app"
   - `pub fn expand_vars(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String`、`pub fn windows_path_has(dir: &str, value: &str, lookup: …) -> bool`、`pub fn windows_path_with(dir: &str, value: &str, lookup: …) -> Result<Option<String>, PathTooLong>`、`pub fn windows_path_without(dir: &str, value: &str, lookup: …) -> Option<String>`、`pub struct PathTooLong(pub usize)`、`pub fn decode_reg_string(bytes: &[u8]) -> Result<String, FromUtf16Error>`、`pub fn encode_reg_string(text: &str) -> Vec<u8>`
   - `pub enum CliPathStatus`（serde `tag = "kind"`：`{"kind":"off"}`、`{"kind":"on","shell_line":null|"…"}`、`{"kind":"stale","target":"…"}`、`{"kind":"blocked","path":"…"}`、`{"kind":"unavailable","reason":"missing_cli"|"not_installed"|"development"}`）、`pub enum CliUnavailable { MissingCli, NotInstalled, Development }`
   - `pub struct CliSetup { pub cli: Option<PathBuf>, pub location: AppLocation, pub home: PathBuf, pub shell_path: Option<String> }`、`CliSetup::for_running_app(cli: Option<PathBuf>, shell_path: Option<String>) -> anyhow::Result<CliSetup>`；`pub fn status(setup: &CliSetup) -> anyhow::Result<CliPathStatus>`、`pub fn install(…)`、`pub fn remove(…)`（同签名）
-- Produces（应用命令，前端 camelCase）：`cli_on_path` / `install_cli_on_path` / `remove_cli_from_path`，无参数，都返回 `CliPathStatus`；`Backend.cliOnPath()`、`installCliOnPath()`、`removeCliFromPath()`；`queryKeys.cliPath`、`useCliPath()`、`useInstallCliOnPath()`、`useRemoveCliFromPath()`；TS 类型 `CliPathStatus`、`CliUnavailable`；假后端常量 `DEMO_SHELL_LINE`。
+- Produces（应用命令，前端 camelCase）：`cli_on_path` / `install_cli_on_path` / `remove_cli_from_path`，无参数，都返回 `CliPathStatus`，登记在 `generate_handler!`、`PANEL_COMMANDS` 与能力文件（`allow-cli-on-path`、`allow-install-cli-on-path`、`allow-remove-cli-from-path`），命令共 37 条；`Backend.cliOnPath()`、`installCliOnPath()`、`removeCliFromPath()`；`queryKeys.cliPath`、`useCliPath()`、`useInstallCliOnPath()`、`useRemoveCliFromPath()`；TS 类型 `CliPathStatus`、`CliUnavailable`；`app/src/lib/shell-line.json`（`{"shell_line": "…"}`，与 core `SHELL_LINE` 由 `commands.rs` 的测试核对）与由它得出的假后端常量 `DEMO_SHELL_LINE`。
 - Produces（命令行）：子命令 `issuerelay start`；常量 `NOT_RUNNING_HINT`（命令行）与 `MCP_NOT_RUNNING_HINT`（MCP）。
 
 - [ ] **Step 1: core `cli_path` 的失败测试**
@@ -1118,14 +1286,45 @@ mod platform {
 Run: `cargo test -p issuerelay-core cli_path` 与 `cargo clippy -p issuerelay-core --all-targets -- -D warnings`
 Expected: PASS（macOS 上含 `link` 子模块的 4 个读写测试）。
 
-- [ ] **Step 3: 应用命令**
+- [ ] **Step 3: 应用命令与登记（三处登记在同一步里改）**
 
-`app/src-tauri/src/commands.rs` 的 `use issuerelay_core::{…}` 里加 `cli_path::{CliPathStatus, CliSetup}`、`env::EnvSource`，文件末尾（`request_quit` 之后）加：
+先建面板与 Rust 测试共读的用例表 `app/src/lib/shell-line.json`（AI_CODING_GUIDE 第 12.9 节：面板重复 core 的事实时，两边读同一个文件）：
+
+```json
+{
+  "shell_line": "export PATH=\"$HOME/.local/bin:$PATH\""
+}
+```
+
+`app/src-tauri/src/commands.rs` 的测试模块加：
+
+```rust
+    #[test]
+    fn the_shell_line_the_panel_shows_is_cores() {
+        // The mock backend shows the line from the same file (`DEMO_SHELL_LINE`).
+        let shared: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/lib/shell-line.json")).unwrap();
+        assert_eq!(shared["shell_line"], issuerelay_core::cli_path::SHELL_LINE);
+    }
+```
+
+`commands.rs` 文件头里关于 `Host::env()` 的那一句（「`Host::env()` holds the real proxy values … never return it or anything taken from it; …」）改为：
+
+```rust
+//! permission. `Host::env()` holds the real proxy values (user name and password unmasked):
+//! neither it nor any proxy value ever reaches the panel. The commands use it to start
+//! processes, and `cli_setup` reads its PATH only to tell whether `~/.local/bin` is on it, a fact
+//! without secrets (the environment check shows the PATH anyway); the environment the panel sees
+//! is `Engine::doctor`'s, with the proxy values masked.
+```
+
+`commands.rs` 的 `use issuerelay_core::{…}` 里加 `cli_path::{CliPathStatus, CliSetup}`、`env::EnvSource`，文件末尾（`request_quit` 之后）加：
 
 ```rust
 /// What the PATH switch needs: the CLI next to the app, where the app runs from, and the login
 /// shell's PATH the host resolved (only a PATH read from the login shell tells whether
-/// `~/.local/bin` is on it).
+/// `~/.local/bin` is on it). The PATH is only read here: the commands answer with what follows
+/// from it (on PATH or not, and the fixed `SHELL_LINE`), never with the PATH itself.
 async fn cli_setup(state: &State<'_, AppState>) -> CmdResult<CliSetup> {
     let env = host(state).await?.env();
     let shell_path = (env.path_source == EnvSource::LoginShell).then_some(env.path).flatten();
@@ -1152,10 +1351,39 @@ pub async fn remove_cli_from_path(state: State<'_, AppState>) -> CmdResult<CliPa
 }
 ```
 
-（模块名 `cli_path` 与 M2 的函数 `cli_path()` 同名不冲突——一个在类型命名空间、一个在值命名空间——但为了好读，调用一律写全路径 `issuerelay_core::cli_path::status`。）`lib.rs` 的 `generate_handler!` 列表在 `commands::request_quit,` 之后加 `commands::cli_on_path, commands::install_cli_on_path, commands::remove_cli_from_path,`（命令共 36 条）。
+（模块名 `cli_path` 与 M2 的函数 `cli_path()` 同名不冲突——一个在类型命名空间、一个在值命名空间——但为了好读，调用一律写全路径 `issuerelay_core::cli_path::status`。）
 
-Run: `cargo clippy -p issuerelay-app --all-targets -- -D warnings`
-Expected: PASS。
+三处登记，同一步里改（AI_CODING_GUIDE 第 7 节「面板命令」）：
+
+- `app/src-tauri/src/lib.rs` 的 `generate_handler!` 列表在 `commands::request_quit,` 之后加：
+
+  ```rust
+              commands::cli_on_path,
+              commands::install_cli_on_path,
+              commands::remove_cli_from_path,
+  ```
+
+- `app/src-tauri/build.rs` 的 `PANEL_COMMANDS` 在 `"request_quit",` 之后加：
+
+  ```rust
+      "cli_on_path",
+      "install_cli_on_path",
+      "remove_cli_from_path",
+  ```
+
+- `app/src-tauri/capabilities/default.json` 的 `permissions` 在 `"allow-request-quit"` 之后加三条（上一行补逗号），`description` 里「links, folders, notifications and autostart go through the commands」改为「links, folders, notifications, autostart and the command line on PATH go through the commands」：
+
+  ```json
+      "allow-request-quit",
+      "allow-cli-on-path",
+      "allow-install-cli-on-path",
+      "allow-remove-cli-from-path"
+  ```
+
+命令共 37 条（M2 的 34 条加这 3 条）。前端的 `backend.ts`、`api.ts`、`mock.ts` 在 Step 7 补；在那之前 `api.test.ts` 的「calls exactly the commands its capability allows」会失败（能力文件多了三条 `allow-*`），这是预期的。
+
+Run: `cargo test -p issuerelay-app` 与 `cargo clippy -p issuerelay-app --all-targets -- -D warnings`
+Expected: PASS，含 `the_panel_is_granted_exactly_the_registered_commands`、`the_acl_the_build_resolves_allows_only_the_panels_commands`（命令表、应用清单、能力文件三者一致）与 `the_shell_line_the_panel_shows_is_cores`。
 
 - [ ] **Step 4: 命令行的失败测试**
 
@@ -1163,9 +1391,9 @@ Expected: PASS。
 
 ```rust
     #[test]
-    fn start_is_a_subcommand_that_sends_nothing_itself() {
+    fn start_is_a_subcommand_of_its_own() {
         assert!(matches!(parse(&["start"]).command, Command::Start));
-        // It is no panel-only action either (`no_subcommand_marks_done_retries_or_cancels`).
+        // Listed with the others, so `no_subcommand_marks_done_retries_or_cancels` sees it too.
         let mut names = Vec::new();
         collect_names(&Cli::command(), &mut names);
         assert!(names.iter().any(|n| n == "start"));
@@ -1394,24 +1622,32 @@ Expected: PASS。
 
 - [ ] **Step 6: 前端的失败测试**
 
-`app/src/pages/Settings.test.tsx` 加（`import type { CliPathStatus } from "@/lib/types";`）：
+`app/src/pages/Settings.test.tsx` 加（导入补 `import { DEMO_SHELL_LINE } from "@/lib/mock-fixtures";`，`import type` 那一行补 `CliPathStatus`）。PATH 一行照 M2 的 `Autostart`：状态读到之前是加载行，没有开关，所以 `findByRole` 等的是数据真正到了，点下去的开关不会是读取中被禁用的那个（第 12.6 节；TESTING_SPEC「等条件，不等固定时间」）：
 
 ```tsx
 test("the command line goes on PATH from the system group and the shell line is shown", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const install = vi.spyOn(backend, "installCliOnPath");
   await renderWithProviders(<Settings />, { backend });
-  await userEvent.click(await screen.findByRole("switch", { name: "Command line on PATH" }));
+  // Only there once the state is read: before that the row is a loading row.
+  const toggle = await screen.findByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeEnabled();
+  await userEvent.click(toggle);
   expect(install).toHaveBeenCalledTimes(1);
-  expect(await screen.findByText('export PATH="$HOME/.local/bin:$PATH"')).toBeInTheDocument();
+  expect(await screen.findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
   expect(screen.getByText(/Add this line to your shell profile/)).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
 });
 
-test("a file IssueRelay did not make blocks the switch and is named", async () => {
+test("a file IssueRelay did not make blocks the switch and is named, cleaned", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
-  backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "blocked", path: "~/.local/bin/issuerelay" });
+  backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "blocked", path: "~/.local/bin/issuerelay\u001b[31m" });
   await renderWithProviders(<Settings />, { backend });
-  expect(await screen.findByText(/~\/\.local\/bin\/issuerelay already exists and was not made by IssueRelay/)).toBeInTheDocument();
+  const note = await screen.findByText(/already exists and was not made by IssueRelay/);
+  expect(note.textContent).toContain("~/.local/bin/issuerelay");
+  // The system's text goes through cleanDisplayText (AI_CODING_GUIDE 12.4).
+  expect(note.textContent).not.toContain("\u001b");
   expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeDisabled();
 });
 
@@ -1422,10 +1658,22 @@ test("from the disk image the switch explains what to do first", async () => {
   expect(await screen.findByText(/Move it to Applications first/)).toBeInTheDocument();
   expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeDisabled();
 });
+
+test("when the PATH setting cannot be read the row says so, with a retry", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.cliOnPath = vi.fn().mockRejectedValue(new BackendError("cannot read the link"));
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("Could not read the PATH setting")).toBeInTheDocument();
+  expect(screen.getByText("cannot read the link")).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Command line on PATH" })).not.toBeInTheDocument();
+  const system = screen.getByRole("region", { name: "System" });
+  await userEvent.click(within(system).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(backend.cliOnPath).toHaveBeenCalledTimes(2));
+});
 ```
 
 Run: `pnpm --dir app test`
-Expected: 失败（`installCliOnPath` 等不存在）。
+Expected: 失败（`installCliOnPath`、`DEMO_SHELL_LINE` 等不存在；`api.test.ts` 的边界测试也失败，因为能力文件已有三条新命令而 `api.ts` 还没有）。
 
 - [ ] **Step 7: 前端实现**
 
@@ -1441,7 +1689,7 @@ export type CliPathStatus =
   | { kind: "unavailable"; reason: CliUnavailable };
 ```
 
-`app/src/lib/backend.ts` 的 `Backend` 在 `setAutostart` 之后加 `cliOnPath(): Promise<CliPathStatus>;`、`installCliOnPath(): Promise<CliPathStatus>;`、`removeCliFromPath(): Promise<CliPathStatus>;`（类型导入补 `CliPathStatus`）。`api.ts` 的 `tauriBackend` 加：
+`app/src/lib/backend.ts` 的 `Backend` 在 `setAutostart` 之后加 `cliOnPath(): Promise<CliPathStatus>;`、`installCliOnPath(): Promise<CliPathStatus>;`、`removeCliFromPath(): Promise<CliPathStatus>;`（类型导入补 `CliPathStatus`）。`api.ts` 的 `tauriBackend` 在 `setAutostart` 之后加：
 
 ```ts
   cliOnPath: () => call("cli_on_path"),
@@ -1449,7 +1697,16 @@ export type CliPathStatus =
   removeCliFromPath: () => call("remove_cli_from_path"),
 ```
 
-`mock-fixtures.ts` 加 `export const DEMO_SHELL_LINE = 'export PATH="$HOME/.local/bin:$PATH"';`（与 core `SHELL_LINE` 相同）。`mock.ts` 在 `let autostart = false;` 之后加 `let cliPath: CliPathStatus = { kind: "off" };`，返回对象在 `setAutostart` 之后加：
+`mock-fixtures.ts` 加（shell 那一行只有 `shell-line.json` 一份，`commands.rs` 的测试拿它对照 core 的 `SHELL_LINE`）：
+
+```ts
+import shellLine from "./shell-line.json";
+
+/** The line the panel shows when ~/.local/bin is not on the login shell's PATH: core's `cli_path::SHELL_LINE`. */
+export const DEMO_SHELL_LINE: string = shellLine.shell_line;
+```
+
+`mock.ts`：从 `./mock-fixtures` 的导入补 `DEMO_SHELL_LINE`，类型导入补 `CliPathStatus`；在 `let autostart = false;` 之后加 `let cliPath: CliPathStatus = { kind: "off" };`，返回对象在 `setAutostart` 之后加：
 
 ```ts
     cliOnPath: () => reply(() => cliPath),
@@ -1466,15 +1723,94 @@ export type CliPathStatus =
       }),
 ```
 
-`hooks/queries.ts`：`queryKeys` 加 `cliPath: ["cliPath"] as const`；加 `useCliPath()`（`useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath() })`）、`useInstallCliOnPath()` 与 `useRemoveCliFromPath()`（`useAction(() => backend.installCliOnPath(), [queryKeys.cliPath], "actions.failed.cli_path")`，移除同理）。
+`hooks/queries.ts`：`queryKeys` 加 `cliPath: ["cliPath"] as const,`，类型导入补 `CliPathStatus`，在 `useAutostart` 之后加查询，在 `useSetAutostart` 之后加两个变更钩子（照 `useAction` 的签名，写在它旁边，不导出它）：
 
-`pages/Settings.tsx` 的「系统」分组在开机自启下面加一行（`useCliPath`、两个变更钩子）：
+```ts
+/** Whether the command line is on PATH through IssueRelay, and what is still to do (design 12). */
+export function useCliPath() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath() });
+}
+```
 
-- `Switch`，`aria-label`/标签 `settings.cli.title`，`checked = status.kind === "on"`；打开调 `installCliOnPath`，关上调 `removeCliFromPath`；`blocked`、`unavailable`、读取中或变更进行中时 `disabled`。
-- 标签下一行说明 `settings.cli.description`。
-- 按状态再显示一行：`on` 且 `shell_line` 为空 → `settings.cli.on_new_terminal`；`on` 且有 `shell_line` → `settings.cli.shell_line` 加一个等宽的 `<code>`（内容为 `shell_line`）与「复制」按钮（`common.copy`，`navigator.clipboard.writeText`）；`stale` → `settings.cli.stale`（`target`）；`blocked` → `settings.cli.blocked`（`path`）；`unavailable` → `settings.cli.unavailable.<reason>`；`useCliPath` 失败 → `ErrorState`（标题 `settings.cli.load_failed`，带重试）。路径与 `shell_line` 一律作为文本节点渲染。
+```ts
+export function useInstallCliOnPath() {
+  return useAction<void, CliPathStatus>((backend) => backend.installCliOnPath(), [queryKeys.cliPath], "actions.failed.cli_path");
+}
 
-翻译键（`en` / `zh-CN` 如下；`zh-TW`、`ja`、`ko` 按 M2 Task 2 的写法同步翻译，`{{…}}` 与命令文本原样保留）：
+export function useRemoveCliFromPath() {
+  return useAction<void, CliPathStatus>((backend) => backend.removeCliFromPath(), [queryKeys.cliPath], "actions.failed.cli_path");
+}
+```
+
+`pages/Settings.tsx`：从 `@/hooks/queries` 的导入补 `useCliPath`、`useInstallCliOnPath`、`useRemoveCliFromPath`，补 `import { useCopyText } from "@/hooks/useCopyText";`，类型导入补 `CliPathStatus`；在 `Autostart` 之后加两个组件，「系统」分组里 `<Autostart />` 下面放 `<CliOnPath />`。换行规则：开关一行沿用 `SwitchRow`（名字在左、开关在右，名字很短）；shell 那一行是 `wrap-anywhere` 的等宽文字，「复制」按钮在同一个 `flex-wrap` 容器里，605 px 放不下时换到下一行；`stale` / `blocked` 的路径在句子里，整句 `wrap-anywhere`（第 12.7 节）：
+
+```tsx
+/** What the PATH row says under its switch. The paths are the system's text: cleaned, and allowed to break anywhere. */
+function CliPathNote({ status }: { status: CliPathStatus }) {
+  const { t } = useTranslation();
+  const copy = useCopyText();
+  switch (status.kind) {
+    case "off":
+      return null;
+    case "on": {
+      const line = status.shell_line;
+      if (line === null) return <p className="text-xs text-muted-foreground">{t("settings.cli.on_new_terminal")}</p>;
+      return (
+        <div className="flex flex-col gap-1">
+          <p className="text-xs text-muted-foreground">{t("settings.cli.shell_line")}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 rounded bg-muted px-2 py-1 font-mono text-xs wrap-anywhere text-foreground select-text">{line}</code>
+            <Button size="sm" variant="outline" onClick={() => copy(line)}>
+              {t("common.copy")}
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    case "stale":
+      return <p className="text-xs text-muted-foreground wrap-anywhere">{t("settings.cli.stale", { target: cleanDisplayText(status.target) })}</p>;
+    case "blocked":
+      return <p className="text-xs text-destructive wrap-anywhere">{t("settings.cli.blocked", { path: cleanDisplayText(status.path) })}</p>;
+    case "unavailable":
+      return <p className="text-xs text-muted-foreground">{t(`settings.cli.unavailable.${status.reason}`)}</p>;
+  }
+}
+
+/**
+ * Putting the command line on PATH (design 12). It acts at once and is not saved with the page,
+ * like starting at login; the switch shows only once the state is read, so it is never shown in a
+ * state it is not in, and it cannot be used while a file IssueRelay did not make is in the way or
+ * where the app runs from does not allow it.
+ */
+function CliOnPath() {
+  const { t } = useTranslation();
+  const id = useId();
+  const status = useCliPath();
+  const install = useInstallCliOnPath();
+  const remove = useRemoveCliFromPath();
+  if (status.isError && !status.isFetching) {
+    return <ErrorState error={status.error} headline="settings.cli.load_failed" onRetry={() => void status.refetch()} />;
+  }
+  if (status.data === undefined) return <LoadingState rows={1} />;
+  const current = status.data;
+  return (
+    <div className="flex flex-col gap-1">
+      <SwitchRow
+        id={id}
+        label={t("settings.cli.title")}
+        note={t("settings.cli.description")}
+        checked={current.kind === "on"}
+        disabled={install.isPending || remove.isPending || current.kind === "blocked" || current.kind === "unavailable"}
+        onChange={(on) => (on ? install.mutate() : remove.mutate())}
+      />
+      <CliPathNote status={current} />
+    </div>
+  );
+}
+```
+
+翻译键（`en` / `zh-CN` 如下；`zh-TW`、`ja`、`ko` 按 M2 Task 2 的写法同步翻译，`{{…}}` 与命令文本原样保留）。`missing_cli` 只会出现在已安装的应用里（开发版先得到 `development`，`CliSetup::usable_cli` 先看位置），所以它的文字只针对安装包：
 
 | 键 | en | zh-CN |
 |---|---|---|
@@ -1484,68 +1820,122 @@ export type CliPathStatus =
 | `settings.cli.shell_line` | Add this line to your shell profile (for zsh, ~/.zshrc), then open a new terminal: | 把下面这一行加到 shell 配置文件（zsh 是 ~/.zshrc），再新开一个终端： |
 | `settings.cli.stale` | The link points at another copy of IssueRelay ({{target}}). Turn this on to point it here. | 链接指向另一份 IssueRelay（{{target}}）。打开开关即改为指向这一份。 |
 | `settings.cli.blocked` | {{path}} already exists and was not made by IssueRelay. Remove or rename it, then try again. | {{path}} 已存在，且不是 IssueRelay 建的。删除或改名后再试。 |
-| `settings.cli.unavailable.missing_cli` | The command-line program is not next to the app. In a development build, run cargo build -p issuerelay-cli first. | 应用旁边没有命令行程序。开发版请先运行 cargo build -p issuerelay-cli。 |
+| `settings.cli.unavailable.missing_cli` | The command-line program is missing from this copy of IssueRelay. Install IssueRelay again from the release page. | 这份 IssueRelay 里缺少命令行程序。请从发布页重新安装 IssueRelay。 |
 | `settings.cli.unavailable.not_installed` | IssueRelay runs from the disk image or a temporary copy. Move it to Applications first. | IssueRelay 正从磁盘映像或临时副本运行。请先把它移到「应用程序」。 |
 | `settings.cli.unavailable.development` | Not available in a development build. | 开发版不提供这一项。 |
 | `settings.cli.load_failed` | Could not read the PATH setting | 读不到 PATH 设置 |
 | `actions.failed.cli_path` | Could not change the command line on PATH | 没能修改「把命令行加入 PATH」 |
 
 Run: `pnpm --dir app test && pnpm --dir app lint`
-Expected: PASS（含缺键守卫与五种语言键对齐检查）。浏览器里看设置页浅色与深色各一次。
+Expected: PASS（含缺键守卫、五种语言键对齐检查，以及不改一字的 `api.test.ts`：`tauriBackend` 调到的命令正好是能力文件给的 37 条，监听仍是 4 个）。
+
+再量布局（AI_CODING_GUIDE 第 12.7 节）：`pnpm --dir app dev` 打开设置页（假后端），打开开关让 shell 那一行出现；再用假后端把 `cliOnPath` 临时改成 `blocked`（路径用一个很长的虚构路径，例如 `/tmp/demo-home/` 加 80 个字符的目录名）看一眼，看完改回。浏览器视口宽 900 px 与 885 px（内容区约 620 px 与 605 px），浅色与深色各一次：开关够得着，shell 那一行与路径断行而不横向溢出，「复制」按钮放不下时在下一行。结果写进提交说明。M2 Task 12 的 Playwright 布局测试若已落地，在它的设置页用例里加上打开了 PATH 开关的状态。
 
 - [ ] **Step 8: 文档与提交**
 
-- 设计第 4.1 节「命令行小程序」一条改为：「…托盘程序没在运行时给出提示：命令行指向 `issuerelay start`，它启动托盘程序（macOS 经 `open -b com.sunkailun.issuerelay`，Windows 启动同目录的 `issuerelay-app.exe`），已在运行就只说明，并等到宿主应答；MCP 服务只报错，请 AI 转告用户打开应用，从不自己启动（AI 不能静默启动有完全权限的程序）。」第 10.1 节的子命令列表加 `start`；第 10.3 节补「宿主没运行时工具返回错误（`isError`），文字里请 AI 转告用户打开 IssueRelay」；第 12 节「把命令行加入 PATH」写实际行为：「macOS 在 `~/.local/bin/issuerelay` 建指向应用包内命令行程序的链接（不覆盖别人的文件，旧链接自动改指向；`~/.local/bin` 不在登录 shell 的 PATH 里时面板给出要加的一行，不改 shell 配置文件；从磁盘映像运行时不建）；Windows 把安装目录加进用户级 `Path`（保持 `REG_EXPAND_SZ`，不分大小写去重，广播 `WM_SETTINGCHANGE`，移除时只删这一项）。都不需要管理员。注册 MCP 控制服务用的是命令行程序的绝对路径，不依赖 PATH。」
-- `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 把命令行加入 PATH、应用安装位置 | crates/core/src/cli_path.rs |`；`.github/CODEOWNERS` 加 `/crates/core/src/cli_path.rs   @sunkailun1992`（会改用户的 PATH 与注册表）。
+事实登记（跟代码同一个提交）：
 
-Run: 六条验证命令
+- 设计第 4.1 节「命令行小程序」一条改为：「…托盘程序没在运行时给出提示：命令行指向 `issuerelay start`，它启动托盘程序（macOS 经 `open -b com.sunkailun.issuerelay`，Windows 启动同目录的 `issuerelay-app.exe`），已在运行就只说明，并等到宿主应答；MCP 服务只报错，请 AI 转告用户打开应用，从不自己启动（AI 不能静默启动有完全权限的程序）。」第 10.1 节的子命令列表加 `start`；第 10.3 节补「宿主没运行时工具返回错误（`isError`），文字里请 AI 转告用户打开 IssueRelay」；第 12 节「把命令行加入 PATH」写实际行为：「macOS 在 `~/.local/bin/issuerelay` 建指向应用包内命令行程序的链接（不覆盖别人的文件，旧链接自动改指向；`~/.local/bin` 不在登录 shell 的 PATH 里时面板给出要加的一行，不改 shell 配置文件；从磁盘映像运行时不建）；Windows 把安装目录加进用户级 `Path`（保持 `REG_EXPAND_SZ`，不分大小写去重，广播 `WM_SETTINGCHANGE`，移除时只删这一项）。都不需要管理员。注册 MCP 控制服务用的是命令行程序的绝对路径，不依赖 PATH。」
+- `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 把命令行加入 PATH、应用安装位置 | crates/core/src/cli_path.rs |`。
+- `docs/ai-coding/TESTING_SPEC.md`「面板与 core 共用的用例表」加一行：`| app/src/lib/shell-line.json | mock-fixtures.ts 的 DEMO_SHELL_LINE（Settings 的测试按它找那一行） | app/src-tauri/src/commands.rs 的测试，对照 core 的 cli_path::SHELL_LINE |`。
+- `.github/CODEOWNERS` 加 `/crates/core/src/cli_path.rs   @sunkailun1992`（会改用户的 PATH 与注册表）。
+
+Run: `pnpm --dir app build` 与六条验证命令
 Expected: 全部通过。
 
+先提交规则（裁定 F14，只含规则文件，第 11 节）：`docs/ai-coding/SECURITY_CODING_SPEC.md` 第 5 节最后几条里的「`Host::env()` 带着真实的代理值（用户名和密码没打码）：命令只拿它启动进程，从不返回它或由它得出的任何东西；面板看到的执行环境是 `Engine::doctor` 给的、代理已打码的那份。」整句改为：
+
+「`Host::env()` 带着真实的代理值（用户名和密码没打码）：它本身和任何代理值都不交给网页视图，命令拿它启动进程；由其中 PATH 得出的不含秘密的事实可以返回（`cli_on_path` 只回答 `~/.local/bin` 在不在登录 shell 的 PATH 里，外加固定的那一行 shell 命令；环境检查的报告本来就带着 PATH）；面板看到的执行环境是 `Engine::doctor` 给的、代理已打码的那份。」
+
 ```bash
-git add crates app docs .github Cargo.lock app/pnpm-lock.yaml
-git commit -m "feat: put the CLI on PATH from the settings and start the tray app from the CLI"
+git status --short
+git add docs/ai-coding/SECURITY_CODING_SPEC.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs(ai-coding): let the panel see facts derived from the PATH
+
+Host::env() and the proxy values still never reach the webview; a command may answer
+with a non-secret fact derived from the PATH (whether ~/.local/bin is on it), as the
+environment check already shows the PATH.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
+```
+
+再提交代码：
+
+```bash
+git status --short
+git add crates/core/src/cli_path.rs crates/core/src/lib.rs crates/core/Cargo.toml Cargo.lock \
+  app/src-tauri/src/commands.rs app/src-tauri/src/lib.rs app/src-tauri/build.rs app/src-tauri/capabilities/default.json \
+  crates/cli/src/main.rs crates/cli/src/mcp.rs crates/cli/tests/mcp_tools.rs \
+  app/src/lib/shell-line.json app/src/lib/types.ts app/src/lib/backend.ts app/src/lib/api.ts app/src/lib/mock.ts \
+  app/src/lib/mock-fixtures.ts app/src/hooks/queries.ts app/src/pages/Settings.tsx app/src/pages/Settings.test.tsx \
+  app/src/i18n/locales/en.json app/src/i18n/locales/zh-CN.json app/src/i18n/locales/zh-TW.json \
+  app/src/i18n/locales/ja.json app/src/i18n/locales/ko.json \
+  docs/superpowers/specs/2026-10-10-issuerelay-design.md docs/ai-coding/AI_CODING_GUIDE.md \
+  docs/ai-coding/TESTING_SPEC.md .github/CODEOWNERS
+git diff --cached --stat
+git commit -F - <<'EOF'
+feat: put the CLI on PATH from the settings and start the tray app from the CLI
+
+core cli_path decides and does it without administrator rights (a ~/.local/bin link on
+macOS, the user's own Path on Windows); the panel gets three commands, registered in
+generate_handler!, PANEL_COMMANDS and the capability (37 commands). `issuerelay start`
+launches the tray app; the MCP server never does.
+
+Layout: the PATH row checked at 620 px and 605 px content width, light and dark; the
+shell line and long paths wrap anywhere, Copy moves under the line when needed.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 ```
 
 ---
 
 ### Task 3: 自动更新
 
-设计第 12 节（Tauri updater，更新包用单独的签名密钥签名，私钥只放在 GitHub Actions secrets，从 GitHub Releases 拉取）。调研结论（`tauri-plugin-updater` 2.13.3、`tauri-cli` 2.12.2 的源码）：
+设计第 12 节（Tauri updater，更新包用单独的签名密钥签名，私钥只放在 GitHub Actions secrets，从 GitHub Releases 拉取）与第 9.5 节（通知）。调研结论（`tauri-plugin-updater` 2.13.3、`tauri-cli` 2.12.2 的源码）：
 
 - `plugins.updater.pubkey` 必填，值是 `.pub` 文件那一行 base64 的内容（不接受文件路径）；配置缺了它，插件初始化就失败，应用起不来——所以公钥必须在注册插件的同一个提交里写进 `tauri.conf.json`。
 - `bundle.createUpdaterArtifacts: true` 让打包器签名更新包，没有私钥时打包失败，所以基础配置保持 `false`，发布工作流用 `--config src-tauri/tauri.updater.conf.json` 打开。产物：macOS `IssueRelay.app.tar.gz` 与 `.sig`；Windows 安装包本身（`-setup.exe`、`.msi`）与各自的 `.sig`。
 - 私钥经环境变量 `TAURI_SIGNING_PRIVATE_KEY`（内容或路径）给构建，密码 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；设置了 `CI` 而没有密码变量时用空密码。签名私钥与公钥不配对时 `tauri build` 只警告、不失败（Task 4 用脚本核对）。`tauri-cli` 2.12.0 起签名的可信注释里记录应用版本，`requireSignedVersion: true` 要求它与清单宣布的版本一致，拦住「高版本号配旧的合法包」的篡改。
 - `Updater::check()`：远端版本不比当前新（语义化版本比较，`0.1.0-rc.1` 小于 `0.1.0`）时返回 `Ok(None)`；清单没有本平台条目时返回 `TargetsNotFound` 错误（即使版本不新）；拿不到有效清单是 `ReleaseNotFound` 或网络、解析错误。`Update::download` 先验签再返回字节，验签失败（`Minisign` 等）什么都不留；`Update::install(bytes)` 在 macOS 原地替换应用包（2.13.2 起失败不会删掉已装的应用），在 Windows 启动安装程序（NSIS 带 `/P /UPDATE /R`）后立即退出本进程。
-- 重启：`AppHandle::restart()` 在主线程上调用时跳过 `Exit` 事件，单实例插件的锁可能还没释放，新实例会把参数交给旧实例后自己退出，结果程序没在运行；在其他线程调用、或用 `request_restart()` 时先发 `Exit`。本任务一律在后台线程用 `request_restart()`。macOS 上新实例经 Launch Services 从应用包启动。
-- `tauri-plugin-process` 只给前端的 `relaunch()` 用；本计划只在 Rust 侧调用，不加它（草稿里的这个依赖删掉）。更新插件只在 Rust 侧用，`capabilities/default.json` 不加权限。
+- 重启：`AppHandle::restart()` 在主线程上调用时跳过 `Exit` 事件，单实例插件的锁可能还没释放，新实例会把参数交给旧实例后自己退出，结果程序没在运行；在其他线程调用、或用 `request_restart()` 时先发 `Exit`。本任务在后台线程装完之后经退出状态机的 `Restart` 一步调用 `request_restart()`。macOS 上新实例经 Launch Services 从应用包启动。
+- 安装发生在宿主停下之后、重启之前（`QuitState::Installing`）：这段时间进程不能因为关窗或另一次退出请求而结束，否则 macOS 上换到一半的应用包或 Windows 上没启动的安装程序会留下问题。装不上时程序按原版本重启（宿主已经停了，不能就地恢复），原因写进数据目录里的一个小文件，重启后由面板顶部的横幅显示一次——不发通知（裁定 F15）。
+- `tauri-plugin-process` 只给前端的 `relaunch()` 用；本计划只在 Rust 侧调用，不加它（草稿里的这个依赖删掉）。更新插件只在 Rust 侧用，`capabilities/default.json` 不加插件权限，只加本程序三条新命令的 `allow-*`。
+- `latest.json` 的 `notes` 是 Release 的正文（Task 4 写的是安装说明链接与签名、自动更新的实际情况，给下载页看的），不是写给已安装程序看的更新说明：面板不显示它，`UpdateStatus` 也不带它。
 
 **Step 0 由主智能体（控制者）在派发本任务之前执行**：在维护者本机生成更新签名密钥对，并把公钥写进 `tauri.conf.json`；不交给子智能体，不在云端会话做。实现者从 Step 1 开始，`app/src-tauri/tauri.conf.json` 里已经有 `plugins.updater`。
 
 **Files:**
 - Modify: `app/src-tauri/tauri.conf.json`（Step 0 写入 `plugins.updater`）
 - Create: `app/src-tauri/tauri.updater.conf.json`
-- Modify: `app/src-tauri/Cargo.toml`、`Cargo.lock`（`tauri-plugin-updater`、`semver`；`chrono` 若还不是普通依赖就加上，带 `serde` 特性）
+- Modify: `app/src-tauri/Cargo.toml`、`Cargo.lock`（加 `tauri-plugin-updater`、`semver`；`chrono` 从 `[dev-dependencies]` 移到 `[dependencies]`，带 `serde` 特性；`tokio` 已是 `full`，不动）
 - Create: `app/src-tauri/src/update.rs`
-- Modify: `app/src-tauri/src/lib.rs`、`app/src-tauri/src/quit.rs`、`app/src-tauri/src/events.rs`、`app/src-tauri/src/commands.rs`、`app/src-tauri/src/i18n.rs`（`USED_KEYS`）、`app/src-tauri/tests/packaging.rs`
+- Modify: `app/src-tauri/src/lib.rs`（模块、插件、状态、后台检查、`generate_handler!`）、`app/src-tauri/build.rs`（`PANEL_COMMANDS`）、`app/src-tauri/capabilities/default.json`（三条 `allow-*`）、`app/src-tauri/src/quit.rs`、`app/src-tauri/src/events.rs`（`UPDATE_STATUS`；`QUIT_REQUESTED` 的文档）、`app/src-tauri/src/notify.rs`（新版本通知沿用同一套翻译与发送；模块文档）、`app/src-tauri/src/commands.rs`、`app/src-tauri/src/i18n.rs`（`USED_KEYS`）、`app/src-tauri/tests/packaging.rs`
 - Modify: `crates/core/src/config.rs`（`auto_update` 的文档注释）
-- Modify: `app/src/lib/{types,backend,api,mock,mock-fixtures,errors}.ts`、`app/src/hooks/{queries,useEngineEvents}.ts`、`app/src/components/QuitDialog.tsx`、`app/src/components/QuitDialog.test.tsx`、`app/src/components/layout/AppShell.tsx`、`app/src/pages/Settings.tsx`、`app/src/pages/Settings.test.tsx`、五个翻译文件
+- Create: `app/src/lib/update-failure-cases.json`（更新失败代码 ↔ 错误代码 ↔ 文案键，Rust 与 TS 的测试共读）
+- Modify: `app/src/lib/{types,backend,api,mock,errors}.ts`、`app/src/lib/errors.test.ts`、`app/src/lib/api.test.ts`（监听 4 → 5 个）、`app/src/hooks/{queries,useEngineEvents}.ts`、`app/src/components/QuitDialog.tsx`、`app/src/components/QuitDialog.test.tsx`（M2 的七个测试全部保留、改用 `QuitPrompt`，另加三个）、`app/src/App.test.tsx`（启动失败页上的退出询问改用 `QuitPrompt`）、`app/src/components/layout/AppShell.tsx`、`app/src/pages/Settings.tsx`、`app/src/pages/Settings.test.tsx`（M2 的「automatic updates … take effect later」测试按新旁注改写）、五个翻译文件
 - Create: `app/src/components/UpdateBanner.tsx`、`app/src/components/UpdateBanner.test.tsx`
 - Modify: `scripts/check-secrets.sh`（拦截更新签名私钥）
 - Create: `docs/release/updater-key.md`
-- Modify: `docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 12 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 5、7 节）、`docs/ai-coding/TESTING_SPEC.md`（假实现清单）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 5 节）
+- Modify（事实登记，跟代码同一个提交）：`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 9.5、12 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 5 节关键文件、第 6 节运行数据）、`docs/ai-coding/TESTING_SPEC.md`（假实现清单、共用用例表）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 5 节）、`.github/CODEOWNERS`（`tauri.conf.json`、`tauri.*.conf.json`）
+- Modify（规则，单独的 `docs` 提交）：`docs/ai-coding/AI_CODING_GUIDE.md`（第 7 节「面板的类型」一句）、`docs/ai-coding/SECURITY_CODING_SPEC.md`（自动更新一段）
 
 **Interfaces:**
-- Consumes（M2）：`quit.rs` 的 `QuitState`、`QuitEvent::Requested { host_ready, running }`、`QuitStep::{Ask, Exit, …}`、`next`、`handle`、`request`、`on_run_event`（Exit 走 `app.exit(0)`；`ExitRequested` 带退出码时放行）；`events::QUIT_REQUESTED`；`state::AppState::{host, try_host}`；`logging::debug_failed`；`i18n::{Translator, USED_KEYS, resolve_language}`（`Translator::for_settings`、`t`、`t_with`）；`Host::engine().settings().auto_update`、`Host::engine().status().running`；`commands.rs` 的 `CmdResult`；前端 `Backend`、`BackendError`、`ERROR_CODES`、`describeError`、`useAction`、`queryKeys`、`useAppInfo`、`formatRelative`、`DetailLine`、`ErrorState`、`subscription`、`useEngineEvents`、`QuitDialog`（M2 的 `quit.title`、`quit.body`、`quit.wait`、`quit.stop`、`quit.cancel`、`quit.waiting`）、`AppShell`、Settings 的「系统」分组与 `auto_update` 开关、`renderWithProviders`、`createMockBackend`；Task 2 的 `issuerelay_core::cli_path::{AppLocation, running_app_location}`。
+- Consumes（M2，2ebda38）：`quit.rs` 的 `QuitState::{Idle, Asking, Waiting, Stopping, Done}`、`QuitEvent::{Requested { host_ready, running }, Wait, StopNow, Stopped, WindowClosed}`、`QuitStep::{Nothing, Ask(usize), ShowPanel, Stop(StopMode), HideWindow, Exit}`、纯函数 `next`、`may_exit`，泛型的 `handle<R: Runtime>(app: &AppHandle<R>, event) -> QuitStep`、`request<R: Runtime>`、`on_run_event<R: Runtime>`、私有的 `no_host_to_stop<R: Runtime>`，测试模块的 `exit_requests_while(state)` 与 `every_exit_request_before_quitting_is_done_is_held`；`test_support::run_mock_app`；`window::on_event`（`HideWindow` 就拦下关窗）；`events::QUIT_REQUESTED`；`state::AppState::{host, try_host, quit}`；`logging::debug_failed`；`i18n::{Translator, USED_KEYS}`（`Translator::for_settings`、`t`、`t_with(key, &[(name, value)])`）；`notify::show` 的发送写法；`Host::engine().settings().auto_update`、`Host::engine().status().running`；`commands.rs` 的 `CmdResult`；`issuerelay_core::paths::AppPaths::system()` 与 `data_dir`；`issuerelay_core::text::clean_text`；Task 2 的 `issuerelay_core::cli_path::{AppLocation, running_app_location}` 与 37 条命令；前端 `Backend`、`BackendError`、`ERROR_CODES`（`not_a_linear_link`、`login_cancelled`）、`describeError`、`useAction<Variables, Result>`、`queryKeys`、`useAppInfo`、`useLang`、`formatRelative(iso, lang)`、`DetailLine`、`ErrorState`、`subscription`、`useEngineEvents`（返回停掉每个订阅的清理函数）、`QuitDialog`（M2 的 `quit.title`、`quit.body`、`quit.wait`、`quit.stop`、`quit.cancel`、`quit.waiting`）、`AppShell` 内容区的 `<Outlet />`、Settings 的「系统」分组、`SwitchRow` 与 `auto_update` 开关、翻译键 `shell.version`、`renderWithProviders`（返回 `client`）、`createMockBackend`、shadcn `Alert` 与 `Button`。
 - Produces（Rust）：
-  - `update::FIRST_CHECK`（60 s）、`update::CHECK_EVERY`（6 h）
-  - `pub enum FailureCode { Unreachable, NoPlatform, BadSignature, Unavailable, InstallFailed, Other }`（serde snake_case）、`FailureCode::error_code(self) -> &'static str`（`update_unreachable`、`update_no_platform`、`update_bad_signature`、`update_unavailable`、`update_install_failed`、`update_failed`）、`pub struct Failure { pub code: FailureCode, pub detail: String }`、`Failure::new(code, detail)`
-  - `pub enum UpdateStatus { Unchecked, UpToDate { checked_at }, Available { version, notes }, Failed(Failure) }`（serde `tag = "kind"`：`{"kind":"unchecked"}`、`{"kind":"up_to_date","checked_at":"…"}`、`{"kind":"available","version":"0.2.0","notes":null}`、`{"kind":"failed","code":"unreachable","detail":"…"}`）
-  - `pub trait UpdateSource`（`type Offer`、`version`、`notes`、`check`、`download`）、`pub struct PluginSource(pub AppHandle)`、`pub struct Pending<O> { pub offer: Arc<O>, pub bytes: Vec<u8> }`、`pub struct Updates<S>`：`new(source, current)`、`status()`、`check()`、`prepare()`、`pending_version()`、`take_pending()`、`clear_pending()`、`should_notify(version)`；`pub type AppUpdates = Updates<PluginSource>`；`pub fn is_newer(current: &str, offered: &str) -> bool`、`pub fn failure_code(&tauri_plugin_updater::Error) -> FailureCode`
-  - `pub fn update::{pending, take_pending, clear_pending}(app: &AppHandle)`、`pub async fn update::check(app) -> UpdateStatus`、`pub async fn update::install(app) -> Result<(), Failure>`、`pub fn update::install_and_restart(app, pending)`、`pub fn update::spawn_checker(app: AppHandle)`
-  - `quit`：`pub enum QuitPurpose { Quit, Update }`、`pub struct QuitPrompt { pub running: usize, pub purpose: QuitPurpose }`（`quit-requested` 的载荷从「运行中的条数」改为 `{"running":2,"purpose":"quit"|"update"}`）、`pub fn request_update(app: &AppHandle)`；`request` 改为先丢掉已下载的更新
+  - `update::FIRST_CHECK`（60 s）、`update::CHECK_EVERY`（6 h）、`update::INSTALL_FAILURE_FILE`（`"update-install-failure.txt"`）
+  - `pub enum FailureCode { Unreachable, NoPlatform, BadSignature, Unavailable, InstallFailed, Other }`（serde snake_case）、`FailureCode::ALL`、`FailureCode::error_code(self) -> &'static str`（`update_unreachable`、`update_no_platform`、`update_bad_signature`、`update_unavailable`、`update_install_failed`、`update_failed`；三者的对应由 `app/src/lib/update-failure-cases.json` 钉住）、`pub struct Failure { pub code: FailureCode, pub detail: String }`、`Failure::new(code, detail)`
+  - `pub enum UpdateStatus { Unchecked, UpToDate { checked_at }, Available { version }, Failed(Failure) }`（serde `tag = "kind"`：`{"kind":"unchecked"}`、`{"kind":"up_to_date","checked_at":"…"}`、`{"kind":"available","version":"0.2.0"}`、`{"kind":"failed","code":"unreachable","detail":"…"}`）
+  - `pub trait UpdateSource`（`type Offer`、`version`、`check`、`download`）、`pub struct PluginSource<R: Runtime>(pub AppHandle<R>)`、`pub struct Pending<O> { pub offer: Arc<O>, pub bytes: Vec<u8> }`、`pub struct Updates<S>`：`new(source, current)`、`status()`、`show_failure(failure)`、`check()`、`prepare()`、`pending_version()`、`take_pending()`、`clear_pending()`、`should_notify(version)`；`pub type AppUpdates<R = tauri::Wry> = Updates<PluginSource<R>>`；`pub fn is_newer(current: &str, offered: &str) -> bool`、`pub fn failure_code(&tauri_plugin_updater::Error) -> FailureCode`；`pub fn record_install_failure(data_dir: &Path, detail: &str)`、`pub fn take_install_failure(data_dir: &Path) -> Option<Failure>`
+  - 泛型的应用函数（`R: tauri::Runtime`）：`update::{pending, take_pending, clear_pending}(app: &AppHandle<R>)`、`async fn update::check(app) -> UpdateStatus`、`async fn update::install(app) -> Result<(), Failure>`、`fn update::install_and_restart(app, pending)`、`fn update::spawn_checker(app: AppHandle<R>)`
+  - `quit`：`QuitState::Installing`、`QuitEvent::Installed`、`QuitStep::{Install, Restart}`、纯函数 `installing_instead(outcome, update_pending)`；`pub enum QuitPurpose { Quit, Update }`、`pub struct QuitPrompt { pub running: usize, pub purpose: QuitPurpose }`（`quit-requested` 的载荷从「运行中的条数」改为 `{"running":2,"purpose":"quit"|"update"}`）；泛型的 `request<R>`（先丢掉已下载的更新）、`request_update<R>`、私有的 `ask<R>`
+  - `notify::show_update_available<R: Runtime>(app, host, version)`（第五种通知没有自己的开关：只有后台检查调用它，而后台检查只在 `auto_update` 打开时运行）
   - `events::UPDATE_STATUS = "update-status"`（载荷：`UpdateStatus`）
-  - 命令：`update_status() -> UpdateStatus`（立即返回）、`check_update() -> UpdateStatus`、`install_update() -> Result<(), String>`（失败时是 `FailureCode::error_code`）；命令共 39 条
-- Produces（前端）：类型 `UpdateStatus`、`UpdateFailureCode`、`QuitPurpose`、`QuitPrompt`；`Backend.updateStatus()`、`checkUpdate()`、`installUpdate()`、`onUpdateStatus(listener)`，`onQuitRequested(listener: (prompt: QuitPrompt) => void)`；`ERROR_CODES` 加六个 `update_*`；`queryKeys.update`、`useUpdateStatus()`、`useCheckUpdate()`、`useInstallUpdate()`；`updateFailureKey(code)`（`lib/errors.ts`）；`UpdateBanner()`。
+  - 命令：`update_status() -> UpdateStatus`（立即返回）、`check_update() -> UpdateStatus`、`install_update() -> Result<(), String>`（失败时是 `FailureCode::error_code`），登记在 `generate_handler!`、`PANEL_COMMANDS`、能力文件（`allow-update-status`、`allow-check-update`、`allow-install-update`）；命令共 40 条
+- Produces（前端）：类型 `UpdateStatus`、`UpdateFailureCode`、`QuitPurpose`、`QuitPrompt`；`Backend.updateStatus()`、`checkUpdate()`、`installUpdate()`、`onUpdateStatus(listener)`，`onQuitRequested(listener: (prompt: QuitPrompt) => void)`；`ERROR_CODES` 保留 `not_a_linear_link`、`login_cancelled`，再加六个 `update_*`；`queryKeys.update`、`useUpdateStatus()`、`useCheckUpdate()`、`useInstallUpdate()`；`updateFailureKey(code)`（`lib/errors.ts`）；`UpdateBanner()`。
 - Produces（密钥）：`~/.tauri/issuerelay.key`（私钥，600，不进仓库）、`~/.tauri/issuerelay.key.pub`；`tauri.conf.json` 的 `plugins.updater.pubkey`；文档 `docs/release/updater-key.md`。
 
 - [ ] **Step 0（主智能体）: 生成密钥对并写入公钥**
@@ -1631,7 +2021,7 @@ fn release_builds_add_the_cli_and_the_update_payloads() {
 }
 ```
 
-`app/src-tauri/src/quit.rs` 的测试模块加：
+`app/src-tauri/src/quit.rs` 的测试模块：顶上的 `use super::QuitEvent::{Requested, StopNow, Stopped, Wait, WindowClosed};` 补 `Installed`；M2 的 `closing_the_window_while_quitting_does_not_exit_early` 的状态列表补 `QuitState::Installing`；M2 的 `every_exit_request_before_quitting_is_done_is_held` 的循环改为 `for state in [QuitState::Waiting, QuitState::Stopping, QuitState::Installing]`，注释末尾补一句「On the mock runtime the hook goes through the generic `request`, which drops a pending update (`update::clear_pending`; no updater state is managed here, so there is none) and asks (`ask`), as in the app.」。再加：
 
 ```rust
     #[test]
@@ -1641,9 +2031,60 @@ fn release_builds_add_the_cli_and_the_update_payloads() {
         let update = QuitPrompt { running: 1, purpose: QuitPurpose::Update };
         assert_eq!(serde_json::to_value(update).unwrap(), serde_json::json!({"running": 1, "purpose": "update"}));
     }
+
+    #[test]
+    fn a_verified_update_is_installed_where_quitting_would_exit() {
+        // Quitting is done (the host stopped, or there was none) and a verified update waits:
+        // it is installed instead, and quitting is not done until the install has returned.
+        assert_eq!(
+            installing_instead((QuitState::Done, QuitStep::Exit), true),
+            (QuitState::Installing, QuitStep::Install)
+        );
+        assert_eq!(installing_instead((QuitState::Done, QuitStep::Exit), false), (QuitState::Done, QuitStep::Exit));
+        // Every other step goes on as quitting does, update or not.
+        for outcome in [
+            (QuitState::Asking, QuitStep::Ask(1)),
+            (QuitState::Waiting, QuitStep::Stop(StopMode::WaitForRuns)),
+            (QuitState::Waiting, QuitStep::ShowPanel),
+            (QuitState::Stopping, QuitStep::Stop(StopMode::StopRuns)),
+            (QuitState::Done, QuitStep::Nothing),
+        ] {
+            assert_eq!(installing_instead(outcome, true), outcome, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn the_process_outlives_the_install_and_then_restarts() {
+        // While the update installs nothing ends the process: a closed window only hides, and
+        // another Quit, an answer or a late `Stopped` change nothing.
+        assert_eq!(next(QuitState::Installing, WindowClosed), (QuitState::Installing, QuitStep::HideWindow));
+        for event in [Requested { host_ready: true, running: 0 }, Wait, StopNow, Stopped] {
+            assert_eq!(next(QuitState::Installing, event), (QuitState::Installing, QuitStep::Nothing), "{event:?}");
+        }
+        assert!(!may_exit(QuitState::Installing), "an exit request is held while installing");
+        // The install returned, installed or not: restart; only now may the process end.
+        assert_eq!(next(QuitState::Installing, Installed), (QuitState::Done, QuitStep::Restart));
+        assert!(may_exit(QuitState::Done));
+        for state in [QuitState::Idle, QuitState::Asking, QuitState::Waiting, QuitState::Stopping, QuitState::Done] {
+            assert_eq!(next(state, Installed), (state, QuitStep::Nothing), "{state:?}");
+        }
+    }
 ```
 
-（「安装并重启」与退出走同一个 `next`：M2 的 `quitting_asks_only_while_runs_are_in_progress`、`waiting_can_still_become_stopping_now` 等测试不改，它们就是 Review Focus 1 在状态机一层的证据。）
+（「安装并重启」与退出走同一个 `next`：M2 的 `quitting_asks_only_while_runs_are_in_progress`、`waiting_can_still_become_stopping_now` 等测试不改，它们就是 Review Focus 1 在状态机一层的证据；`installing_instead` 只在「退出」那一步换成「安装」。）
+
+更新失败代码的用例表 `app/src/lib/update-failure-cases.json`（Rust 的 `FailureCode`、`error_code()`，TS 的 `UpdateFailureCode`、`ERROR_CODES`、`updateFailureKey` 与文案键 `errors.<error_code>` 都由读它的测试钉住，AI_CODING_GUIDE 第 12.9 节）：
+
+```json
+[
+  { "code": "unreachable", "error_code": "update_unreachable" },
+  { "code": "no_platform", "error_code": "update_no_platform" },
+  { "code": "bad_signature", "error_code": "update_bad_signature" },
+  { "code": "unavailable", "error_code": "update_unavailable" },
+  { "code": "install_failed", "error_code": "update_install_failed" },
+  { "code": "other", "error_code": "update_failed" }
+]
+```
 
 新建 `app/src-tauri/src/update.rs`，先只放测试模块：
 
@@ -1651,6 +2092,8 @@ fn release_builds_add_the_cli_and_the_update_payloads() {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
 
     use super::*;
 
@@ -1680,10 +2123,6 @@ mod tests {
 
         fn version(offer: &FakeOffer) -> &str {
             &offer.0
-        }
-
-        fn notes(_offer: &FakeOffer) -> Option<&str> {
-            Some("Faster checks")
         }
 
         async fn check(&self) -> Result<Option<FakeOffer>, Failure> {
@@ -1765,7 +2204,7 @@ mod tests {
         *updates.source.check.lock().unwrap() = Err(failure(FailureCode::Unreachable));
         // This check's outcome is the failure; what the panel keeps showing is the offer.
         assert_eq!(updates.check().await, UpdateStatus::Failed(failure(FailureCode::Unreachable)));
-        assert_eq!(updates.status(), UpdateStatus::Available { version: "0.2.0".into(), notes: Some("Faster checks".into()) });
+        assert_eq!(updates.status(), UpdateStatus::Available { version: "0.2.0".into() });
     }
 
     #[test]
@@ -1784,33 +2223,80 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_reads_the_status_and_the_error_codes() {
+    fn the_panel_reads_the_status() {
         let failed = UpdateStatus::Failed(Failure::new(FailureCode::BadSignature, "The signature verification failed"));
         assert_eq!(
             serde_json::to_value(failed).unwrap(),
             serde_json::json!({"kind": "failed", "code": "bad_signature", "detail": "The signature verification failed"})
         );
-        let available = UpdateStatus::Available { version: "0.2.0".into(), notes: None };
-        assert_eq!(serde_json::to_value(available).unwrap(), serde_json::json!({"kind": "available", "version": "0.2.0", "notes": null}));
-        assert_eq!(FailureCode::Unreachable.error_code(), "update_unreachable");
-        assert_eq!(FailureCode::Other.error_code(), "update_failed");
+        let available = UpdateStatus::Available { version: "0.2.0".into() };
+        assert_eq!(serde_json::to_value(available).unwrap(), serde_json::json!({"kind": "available", "version": "0.2.0"}));
         // A detail with control characters arrives cleaned.
         assert_eq!(Failure::new(FailureCode::Other, "bad\u{1b}[2Jline\n").detail, "bad [2Jline");
+    }
+
+    #[test]
+    fn the_failure_codes_follow_the_shared_case_table() {
+        // The panel's codes, the error codes `install_update` answers with and, as
+        // `errors.<error_code>`, the translation keys: one table, read by the TS tests too.
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../src/lib/update-failure-cases.json")).unwrap();
+        assert_eq!(cases.len(), FailureCode::ALL.len(), "one case per code");
+        for (case, code) in cases.iter().zip(FailureCode::ALL) {
+            assert_eq!(case["code"], serde_json::to_value(code).unwrap(), "{code:?}");
+            assert_eq!(case["error_code"], code.error_code(), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_install_is_shown_once_after_the_restart() {
+        let data = tempfile::tempdir().unwrap();
+        assert_eq!(take_install_failure(data.path()), None, "nothing recorded");
+        // Written by the process that failed to install, just before it restarts as it is.
+        record_install_failure(data.path(), "cannot replace\u{1b}[2J the app\n");
+        let failure = take_install_failure(data.path()).expect("recorded before the restart");
+        assert_eq!(failure.code, FailureCode::InstallFailed);
+        assert_eq!(failure.detail, "cannot replace [2J the app");
+        assert_eq!(take_install_failure(data.path()), None, "shown once: the file is gone");
+        // The restarted app starts with it on show, until a check has something to say.
+        let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
+        updates.show_failure(failure.clone());
+        assert_eq!(updates.status(), UpdateStatus::Failed(failure));
+    }
+
+    #[test]
+    fn the_quit_flow_helpers_run_on_any_runtime() {
+        // Generic over the runtime like quit.rs, so the quit flow that calls them runs on tauri's
+        // mock runtime in quit.rs's tests: without updater state nothing is pending.
+        let app = mock_builder()
+            .manage(crate::state::AppState::new(false))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        assert!(!pending(app.handle()));
+        assert!(take_pending(app.handle()).is_none());
+        clear_pending(app.handle());
+        // With the state the app manages: still nothing until a verified download exists.
+        app.manage(AppUpdates::new(PluginSource(app.handle().clone()), "0.1.0"));
+        assert!(!pending(app.handle()));
+        assert_eq!(app.state::<AppUpdates<MockRuntime>>().status(), UpdateStatus::Unchecked);
     }
 }
 ```
 
 Run: `cargo test -p issuerelay-app`
-Expected: 编译失败（`update` 模块与 `QuitPrompt` 不存在；配置测试缺 `tauri.updater.conf.json`）。
+Expected: 编译失败（`update` 模块、`QuitPrompt`、`QuitState::Installing`、`installing_instead` 不存在；配置测试缺 `tauri.updater.conf.json`）。
 
 - [ ] **Step 2: 依赖与配置文件**
 
 ```bash
 cargo add -p issuerelay-app tauri-plugin-updater semver
-cargo add -p issuerelay-app chrono --features serde   # skip if chrono is already a normal dependency
+# chrono is a dev-dependency of the app crate (test_support uses it); update.rs needs it as a
+# normal one. Move it rather than add a second entry.
+cargo remove -p issuerelay-app --dev chrono
+cargo add -p issuerelay-app chrono --features serde
 ```
 
-（解析到的 `tauri-plugin-updater` 应是 2.13.x；版本、`Update` 的字段与 `Error` 的变体以它的 docs.rs 为准，与下面的写法不同时照文档改，在报告里列出。）
+（解析到的 `tauri-plugin-updater` 应是 2.13.x；版本、`Update` 的字段与 `Error` 的变体以它的 docs.rs 为准，与下面的写法不同时照文档改，在报告里列出。`chrono` 移到 `[dependencies]` 后测试照样能用，`tokio` 已是 `features = ["full"]`，`tokio::time::sleep` 不用另加特性。）
 
 `app/src-tauri/tauri.updater.conf.json`：
 
@@ -1830,7 +2316,7 @@ cargo add -p issuerelay-app chrono --features serde   # skip if chrono is alread
 
 - [ ] **Step 3: 实现 `update.rs`**
 
-在测试模块上方写：
+在测试模块上方写。应用一侧的函数都对 `R: tauri::Runtime` 泛型，与 M2 的 `quit::handle` 一样，所以退出流程在 MockRuntime 上的测试照样编译、照样跑（裁定 M3-AR3）：
 
 ```rust
 //! Automatic updates (design 12). The updater plugin reads
@@ -1840,10 +2326,15 @@ cargo add -p issuerelay-app chrono --features serde   # skip if chrono is alread
 //! the public key in tauri.conf.json (and names the announced version, `requireSignedVersion`)
 //! is ever kept. Installing waits for the user's "install and restart", which goes through the
 //! quit flow (`quit::request_update`): with runs in progress the panel asks the same "wait for
-//! completion / stop now" as quitting. A failed check, a missing platform, a bad signature or a
-//! version that is not newer is shown and logged and changes nothing else: monitoring goes on.
+//! completion / stop now" as quitting, and once the host has stopped the quit flow installs
+//! (`QuitState::Installing`) and then restarts. A failed check, a missing platform, a bad
+//! signature or a version that is not newer is shown and logged and changes nothing else:
+//! monitoring goes on. An install that fails after the host stopped restarts the app as it is and
+//! is shown by the panel after the restart (`record_install_failure`), never as a notification.
+//! Everything that takes the app is generic over the runtime, like quit.rs.
 use std::{
     future::Future,
+    path::Path,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -1851,21 +2342,27 @@ use std::{
 use chrono::{DateTime, Utc};
 use issuerelay_core::{
     cli_path::{AppLocation, running_app_location},
+    host::Host,
+    paths::AppPaths,
     text::clean_text,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
-use crate::{events, i18n, logging, quit, state::AppState};
+use crate::{
+    events, logging, notify,
+    quit::{self, QuitEvent},
+    state::AppState,
+};
 
 /// The first background check after the start.
 pub const FIRST_CHECK: Duration = Duration::from_secs(60);
 /// The background checks after the first.
 pub const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
-/// Release notes are cut to this many characters; the banner shows a few lines of them.
-const MAX_NOTES_CHARS: usize = 4000;
+/// What a failed install leaves in the data folder for the next start: the process restarts as it
+/// is right after the failure, and the panel then shows the cleaned reason once.
+pub const INSTALL_FAILURE_FILE: &str = "update-install-failure.txt";
 
 /// Why a check, a download or an install failed, as a code the panel translates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1886,6 +2383,17 @@ pub enum FailureCode {
 }
 
 impl FailureCode {
+    /// Every code, in the order of app/src/lib/update-failure-cases.json, which the panel's tests
+    /// read too.
+    pub const ALL: [FailureCode; 6] = [
+        Self::Unreachable,
+        Self::NoPlatform,
+        Self::BadSignature,
+        Self::Unavailable,
+        Self::InstallFailed,
+        Self::Other,
+    ];
+
     /// The error code `install_update` answers with; the panel translates it (`errors.*`).
     pub fn error_code(self) -> &'static str {
         match self {
@@ -1913,6 +2421,8 @@ impl Failure {
 }
 
 /// What the panel shows about updates: `update_status`, `check_update` and `update-status`.
+/// The release's own text (`notes` in latest.json) is written for the download page, not for an
+/// installed copy, and is not carried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UpdateStatus {
@@ -1920,9 +2430,9 @@ pub enum UpdateStatus {
     Unchecked,
     /// The last check found nothing newer than the running version.
     UpToDate { checked_at: DateTime<Utc> },
-    /// A newer version is offered; `notes` is the release text, shown as plain text.
-    Available { version: String, notes: Option<String> },
-    /// The check failed; nothing was installed.
+    /// A newer version is offered.
+    Available { version: String },
+    /// The check failed, or (after a restart) the previous install did; nothing was installed.
     Failed(Failure),
 }
 
@@ -1931,7 +2441,6 @@ pub trait UpdateSource: Send + Sync + 'static {
     /// An update a check found; kept until it is downloaded and installed.
     type Offer: Send + Sync + 'static;
     fn version(offer: &Self::Offer) -> &str;
-    fn notes(offer: &Self::Offer) -> Option<&str>;
     /// The newest release when it is newer than the running version.
     fn check(&self) -> impl Future<Output = Result<Option<Self::Offer>, Failure>> + Send;
     /// The offer's payload, verified against the public key: nothing unverified comes back.
@@ -1985,15 +2494,17 @@ impl<S: UpdateSource> Updates<S> {
         lock(&self.status).clone()
     }
 
+    /// Starts with a failure on show: the previous run's failed install (`take_install_failure`).
+    pub fn show_failure(&self, failure: Failure) {
+        *lock(&self.status) = UpdateStatus::Failed(failure);
+    }
+
     /// Asks the source and returns this check's outcome. Only a newer version becomes an offer.
     /// A failed check is logged and leaves a version already offered on show.
     pub async fn check(&self) -> UpdateStatus {
         let outcome = match self.source.check().await {
             Ok(Some(offer)) if is_newer(&self.current, S::version(&offer)) => {
-                let status = UpdateStatus::Available {
-                    version: S::version(&offer).to_string(),
-                    notes: S::notes(&offer).map(|notes| notes.chars().take(MAX_NOTES_CHARS).collect()),
-                };
+                let status = UpdateStatus::Available { version: S::version(&offer).to_string() };
                 *lock(&self.offer) = Some(Arc::new(offer));
                 status
             }
@@ -2058,17 +2569,13 @@ impl<S: UpdateSource> Updates<S> {
 }
 
 /// The updater plugin as the source of updates.
-pub struct PluginSource(pub AppHandle);
+pub struct PluginSource<R: Runtime>(pub AppHandle<R>);
 
-impl UpdateSource for PluginSource {
+impl<R: Runtime> UpdateSource for PluginSource<R> {
     type Offer = tauri_plugin_updater::Update;
 
     fn version(offer: &Self::Offer) -> &str {
         &offer.version
-    }
-
-    fn notes(offer: &Self::Offer) -> Option<&str> {
-        offer.body.as_deref()
     }
 
     async fn check(&self) -> Result<Option<Self::Offer>, Failure> {
@@ -2103,28 +2610,28 @@ pub fn failure_code(error: &tauri_plugin_updater::Error) -> FailureCode {
     }
 }
 
-/// The update state the app manages.
-pub type AppUpdates = Updates<PluginSource>;
+/// The update state the app manages; `tauri::Wry` in the app, tauri's mock runtime in tests.
+pub type AppUpdates<R = tauri::Wry> = Updates<PluginSource<R>>;
 
 /// Whether a verified update waits for the quit flow.
-pub fn pending(app: &AppHandle) -> bool {
-    app.try_state::<AppUpdates>().is_some_and(|updates| updates.pending_version().is_some())
+pub fn pending<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<AppUpdates<R>>().is_some_and(|updates| updates.pending_version().is_some())
 }
 
-pub fn take_pending(app: &AppHandle) -> Option<Pending<tauri_plugin_updater::Update>> {
-    app.try_state::<AppUpdates>().and_then(|updates| updates.take_pending())
+pub fn take_pending<R: Runtime>(app: &AppHandle<R>) -> Option<Pending<tauri_plugin_updater::Update>> {
+    app.try_state::<AppUpdates<R>>().and_then(|updates| updates.take_pending())
 }
 
-pub fn clear_pending(app: &AppHandle) {
-    if let Some(updates) = app.try_state::<AppUpdates>() {
+pub fn clear_pending<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(updates) = app.try_state::<AppUpdates<R>>() {
         updates.clear_pending();
     }
 }
 
 /// Checks now, records the outcome and tells an open panel (`update-status` carries what the
 /// panel should keep showing).
-pub async fn check(app: &AppHandle) -> UpdateStatus {
-    let updates = app.state::<AppUpdates>();
+pub async fn check<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
+    let updates = app.state::<AppUpdates<R>>();
     let outcome = updates.check().await;
     logging::debug_failed(app.emit(events::UPDATE_STATUS, updates.status()), "telling the panel about the update check");
     outcome
@@ -2133,7 +2640,7 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
 /// "Install and restart": refuses where the app cannot replace itself, downloads and verifies the
 /// offered version, then hands over to the quit flow, which asks about runs in progress exactly
 /// as quitting does and installs once the host has stopped.
-pub async fn install(app: &AppHandle) -> Result<(), Failure> {
+pub async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), Failure> {
     match running_app_location() {
         AppLocation::Installed => {}
         AppLocation::NotInstalled => {
@@ -2143,70 +2650,74 @@ pub async fn install(app: &AppHandle) -> Result<(), Failure> {
             return Err(Failure::new(FailureCode::Unavailable, "a development build does not install updates"));
         }
     }
-    app.state::<AppUpdates>().prepare().await?;
+    app.state::<AppUpdates<R>>().prepare().await?;
     quit::request_update(app);
     Ok(())
 }
 
-/// Installs a verified download once the quit flow has stopped the host, and restarts into it.
-/// macOS swaps the app bundle in place and relaunches it; on Windows `install` starts the NSIS
-/// installer (`/P /UPDATE /R`), which ends this process and starts the new version itself. If
-/// installing fails the app restarts as it is, so monitoring resumes, and a notification says
-/// why.
-pub fn install_and_restart(app: &AppHandle, pending: Pending<tauri_plugin_updater::Update>) {
+/// Installs a verified download once the quit flow has stopped the host (`QuitState::Installing`)
+/// and then lets it restart (`QuitEvent::Installed`). macOS swaps the app bundle in place and the
+/// restart opens the new one; on Windows `install` starts the NSIS installer (`/P /UPDATE /R`),
+/// which ends this process and starts the new version itself. If installing fails the app
+/// restarts as it is, so monitoring resumes, and the panel says why after the restart.
+pub fn install_and_restart<R: Runtime>(app: &AppHandle<R>, pending: Pending<tauri_plugin_updater::Update>) {
     let app = app.clone();
-    // Off the main thread: `request_restart` then delivers the exit event first, so the
+    // Off the main thread: the restart that follows then delivers the exit event first, so the
     // single-instance lock is released before the new instance starts.
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(e) = pending.offer.install(&pending.bytes) {
             tracing::error!(error = %e, version = %pending.offer.version, "installing the update failed; restarting the current version");
-            notify(&app, "app.name", None, "notify.update_install_failed");
+            match AppPaths::system() {
+                Ok(paths) => record_install_failure(&paths.data_dir, &e.to_string()),
+                Err(error) => tracing::warn!(error = %format!("{error:#}"), "cannot keep the install failure for the panel"),
+            }
         }
-        app.request_restart();
+        quit::handle(&app, QuitEvent::Installed);
     });
 }
 
-/// A translator in the user's language: the settings' when the host runs, the system's otherwise.
-fn translator(app: &AppHandle) -> i18n::Translator<'static> {
-    match app.state::<AppState>().try_host() {
-        Some(host) => i18n::Translator::for_settings(&host.engine().settings()),
-        None => i18n::Translator::new(i18n::resolve_language("system", sys_locale::get_locale().as_deref())),
+/// Keeps a failed install's cleaned error line for the next start, whose panel shows it once
+/// (`take_install_failure`); a failure to write it is only logged.
+pub fn record_install_failure(data_dir: &Path, detail: &str) {
+    let file = data_dir.join(INSTALL_FAILURE_FILE);
+    let written = std::fs::create_dir_all(data_dir).and_then(|()| std::fs::write(&file, clean_text(detail)));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "cannot keep the install failure for the panel");
     }
 }
 
-/// Shows a system notification whose title and body are translation keys.
-fn notify(app: &AppHandle, title_key: &str, version: Option<&str>, body_key: &str) {
-    let t = translator(app);
-    let vars: Vec<(&str, &str)> = version.map(|version| ("version", version)).into_iter().collect();
-    let title = t.t_with(title_key, &vars);
-    if let Err(e) = app.notification().builder().title(title).body(t.t(body_key)).show() {
-        tracing::warn!(error = %e, "could not show the update notification");
+/// The failed install the previous run left, once: the file is removed as it is read.
+pub fn take_install_failure(data_dir: &Path) -> Option<Failure> {
+    let file = data_dir.join(INSTALL_FAILURE_FILE);
+    let detail = std::fs::read_to_string(&file).ok()?;
+    if let Err(e) = std::fs::remove_file(&file) {
+        tracing::warn!(error = %e, "cannot remove the install failure note; the panel may show it again");
     }
+    Some(Failure::new(FailureCode::InstallFailed, detail))
 }
 
-/// Whether the background check runs: automatic checks on, and the host started.
-async fn auto_check_enabled(app: &AppHandle) -> bool {
-    match app.state::<AppState>().host().await {
-        Ok(host) => host.engine().settings().auto_update,
-        Err(_) => false,
-    }
+/// The host, when the background check may run: started, and automatic checks on.
+async fn auto_check_host<R: Runtime>(app: &AppHandle<R>) -> Option<Host> {
+    let host = app.state::<AppState>().host().await.ok()?;
+    host.engine().settings().auto_update.then_some(host)
 }
 
-/// The background check: a minute after the start, then every six hours, while
-/// `settings.auto_update` is on. A newer version notifies once and shows the banner. Development
-/// builds check only when asked.
-pub fn spawn_checker(app: AppHandle) {
+/// The background check: a minute after the start, then every six hours, only while
+/// `settings.auto_update` is on, which is also the only switch of the "new version" notice
+/// (design 9.5's four switchable notifications are about runs). A newer version notifies once and
+/// shows the banner. Development builds check only when asked.
+pub fn spawn_checker<R: Runtime>(app: AppHandle<R>) {
     if cfg!(debug_assertions) {
         return;
     }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK).await;
         loop {
-            if auto_check_enabled(&app).await
-                && let UpdateStatus::Available { version, .. } = check(&app).await
-                && app.state::<AppUpdates>().should_notify(&version)
+            if let Some(host) = auto_check_host(&app).await
+                && let UpdateStatus::Available { version } = check(&app).await
+                && app.state::<AppUpdates<R>>().should_notify(&version)
             {
-                notify(&app, "notify.update_available", Some(&version), "notify.update_available_body");
+                notify::show_update_available(&app, &host, &version);
             }
             tokio::time::sleep(CHECK_EVERY).await;
         }
@@ -2214,16 +2725,61 @@ pub fn spawn_checker(app: AppHandle) {
 }
 ```
 
-（`AppHandle::request_restart` 在 tauri 2.12.3 的文档里有；解析到的版本没有它时，改为 `tauri_plugin_single_instance::destroy(&app); app.restart();`——先释放单实例锁再重启——并在报告里说明。`tauri_plugin_updater::Update` 若不是 `Sync`，`Arc<Update>` 编译不过，就把 `Pending.offer` 与 `Updates.offer` 改为直接存 `Update`（它实现 `Clone`），在报告里说明。应用 crate 的 `tokio` 依赖（M2 的 `state.rs` 用它的 `sync`）还需要 `time` 特性给 `tokio::time::sleep`：没有就 `cargo add -p issuerelay-app tokio --features sync,time`。）
+（`AppHandle::request_restart` 在 tauri 2.12.3 的文档里有（退出状态机的 `Restart` 一步调用它）；解析到的版本没有它时，`Restart` 改为 `tauri_plugin_single_instance::destroy(app); app.restart();`——先释放单实例锁再重启——并在报告里说明。`tauri_plugin_updater::Update` 若不是 `Sync`，`Arc<Update>` 编译不过，就把 `Pending.offer` 与 `Updates.offer` 改为直接存 `Update`（它实现 `Clone`），在报告里说明。`PluginSource<R>` 的 `check` / `download` 的 future 必须是 `Send`（`UpdateSource` 的约束）；解析到的插件版本做不到时停下报告。）
 
-- [ ] **Step 4: 接上退出流程、事件、命令与插件**
+- [ ] **Step 4: 接上退出流程、事件、通知、命令与插件**
 
-`events.rs` 加 `pub const UPDATE_STATUS: &str = "update-status";`（文档注释：`/// The update state the panel should show (an \`update::UpdateStatus\`).`）。
+`events.rs` 加 `pub const UPDATE_STATUS: &str = "update-status";`（文档注释：`/// The update state the panel should show (an \`update::UpdateStatus\`).`），并把 `QUIT_REQUESTED` 的文档注释（现在写着「the payload is the number of runs in progress」）改为：
 
-`quit.rs`：
+```rust
+/// Quitting asks the panel "wait or stop now"; the payload is a `quit::QuitPrompt`: how many runs
+/// are in progress and whether IssueRelay then quits or installs a downloaded update.
+pub const QUIT_REQUESTED: &str = "quit-requested";
+```
 
-- `use` 加 `serde::Serialize`，`crate::{…}` 里加 `update`。
-- 在 `QuitStep` 之后加：
+`quit.rs`（编辑 M2 的文件；M2 的函数签名、纯函数 `next` 的已有分支与全部测试保留）：
+
+- `use` 加 `serde::Serialize`；`use crate::{events, logging, state::AppState, window};` 改为 `use crate::{events, logging, state::AppState, update, window};`。
+- 模块文档末尾补一段：「"Install and restart" (`quit::request_update`) goes through the same steps. Where quitting would exit, a verified update waiting in `update` is installed instead (`installing_instead`): quitting stays `Installing`, so a closed window only hides and an exit request is held, until the install has returned (`Installed`) and IssueRelay restarts. A plain quit (`request`) drops a downloaded update first, so quitting never installs it.」
+- `QuitState` 在 `Done` 前加：
+
+```rust
+    /// The host has stopped and a verified update is being installed: the process must outlive
+    /// the install, so a closed window only hides and an exit request is held; `Installed` ends it.
+    Installing,
+```
+
+- `QuitEvent` 末尾加：
+
+```rust
+    /// The update's install returned, installed or not (`update::install_and_restart`).
+    Installed,
+```
+
+- `QuitStep` 的 `Ask` 与 `ShowPanel` 的文档注释改写，末尾加两步：
+
+```rust
+    /// Show the panel and ask (`quit-requested` with a `QuitPrompt`).
+    Ask(usize),
+    /// Show the panel again: it still shows the waiting prompt with "stop now", and is told again
+    /// what follows, which a tray Quit may just have changed.
+    ShowPanel,
+```
+
+```rust
+    /// Install the verified update in the background; `Installed` follows.
+    Install,
+    /// Restart into the installed version, or into the current one when installing failed.
+    Restart,
+```
+
+- `next` 在最后的 `_ => (state, QuitStep::Nothing),` 之前加一个分支（关窗已由现有的 `(_, E::WindowClosed) => HideWindow` 管住，`Installing` 不是 `Done`，所以只隐藏；其余事件在 `Installing` 里落到 `_`，什么都不做）：
+
+```rust
+        (S::Installing, E::Installed) => (S::Done, QuitStep::Restart),
+```
+
+- 在 `QuitStep` 之后加载荷与 `installing_instead`：
 
 ```rust
 /// What follows once quitting is done: IssueRelay exits, or installs the downloaded update and
@@ -2241,52 +2797,181 @@ pub struct QuitPrompt {
     pub running: usize,
     pub purpose: QuitPurpose,
 }
+
+/// `next`'s outcome when a verified update waits for quitting to end: where quitting would exit,
+/// IssueRelay installs the update instead, and quitting is not done until the install has
+/// returned (`Installed`). Any other outcome stands.
+pub fn installing_instead(outcome: (QuitState, QuitStep), update_pending: bool) -> (QuitState, QuitStep) {
+    match outcome {
+        (QuitState::Done, QuitStep::Exit) if update_pending => (QuitState::Installing, QuitStep::Install),
+        outcome => outcome,
+    }
+}
 ```
 
-- `handle` 里两个分支改为：
+- `handle` 改为（签名不变，仍对 `R: Runtime` 泛型；`Stop` 一支原样保留）：
 
 ```rust
+pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
+    let state = app.state::<AppState>();
+    let (step, install) = {
+        let mut quit = state.quit.lock().unwrap_or_else(PoisonError::into_inner);
+        let outcome = next(*quit, event);
+        // Taken under the quit lock where quitting would exit: a tray Quit that drops the update
+        // (`request`) comes either before, and IssueRelay quits, or after, and finds it installing.
+        let install = (outcome == (QuitState::Done, QuitStep::Exit))
+            .then(|| update::take_pending(app))
+            .flatten();
+        let (next_state, step) = installing_instead(outcome, install.is_some());
+        *quit = next_state;
+        (step, install)
+    };
+    match step {
+        QuitStep::Nothing | QuitStep::HideWindow => {}
         QuitStep::Ask(running) => {
             window::show(app);
-            let purpose = if update::pending(app) { QuitPurpose::Update } else { QuitPurpose::Quit };
-            logging::debug_failed(app.emit(events::QUIT_REQUESTED, QuitPrompt { running, purpose }), "asking the panel about quitting");
+            tell_panel(app, running);
         }
-```
-
-```rust
-        QuitStep::Exit => match update::take_pending(app) {
-            Some(pending) => update::install_and_restart(app, pending),
-            None => app.exit(0),
+        QuitStep::ShowPanel => {
+            window::show(app);
+            // Still waiting: say again what follows. A tray Quit has just dropped a downloaded
+            // update, so IssueRelay now quits instead of installing it, and the prompt says so.
+            if let QuitEvent::Requested { running, .. } = event {
+                tell_panel(app, running);
+            }
+        }
+        QuitStep::Stop(mode) => match state.try_host() {
+            Some(host) => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    host.stop(mode).await;
+                    // Only now: the runs have ended with their trees, their results are recorded
+                    // and the single-instance lock is released. `Stopped` leads to `Done`, and
+                    // only that transition asks for `Exit`.
+                    handle(&app, QuitEvent::Stopped);
+                });
+            }
+            None => {
+                no_host_to_stop(app, "asked to stop the host");
+                handle(app, QuitEvent::Stopped);
+            }
         },
+        QuitStep::Exit => app.exit(0),
+        QuitStep::Install => {
+            if let Some(pending) = install {
+                update::install_and_restart(app, pending);
+            }
+        }
+        QuitStep::Restart => app.request_restart(),
+    }
+    step
+}
+
+/// Asks the panel (`quit-requested`): how many runs are in progress and what follows, an exit or
+/// installing the downloaded update.
+fn tell_panel<R: Runtime>(app: &AppHandle<R>, running: usize) {
+    let purpose = if update::pending(app) { QuitPurpose::Update } else { QuitPurpose::Quit };
+    logging::debug_failed(
+        app.emit(events::QUIT_REQUESTED, QuitPrompt { running, purpose }),
+        "asking the panel about quitting",
+    );
+}
 ```
 
-- `request` 换成三个函数：
+- `request` 换成三个函数（都对 `R: Runtime` 泛型；M2 的「没有宿主可停」日志留在 `ask` 里）：
 
 ```rust
-/// The tray's Quit, Cmd+Q and the system's exit request: a quit, so an update downloaded for
-/// "install and restart" is dropped and quitting never installs it.
-pub fn request(app: &AppHandle) {
+/// The tray's Quit, Cmd+Q and an exit request: a quit, so an update downloaded for "install and
+/// restart" is dropped first and quitting never installs it (while the panel waits for runs to
+/// install, this turns it into a plain quit, and the prompt says so).
+pub fn request<R: Runtime>(app: &AppHandle<R>) {
     update::clear_pending(app);
     ask(app);
 }
 
 /// "Install and restart", once the update is downloaded and verified: with runs in progress the
 /// same question as quitting; once the host has stopped, `handle` installs instead of exiting.
-pub fn request_update(app: &AppHandle) {
+pub fn request_update<R: Runtime>(app: &AppHandle<R>) {
     ask(app);
 }
 
 /// Starts quitting with the host as it is now.
-fn ask(app: &AppHandle) {
+fn ask<R: Runtime>(app: &AppHandle<R>) {
     let host = app.state::<AppState>().try_host();
-    let running = host.as_ref().map_or(0, |host| host.engine().status().running);
-    handle(app, QuitEvent::Requested { host_ready: host.is_some(), running });
+    let running = match &host {
+        Some(host) => host.engine().status().running,
+        None => {
+            no_host_to_stop(app, "quitting");
+            0
+        }
+    };
+    handle(
+        app,
+        QuitEvent::Requested {
+            host_ready: host.is_some(),
+            running,
+        },
+    );
 }
 ```
 
-- 模块文档补一句：「"Install and restart" (`request_update`) goes through the same steps; when they end, a verified update waiting in `update` is installed instead of exiting.」
+- `forced_exit` 的第一个判断改为 `if may_exit(*state) || *state == QuitState::Installing { return ForcedExit::Done; }`（宿主在安装之前就停了，系统强制结束时没有什么要再停），测试模块加：
 
-（`on_run_event` 不变：`request_restart()` 发出的 `ExitRequested` 带退出码，照样放行。）
+```rust
+    #[test]
+    fn a_forced_exit_while_installing_stops_nothing_again() {
+        let quit = Mutex::new(QuitState::Installing);
+        let outcome = forced_exit(&quit, Some(std::future::pending::<()>()), Duration::from_millis(50));
+        assert_eq!(outcome, ForcedExit::Done, "the host stopped before the install began");
+        assert_eq!(*quit.lock().unwrap(), QuitState::Installing);
+    }
+```
+
+（`on_run_event` 不变：`Restart` 一步发出的 `ExitRequested` 带退出码，到那时已是 `Done`，照样放行；`Installing` 里的退出请求被拦下，经 `request` 走到 `next`，什么都不做。`window::on_event` 不变：`Installing` 里关窗得到 `HideWindow`。）
+
+`notify.rs`（新版本通知沿用同一套翻译与发送，不另写一份，裁定 F25）：模块文档改为：
+
+```rust
+//! System notifications (design 9.5): the four moments of a run, each of which can be switched
+//! off, plus the notice of a new version, which has no switch of its own: only the background
+//! update check shows it (`update::spawn_checker`), and that check runs only while "check for
+//! updates automatically" is on. A notification names the issue (or the version) and says what
+//! happened in the user's language; the engine's own text stays in the panel, under a translated
+//! headline. A failed update install is shown in the panel, never here.
+```
+
+`use tauri::AppHandle;` 改为 `use tauri::{AppHandle, Runtime};`；`show` 的最后三行（`app.notification()…`）换成 `deliver(app, title, body);`，再加：
+
+```rust
+/// Title and body of the new-version notice: the version and a translated sentence.
+pub fn update_content(version: &str, t: &Translator) -> (String, String) {
+    (t.t_with("notify.update_available", &[("version", version)]), t.t("notify.update_available_body"))
+}
+
+/// The notice that a background check found `version` (once per version, `Updates::should_notify`).
+pub fn show_update_available<R: Runtime>(app: &AppHandle<R>, host: &Host, version: &str) {
+    let (title, body) = update_content(version, &Translator::for_settings(&host.engine().settings()));
+    deliver(app, title, body);
+}
+
+/// Hands a notification to the system; a failure is only logged.
+fn deliver<R: Runtime>(app: &AppHandle<R>, title: String, body: String) {
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        tracing::warn!(error = %e, "could not show a notification");
+    }
+}
+```
+
+测试模块加：
+
+```rust
+    #[test]
+    fn the_new_version_notice_names_the_version_in_the_users_language() {
+        let (title, body) = update_content("0.2.0", &Translator::new("en"));
+        assert_eq!(title, "IssueRelay 0.2.0 is available");
+        assert_eq!(body, "Open the panel to install it.");
+    }
+```
 
 `commands.rs` 的 `use crate::{…}` 加 `update::{self, AppUpdates, UpdateStatus}`，末尾加：
 
@@ -2314,35 +2999,58 @@ pub async fn install_update(app: AppHandle) -> CmdResult<()> {
 }
 ```
 
-`lib.rs`：`pub mod update;`；`tauri::Builder::default()` 链里在 `tauri_plugin_dialog::init()` 之后加 `.plugin(tauri_plugin_updater::Builder::new().build())`；`.setup` 里第一行加
+`commands.rs` 文件头里列举错误代码的那句（`not_a_linear_link`、`login_cancelled`）补上「and the `update_*` codes of `install_update`」。
+
+`lib.rs`：`pub mod update;`（放在 `pub mod tray;` 之后）；`tauri::Builder::default()` 链里在 `.plugin(tauri_plugin_dialog::init())` 之后加 `.plugin(tauri_plugin_updater::Builder::new().build())`；`.setup` 的闭包开头加：
 
 ```rust
-            app.manage(update::AppUpdates::new(update::PluginSource(app.handle().clone()), env!("CARGO_PKG_VERSION")));
+            let updates = update::AppUpdates::new(
+                update::PluginSource(app.handle().clone()),
+                env!("CARGO_PKG_VERSION"),
+            );
+            // The previous run could not install an update and restarted as it was: the banner
+            // says why, once.
+            if let Some(failure) = issuerelay_core::paths::AppPaths::system()
+                .ok()
+                .and_then(|paths| update::take_install_failure(&paths.data_dir))
+            {
+                updates.show_failure(failure);
+            }
+            app.manage(updates);
 ```
 
-并在 `tauri::async_runtime::spawn(startup::start(…))` 之后加 `update::spawn_checker(app.handle().clone());`；`generate_handler!` 加 `commands::update_status, commands::check_update, commands::install_update,`。
+并在 `tauri::async_runtime::spawn(startup::start(app.handle().clone()));` 之后加 `update::spawn_checker(app.handle().clone());`。
 
-`i18n.rs` 的 `USED_KEYS` 末尾加 `"app.name", "notify.update_available", "notify.update_available_body", "notify.update_install_failed",`（翻译文件 Step 6 补）。
+三处登记，同一步里改：
+
+- `lib.rs` 的 `generate_handler!` 在 `commands::remove_cli_from_path,` 之后加 `commands::update_status,`、`commands::check_update,`、`commands::install_update,`（各占一行）。
+- `build.rs` 的 `PANEL_COMMANDS` 在 `"remove_cli_from_path",` 之后加 `"update_status",`、`"check_update",`、`"install_update",`。
+- `capabilities/default.json` 在 `"allow-remove-cli-from-path"` 之后加 `"allow-update-status"`、`"allow-check-update"`、`"allow-install-update"`（上一行补逗号）；`description` 里「… and the command line on PATH go through the commands」改为「…, the command line on PATH and updates go through the commands」。
+
+命令共 40 条（M2 的 34 条、Task 2 的 3 条、这里的 3 条）。
+
+`i18n.rs` 的 `USED_KEYS` 末尾加 `"notify.update_available",`、`"notify.update_available_body",`（翻译文件 Step 6 补）。
 
 Run: `cargo test -p issuerelay-app` 与 `cargo clippy -p issuerelay-app --all-targets -- -D warnings`
-Expected: PASS（`USED_KEYS` 的检查要等 Step 6 补好翻译才通过；在那之前它是唯一失败的测试）。
+Expected: 除下面两条外全部 PASS，含 M2 的绊线测试（命令表、应用清单、能力文件都是 40 条）与扩展到 `Installing` 的 `every_exit_request_before_quitting_is_done_is_held`（在 MockRuntime 上走泛型的 `request` → `update::clear_pending` → `ask` → `handle`）。`USED_KEYS` 的检查与 `the_new_version_notice_names_the_version_in_the_users_language` 要等 Step 6 补好翻译才通过，在那之前是仅有的两条失败。`api.test.ts` 也要等 Step 6（能力文件多了三条命令）。
 
 - [ ] **Step 5: 前端的失败测试**
 
-`app/src/components/UpdateBanner.test.tsx`：
+`app/src/components/UpdateBanner.test.tsx`（断言「没有」之前先等查询真的有了答复：假后端在下一个宏任务才答，一次 `act` 冲不到它，TESTING_SPEC「等条件，不等固定时间」）：
 
 ```tsx
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
+import { queryKeys } from "@/hooks/queries";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import type { UpdateStatus } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import { UpdateBanner } from "./UpdateBanner";
 
-const AVAILABLE: UpdateStatus = { kind: "available", version: "0.2.0", notes: "Faster checks\u001b[31m\nSecond line" };
+const AVAILABLE: UpdateStatus = { kind: "available", version: "0.2.0" };
 
 test("a newer version shows the banner, and installing is the backend's job", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
@@ -2352,7 +3060,6 @@ test("a newer version shows the banner, and installing is the backend's job", as
   const requestQuit = vi.spyOn(backend, "requestQuit");
   await renderWithProviders(<UpdateBanner />, { backend });
   expect(await screen.findByText("IssueRelay 0.2.0 is available")).toBeInTheDocument();
-  expect(screen.getByText(/Faster checks/).textContent).not.toContain("\u001b");
   await userEvent.click(screen.getByRole("button", { name: "Install and restart" }));
   expect(install).toHaveBeenCalledTimes(1);
   // The panel never quits or restarts by itself: the Rust side asks about runs first.
@@ -2372,8 +3079,9 @@ test("a failed install says why in the user's language and keeps the banner", as
 
 test("no banner while up to date; Later hides it for that version", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
-  const { unmount } = await renderWithProviders(<UpdateBanner />, { backend });
-  await act(async () => {});
+  const { client, unmount } = await renderWithProviders(<UpdateBanner />, { backend });
+  // The answer (up to date) has arrived, so the absence below is a real one.
+  await waitFor(() => expect(client.getQueryState(queryKeys.update)?.status).toBe("success"));
   expect(screen.queryByRole("button", { name: "Install and restart" })).not.toBeInTheDocument();
   unmount();
   backend.updateStatus = async () => AVAILABLE;
@@ -2390,7 +3098,7 @@ test("a background check that finds a version shows the banner in an open panel"
     return () => {};
   });
   backend.onUpdateStatus = listen;
-  await renderWithProviders(
+  const { client } = await renderWithProviders(
     <>
       <EngineEventsBridge />
       <UpdateBanner />
@@ -2398,56 +3106,62 @@ test("a background check that finds a version shows the banner in an open panel"
     { backend },
   );
   await waitFor(() => expect(listen).toHaveBeenCalled());
-  // Let the first read (up to date) settle, so it cannot overwrite the event.
-  await act(async () => {});
+  // The first read (up to date) has settled, so it cannot overwrite the event afterwards.
+  await waitFor(() => expect(client.getQueryState(queryKeys.update)?.status).toBe("success"));
   await act(async () => announce(AVAILABLE));
   expect(await screen.findByText("IssueRelay 0.2.0 is available")).toBeInTheDocument();
 });
+
+test("an update that could not be installed before the restart is shown once, with why", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.updateStatus = async (): Promise<UpdateStatus> => ({ kind: "failed", code: "install_failed", detail: "cannot replace the app" });
+  await renderWithProviders(<UpdateBanner />, { backend });
+  expect(await screen.findByText("The update could not be installed")).toBeInTheDocument();
+  expect(screen.getByText("cannot replace the app")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  expect(screen.queryByText("The update could not be installed")).not.toBeInTheDocument();
+});
+
+test("a failed background check stays out of the banner", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.updateStatus = async (): Promise<UpdateStatus> => ({ kind: "failed", code: "unreachable", detail: "offline" });
+  const { client } = await renderWithProviders(<UpdateBanner />, { backend });
+  await waitFor(() => expect(client.getQueryState(queryKeys.update)?.status).toBe("success"));
+  expect(screen.queryByText("Could not reach the update server")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Install and restart" })).not.toBeInTheDocument();
+});
 ```
 
-`app/src/components/QuitDialog.test.tsx` 换成（M2 的两个测试改用 `QuitPrompt`，加一个「安装更新」的测试）：
+`app/src/components/QuitDialog.test.tsx` **编辑，不替换**：M2 的七个测试全部保留，只把载荷改成 `QuitPrompt`，再加三个。
+
+- 导入补 `import type { QuitPrompt, QuitPurpose } from "@/lib/types";`。
+- 前两个测试（「quitting with runs in progress asks…」「keep running closes the prompt…」）里 `let ask: (running: number) => void = () => {};` 改为 `let ask: (prompt: QuitPrompt) => void = () => {};`，`ask(2)` 改为 `ask({ running: 2, purpose: "quit" })`，`ask(1)` 改为 `ask({ running: 1, purpose: "quit" })`。
+- 辅助函数 `askedWith` 改为下面这样；用它的五个测试（escape、asked again、while waiting、refused wait、stopping twice）一字不改：
 
 ```tsx
-import { act, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { vi } from "vitest";
-import { createMockBackend } from "@/lib/mock";
-import type { QuitPrompt } from "@/lib/types";
-import { renderWithProviders } from "@/test/render";
-import { QuitDialog } from "./QuitDialog";
-
-async function openWith(prompt: QuitPrompt) {
+/** A dialog that the backend asks to open with `running` runs; the answer is whatever `quit` does. */
+async function askedWith(running: number, quit: () => Promise<void>, purpose: QuitPurpose = "quit") {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   let ask: (prompt: QuitPrompt) => void = () => {};
   backend.onQuitRequested = async (listener) => {
     ask = listener;
     return () => {};
   };
-  backend.quit = vi.fn().mockResolvedValue(undefined);
+  backend.quit = vi.fn(quit);
   await renderWithProviders(<QuitDialog />, { backend });
-  await act(async () => ask(prompt));
-  return backend;
+  await act(async () => ask({ running, purpose }));
+  return {
+    backend,
+    ask: (count: number, next: QuitPurpose = "quit") => act(async () => ask({ running: count, purpose: next })),
+  };
 }
+```
 
-test("quitting with runs in progress asks, and waiting can still become stopping", async () => {
-  const backend = await openWith({ running: 2, purpose: "quit" });
-  expect(screen.getByText(/2 run\(s\) are in progress/)).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
-  expect(backend.quit).toHaveBeenCalledWith("wait");
-  expect(screen.getByText(/Waiting for the runs to finish, then IssueRelay quits/)).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Stop now" }));
-  expect(backend.quit).toHaveBeenLastCalledWith("stop");
-});
+- 文件末尾加：
 
-test("keep running closes the prompt without quitting", async () => {
-  const backend = await openWith({ running: 1, purpose: "quit" });
-  await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
-  expect(backend.quit).not.toHaveBeenCalled();
-  expect(screen.queryByText(/run\(s\) are in progress/)).not.toBeInTheDocument();
-});
-
+```tsx
 test("installing an update with runs in progress asks the same question and says it restarts", async () => {
-  const backend = await openWith({ running: 1, purpose: "update" });
+  const { backend } = await askedWith(1, async () => {}, "update");
   expect(screen.getByText(/1 run\(s\) are in progress/)).toBeInTheDocument();
   expect(screen.getByText("IssueRelay restarts to install the update once these runs are settled.")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
@@ -2456,9 +3170,53 @@ test("installing an update with runs in progress asks the same question and says
   await userEvent.click(screen.getByRole("button", { name: "Stop now" }));
   expect(backend.quit).toHaveBeenLastCalledWith("stop");
 });
+
+test("a plain quit says nothing about an update", async () => {
+  await askedWith(1, async () => {});
+  expect(screen.queryByText(/install the update/)).not.toBeInTheDocument();
+});
+
+test("a tray Quit while waiting to install keeps waiting and says IssueRelay quits instead", async () => {
+  const { ask } = await askedWith(2, async () => {}, "update");
+  await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
+  expect(screen.getByText(/then IssueRelay installs the update and restarts/)).toBeInTheDocument();
+  // The tray's Quit dropped the downloaded update; the app says again what follows.
+  await ask(2, "quit");
+  expect(screen.getByText("Waiting for the runs to finish, then IssueRelay quits.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stop now" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Wait for completion" })).not.toBeInTheDocument();
+});
 ```
 
-`app/src/pages/Settings.test.tsx` 加：
+`app/src/App.test.tsx` 的「the quit prompt works while the panel is replaced by the start failure」：`let ask: (running: number) => void = () => {};` 改为 `let ask: (prompt: QuitPrompt) => void = () => {};`，`ask(1)` 改为 `ask({ running: 1, purpose: "quit" })`，`import type { StartupState, StatusView } from "@/lib/types";` 补 `QuitPrompt`。
+
+`app/src/lib/api.test.ts` 的「the panel calls exactly the commands its capability allows…」里 `expect(listen).toHaveBeenCalledTimes(4);` 改为 `expect(listen).toHaveBeenCalledTimes(5);`（第五个是 `onUpdateStatus`）。
+
+`app/src/lib/errors.test.ts` 加（导入：`./backend` 那一行补 `ERROR_CODES`，`./errors` 那一行补 `updateFailureKey`，再加 `import { UPDATE_FAILURE_CODES } from "./types";` 与 `import cases from "./update-failure-cases.json";`；第二个测试守住 M2 的 `login_cancelled`）：
+
+```ts
+test("update failures follow the case table the Rust side reads too", () => {
+  expect(cases.map((entry) => entry.code)).toEqual([...UPDATE_FAILURE_CODES]);
+  for (const { code, error_code } of cases) {
+    expect(ERROR_CODES).toContain(error_code);
+    expect(updateFailureKey(code as (typeof UPDATE_FAILURE_CODES)[number])).toBe(`errors.${error_code}`);
+    // `install_update` answers with the error code, which reads as the same translated headline.
+    expect(describeError(new BackendError(error_code), t, "actions.failed.install_update")).toEqual({
+      headline: t(`errors.${error_code}`),
+      detail: null,
+    });
+  }
+});
+
+test("a cancelled browser login is still a code, not a failure", () => {
+  expect(new BackendError("login_cancelled").code).toBe("login_cancelled");
+});
+```
+
+`app/src/pages/Settings.test.tsx`：
+
+- M2 的「automatic updates are saved with the page, and say they take effect later」改名为「automatic updates are saved with the page, and say when they check」，其中 `toHaveAccessibleDescription("Updates arrive in a later version; your choice is kept until then.")` 改为 `toHaveAccessibleDescription("Checks a minute after start and every 6 hours. Installing always waits for your click.")`，其余不变。
+- 加：
 
 ```tsx
 test("checking for updates shows the version and the result; a failure is a translated headline with the detail", async () => {
@@ -2466,7 +3224,7 @@ test("checking for updates shows the version and the result; a failure is a tran
   backend.checkUpdate = vi.fn().mockResolvedValue({ kind: "failed", code: "unreachable", detail: "error sending request" });
   await renderWithProviders(<Settings />, { backend });
   expect(await screen.findByText("Version 0.1.0")).toBeInTheDocument();
-  expect(screen.getByText(/Up to date/)).toBeInTheDocument();
+  expect(await screen.findByText(/Up to date/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   expect(await screen.findByText("Could not reach the update server")).toBeInTheDocument();
   expect(screen.getByText("error sending request")).toBeInTheDocument();
@@ -2474,102 +3232,302 @@ test("checking for updates shows the version and the result; a failure is a tran
 ```
 
 Run: `pnpm --dir app test`
-Expected: 失败（组件、方法与类型不存在）。
+Expected: 失败（组件、方法、类型与用例表的读取方不存在；`api.test.ts` 的监听数还是 4）。
 
 - [ ] **Step 6: 前端实现与文案**
 
-`types.ts` 加，并把 M2 的 `onQuitRequested` 载荷类型换掉：
+`types.ts` 加，并把 `QuitPrompt` 用到 `onQuitRequested`（见 `backend.ts`）：
 
 ```ts
-export type UpdateFailureCode = "unreachable" | "no_platform" | "bad_signature" | "unavailable" | "install_failed" | "other";
+/** The update failure codes (`FailureCode` in update.rs); update-failure-cases.json pins both sides. */
+export const UPDATE_FAILURE_CODES = ["unreachable", "no_platform", "bad_signature", "unavailable", "install_failed", "other"] as const;
+export type UpdateFailureCode = (typeof UPDATE_FAILURE_CODES)[number];
 export type UpdateStatus =
   | { kind: "unchecked" }
   | { kind: "up_to_date"; checked_at: string }
-  | { kind: "available"; version: string; notes: string | null }
+  | { kind: "available"; version: string }
   | { kind: "failed"; code: UpdateFailureCode; detail: string };
 export type QuitPurpose = "quit" | "update";
 export interface QuitPrompt { running: number; purpose: QuitPurpose }
 ```
 
-`backend.ts`：`ERROR_CODES` 改为 `["not_a_linear_link", "update_unreachable", "update_no_platform", "update_bad_signature", "update_unavailable", "update_install_failed", "update_failed"] as const`；`Backend` 加 `updateStatus(): Promise<UpdateStatus>;`、`checkUpdate(): Promise<UpdateStatus>;`、`installUpdate(): Promise<void>;`、`onUpdateStatus(listener: (status: UpdateStatus) => void): Promise<() => void>;`，并把 `onQuitRequested(listener: (running: number) => void)` 改为 `onQuitRequested(listener: (prompt: QuitPrompt) => void)`。`api.ts`：
+`backend.ts`：`ERROR_CODES` 是 M2 的两条加六条，`login_cancelled` 留着（取消浏览器登录不算失败，`useLinearLogin` 靠它不报错）：
+
+```ts
+/** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
+export const ERROR_CODES = [
+  "not_a_linear_link",
+  "login_cancelled",
+  "update_unreachable",
+  "update_no_platform",
+  "update_bad_signature",
+  "update_unavailable",
+  "update_install_failed",
+  "update_failed",
+] as const;
+```
+
+`Backend` 在 `requestQuit` 之后加 `updateStatus(): Promise<UpdateStatus>;`、`checkUpdate(): Promise<UpdateStatus>;`、`installUpdate(): Promise<void>;`，在 `onStartupFailed` 之后加 `onUpdateStatus(listener: (status: UpdateStatus) => void): Promise<() => void>;`，并把 `onQuitRequested(listener: (running: number) => void)` 改为 `onQuitRequested(listener: (prompt: QuitPrompt) => void)`（类型导入补 `QuitPrompt`、`UpdateStatus`）。`api.ts`（类型导入补 `QuitPrompt`、`UpdateStatus`）：`requestQuit` 之后加三条命令，`onQuitRequested` 改写，末尾加 `onUpdateStatus`：
 
 ```ts
   updateStatus: () => call("update_status"),
   checkUpdate: () => call("check_update"),
   installUpdate: () => call("install_update"),
+```
+
+```ts
   onQuitRequested: (listener) => on<QuitPrompt>("quit-requested", listener),
+```
+
+```ts
   onUpdateStatus: (listener) => on<UpdateStatus>("update-status", listener),
 ```
 
-`mock.ts`：`listeners.quit` 的类型改为 `Set<(prompt: QuitPrompt) => void>`，加 `update: new Set<(status: UpdateStatus) => void>()`；`let update: UpdateStatus = { kind: "up_to_date", checked_at: ago(30) };`；返回对象加 `updateStatus: () => reply(() => update)`、`checkUpdate: () => reply(() => update)`、`installUpdate: () => reply(() => undefined)`、`onUpdateStatus: (listener) => subscribe(listeners.update, listener)`（假后端自己不发这个事件；`ago` 从 `mock-fixtures.ts` 导入）。
-
-`lib/errors.ts` 加：
+`mock.ts`（类型导入补 `QuitPrompt`、`UpdateStatus`；`ago` 已经从 `./mock-fixtures` 导入）：`listeners.quit` 改为 `new Set<(prompt: QuitPrompt) => void>()`，加 `update: new Set<(status: UpdateStatus) => void>()`；在 `let autostart = false;` 之后加（名字不用 `update`：M2 的 `mock.ts` 已有改任务的 `const update = (id, change) => …`）：
 
 ```ts
-/** The translation key of an update failure's headline: the same texts as the `update_*` error codes. */
+  // What the app's last update check found; the fake never sends `update-status` by itself.
+  let updateState: UpdateStatus = { kind: "up_to_date", checked_at: ago(30) };
+```
+
+返回对象在 `requestQuit` 之后加 `updateStatus: () => reply(() => updateState),`、`checkUpdate: () => reply(() => updateState),`、`installUpdate: () => reply(() => undefined),`，在 `onStartupFailed` 之后加 `onUpdateStatus: (listener) => subscribe(listeners.update, listener),`。
+
+`lib/errors.ts` 加（文案键由用例表得出，不另写一份对应关系）：
+
+```ts
+import updateFailures from "./update-failure-cases.json";
+import type { UpdateFailureCode } from "./types";
+
+/** The translation key of an update failure's headline: `errors.<error code>`, by update-failure-cases.json. */
 export function updateFailureKey(code: UpdateFailureCode): string {
-  return code === "other" ? "errors.update_failed" : `errors.update_${code}`;
+  const entry = updateFailures.find((candidate) => candidate.code === code);
+  return `errors.${entry?.error_code ?? "update_failed"}`;
 }
 ```
 
-`hooks/queries.ts`：`queryKeys.update = ["update"] as const`；`useUpdateStatus()`（`useQuery({ queryKey: queryKeys.update, queryFn: () => backend.updateStatus() })`）；`useCheckUpdate()` = `useAction(() => backend.checkUpdate(), [queryKeys.update], "actions.failed.check_update")`；`useInstallUpdate()` = `useAction(() => backend.installUpdate(), [], "actions.failed.install_update")`。`hooks/useEngineEvents.ts` 再订阅一个：`subscription(backend.onUpdateStatus((status) => client.setQueryData(queryKeys.update, status)))`。
+`hooks/queries.ts`：`queryKeys` 加 `update: ["update"] as const,`，类型导入补 `UpdateStatus`；在 `useAppInfo` 之后加查询，在 `useRemoveCliFromPath` 之后加两个变更钩子（照 `useAction<Variables, Result>` 的签名）：
 
-`components/UpdateBanner.tsx`：
+```ts
+/** What the app's last update check found; `update-status` keeps it current (`useEngineEvents`). */
+export function useUpdateStatus() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.update, queryFn: () => backend.updateStatus() });
+}
+```
+
+```ts
+/** Checks for an update now: what this check found is the action's `data`; the kept status is read again. */
+export function useCheckUpdate() {
+  return useAction<void, UpdateStatus>((backend) => backend.checkUpdate(), [queryKeys.update], "actions.failed.check_update");
+}
+
+/** "Install and restart": the Rust side downloads, verifies and goes through the quit flow. */
+export function useInstallUpdate() {
+  return useAction<void, void>((backend) => backend.installUpdate(), [], "actions.failed.install_update");
+}
+```
+
+`hooks/useEngineEvents.ts`：文档注释补「the app's update check (`update-status`) is put into the cache as it comes」；在 `stopResync` 之后加订阅，清理函数里一并停掉它：
+
+```ts
+    const stopUpdate = subscription(backend.onUpdateStatus((status) => client.setQueryData(queryKeys.update, status)));
+    return () => {
+      stopEvents();
+      stopResync();
+      stopUpdate();
+    };
+```
+
+`components/UpdateBanner.tsx`。换行规则：标题里的版本号可以在词中断行；两个按钮在 `flex-wrap` 里，605 px 放不下时上下排；失败的细节是 `DetailLine`（`break-words`）：
 
 ```tsx
-import { Download } from "lucide-react";
+import { CircleAlert, Download } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DetailLine } from "@/components/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useInstallUpdate, useUpdateStatus } from "@/hooks/queries";
-import { cleanDisplayLines } from "@/lib/clean";
+import { updateFailureKey } from "@/lib/errors";
 
 /**
- * Above every page while a newer version is offered (design 12). "Install and restart" asks the
- * Rust side, which downloads and verifies the update and then goes through the quit flow: the
- * panel itself never quits or restarts. "Later" hides the banner for that version until the
- * panel is opened again.
+ * Above every page (design 12): a newer version with "Install and restart", or, once after a
+ * restart, an update that could not be installed and why. Installing asks the Rust side, which
+ * downloads and verifies the update and then goes through the quit flow: the panel itself never
+ * quits or restarts. "Later" hides an offer for that version and "Dismiss" the failure, until the
+ * panel is opened again. A failed check is left to the settings page: monitoring goes on, so it
+ * does not nag here.
  */
 export function UpdateBanner() {
   const { t } = useTranslation();
   const status = useUpdateStatus();
   const install = useInstallUpdate();
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  const offer = status.data?.kind === "available" ? status.data : null;
-  if (offer === null || dismissed === offer.version) return null;
+  const [laterFor, setLaterFor] = useState<string | null>(null);
+  const [failureSeen, setFailureSeen] = useState(false);
+  const shown = status.data;
+  if (shown?.kind === "available" && laterFor !== shown.version) {
+    return (
+      <Alert className="mb-4" role="status">
+        <Download className="size-4" aria-hidden />
+        <AlertTitle className="wrap-anywhere">{t("update.available", { version: shown.version })}</AlertTitle>
+        <AlertDescription className="space-y-2">
+          <p className="text-muted-foreground">{t("update.restart_note")}</p>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={install.isPending} onClick={() => install.mutate()}>
+              {install.isPending ? t("update.downloading") : t("update.install")}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setLaterFor(shown.version)}>
+              {t("update.later")}
+            </Button>
+          </div>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  if (shown?.kind === "failed" && shown.code === "install_failed" && !failureSeen) {
+    return (
+      <Alert className="mb-4" role="alert">
+        <CircleAlert className="size-4" aria-hidden />
+        <AlertTitle>{t(updateFailureKey(shown.code))}</AlertTitle>
+        <AlertDescription className="space-y-2">
+          <DetailLine text={shown.detail} />
+          <Button size="sm" variant="ghost" onClick={() => setFailureSeen(true)}>
+            {t("update.dismiss")}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  return null;
+}
+```
+
+`layout/AppShell.tsx`：导入 `UpdateBanner`，内容区里 `<Outlet />` 上方放 `<UpdateBanner />`（同在最大宽度与内边距之内）。
+
+`components/QuitDialog.tsx` 整个组件改为下面这样（导入照旧，另补 `useRef` 与类型 `QuitPrompt`）。等待中的询问框收到新的问题时只更新「之后做什么」，不回到提问：
+
+```tsx
+/**
+ * The question that quitting with runs in progress asks (design 4.1, 6.2): wait for them, stop
+ * them now, or keep running. "Install and restart" asks the same (design 12) and says that
+ * IssueRelay then installs the update and restarts. Waiting can still become stopping, so once
+ * chosen the prompt stays up with "stop now" until the app exits; a question that comes while it
+ * waits only says again what follows (the tray's Quit drops a downloaded update, so IssueRelay then
+ * quits instead). "Keep running" only closes the prompt: the app treats a question nobody answers
+ * like no question at all and asks again the next time.
+ */
+export function QuitDialog() {
+  const backend = useBackend();
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  // Kept after the prompt closes, so that it does not read "0 runs" while it fades out.
+  const [prompt, setPrompt] = useState<QuitPrompt>({ running: 0, purpose: "quit" });
+  const [waiting, setWaiting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  // Read by the subscription, which is made once per backend: whether the prompt waits right now.
+  const waitingNow = useRef(false);
+  const markWaiting = (value: boolean) => {
+    waitingNow.current = value;
+    setWaiting(value);
+  };
+
+  useEffect(
+    () =>
+      subscription(
+        backend.onQuitRequested((next) => {
+          setPrompt(next);
+          if (waitingNow.current) return;
+          setStopping(false);
+          setOpen(true);
+        }),
+      ),
+    [backend],
+  );
+
+  const answer = (mode: QuitMode) => {
+    const mark = mode === "wait" ? markWaiting : setStopping;
+    mark(true);
+    backend.quit(mode).catch((error: unknown) => {
+      // The app did not take the answer: back to the question, and say why.
+      mark(false);
+      reportFailure(error, t, "common.error_title");
+    });
+  };
+
+  const update = prompt.purpose === "update";
   return (
-    <Alert className="mb-4" role="status">
-      <Download className="size-4" aria-hidden />
-      <AlertTitle>{t("update.available", { version: offer.version })}</AlertTitle>
-      <AlertDescription className="space-y-2">
-        {offer.notes ? <p className="line-clamp-3 whitespace-pre-line">{cleanDisplayLines(offer.notes)}</p> : null}
-        <p className="text-muted-foreground">{t("update.restart_note")}</p>
-        <div className="flex gap-2">
-          <Button size="sm" disabled={install.isPending} onClick={() => install.mutate()}>
-            {install.isPending ? t("update.downloading") : t("update.install")}
+    <AlertDialog
+      open={open}
+      // Escape and a click outside answer "keep running", but only while the question is open.
+      onOpenChange={(next) => {
+        if (!next && !waiting && !stopping) setOpen(false);
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{t("quit.title")}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {waiting ? t(update ? "update.waiting" : "quit.waiting") : t("quit.body", { count: prompt.running })}
+          </AlertDialogDescription>
+          {update && !waiting && <p className="text-sm text-muted-foreground">{t("update.restart_body")}</p>}
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          {!waiting && <AlertDialogCancel disabled={stopping}>{t("quit.cancel")}</AlertDialogCancel>}
+          <Button variant="destructive" disabled={stopping} onClick={() => answer("stop")}>
+            {t("quit.stop")}
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setDismissed(offer.version)}>
-            {t("update.later")}
-          </Button>
-        </div>
-      </AlertDescription>
-    </Alert>
+          {!waiting && (
+            <Button disabled={stopping} onClick={() => answer("wait")}>
+              {t("quit.wait")}
+            </Button>
+          )}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 ```
 
-`layout/AppShell.tsx`：内容区里 `<Outlet />` 上方放 `<UpdateBanner />`（同在最大宽度与内边距之内）。
+`pages/Settings.tsx`：导入补 `useCheckUpdate`、`useUpdateStatus`（`@/hooks/queries`；`useAppInfo` 已在）、`import { useLang } from "@/hooks/useLang";`、`import { formatRelative } from "@/lib/format";`、`import { updateFailureKey } from "@/lib/errors";`，`@/components/states` 那一行补 `DetailLine`。在 `CliOnPath` 之后加版本与检查更新一行。换行规则：版本与按钮在 `flex-wrap justify-between` 里，按钮放不下时换到下一行；结果是一行短句，失败的细节是 `DetailLine`：
 
-`QuitDialog.tsx`：订阅得到的是 `QuitPrompt`，状态从「条数」改存整个 `prompt`；正文 `t("quit.body", { count: prompt.running })`；`prompt.purpose === "update"` 时正文下面加一段 `update.restart_body`，选了等待之后的说明用 `update.waiting` 而不是 `quit.waiting`。按钮与它们调用的 `quit("wait")` / `quit("stop")` 不变。
+```tsx
+/** The running version, "Check for updates", and what the last check found (design 12). */
+function UpdateCheck() {
+  const { t } = useTranslation();
+  const lang = useLang();
+  const info = useAppInfo();
+  const status = useUpdateStatus();
+  const check = useCheckUpdate();
+  // This check's own outcome first; otherwise what the app keeps (a background check's, or a
+  // failed install's after the restart).
+  const shown = check.data ?? status.data;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium">{info.data ? t("shell.version", { version: info.data.version }) : t("common.loading")}</span>
+        <Button size="sm" variant="outline" disabled={check.isPending} onClick={() => check.mutate()}>
+          {check.isPending && <LoaderCircle aria-hidden className="animate-spin" />}
+          {t("update.check")}
+        </Button>
+      </div>
+      {shown?.kind === "up_to_date" && (
+        <p className="text-xs text-muted-foreground">{t("update.up_to_date", { time: formatRelative(shown.checked_at, lang) })}</p>
+      )}
+      {shown?.kind === "available" && <p className="text-xs text-muted-foreground">{t("update.available", { version: shown.version })}</p>}
+      {shown?.kind === "failed" && (
+        <div>
+          <p className="text-xs text-destructive">{t(updateFailureKey(shown.code))}</p>
+          <DetailLine text={shown.detail} />
+        </div>
+      )}
+    </div>
+  );
+}
+```
 
-`pages/Settings.tsx` 的「系统」分组：
+「系统」分组的最终顺序（Task 2 与本任务合起来）：`<Autostart />`、`<CliOnPath />`、M2 的「自动检查更新」`SwitchRow`（不变，旁注 `settings.auto_update_note` 换成新文案）、`<UpdateCheck />`。版本号沿用 M2 侧栏已有的键 `shell.version`，不另加 `update.version`。
 
-- 第一行：`t("update.version", { version })`（`useAppInfo()` 的 `version`）与按钮「检查更新」（`update.check`，`useCheckUpdate`，进行中禁用）。
-- 下面一行显示 `const shown = check.data ?? status.data`（本次检查的结果优先，否则是存下的状态）：`up_to_date` → `t("update.up_to_date", { time: formatRelative(shown.checked_at, lang) })`；`available` → `t("update.available", { version })`（安装按钮在页顶的横幅里）；`failed` → 标题 `t(updateFailureKey(shown.code))` 加 `<DetailLine text={shown.detail} />`；`unchecked` 不显示。
-- M2 的「自动更新」开关不变，旁注 `settings.auto_update_note` 改为新文案（下表）。
-
-翻译键（`en` / `zh-CN` 如下；`zh-TW`、`ja`、`ko` 同步翻译，`{{…}}` 原样保留）：
+翻译键（`en` / `zh-CN` 如下；`zh-TW`、`ja`、`ko` 同步翻译，`{{…}}` 原样保留；`errors.update_*` 六个键与 `update-failure-cases.json` 一一对应）：
 
 | 键 | en | zh-CN |
 |---|---|---|
@@ -2577,10 +3535,10 @@ export function UpdateBanner() {
 | `update.install` | Install and restart | 安装并重启 |
 | `update.downloading` | Downloading and verifying… | 正在下载并校验… |
 | `update.later` | Later | 稍后 |
+| `update.dismiss` | Dismiss | 知道了 |
 | `update.restart_note` | IssueRelay restarts to install it; if runs are in progress you are asked first. | 安装时 IssueRelay 会重启；有任务在运行时会先问你。 |
 | `update.restart_body` | IssueRelay restarts to install the update once these runs are settled. | 这些运行处理完后，IssueRelay 会重启并安装更新。 |
 | `update.waiting` | Waiting for the runs to finish, then IssueRelay installs the update and restarts. | 正在等待运行结束，之后 IssueRelay 会安装更新并重启。 |
-| `update.version` | Version {{version}} | 版本 {{version}} |
 | `update.check` | Check for updates | 检查更新 |
 | `update.up_to_date` | Up to date (checked {{time}}) | 已是最新版本（{{time}}检查） |
 | `errors.update_unreachable` | Could not reach the update server | 连不上更新服务器 |
@@ -2594,10 +3552,11 @@ export function UpdateBanner() {
 | `settings.auto_update_note` | Checks a minute after start and every 6 hours. Installing always waits for your click. | 启动 1 分钟后检查一次，之后每 6 小时一次；安装总要等你点。 |
 | `notify.update_available` | IssueRelay {{version}} is available | IssueRelay {{version}} 已发布 |
 | `notify.update_available_body` | Open the panel to install it. | 打开面板即可安装。 |
-| `notify.update_install_failed` | The update could not be installed; IssueRelay restarts with the current version. | 更新没能安装，IssueRelay 用当前版本重启。 |
 
 Run: `pnpm --dir app test && pnpm --dir app lint` 与 `cargo test -p issuerelay-app`
-Expected: 全部 PASS（含 `USED_KEYS` 检查、缺键守卫、五种语言对齐）。浏览器里用假后端把 `updateStatus` 临时改成 `available` 看一眼横幅的浅色与深色，看完改回。
+Expected: 全部 PASS（含 `USED_KEYS` 检查、`the_new_version_notice_names_the_version_in_the_users_language`、缺键守卫、五种语言对齐、`api.test.ts` 的 40 条命令与 5 个监听、两边读用例表的测试）。
+
+再量布局（第 12.7 节）：`pnpm --dir app dev`，用假后端把 `updateState` 临时改成 `{ kind: "available", version: "0.2.0" }` 看横幅与设置页的版本一行，再改成 `{ kind: "failed", code: "install_failed", detail: <一段 200 个字符的虚构原因> }` 看失败的横幅，看完改回。浏览器视口宽 900 px 与 885 px（内容区约 620 px 与 605 px），浅色与深色各一次：按钮都够得着，标题与细节断行而不横向溢出。结果写进提交说明。M2 Task 12 的 Playwright 布局测试若已落地，把横幅（有新版本）加进它的概览页用例。
 
 - [ ] **Step 7: `check-secrets.sh` 拦截更新签名私钥**
 
@@ -2622,7 +3581,7 @@ bash scripts/check-secrets.sh --strict; echo "exit $?"
 
 Expected：`1`、`1`、`exit 0` 且没有别的输出（仓库里只有公钥，它的开头是 `…bWluaXNpZ24gcHVibGlj…` 而不是私钥的开头）。Step 0 已经核对过这个特征认得出真正的私钥。
 
-- [ ] **Step 8: 文档**
+- [ ] **Step 8: 文档（事实登记跟代码同一个提交，规则另提交）**
 
 `docs/release/updater-key.md`（中文）：
 
@@ -2667,22 +3626,79 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY --repo sunkailun1992/issuerelay < ~/.tau
 - 私钥泄露：攻击者要发出能被安装的更新，还得能往本仓库的 Releases 上传资产（需要写权限）或冒充 github.com 的 HTTPS。立刻按上一条轮换；同时检查仓库的协作者、Actions 日志与 Releases。
 ~~~
 
-- 设计第 12 节「自动更新」一条改为：「使用 Tauri updater（`tauri-plugin-updater`）：设置里「自动检查更新」打开时，启动 1 分钟后检查一次、之后每 6 小时一次，也可以在设置里手动检查；清单固定为 `https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json`，只接受比当前版本新、用仓库里的公钥验签通过、且签名里记的版本与清单一致的更新包。发现新版本时发一次系统通知、面板顶部显示横幅；安装由用户点「安装并重启」：先下载并验签，有任务在跑时走与退出相同的询问（等待完成 / 立即停止），宿主停下后安装并重启（Windows 交给 NSIS 安装程序）。检查失败、清单缺本平台、验签失败、版本不新只提示，不影响监控。更新包用单独的签名密钥签名，私钥只在维护者本机与 GitHub Actions secrets（`docs/release/updater-key.md`）。」
-- `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 自动更新（检查、验签、经退出流程安装） | app/src-tauri/src/update.rs |`；第 7 节补：「`quit-requested` 的载荷是 `QuitPrompt { running, purpose }`；`update-status` 的载荷是 `UpdateStatus`，改动时同步 `app/src/lib/types.ts`。」
-- `docs/ai-coding/TESTING_SPEC.md` 假实现清单加一行：`| FakeSource | app/src-tauri/src/update.rs 的测试模块 | 更新插件（按脚本给出检查结果与下载结果，并计数下载）；测试不访问网络 |`。
-- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 5 节登记 `docs/release/`（发布相关说明：更新签名密钥）。
+事实登记（跟代码同一个提交）：
 
-Run: 六条验证命令
+- 设计第 12 节「自动更新」一条改为：「使用 Tauri updater（`tauri-plugin-updater`）：设置里「自动检查更新」打开时，启动 1 分钟后检查一次、之后每 6 小时一次，也可以在设置里手动检查；清单固定为 `https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json`，只接受比当前版本新、用仓库里的公钥验签通过、且签名里记的版本与清单一致的更新包。后台检查发现新版本时发一次系统通知（每个版本一次，没有单独的开关，跟随「自动检查更新」）、面板顶部显示横幅；安装由用户点「安装并重启」：先下载并验签，有任务在跑时走与退出相同的询问（等待完成 / 立即停止），宿主停下后安装并重启（Windows 交给 NSIS 安装程序），安装期间关窗或再次退出都不结束进程；等待中从托盘退出则丢掉已下载的更新、只退出。检查失败、清单缺本平台、验签失败、版本不新只提示，不影响监控；宿主停下后才装不上时按原版本重启，面板顶部说明原因（不发通知）。更新包用单独的签名密钥签名，私钥只在维护者本机与 GitHub Actions secrets（`docs/release/updater-key.md`）；`tauri.conf.json` 里的公钥是更新的信任根。」
+- 设计第 9.5 节改为：「「开始运行」「进入待验收」「需要补充信息」「失败」四种运行通知，可以分别关闭；另有自动更新发现新版本时的一条通知（每个版本一次），它没有单独的开关：只有设置里「自动检查更新」打开时才会后台检查、才会发它（第 12 节）。更新装不上只在面板里说明，不发通知。」
+- `docs/ai-coding/AI_CODING_GUIDE.md` 第 5 节加 `| 自动更新（检查、验签、经退出流程安装） | app/src-tauri/src/update.rs |`；第 6 节的表加一行：`| 装不上的更新 | <数据目录>/com.sunkailun.issuerelay/update-install-failure.txt | 「安装并重启」在宿主停下后没装上时写下清洗过的一行原因，程序按原版本重启后读出、删除，面板顶部的横幅显示一次 |`。
+- `docs/ai-coding/TESTING_SPEC.md` 假实现清单加一行：`| FakeSource | app/src-tauri/src/update.rs 的测试模块 | 更新插件（按脚本给出检查结果与下载结果，并计数下载）；测试不访问网络 |`；「面板与 core 共用的用例表」加一行：`| app/src/lib/update-failure-cases.json | errors.test.ts（UPDATE_FAILURE_CODES、ERROR_CODES、updateFailureKey 与 errors.* 文案） | app/src-tauri/src/update.rs 的测试（FailureCode 的 serde 名与 error_code） |`。
+- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 5 节登记 `docs/release/`（发布相关说明：更新签名密钥）。
+- `.github/CODEOWNERS` 加两行（`plugins.updater.pubkey` 是更新的信任根，改它就能换掉已安装程序信任的签名者）：
+
+  ```text
+  /app/src-tauri/tauri.conf.json     @sunkailun1992
+  /app/src-tauri/tauri.*.conf.json   @sunkailun1992
+  ```
+
+规则（单独的 `docs` 提交，只含规则文件，第 11 节）：
+
+- `docs/ai-coding/AI_CODING_GUIDE.md` 第 7 节「面板的类型」一条末尾补：「`quit-requested` 的载荷是 `QuitPrompt { running, purpose }`，`update-status` 的载荷是 `UpdateStatus`；改它们时同步 `app/src/lib/types.ts`、`mock.ts` 与读它们的组件（`QuitDialog`、`UpdateBanner`）。」
+- `docs/ai-coding/SECURITY_CODING_SPEC.md` 第 8 节「供应链」末尾加一条：「自动更新（M3）：程序只向 GitHub Releases 发出检查更新的请求（清单 `…/releases/latest/download/latest.json`，安装包经 `api.github.com` 的资产地址下载），不带任何用户数据，也不算遥测。`tauri.conf.json` 的 `plugins.updater.pubkey` 是更新的信任根：只安装用这把公钥验签通过、签名里记的版本与清单一致（`requireSignedVersion`）且比当前版本新的更新包，从不安装未签名或更旧的版本，也不在开发版或从磁盘映像运行时安装；改这把公钥（`tauri.conf.json`、`tauri.*.conf.json`）要经 CODEOWNERS 评审。私钥只在维护者本机与 GitHub Actions secrets，`check-secrets.sh` 拦截它（`docs/release/updater-key.md`）。」
+
+Run: `pnpm --dir app build` 与六条验证命令
 Expected: 全部通过。
 
 - [ ] **Step 9: Commit**
 
+先提交代码。`AI_CODING_GUIDE.md` 在这个提交里只带第 5、6 节的事实登记：先只改这两节，提交后再改第 7 节（下面的规则提交）。
+
 ```bash
-git add app crates/core/src/config.rs scripts/check-secrets.sh docs Cargo.lock app/pnpm-lock.yaml
-git commit -m "feat(app): add signed automatic updates from GitHub Releases"
+git status --short
+git add app/src-tauri/tauri.conf.json app/src-tauri/tauri.updater.conf.json app/src-tauri/Cargo.toml Cargo.lock \
+  app/src-tauri/build.rs app/src-tauri/capabilities/default.json app/src-tauri/tests/packaging.rs \
+  app/src-tauri/src/update.rs app/src-tauri/src/lib.rs app/src-tauri/src/quit.rs app/src-tauri/src/events.rs \
+  app/src-tauri/src/notify.rs app/src-tauri/src/commands.rs app/src-tauri/src/i18n.rs crates/core/src/config.rs \
+  app/src/lib/update-failure-cases.json app/src/lib/types.ts app/src/lib/backend.ts app/src/lib/api.ts \
+  app/src/lib/api.test.ts app/src/lib/mock.ts app/src/lib/errors.ts app/src/lib/errors.test.ts \
+  app/src/hooks/queries.ts app/src/hooks/useEngineEvents.ts app/src/components/UpdateBanner.tsx \
+  app/src/components/UpdateBanner.test.tsx app/src/components/QuitDialog.tsx app/src/components/QuitDialog.test.tsx \
+  app/src/App.test.tsx app/src/components/layout/AppShell.tsx app/src/pages/Settings.tsx app/src/pages/Settings.test.tsx \
+  app/src/i18n/locales/en.json app/src/i18n/locales/zh-CN.json app/src/i18n/locales/zh-TW.json \
+  app/src/i18n/locales/ja.json app/src/i18n/locales/ko.json scripts/check-secrets.sh docs/release/updater-key.md \
+  docs/superpowers/specs/2026-10-10-issuerelay-design.md docs/ai-coding/AI_CODING_GUIDE.md \
+  docs/ai-coding/TESTING_SPEC.md docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md .github/CODEOWNERS
+git diff --cached --stat
+git commit -F - <<'EOF'
+feat(app): add signed automatic updates from GitHub Releases
+
+The updater plugin checks latest.json on GitHub Releases (a minute after start and every six
+hours while automatic checks are on) and keeps only payloads that verify against the committed
+public key. "Install and restart" goes through the quit flow: with runs in progress the same
+question as quitting, then QuitState::Installing until the install returns, then a restart.
+quit-requested now carries QuitPrompt { running, purpose }. Three commands, registered in
+generate_handler!, PANEL_COMMANDS and the capability (40 commands).
+
+Layout: the update banner and the version row checked at 620 px and 605 px content width,
+light and dark; titles and details wrap, the buttons move under each other when needed.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 ```
 
-提交前确认 `git diff --cached` 里没有 `~/.tauri` 下的任何文件（它们本来就在仓库之外），`bash scripts/check-secrets.sh --strict` 无输出。主智能体在本任务的报告里把 Step 0 的 `gh secret set` 命令交给维护者。
+再提交规则：
+
+```bash
+git status --short
+git add docs/ai-coding/AI_CODING_GUIDE.md docs/ai-coding/SECURITY_CODING_SPEC.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs(ai-coding): describe the quit and update payloads and the updater's trust root
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
+```
+
+两次提交前都确认 `git diff --cached` 里没有 `~/.tauri` 下的任何文件（它们本来就在仓库之外），`bash scripts/check-secrets.sh --strict` 无输出。主智能体在本任务的报告里把 Step 0 的 `gh secret set` 命令交给维护者。
 
 ---
 
@@ -2695,27 +3711,32 @@ git commit -m "feat(app): add signed automatic updates from GitHub Releases"
 - `latest.json` 里的 `url` 是 GitHub API 的资产地址（`api.github.com/repos/…/releases/assets/<id>`），更新插件带 `Accept: application/octet-stream` 下载，会被重定向到文件；只有草稿被公开、且它是仓库最新的正式版本时，`…/releases/latest/download/latest.json` 才指向它。
 - 通用包 `--target universal-apple-darwin` 写出 `darwin-aarch64`、`darwin-x86_64`、`darwin-universal`（及 `-app` 变体）三组键，都指向同一个 `.app.tar.gz`；需要两个 Apple 目标都装在固定的 1.99.0 工具链上。资产名：`IssueRelay_<版本>_universal.dmg`、`IssueRelay_<版本>_universal.app.tar.gz`（与 `.sig`）、`IssueRelay_<版本>_x64-setup.exe`（与 `.sig`）、`IssueRelay_<版本>_x64_en-US.msi`（与 `.sig`）。
 - 上传工作流产物时 `upload-artifact` 的压缩包会丢掉 Unix 权限，所以只传 `.dmg` 与安装包，不传 `.app` 目录。macOS 上 tauri-action 默认设置 `TAURI_BUNDLER_DMG_IGNORE_CI=true`。`macos-latest` 是 macOS 26 arm64，`windows-latest` 是 Windows Server 2025。
-- 可选的 secrets 写进 `$GITHUB_ENV` 再交给后面的步骤：只有存在时才设置环境变量（空字符串的 `APPLE_CERTIFICATE` 之类会让打包器去导入一个空证书）。
+- 可选的 secrets 只经步骤级 `env:` 交给用到它们的那一步，从不写进 `$GITHUB_ENV`（写进去的值会进入之后的每一步，包括 `pnpm build` 与 cargo 的构建脚本）。空字符串的 `APPLE_CERTIFICATE` 之类会让打包器去导入一个空证书，所以 Apple 的六个值只出现在「有 Apple 证书」那一个 tauri-action 步骤里，没有证书时走另一个不带它们的步骤；更新签名私钥只在打开更新包时给（`createUpdaterArtifacts: false` 时 CLI 不读它；执行时按解析到的 tauri-cli 核对，空值有影响就把 tauri-action 步骤再按有无私钥分开）。
+- 拉取请求触发的工作流可能运行 PR 里改过的构建脚本（pnpm、cargo），所以试打包只给只读的令牌（`contents: read`）；只有推送标签的正式发布才有 `contents: write`。权限按任务给、不能按矩阵条目或表达式给，所以打包分成两个任务（`bundle-release`、`bundle-dry-run`），共用可复用工作流 `bundle.yml`，调用方决定它的权限与 secrets。
+- 发布门禁写成 `scripts/release-checks.mjs` 里的纯函数，每道门都有通过与不通过的自测（版本不符、提交不在 main 上、缺资产、缺平台键、签名为空、地址不是本 Release 的资产、通用键指向 MSI）；`verify` 先跑自测，试打包对将要打的标签 `v<版本>`、将要打标签的提交（`origin/main`）和试打包产物跑同样的门，所以没有哪道门第一次运行就在正式标签上（裁定 M3-AR7）。tauri-action 写的真实 `latest.json` 只在正式发布时才有（试打包没有 Release 可传），试打包检查的是由产物得出的「将会写出的」`latest.json`，真实那份由 `verify-release` 检查，不对就标记草稿。
 
 工作流的形状：
 
-- 触发：推送 `v*` 标签 = 正式发布；`workflow_dispatch` 与改了打包相关文件的 `pull_request` = 试打包（同样的检查、测试和打包，产物存为工作流产物，不建 Release）。GitHub 只在工作流文件已经在默认分支上时才允许手动运行它，所以合入之前的第一次试打包靠 M3 自己的 PR 触发。拉取请求触发的试打包从不使用任何 secret。
-- `verify`（ubuntu）：读工作区版本；正式发布时核对标签等于 `v<版本>`、标签提交是 `origin/main` 的祖先；`check-secrets --strict`；记下哪些可选 secrets 齐全（只看是否为空，从不打印值）。
+- 触发：推送 `v*` 标签 = 正式发布；`workflow_dispatch` 与改了打包相关文件的 `pull_request` = 试打包（同样的门禁、测试和打包，产物存为工作流产物，不建 Release）。GitHub 只在工作流文件已经在默认分支上时才允许手动运行它，所以合入之前的第一次试打包靠 M3 自己的 PR 触发。拉取请求触发的试打包拿不到任何 secret（调用 `bundle.yml` 时传空值）。
+- `verify`（ubuntu）：门禁自测；读工作区版本；标签等于 `v<版本>`（试打包用将要打的标签）；标签提交是 `origin/main` 的祖先（试打包用 `origin/main` 本身）；`check-secrets --strict`；记下哪些可选 secrets 齐全（只看是否为空，从不打印值）。
 - `test`（macOS、Windows）：六条验证命令。
-- `create-release`（ubuntu，只在正式发布时）：同一标签已有 Release 就失败；否则建一个草稿，正文写安装说明链接、签名与自动更新的实际情况，输出 `id`。
-- `bundle`（矩阵：macOS 通用包、Windows x64，逐个运行）：装工具链与依赖，`stage-cli`，按 secrets 选配置与签名，`tauri-action` 构建（正式发布时经 `releaseId` 上传并合并 `latest.json`），核对包内容，有更新包时用提交的公钥核对签名，试打包时上传工作流产物。
-- `verify-release`（ubuntu，只要草稿建成了就运行）：草稿仍是草稿；资产齐全；有更新包时 `latest.json` 的版本正确、五个平台键都有签名和地址、`windows-x86_64` 指向 NSIS；任何一项不对就失败并把草稿标题改成「incomplete: do not publish」。
-- 权限：顶层 `contents: read`；`contents: write` 只给 `create-release`、`bundle`、`verify-release`。
+- `create-release`（ubuntu，只在正式发布时，`contents: write`）：同一标签已有 Release 就失败；否则建一个草稿，正文写安装说明链接、签名与自动更新的实际情况，输出 `id`。
+- `bundle-release`（只在正式发布时，`contents: write`）/ `bundle-dry-run`（只在试打包时，`contents: read`）：都调用 `bundle.yml`——矩阵（macOS 通用包、Windows x64）逐个运行：装工具链与依赖，`stage-cli`，构建面板并确认不是占位页，按 secrets 选配置与签名，`tauri-action` 构建（正式发布时经 `releaseId` 上传并合并 `latest.json`），核对包内容，有更新包时用提交的公钥核对签名，试打包时上传工作流产物。
+- `verify-release`（ubuntu，只要草稿建成了就运行，`contents: write`）：草稿仍是草稿；资产齐全；有更新包时真实 `latest.json` 的版本、每个平台键的签名与地址（指向本 Release 的哪个资产）；任何一项不对就失败并把草稿标题改成「incomplete: do not publish」。
+- `verify-dry-run`（ubuntu，只在试打包时，`contents: read`）：下载两个平台的工作流产物，跑同样的资产门与（有更新包时）「将会写出的」`latest.json` 门。
+- 权限：顶层 `contents: read`；`contents: write` 只给 `create-release`、`bundle-release`、`verify-release`。每个任务都有 `timeout-minutes` 和如实说明的注释（调用可复用工作流的任务不能写，上限在 `bundle.yml` 里）。
 
 **Files:**
-- Create: `.github/workflows/release.yml`
+- Create: `.github/workflows/release.yml`、`.github/workflows/bundle.yml`
 - Create: `scripts/verify-update-signature.mjs`
-- Modify: `.github/workflows/ci.yml`（pnpm 与 Node 两步的版本与发布工作流一致）
-- Modify: `MAINTAINERS.md`（英文摘要的发布一条、「发布」一节）、`docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md`（第 7.1 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 10 节）、`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 6 节）、`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 12、18 节）、`.github/CODEOWNERS`（`/scripts/stage-cli.*`、`/scripts/verify-update-signature.mjs`）
+- Modify: `scripts/release-checks.mjs`（Task 1 建的文件：加标签、`origin/main`、资产、`latest.json` 几道门与自测）
+- Modify: `.github/workflows/ci.yml`（`secrets` 任务加一步 actionlint；必需检查的名字不变）
+- Modify（事实登记，跟代码同一个提交）：`docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md`（第 6 节）、`docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 12、18 节）、`.github/CODEOWNERS`（`/scripts/stage-cli.sh`、`/scripts/stage-cli.ps1`、`/scripts/verify-update-signature.mjs`、`/scripts/release-checks.mjs`）
+- Modify（规则，单独的 `docs` 提交）：`MAINTAINERS.md`（英文摘要的发布一条、「发布」一节、「分支保护」表里 `secrets` 一项）、`docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md`（第 7.1 节）、`docs/ai-coding/AI_CODING_GUIDE.md`（第 10 节）
 
 **Interfaces:**
-- Consumes：Task 1 的 `scripts/stage-cli.sh --universal`、`scripts/stage-cli.ps1`、`app/src-tauri/tauri.bundle.conf.json`；Task 3 的 `app/src-tauri/tauri.updater.conf.json`、`plugins.updater.pubkey`；M2 的 `app/package.json`（`packageManager` 字段、`lint`/`test`/`build`/`tauri` 脚本）、`app/pnpm-lock.yaml`、`ci.yml` 的 `test` 任务（M2 Task 1 加的 pnpm、Node 步骤）；`scripts/check-secrets.sh`；`.github/dependabot.yml` 现有的 github-actions 条目（它也更新按 SHA 固定的 action，不用改）。
-- Produces：工作流 `release`（任务 `verify`、`test`、`create-release`、`bundle`、`verify-release`；`verify` 的输出 `version`、`updater`、`apple`、`windows`，`create-release` 的输出 `id`）；试打包的工作流产物 `bundles-macos-universal`、`bundles-windows-x64`；`node scripts/verify-update-signature.mjs --version <X.Y.Z> --artifacts '<JSON 数组>' [--pubkey <base64>]`（退出码 0 / 1 / 2）；secrets 名：`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（不建）、`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`、`WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD`。
+- Consumes：Task 1 的 `scripts/stage-cli.sh --universal`、`scripts/stage-cli.ps1`、`app/src-tauri/tauri.bundle.conf.json`、`scripts/release-checks.mjs`（`panel`、`self-test`、导出的 `PLACEHOLDER_MARKER`）；Task 3 的 `app/src-tauri/tauri.updater.conf.json`、`plugins.updater.pubkey`；M2 的 `app/package.json`（`packageManager` 字段、`lint`/`test`/`build`/`tauri` 脚本）、`app/pnpm-lock.yaml`、`ci.yml` 的 `test` 任务（`rustup toolchain install 1.99.0 …`、`Swatinem/rust-cache@v2`、`pnpm/action-setup@v6`、`actions/setup-node@v7` 与 Node 24，以及每个任务的 `timeout-minutes` 和说明）与 `secrets` 任务；`scripts/check-secrets.sh`；`.github/dependabot.yml` 现有的 github-actions 条目（它也更新按 SHA 固定的 action，不用改）。
+- Produces：工作流 `release`（任务 `verify`、`test`、`create-release`、`bundle-release`、`bundle-dry-run`、`verify-release`、`verify-dry-run`；`verify` 的输出 `version`、`updater`、`apple`、`windows`，`create-release` 的输出 `id`）；可复用工作流 `bundle`（`workflow_call` 输入 `version`、`updater`、`apple`、`windows`、`release-id`，可选 secrets 同名）；试打包的工作流产物 `bundles-macos-universal`、`bundles-windows-x64`；`node scripts/verify-update-signature.mjs --version <X.Y.Z> --artifacts '<JSON 数组>' [--pubkey <base64>]`（退出码 0 / 1 / 2）；`node scripts/release-checks.mjs` 的 `workspace-version`、`tag --tag <标签> [--manifest <Cargo.toml>]`、`on-main --commit <提交> [--ref <引用>]`、`assets --version <X.Y.Z> --updater true|false --mode release|dry-run --names <文件>`、`latest-json --version <X.Y.Z> --latest <文件> --assets <文件>`（每行 `<id>\t<名字>`）、`latest-json-dry-run --version <X.Y.Z> --dir <目录>`，导出 `workspaceVersion`、`tagProblems`、`onMainProblems`、`expectedAssets`、`assetProblems`、`PLATFORM_KEYS`、`latestJsonProblems`、`wouldBeLatestJson`；secrets 名：`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（不建）、`APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`、`WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD`。
 
 - [ ] **Step 1: 写签名核对脚本**
 
@@ -2832,180 +3853,379 @@ rm -rf "$SCRATCH"
 
 Expected，依次：`verified IssueRelay.app.tar.gz` / `exit 0`；`FAILED …: the signature does not name version 0.1.1 …` / `exit 1`；用提交的公钥核对测试密钥的签名：`FAILED …: it was signed with another key …` / `exit 1`；改过的文件：`FAILED …: the signature does not match the file` / `exit 1`；`verify-update-signature: no update signature among the artifacts` / `exit 2`。第一条若是 `the signature does not match the file`，先确认 `.sig` 的第二行解码后前两个字节是 `ED`（预哈希）还是 `Ed`，脚本两种都处理；仍不对就停下来报告。
 
-- [ ] **Step 2: 写 `.github/workflows/release.yml`**
+
+- [ ] **Step 2: 发布门禁（`scripts/release-checks.mjs`，先写失败的自测）**
+
+把文件头的用法注释换成完整的一份：
+
+```js
+// Usage: node scripts/release-checks.mjs <gate> [options]
+//   panel [--index <file>]          the panel about to be embedded (app/dist/index.html by default)
+//                                   is the real one, not build.rs's placeholder page
+//   tag --tag <tag> [--manifest <Cargo.toml>]
+//                                   the tag names the workspace version, which is X.Y.Z
+//   on-main --commit <sha> [--ref <ref>]
+//                                   the commit is on the ref (origin/main by default)
+//   assets --version <X.Y.Z> --updater true|false --mode release|dry-run --names <file>
+//                                   every asset the release (or the dry run) must have is listed
+//                                   in <file>, one name per line
+//   latest-json --version <X.Y.Z> --latest <file> --assets <file>
+//                                   latest.json announces the version, and every platform key has
+//                                   a signature and points at the right asset of the release
+//                                   (<file>: one "<id><TAB><name>" line per asset)
+//   latest-json-dry-run --version <X.Y.Z> --dir <dir>
+//                                   the same for the latest.json a release of the dry run's
+//                                   bundles in <dir> would get
+//   workspace-version               prints the version in the root Cargo.toml (not a gate)
+//   self-test                       every gate against made-up input, passing and failing cases
+// Exit codes: 0 = passed, 1 = a gate failed, 2 = bad arguments or unreadable input.
+```
+
+导入改为：
+
+```js
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+```
+
+`SELF_TESTS` 里在 `panel` 之后加四组（含裁定要求的反例：版本不符、缺资产、缺平台键；`on-main` 在 `mkdtemp` 建的一次性 git 仓库里测，用完删掉）：
+
+```js
+  tag() {
+    const manifest = '[workspace]\nmembers = ["crates/*"]\n\n[workspace.package]\nversion = "0.2.0"\nedition = "2024"\n';
+    assert.equal(workspaceVersion(manifest), "0.2.0");
+    assert.throws(() => workspaceVersion('[package]\nversion = "0.2.0"\n'), /no \[workspace\.package\] version/);
+    assert.deepEqual(tagProblems("v0.2.0", "0.2.0"), []);
+    assert.match(tagProblems("v0.2.1", "0.2.0").join(), /does not name the workspace version 0\.2\.0/);
+    assert.match(tagProblems("0.2.0", "0.2.0").join(), /expected v0\.2\.0/);
+    assert.match(tagProblems("v0.2.0-rc.1", "0.2.0-rc.1").join(), /not X\.Y\.Z/);
+    // The repository's own Cargo.toml reads.
+    assert.match(workspaceVersion(readFileSync(path.join(root, "Cargo.toml"), "utf8")), /^\d+\.\d+\.\d+$/);
+  },
+  "on-main"() {
+    const repo = mkdtempSync(path.join(tmpdir(), "release-checks-"));
+    try {
+      const git = (...args) =>
+        execFileSync("git", ["-c", "user.name=Demo", "-c", "user.email=demo@example.com", "-c", "commit.gpgsign=false", ...args], {
+          cwd: repo,
+          stdio: "pipe",
+        })
+          .toString()
+          .trim();
+      git("init", "--quiet", "--initial-branch=main");
+      git("commit", "--quiet", "--allow-empty", "-m", "one");
+      const onMain = git("rev-parse", "HEAD");
+      git("switch", "--quiet", "-c", "side");
+      git("commit", "--quiet", "--allow-empty", "-m", "side work");
+      const offMain = git("rev-parse", "HEAD");
+      assert.deepEqual(onMainProblems(onMain, "main", repo), []);
+      assert.match(onMainProblems(offMain, "main", repo).join(), /is not on main/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  },
+  assets() {
+    const release = expectedAssets("0.2.0", true, "release");
+    assert.deepEqual(assetProblems(release, "0.2.0", true, "release"), []);
+    assert.deepEqual(assetProblems(release.filter((name) => !name.endsWith(".msi")), "0.2.0", true, "release"), [
+      "missing asset IssueRelay_0.2.0_x64_en-US.msi",
+    ]);
+    // Bundles of another version are none of this version's assets.
+    assert.equal(assetProblems(expectedAssets("0.1.9", true, "release"), "0.2.0", true, "release").length, release.length);
+    // Without the update key: no payloads, no signatures, no latest.json.
+    assert.deepEqual(expectedAssets("0.2.0", false, "release"), [
+      "IssueRelay_0.2.0_universal.dmg",
+      "IssueRelay_0.2.0_x64-setup.exe",
+      "IssueRelay_0.2.0_x64_en-US.msi",
+    ]);
+    // A dry run keeps the bundler's own name of the macOS payload and has no latest.json.
+    assert.ok(expectedAssets("0.2.0", true, "dry-run").includes("IssueRelay.app.tar.gz.sig"));
+    assert.ok(!expectedAssets("0.2.0", true, "dry-run").includes("latest.json"));
+  },
+  "latest-json"() {
+    const assets = [
+      { id: "11", name: "IssueRelay_0.2.0_universal.app.tar.gz" },
+      { id: "22", name: "IssueRelay_0.2.0_x64-setup.exe" },
+      { id: "33", name: "IssueRelay_0.2.0_x64_en-US.msi" },
+    ];
+    const api = (id) => `https://api.github.com/repos/demo/issuerelay/releases/assets/${id}`;
+    const entry = (id) => ({ signature: "c2lnbmF0dXJl", url: api(id) });
+    const idFor = { ".app.tar.gz": "11", "-setup.exe": "22", ".msi": "33" };
+    const good = {
+      version: "0.2.0",
+      platforms: Object.fromEntries(Object.entries(PLATFORM_KEYS).map(([key, suffix]) => [key, entry(idFor[suffix])])),
+    };
+    assert.deepEqual(latestJsonProblems(good, "0.2.0", assets), []);
+    assert.match(latestJsonProblems({ ...good, version: "0.1.9" }, "0.2.0", assets).join(), /announces 0\.1\.9, not 0\.2\.0/);
+    const withoutUniversal = { ...good, platforms: { ...good.platforms } };
+    delete withoutUniversal.platforms["darwin-universal"];
+    assert.match(latestJsonProblems(withoutUniversal, "0.2.0", assets).join(), /no entry for darwin-universal/);
+    const unsigned = { ...good, platforms: { ...good.platforms, "windows-x86_64-msi": { signature: "", url: api("33") } } };
+    assert.match(latestJsonProblems(unsigned, "0.2.0", assets).join(), /windows-x86_64-msi has no signature/);
+    const elsewhere = { ...good, platforms: { ...good.platforms, "darwin-aarch64": entry("99") } };
+    assert.match(latestJsonProblems(elsewhere, "0.2.0", assets).join(), /no asset of this release/);
+    const msiForAll = { ...good, platforms: { ...good.platforms, "windows-x86_64": entry("33") } };
+    assert.match(latestJsonProblems(msiForAll, "0.2.0", assets).join(), /windows-x86_64 points at .*\.msi, not the -setup\.exe payload/);
+    // A dry run's would-be latest.json passes the same gate; a missing signature fails it.
+    const bundles = ["IssueRelay.app.tar.gz", "IssueRelay_0.2.0_x64-setup.exe", "IssueRelay_0.2.0_x64_en-US.msi"].map((name) => ({ id: name, name }));
+    assert.deepEqual(latestJsonProblems(wouldBeLatestJson("0.2.0", bundles, () => "c2ln"), "0.2.0", bundles), []);
+    assert.match(latestJsonProblems(wouldBeLatestJson("0.2.0", bundles, () => ""), "0.2.0", bundles).join(), /has no signature/);
+  },
+```
+
+Run: `node scripts/release-checks.mjs self-test; echo "exit $?"`
+Expected: `ok panel`，另外四行 `FAILED tag: workspaceVersion is not defined` 之类，`exit 1`。
+
+再在 `// ---- gates` 一节里 `panelProblems` 之后加门禁本身：
+
+```js
+/** The workspace version: `version` in the `[workspace.package]` table of the root Cargo.toml. */
+export function workspaceVersion(cargoToml) {
+  const table = cargoToml.split(/^\[/m).find((part) => part.startsWith("workspace.package]"));
+  const match = table?.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!match) throw new Error("Cargo.toml has no [workspace.package] version");
+  return match[1];
+}
+
+/** What is wrong with releasing `version` under `tag`. */
+export function tagProblems(tag, version) {
+  const problems = [];
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    problems.push(`the workspace version ${version} is not X.Y.Z (MSI refuses pre-release suffixes like -rc.1)`);
+  }
+  if (tag !== `v${version}`) problems.push(`tag ${tag} does not name the workspace version ${version} in Cargo.toml (expected v${version})`);
+  return problems;
+}
+
+/** Whether `commit` is on `ref` (it, or one of its ancestors), as git says. */
+export function onMainProblems(commit, ref, cwd = root) {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, ref], { cwd, stdio: "ignore" });
+    return [];
+  } catch (error) {
+    if (error.status === 1) return [`${commit} is not on ${ref}: a release is built only from a commit of main`];
+    throw new Error(`git merge-base could not compare ${commit} with ${ref}`);
+  }
+}
+
+/**
+ * The assets a release (`mode` "release") or a dry run's bundles ("dry-run") of `version` must
+ * have. tauri-action renames the macOS update payload when it uploads it; in a dry run it keeps
+ * the bundler's own name. (Names from tauri-action v1.0.0 and tauri-bundler 2.10.2; the first
+ * dry run shows the real ones.)
+ */
+export function expectedAssets(version, updater, mode) {
+  const names = [`IssueRelay_${version}_universal.dmg`, `IssueRelay_${version}_x64-setup.exe`, `IssueRelay_${version}_x64_en-US.msi`];
+  if (!updater) return names;
+  const payload = mode === "release" ? `IssueRelay_${version}_universal.app.tar.gz` : "IssueRelay.app.tar.gz";
+  names.push(payload, `${payload}.sig`, `IssueRelay_${version}_x64-setup.exe.sig`, `IssueRelay_${version}_x64_en-US.msi.sig`);
+  if (mode === "release") names.push("latest.json");
+  return names;
+}
+
+export function assetProblems(names, version, updater, mode) {
+  const present = new Set(names);
+  return expectedAssets(version, updater, mode)
+    .filter((name) => !present.has(name))
+    .map((name) => `missing asset ${name}`);
+}
+
+/**
+ * The platform keys tauri-action v1.0.0 writes into latest.json for a universal macOS build and
+ * the Windows installers (with `updaterJsonPreferNsis`), and the payload each must point at.
+ */
+export const PLATFORM_KEYS = {
+  "darwin-aarch64": ".app.tar.gz",
+  "darwin-aarch64-app": ".app.tar.gz",
+  "darwin-x86_64": ".app.tar.gz",
+  "darwin-x86_64-app": ".app.tar.gz",
+  "darwin-universal": ".app.tar.gz",
+  "darwin-universal-app": ".app.tar.gz",
+  "windows-x86_64": "-setup.exe",
+  "windows-x86_64-nsis": "-setup.exe",
+  "windows-x86_64-msi": ".msi",
+};
+
+/** The asset a latest.json `url` names: GitHub's API asset URL ends in its id, a download URL (or a dry run's) in its name. */
+function assetAt(url, assets) {
+  const last = String(url ?? "").split("/").pop();
+  return assets.find((asset) => String(asset.id) === last || asset.name === last);
+}
+
+/** What is wrong with `latest` for `version`, given the release's assets (`{ id, name }`). */
+export function latestJsonProblems(latest, version, assets) {
+  const problems = [];
+  if (latest?.version !== version && latest?.version !== `v${version}`) problems.push(`latest.json announces ${latest?.version}, not ${version}`);
+  for (const [key, suffix] of Object.entries(PLATFORM_KEYS)) {
+    const entry = latest?.platforms?.[key];
+    if (!entry) {
+      problems.push(`latest.json has no entry for ${key}`);
+      continue;
+    }
+    if (typeof entry.signature !== "string" || entry.signature.trim() === "") problems.push(`latest.json's ${key} has no signature`);
+    const asset = assetAt(entry.url, assets);
+    if (!asset) problems.push(`latest.json's ${key} points at ${entry.url}, which is no asset of this release`);
+    else if (!asset.name.endsWith(suffix)) problems.push(`latest.json's ${key} points at ${asset.name}, not the ${suffix} payload`);
+  }
+  return problems;
+}
+
+/** The latest.json a release of these bundles would get, the way tauri-action writes it, with the bundle names as urls. */
+export function wouldBeLatestJson(version, assets, signatureOf) {
+  const platforms = {};
+  for (const [key, suffix] of Object.entries(PLATFORM_KEYS)) {
+    const asset = assets.find((candidate) => candidate.name.endsWith(suffix));
+    if (asset) platforms[key] = { signature: signatureOf(asset.name), url: asset.name };
+  }
+  return { version, platforms };
+}
+```
+
+命令行一节：`GATES` 里在 `panel` 之后加下面几道，`main` 开头在 `self-test` 那一行之后加 `workspace-version`，并加四个小工具：
+
+```js
+  tag: {
+    options: { tag: { type: "string" }, manifest: { type: "string" } },
+    run: (values) => tagProblems(required(values, "tag"), workspaceVersion(readFileSync(values.manifest ?? path.join(root, "Cargo.toml"), "utf8"))),
+  },
+  "on-main": {
+    options: { commit: { type: "string" }, ref: { type: "string" } },
+    run: (values) => onMainProblems(required(values, "commit"), values.ref ?? "origin/main"),
+  },
+  assets: {
+    options: { version: { type: "string" }, updater: { type: "string" }, mode: { type: "string" }, names: { type: "string" } },
+    run: (values) => assetProblems(lines(required(values, "names")), required(values, "version"), choice(values, "updater", ["true", "false"]) === "true", choice(values, "mode", ["release", "dry-run"])),
+  },
+  "latest-json": {
+    options: { version: { type: "string" }, latest: { type: "string" }, assets: { type: "string" } },
+    run: (values) => {
+      const assets = lines(required(values, "assets")).map((line) => {
+        const [id, name = ""] = line.split("\t");
+        return { id, name };
+      });
+      return latestJsonProblems(JSON.parse(readFileSync(required(values, "latest"), "utf8")), required(values, "version"), assets);
+    },
+  },
+  "latest-json-dry-run": {
+    options: { version: { type: "string" }, dir: { type: "string" } },
+    run: (values) => {
+      const files = readdirSync(required(values, "dir"), { recursive: true, withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => path.join(entry.parentPath, entry.name));
+      const assets = files.map((file) => ({ id: path.basename(file), name: path.basename(file) }));
+      const signatureOf = (name) => {
+        const sig = files.find((file) => path.basename(file) === `${name}.sig`);
+        return sig === undefined ? "" : readFileSync(sig, "utf8").trim();
+      };
+      const version = required(values, "version");
+      return latestJsonProblems(wouldBeLatestJson(version, assets, signatureOf), version, assets);
+    },
+  },
+```
+
+```js
+  if (name === "workspace-version" && rest.length === 0) {
+    console.log(workspaceVersion(readFileSync(path.join(root, "Cargo.toml"), "utf8")));
+    return 0;
+  }
+```
+
+```js
+function required(values, name) {
+  if (values[name] === undefined) throw new Error(`--${name} is required`);
+  return values[name];
+}
+
+function choice(values, name, allowed) {
+  const value = required(values, name);
+  if (!allowed.includes(value)) throw new Error(`--${name} is one of ${allowed.join(", ")}`);
+  return value;
+}
+
+/** The non-empty lines of a file. */
+function lines(file) {
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+```
+
+Run:
+
+```bash
+node scripts/release-checks.mjs self-test; echo "exit $?"
+node scripts/release-checks.mjs workspace-version
+node scripts/release-checks.mjs tag --tag "v$(node scripts/release-checks.mjs workspace-version)"; echo "exit $?"
+node scripts/release-checks.mjs tag --tag v9.9.9; echo "exit $?"
+git fetch --no-tags origin main && node scripts/release-checks.mjs on-main --commit "$(git rev-parse FETCH_HEAD)" --ref FETCH_HEAD; echo "exit $?"
+node scripts/release-checks.mjs assets --version 0.1.0 --updater maybe --mode release --names /dev/null; echo "exit $?"
+```
+
+Expected，依次：`ok panel`、`ok tag`、`ok on-main`、`ok assets`、`ok latest-json`、`exit 0`；工作区版本（例如 `0.1.0`）；`ok tag`、`exit 0`；`FAILED tag: tag v9.9.9 does not name the workspace version …`、`exit 1`；`ok on-main`、`exit 0`；`release-checks: --updater is one of true, false`、`exit 2`。
+
+- [ ] **Step 3: 写 `.github/workflows/bundle.yml` 与 `.github/workflows/release.yml`**
+
+`.github/workflows/bundle.yml`（可复用；权限由调用它的任务给）：
 
 ```yaml
-name: release
+name: bundle
 
-# A `vX.Y.Z` tag on a commit of main builds the installers and puts them in ONE draft GitHub
-# release; a maintainer publishes it by hand (MAINTAINERS.md, "发布"). A manual run and a pull
-# request that changes the packaging are dry runs: the same checks, tests and bundles, kept as
-# workflow artifacts, and no release. Optional secrets are used only when they are set, and
-# never in a pull request.
+# Builds the installers for release.yml, on macOS (universal) and Windows (x64), one platform at a
+# time: into the draft release when `release-id` is set (the calling job then has
+# `contents: write`), as workflow artifacts otherwise (a dry run, called read-only). Optional
+# secrets reach only the steps that use them, as step-level env, and are never written to
+# $GITHUB_ENV; a dry run of a pull request is called without any.
 on:
-  push:
-    tags: ["v*"]
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - scripts/stage-cli.sh
-      - scripts/stage-cli.ps1
-      - scripts/verify-update-signature.mjs
-      - app/src-tauri/tauri.conf.json
-      - app/src-tauri/tauri.bundle.conf.json
-      - app/src-tauri/tauri.updater.conf.json
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  # A release only for a pushed tag; everything else is a dry run.
-  RELEASE: ${{ github.event_name == 'push' }}
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      updater:
+        description: '"true" when the update-signing key is set and may be used'
+        type: string
+        required: true
+      apple:
+        type: string
+        required: true
+      windows:
+        type: string
+        required: true
+      release-id:
+        description: The draft release to upload to; empty in a dry run
+        type: string
+        required: false
+        default: ""
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      updater: ${{ steps.secrets.outputs.updater }}
-      apple: ${{ steps.secrets.outputs.apple }}
-      windows: ${{ steps.secrets.outputs.windows }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Read the workspace version
-        id: version
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "workspace version: $version"
-      - name: The tag names the workspace version
-        if: env.RELEASE == 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $VERSION in Cargo.toml"
-            exit 1
-          fi
-      - name: The tagged commit is on main
-        if: env.RELEASE == 'true'
-        run: |
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
-            echo "::error::$GITHUB_REF_NAME points at a commit that is not on origin/main"
-            exit 1
-          fi
-      - run: bash scripts/check-secrets.sh --strict
-      - name: Which optional secrets are set
-        id: secrets
-        # Only whether each secret is empty is tested; no value is printed. Pull requests never use any.
-        env:
-          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
-          HAS_APPLE: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
-          HAS_WINDOWS: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
-          IS_PR: ${{ github.event_name == 'pull_request' }}
-        run: |
-          use() { if [[ "$IS_PR" != true && "$1" == true ]]; then echo true; else echo false; fi; }
-          {
-            echo "updater=$(use "$HAS_UPDATER_KEY")"
-            echo "apple=$(use "$HAS_APPLE")"
-            echo "windows=$(use "$HAS_WINDOWS")"
-          } | tee -a "$GITHUB_OUTPUT"
-
-  test:
-    needs: verify
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          package_json_file: app/package.json
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
-      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: pnpm --dir app install --frozen-lockfile
-      - run: pnpm --dir app lint
-      - run: pnpm --dir app test
-      # The Tauri crate embeds the built panel, as in ci.yml.
-      - run: pnpm --dir app build
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: bash scripts/check-secrets.sh --strict
-        shell: bash
-
-  create-release:
-    needs: [verify, test]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      id: ${{ steps.create.outputs.id }}
-    steps:
-      - name: Create the draft release
-        id: create
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.verify.outputs.version }}
-          UPDATER: ${{ needs.verify.outputs.updater }}
-          APPLE: ${{ needs.verify.outputs.apple }}
-          WINDOWS: ${{ needs.verify.outputs.windows }}
-        run: |
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .id")
-          if [[ -n "$existing" ]]; then
-            echo "::error::a release for $TAG exists already (id $existing); delete that draft first, or release the next version"
-            exit 1
-          fi
-          notes=$(mktemp)
-          {
-            echo "Install guide / 安装说明: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/install.md"
-            echo
-            echo "- macOS (Apple silicon and Intel): \`IssueRelay_${VERSION}_universal.dmg\`"
-            echo "- Windows: \`IssueRelay_${VERSION}_x64-setup.exe\` (recommended: installs for your user, no administrator rights) or \`IssueRelay_${VERSION}_x64_en-US.msi\` (installs for all users, needs administrator rights)"
-            echo
-            if [[ "$APPLE" == true ]]; then
-              echo "- macOS: signed with a Developer ID and notarized by Apple."
-            else
-              echo "- macOS: not notarized by Apple (signed ad hoc). The first start needs one approval: System Settings → Privacy & Security → Open Anyway. / 未经 Apple 公证：第一次打开要在「系统设置 → 隐私与安全性」里点「仍要打开」。"
-            fi
-            if [[ "$WINDOWS" == true ]]; then
-              echo "- Windows: the installers are code-signed."
-            else
-              echo "- Windows: the installers are not code-signed; SmartScreen asks once (More info → Run anyway). / 安装包未签名：SmartScreen 提示时点「更多信息 → 仍要运行」。"
-            fi
-            if [[ "$UPDATER" != true ]]; then
-              echo "- This release has no automatic-update package: installed copies do not update to it by themselves; download and install it by hand. / 本版本不含自动更新包：已安装的程序不会自动更新到这个版本，请手动下载安装。"
-            fi
-          } > "$notes"
-          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$TAG" -f name="IssueRelay $TAG" -F draft=true -F prerelease=false \
-            -F body=@"$notes" --jq .id)
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "draft release $id created for $TAG"
-
   bundle:
-    needs: [verify, test, create-release]
-    # Dry runs (create-release skipped) and releases (draft created) both bundle.
-    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.test.result == 'success' && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       # One at a time: tauri-action merges latest.json by downloading, editing and uploading it
@@ -3020,10 +4240,16 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # The heaviest job of a release: on macOS the app and the CLI are compiled for both
+    # architectures, from a cold cache at worst, then signed (and notarized with a certificate).
+    # 90 minutes is well above that and far below GitHub's default of six hours.
     timeout-minutes: 90
     env:
-      VERSION: ${{ needs.verify.outputs.version }}
-      UPDATER: ${{ needs.verify.outputs.updater }}
+      VERSION: ${{ inputs.version }}
+      UPDATER: ${{ inputs.updater }}
+      RELEASE: ${{ inputs.release-id != '' }}
+      # One --config at a time: externalBin only, or externalBin and the update payloads.
+      CONFIG: ${{ inputs.updater == 'true' && 'src-tauri/tauri.updater.conf.json' || 'src-tauri/tauri.bundle.conf.json' }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -3054,52 +4280,19 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/stage-cli.ps1
-      - name: Use the update-signing key
-        if: env.UPDATER == 'true'
+      - name: Build the panel and check it is not build.rs's placeholder
         shell: bash
-        env:
-          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<ISSUERELAY_EOF"
-            echo "$KEY"
-            echo "ISSUERELAY_EOF"
-            # The key has no password (docs/release/updater-key.md): with CI set the CLI uses an
-            # empty one. A password secret, if one is ever set, is passed on.
-            if [[ -n "$PASSWORD" ]]; then
-              echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD<<ISSUERELAY_EOF"
-              echo "$PASSWORD"
-              echo "ISSUERELAY_EOF"
-            fi
-            echo "ISSUERELAY_TAURI_CONFIG=src-tauri/tauri.updater.conf.json"
-          } >> "$GITHUB_ENV"
-      - name: Bundle without update payloads
-        if: env.UPDATER != 'true'
-        shell: bash
-        run: echo "ISSUERELAY_TAURI_CONFIG=src-tauri/tauri.bundle.conf.json" >> "$GITHUB_ENV"
-      - name: Use the Apple signing certificate
-        if: runner.os == 'macOS' && needs.verify.outputs.apple == 'true'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # APPLE_SIGNING_IDENTITY overrides the ad hoc "-" in tauri.conf.json; the CLI imports the
-        # certificate into a temporary keychain and notarizes with the Apple ID.
-        run: |
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            { echo "$name<<ISSUERELAY_EOF"; printenv "$name"; echo "ISSUERELAY_EOF"; } >> "$GITHUB_ENV"
-          done
+          pnpm --dir app build
+          node scripts/release-checks.mjs panel
       - name: Use the Windows signing certificate
-        if: runner.os == 'Windows' && needs.verify.outputs.windows == 'true'
+        if: runner.os == 'Windows' && inputs.windows == 'true'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        # Tauri merges tauri.windows.conf.json by itself when it builds on Windows.
+        # Tauri merges tauri.windows.conf.json by itself when it builds on Windows; the file holds
+        # the certificate's thumbprint, not a secret. The PFX is removed once imported.
         run: |
           $config = 'app/src-tauri/tauri.windows.conf.json'
           if (Test-Path $config) { throw "$config is in the repository; merge the signing settings into it instead" }
@@ -3112,17 +4305,53 @@ jobs:
             ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $config
       - name: Build the bundles
         id: tauri
+        # Every build but a macOS one with an Apple certificate: macOS signs ad hoc ("-" in
+        # tauri.conf.json), Windows signs with the thumbprint above when there is one.
+        if: runner.os != 'macOS' || inputs.apple != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Only read when tauri.updater.conf.json switches the update payloads on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           projectPath: app
-          args: --target ${{ matrix.target }} --config ${{ env.ISSUERELAY_TAURI_CONFIG }}
+          args: --target ${{ matrix.target }} --config ${{ env.CONFIG }}
           # Empty in a dry run: then the action only builds.
-          releaseId: ${{ needs.create-release.outputs.id }}
-          uploadUpdaterJson: ${{ env.UPDATER == 'true' }}
+          releaseId: ${{ inputs.release-id }}
+          uploadUpdaterJson: ${{ inputs.updater == 'true' }}
           updaterJsonPreferNsis: true
           retryAttempts: 1
+      - name: Build the bundles (Developer ID signed and notarized)
+        id: tauri-apple
+        if: runner.os == 'macOS' && inputs.apple == 'true'
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          # APPLE_SIGNING_IDENTITY overrides the ad hoc "-"; the CLI imports the certificate into a
+          # temporary keychain and notarizes with the Apple ID.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: app
+          args: --target ${{ matrix.target }} --config ${{ env.CONFIG }}
+          releaseId: ${{ inputs.release-id }}
+          uploadUpdaterJson: ${{ inputs.updater == 'true' }}
+          updaterJsonPreferNsis: true
+          retryAttempts: 1
+      - name: The files the build produced
+        id: built
+        shell: bash
+        env:
+          PLAIN: ${{ steps.tauri.outputs.artifactPaths }}
+          SIGNED: ${{ steps.tauri-apple.outputs.artifactPaths }}
+        run: echo "paths=${PLAIN:-$SIGNED}" >> "$GITHUB_OUTPUT"
       - name: Check the macOS bundle
         if: runner.os == 'macOS'
         run: |
@@ -3159,14 +4388,14 @@ jobs:
         if: env.UPDATER == 'true'
         shell: bash
         env:
-          ARTIFACTS: ${{ steps.tauri.outputs.artifactPaths }}
+          ARTIFACTS: ${{ steps.built.outputs.paths }}
         run: node scripts/verify-update-signature.mjs --version "$VERSION" --artifacts "$ARTIFACTS"
       - name: List the bundles to keep
         if: env.RELEASE != 'true'
         id: bundles
         shell: bash
         env:
-          ARTIFACTS: ${{ steps.tauri.outputs.artifactPaths }}
+          ARTIFACTS: ${{ steps.built.outputs.paths }}
         # The .app folder is left out: a zipped folder loses its Unix permissions; the .dmg holds it.
         run: |
           {
@@ -3182,11 +4411,243 @@ jobs:
           path: ${{ steps.bundles.outputs.paths }}
           if-no-files-found: error
           retention-days: 7
+```
+
+`.github/workflows/release.yml`：
+
+```yaml
+name: release
+
+# A `vX.Y.Z` tag on a commit of main builds the installers and puts them in ONE draft GitHub
+# release; a maintainer publishes it by hand (MAINTAINERS.md, "发布"). A manual run and a pull
+# request that changes the packaging are dry runs: the same gates (scripts/release-checks.mjs, for
+# the tag that would be pushed and for the dry run's bundles), tests and bundles, kept as workflow
+# artifacts, and no release. Only the jobs of a tag push can write to the repository; optional
+# secrets are used only when they are set, and never in a pull request.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/bundle.yml
+      - scripts/stage-cli.sh
+      - scripts/stage-cli.ps1
+      - scripts/verify-update-signature.mjs
+      - scripts/release-checks.mjs
+      - app/src-tauri/tauri.conf.json
+      - app/src-tauri/tauri.bundle.conf.json
+      - app/src-tauri/tauri.updater.conf.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # A checkout, two git commands, the secret scan and the gates' self-test: a minute or two.
+    # The limit only stops a hung step long before GitHub's default of six hours.
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      updater: ${{ steps.secrets.outputs.updater }}
+      apple: ${{ steps.secrets.outputs.apple }}
+      windows: ${{ steps.secrets.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: The release gates pass their own tests
+        run: node scripts/release-checks.mjs self-test
+      - name: Read the workspace version
+        id: version
+        run: |
+          version=$(node scripts/release-checks.mjs workspace-version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "workspace version: $version"
+      - name: The tag names the workspace version
+        env:
+          # A release checks its own tag; a dry run the tag that would be pushed (MAINTAINERS.md).
+          TAG: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+        run: node scripts/release-checks.mjs tag --tag "$TAG"
+      - name: The tagged commit is on main
+        env:
+          IS_RELEASE: ${{ github.event_name == 'push' }}
+        # A release checks the tagged commit; a dry run the commit a tag would be put on (origin/main).
+        run: |
+          git fetch --no-tags origin main
+          if [[ "$IS_RELEASE" == true ]]; then commit=$GITHUB_SHA; else commit=$(git rev-parse FETCH_HEAD); fi
+          node scripts/release-checks.mjs on-main --commit "$commit" --ref FETCH_HEAD
+      - run: bash scripts/check-secrets.sh --strict
+      - name: Which optional secrets are set
+        id: secrets
+        # Only whether each secret is empty is tested; no value is printed. Pull requests never use any.
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_APPLE: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+          HAS_WINDOWS: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          use() { if [[ "$IS_PR" != true && "$1" == true ]]; then echo true; else echo false; fi; }
+          {
+            echo "updater=$(use "$HAS_UPDATER_KEY")"
+            echo "apple=$(use "$HAS_APPLE")"
+            echo "windows=$(use "$HAS_WINDOWS")"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  test:
+    needs: verify
+    # The six checks, as ci.yml's test job: 45 minutes there for the first uncached compile of the
+    # Tauri app (Windows slowest); the same here.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: pnpm --dir app install --frozen-lockfile
+      - run: pnpm --dir app lint
+      - run: pnpm --dir app test
+      # The Tauri crate embeds the built panel, as in ci.yml.
+      - run: pnpm --dir app build
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: bash scripts/check-secrets.sh --strict
+        shell: bash
+
+  create-release:
+    needs: [verify, test]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Two API calls: seconds. The limit only stops a hung call.
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      id: ${{ steps.create.outputs.id }}
+    steps:
+      - name: Create the draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          UPDATER: ${{ needs.verify.outputs.updater }}
+          APPLE: ${{ needs.verify.outputs.apple }}
+          WINDOWS: ${{ needs.verify.outputs.windows }}
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate | jq -r --arg tag "$TAG" '.[] | select(.tag_name == $tag) | .id')
+          if [[ -n "$existing" ]]; then
+            echo "::error::a release for $TAG exists already (id $existing); delete that draft first, or release the next version"
+            exit 1
+          fi
+          notes=$(mktemp)
+          trap 'rm -f "$notes"' EXIT
+          {
+            echo "Install guide / 安装说明: https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/install.md"
+            echo
+            echo "- macOS (Apple silicon and Intel, macOS 13.3 or later): \`IssueRelay_${VERSION}_universal.dmg\`"
+            echo "- Windows: \`IssueRelay_${VERSION}_x64-setup.exe\` (recommended: installs for your user, no administrator rights) or \`IssueRelay_${VERSION}_x64_en-US.msi\` (installs for all users, needs administrator rights)"
+            echo
+            if [[ "$APPLE" == true ]]; then
+              echo "- macOS: signed with a Developer ID and notarized by Apple."
+            else
+              echo "- macOS: not notarized by Apple (signed ad hoc). The first start needs one approval: System Settings → Privacy & Security → Open Anyway. / 未经 Apple 公证：第一次打开要在「系统设置 → 隐私与安全性」里点「仍要打开」。"
+            fi
+            if [[ "$WINDOWS" == true ]]; then
+              echo "- Windows: the installers are code-signed."
+            else
+              echo "- Windows: the installers are not code-signed; SmartScreen asks once (More info → Run anyway). / 安装包未签名：SmartScreen 提示时点「更多信息 → 仍要运行」。"
+            fi
+            if [[ "$UPDATER" != true ]]; then
+              echo "- This release has no automatic-update package: installed copies do not update to it by themselves; download and install it by hand. / 本版本不含自动更新包：已安装的程序不会自动更新到这个版本，请手动下载安装。"
+            fi
+          } > "$notes"
+          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" -f name="IssueRelay $TAG" -F draft=true -F prerelease=false \
+            -F body=@"$notes" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release $id created for $TAG"
+
+  bundle-release:
+    needs: [verify, test, create-release]
+    if: github.event_name == 'push'
+    # Uploads into the draft. (A job that calls a reusable workflow cannot set timeout-minutes;
+    # bundle.yml's job has the limit.)
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      updater: ${{ needs.verify.outputs.updater }}
+      apple: ${{ needs.verify.outputs.apple }}
+      windows: ${{ needs.verify.outputs.windows }}
+      release-id: ${{ needs.create-release.outputs.id }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
+  bundle-dry-run:
+    needs: [verify, test]
+    if: github.event_name != 'push'
+    # Read-only: a pull request's own build scripts run here. A pull request gets no secret at all;
+    # a manual run (on the default branch) gets them, so the update signatures are checked too.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bundle.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      updater: ${{ needs.verify.outputs.updater }}
+      apple: ${{ needs.verify.outputs.apple }}
+      windows: ${{ needs.verify.outputs.windows }}
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+      APPLE_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+      APPLE_SIGNING_IDENTITY: ${{ github.event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+      APPLE_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_ID || '' }}
+      APPLE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
+      WINDOWS_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.WINDOWS_CERTIFICATE || '' }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
 
   verify-release:
-    needs: [verify, create-release, bundle]
+    needs: [verify, create-release, bundle-release]
     if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
+    # Two API calls, one small download and the gates: well under a minute.
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -3195,44 +4656,29 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       UPDATER: ${{ needs.verify.outputs.updater }}
     steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: The draft has every asset and latest.json every platform
         run: |
           set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
           draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft)
           if [[ "$draft" != true ]]; then
             echo "::error::release $RELEASE_ID is no longer a draft"
             exit 1
           fi
-          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | "\(.id) \(.name)"')
-          echo "$assets"
-          want=("IssueRelay_${VERSION}_universal.dmg" "IssueRelay_${VERSION}_x64-setup.exe" "IssueRelay_${VERSION}_x64_en-US.msi")
-          if [[ "$UPDATER" == true ]]; then
-            want+=("IssueRelay_${VERSION}_universal.app.tar.gz" "IssueRelay_${VERSION}_universal.app.tar.gz.sig"
-                   "IssueRelay_${VERSION}_x64-setup.exe.sig" "IssueRelay_${VERSION}_x64_en-US.msi.sig" "latest.json")
-          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | "\(.id)\t\(.name)"' > "$work/assets.tsv"
+          cut -f2 "$work/assets.tsv" | tee "$work/names.txt"
           failed=0
-          for name in "${want[@]}"; do
-            if ! awk -v n="$name" '$2 == n { found = 1 } END { exit !found }' <<<"$assets"; then
-              echo "::error::missing asset $name"
-              failed=1
-            fi
-          done
-          id=$(awk '$2 == "latest.json" { print $1 }' <<<"$assets")
-          if [[ "$UPDATER" == true && -n "$id" ]]; then
-            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" -H "Accept: application/octet-stream" > latest.json
-            if ! jq -e --arg v "$VERSION" '.version == $v or .version == ("v" + $v)' latest.json > /dev/null; then
-              echo "::error::latest.json announces $(jq -r .version latest.json), not $VERSION"
-              failed=1
-            fi
-            for key in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-x86_64-nsis windows-x86_64-msi; do
-              if ! jq -e --arg k "$key" '.platforms[$k] | ((.signature // "") | length > 0) and ((.url // "") | length > 0)' latest.json > /dev/null; then
-                echo "::error::latest.json has no signed entry for $key"
-                failed=1
-              fi
-            done
-            if ! jq -e '.platforms["windows-x86_64"].url == .platforms["windows-x86_64-nsis"].url' latest.json > /dev/null; then
-              echo "::error::latest.json's windows-x86_64 entry does not point at the NSIS installer"
-              failed=1
+          node scripts/release-checks.mjs assets --version "$VERSION" --updater "$UPDATER" --mode release --names "$work/names.txt" || failed=1
+          if [[ "$UPDATER" == true ]]; then
+            id=$(awk -F '\t' '$2 == "latest.json" { print $1 }' "$work/assets.tsv")
+            if [[ -n "$id" ]]; then
+              gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" -H "Accept: application/octet-stream" > "$work/latest.json"
+              node scripts/release-checks.mjs latest-json --version "$VERSION" --latest "$work/latest.json" --assets "$work/assets.tsv" || failed=1
             fi
           fi
           exit "$failed"
@@ -3242,48 +4688,120 @@ jobs:
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -f name="IssueRelay $GITHUB_REF_NAME (incomplete: do not publish)" > /dev/null
           echo "::error::the draft is incomplete and was renamed; see MAINTAINERS.md, 发布"
-```
 
-（几处要在第一次运行时看实际行为、与这里不同就照实改并写进报告：`releaseId` 为空字符串时 tauri-action 是否只构建；`--config` 的相对路径是否按 `projectPath`（`app/`）解析；`7z l` 能否列出 NSIS 安装包里的文件——不能时改为检查 `target/x86_64-pc-windows-msvc/release/` 下的两个 exe，并在报告里说明；`gh api … -H "Accept: application/octet-stream"` 能否跟随重定向取到草稿里的 `latest.json`——不能时改用 `curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream"`。）
-
-- [ ] **Step 3: 静态检查与固定的 action 版本**
-
-```bash
-ruby -ryaml -e 'YAML.load_file(".github/workflows/release.yml"); puts "yaml ok"'
-git ls-remote https://github.com/tauri-apps/tauri-action 'refs/tags/v1.0.0' 'refs/tags/v1.0.0^{}'
-git ls-remote https://github.com/pnpm/action-setup 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'
-git ls-remote https://github.com/Swatinem/rust-cache 'refs/tags/v2.9.2' 'refs/tags/v2.9.2^{}'
-```
-
-Expected：`yaml ok`；三个仓库各返回标签（附注标签还会多一行 `^{}`），指向提交的那一行分别是 `1deb371b0cd8bd54025b384f1cd735e725c4060f`、`ea17c68df8912ef543352723c149a84f56e3d413`、`6323deb102c322ba6fcbdcafc7e3dddab59af2b6`。不一致时用 `ls-remote` 给出的提交替换 `release.yml` 里的 SHA，并在报告里写明。
-
-- [ ] **Step 4: `ci.yml` 的 pnpm 与 Node 与发布工作流一致**
-
-`.github/workflows/ci.yml` 的 `test` 任务里，M2 Task 1 加的两步改成下面这样（`pnpm/action-setup` 的浮动标签 `v6` 停在 6.0.10，不支持 pnpm 12，所以写到 `v6.1.0`；Node 24 是当前的长期支持版）：
-
-```yaml
-      - uses: pnpm/action-setup@v6.1.0
-        with:
-          package_json_file: app/package.json
+  verify-dry-run:
+    needs: [verify, bundle-dry-run]
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # Downloads the dry run's bundles (a few hundred megabytes) and runs the gates: minutes.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      UPDATER: ${{ needs.verify.outputs.updater }}
+    steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bundles-*
+          path: dry-run
+      - name: The bundles a release of this version would have, and its latest.json
+        run: |
+          set -euo pipefail
+          names=$(mktemp)
+          trap 'rm -f "$names"' EXIT
+          find dry-run -type f -exec basename {} \; | sort | tee "$names"
+          failed=0
+          node scripts/release-checks.mjs assets --version "$VERSION" --updater "$UPDATER" --mode dry-run --names "$names" || failed=1
+          if [[ "$UPDATER" == true ]]; then
+            node scripts/release-checks.mjs latest-json-dry-run --version "$VERSION" --dir dry-run || failed=1
+          fi
+          exit "$failed"
 ```
 
-其余步骤不变（`ci.yml` 不放命令行程序也能编译应用 crate：`externalBin` 不在基础配置里）。
+（几处要在第一次运行时看实际行为、与这里不同就照实改并写进报告：`releaseId` 为空字符串时 tauri-action 是否只构建；`--config` 的相对路径是否按 `projectPath`（`app/`）解析；`createUpdaterArtifacts: false` 时空的 `TAURI_SIGNING_PRIVATE_KEY` 是否被忽略（不被忽略就把不带私钥的构建再分出一个步骤）；可复用工作流收到空字符串的 secret 时是否当作没有；`7z l` 能否列出 NSIS 安装包里的文件——不能时改为检查 `target/x86_64-pc-windows-msvc/release/` 下的两个 exe，并在报告里说明；`gh api … -H "Accept: application/octet-stream"` 能否跟随重定向取到草稿里的 `latest.json`——不能时改用 `curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream"`；`expectedAssets` 与 `PLATFORM_KEYS` 写的是调研读到的 tauri-action v1.0.0 与 tauri-bundler 2.10.2 的名字，与第一次试打包或第一个草稿不同就照实改脚本与它的自测。）
 
-- [ ] **Step 5: 文档**
+- [ ] **Step 4: 静态检查与固定的 action 版本**
 
-`MAINTAINERS.md`：英文摘要里「Releases start at M3…」一条改为「Releases start at M3: a maintainer bumps the version in a PR, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets.」「## 发布」一节整节换成：
+```bash
+ruby -ryaml -e 'ARGV.each { |f| YAML.load_file(f) }; puts "yaml ok"' .github/workflows/release.yml .github/workflows/bundle.yml
+git ls-remote https://github.com/tauri-apps/tauri-action 'refs/tags/v1.0.0' 'refs/tags/v1.0.0^{}'
+git ls-remote https://github.com/pnpm/action-setup 'refs/tags/v6.1.0' 'refs/tags/v6.1.0^{}'
+git ls-remote https://github.com/Swatinem/rust-cache 'refs/tags/v2.9.2' 'refs/tags/v2.9.2^{}'
+git ls-remote https://github.com/rhysd/actionlint 'refs/tags/v*' | tail -3
+```
+
+Expected：`yaml ok`；三个仓库各返回标签（附注标签还会多一行 `^{}`），指向提交的那一行分别是 `1deb371b0cd8bd54025b384f1cd735e725c4060f`、`ea17c68df8912ef543352723c149a84f56e3d413`、`6323deb102c322ba6fcbdcafc7e3dddab59af2b6`；不一致时用 `ls-remote` 给出的提交替换 `release.yml` / `bundle.yml` 里的 SHA，并在报告里写明。最后一行列出 actionlint 最新的几个发布，Step 5 写最新那个的版本号。本机有 Docker 时再跑一次 `docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:<版本> -color`（无输出即通过）；没有 Docker 就以推送后 CI 的 `secrets` 任务为准，不为此安装工具。
+
+- [ ] **Step 5: `ci.yml` 用 actionlint 检查工作流**
+
+M2 的 `ci.yml` 已经用 `pnpm/action-setup@v6` 与 Node 24（`packageManager` 是 pnpm 10），不用改它的 pnpm 与 Node 两步。在 `secrets` 任务（ubuntu，必需检查之一，名字不变）的 `check-secrets` 之后加一步：
+
+```yaml
+      # actionlint checks every workflow: expressions, job outputs and needs, reusable workflow
+      # inputs, and the shell in `run:` through shellcheck. The author's container image, pinned
+      # to a release (Step 4 of the M3 plan: the newest at the time).
+      - name: Lint the workflows
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+```
+
+（`1.7.7` 换成 Step 4 查到的最新发布；`docker://` 只能在 Linux 运行器上用，`secrets` 任务正是 ubuntu。actionlint 报的问题——包括 shellcheck 对 `run:` 脚本的意见——照改，不加忽略。）
+
+Run: 推送前本机能跑就跑 Step 4 的 Docker 命令；推送后看 `ci` 的 `secrets` 任务。
+Expected: `secrets` 任务通过，两条命令都没有输出问题。
+
+- [ ] **Step 6: 文档（事实登记）与代码提交**
+
+- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 6 节加：`.github/workflows/release.yml`：版本标签触发的打包与草稿 Release，手动运行与改了打包配置的 PR 只试打包；`.github/workflows/bundle.yml`：两种打包共用的可复用工作流（权限由调用的任务给）；`scripts/verify-update-signature.mjs`：用提交的公钥核对更新包签名；`scripts/release-checks.mjs` 一条补上「标签与版本、`origin/main`、资产与 `latest.json` 的门禁」（用法见文件头）。
+- 设计第 12 节「GitHub Actions」一条改为：「GitHub Actions（`release.yml`）：推送版本标签时先跑门禁（`scripts/release-checks.mjs`：标签与版本、标签提交在 `main` 上）并扫描密钥，在 macOS 和 Windows 上跑全部验证命令，建一个草稿 Release，逐个平台打包上传，最后核对资产与 `latest.json` 齐全；由维护者确认后公开。手动运行与改了打包配置的 PR 只试打包（只读，拉取请求拿不到 secrets），对将要打的标签与试打包产物跑同样的门禁。」第 18 节第 2 条后补：「现状（M3）：没有证书时 macOS 包做 ad-hoc 签名（不是完全不签：未签名的 arm64 包下载后会被报『已损坏』），Windows 不签名；secrets 里放齐 Apple 或 Windows 证书后，发布工作流自动改用正式签名（macOS 同时公证）。」
+- `.github/CODEOWNERS` 加四行（发布流水线；`/.github/` 已经覆盖两个工作流）：
+
+  ```text
+  /scripts/stage-cli.sh                 @sunkailun1992
+  /scripts/stage-cli.ps1                @sunkailun1992
+  /scripts/verify-update-signature.mjs  @sunkailun1992
+  /scripts/release-checks.mjs           @sunkailun1992
+  ```
+
+Run: `pnpm --dir app build`、六条验证命令与 `node scripts/release-checks.mjs self-test`
+Expected: 全部通过。
+
+```bash
+git status --short
+git add .github/workflows/release.yml .github/workflows/bundle.yml .github/workflows/ci.yml .github/CODEOWNERS \
+  scripts/verify-update-signature.mjs scripts/release-checks.mjs \
+  docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md docs/superpowers/specs/2026-10-10-issuerelay-design.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+ci: build installers and draft a GitHub release on version tags
+
+release.yml: the gates (scripts/release-checks.mjs, self-tested, also run by dry runs for the
+tag that would be pushed and the dry run's bundles), the six checks, one draft release, the
+bundles of the reusable bundle.yml one platform at a time, then the draft's assets and
+latest.json. Only a tag push can write; dry runs are read-only and pull requests get no
+secrets, which reach only the steps that use them. Every job has a time limit, and ci.yml
+lints the workflows with actionlint.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
+```
+
+- [ ] **Step 7: 发布规则（单独的 `docs` 提交）**
+
+`MAINTAINERS.md`：英文摘要里「Releases start at M3…」一条改为「Releases start at M3: a maintainer bumps the version in a PR, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets.」「分支保护」表里「必需检查」一行的 `secrets` 后面补「（含 actionlint 检查工作流）」。「## 发布」一节整节换成：
 
 ~~~markdown
 ## 发布
 
-M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.github/workflows/release.yml`，安装说明 `docs/install.md`，更新签名密钥 `docs/release/updater-key.md`。
+M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.github/workflows/release.yml`（打包在 `bundle.yml`），门禁 `scripts/release-checks.mjs`，安装说明 `docs/install.md`，更新签名密钥 `docs/release/updater-key.md`。
 
-1. **升版本号**：开一个 PR，把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；合入 `main`。
+1. **升版本号**：开一个普通的 PR，把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本，再运行 `cargo update -w`（只更新本仓库 crate 在 `Cargo.lock` 里的版本），两个文件一起提交；0.x 阶段升次版本号时，`crates/cli`、`crates/devhost`、`app/src-tauri` 对 `issuerelay-core` 的版本要求一起改（`AI_CODING_GUIDE.md` 第 10 节）。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；CI 全绿后合入 `main`。不在本地临时改版本号再改回来。
 2. **推标签**（本地会话）：
 
    ```bash
@@ -3293,7 +4811,7 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
    git push origin "v$version"
    ```
 
-3. **等工作流全绿**：`verify`（标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `test`（macOS、Windows 六条验证命令）→ `create-release`（建一个草稿）→ `bundle`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。
+3. **等工作流全绿**：`verify`（门禁自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `test`（macOS、Windows 六条验证命令）→ `create-release`（建一个草稿）→ `bundle-release`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名、地址指向本 Release 的资产）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。这些门禁在每次试打包里已经对将要打的标签跑过。
 4. **检查草稿**：资产有 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`；有更新签名私钥时还有 `_universal.app.tar.gz` 与三个 `.sig`、`latest.json`。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
 5. **公开**：在 GitHub 的草稿页点「Publish release」。这是对外动作，只由维护者亲手点，工作流和 AI 都不公开。公开后 `…/releases/latest/download/latest.json` 才指向新版本，已安装的程序在下次检查时看到更新。
 6. **失败或放弃**：没公开的草稿可以删掉（Releases 页面删除草稿，再 `git push origin --delete "v$version"` 删标签），修好后重推同一个标签；已经公开的版本号永不重用，修复用下一个版本号。
@@ -3307,55 +4825,65 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
 | `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | 否（六个齐全才用） | Developer ID 签名与公证 | ad-hoc 签名、不公证：用户第一次打开要在「隐私与安全性」里放行一次 |
 | `WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD` | 否（两个齐全才用） | Windows 代码签名（PFX 文件的 base64 与密码） | 不签名：SmartScreen 提示一次 |
 
-secrets 只由管理员在仓库设置里改；拉取请求触发的试打包从不使用它们。
+secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤；拉取请求触发的试打包拿不到它们，试打包只有只读权限。
 ~~~
 
-- `docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md` 第 7.1 节改为：「可以做实机验收、打版本标签、发布安装包。发布只从已推送到 `origin/main` 的提交构建：发布工作流核对标签提交在 `origin/main` 上、标签等于工作区版本，只建草稿 Release；公开由维护者在 GitHub 页面上点。」
-- `docs/ai-coding/AI_CODING_GUIDE.md` 第 10 节最后一条改为：「M3 起推送 `vX.Y.Z` 标签触发发布（`.github/workflows/release.yml`）：标签必须等于工作区版本、标签提交必须在 `origin/main` 上，工作流只建草稿，步骤见 `MAINTAINERS.md`「发布」。」
-- `docs/ai-coding/AI_DIRECTORY_STRUCTURE_GUIDE.md` 第 6 节加：`.github/workflows/release.yml`：版本标签触发的打包与草稿 Release，手动运行与改了打包配置的 PR 只试打包；`scripts/verify-update-signature.mjs`：用提交的公钥核对更新包签名（用法见文件头）。
-- 设计第 12 节「GitHub Actions」一条改为：「GitHub Actions（`release.yml`）：推送版本标签时先核对标签与版本、标签提交在 `main` 上并扫描密钥，在 macOS 和 Windows 上跑全部验证命令，建一个草稿 Release，逐个平台打包上传，最后核对资产与 `latest.json` 齐全；由维护者确认后公开。手动运行与改了打包配置的 PR 只试打包。」第 18 节第 2 条后补：「现状（M3）：没有证书时 macOS 包做 ad-hoc 签名（不是完全不签：未签名的 arm64 包下载后会被报『已损坏』），Windows 不签名；secrets 里放齐 Apple 或 Windows 证书后，发布工作流自动改用正式签名（macOS 同时公证）。」
-- `.github/CODEOWNERS` 加 `/scripts/stage-cli.sh`、`/scripts/stage-cli.ps1`、`/scripts/verify-update-signature.mjs` 三行（发布流水线）。
-
-Run: 六条验证命令
-Expected: 全部通过。
-
-- [ ] **Step 6: Commit**
+- `docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md` 第 7.1 节改为：「可以做实机验收、打版本标签、发布安装包。发布只从已推送到 `origin/main` 的提交构建：发布工作流核对标签提交在 `origin/main` 上、标签等于工作区版本，只建草稿 Release；公开由维护者在 GitHub 页面上点。升版本号是合入 `main` 的普通 PR，不在本地临时改了再改回。」
+- `docs/ai-coding/AI_CODING_GUIDE.md` 第 10 节最后一条改为：「M3 起推送 `vX.Y.Z` 标签触发发布（`.github/workflows/release.yml`）：标签必须等于工作区版本、标签提交必须在 `origin/main` 上（`scripts/release-checks.mjs`，试打包同样检查），工作流只建草稿，步骤见 `MAINTAINERS.md`「发布」。」
 
 ```bash
-git add .github scripts/verify-update-signature.mjs MAINTAINERS.md docs
-git commit -m "ci: build installers and draft a GitHub release on version tags"
+git status --short
+git add MAINTAINERS.md docs/ai-coding/AI_ENGINEERING_GUARDRAILS.md docs/ai-coding/AI_CODING_GUIDE.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs: describe how a maintainer releases from a version tag
+
+The version bump is an ordinary PR; the tag goes on origin/main; the workflow only drafts
+the release and a maintainer publishes it. Release secrets reach only the steps that use
+them, and dry runs are read-only.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 ```
 
-- [ ] **Step 7: 试打包（M3 的 PR）**
+- [ ] **Step 8: 试打包（M3 的 PR）**
 
-推送分支并开草稿 PR（已开过就只推送）；改了打包配置，`release` 工作流随 PR 运行：
+推送分支并开草稿 PR（已开过就只推送）；改了打包配置，`release` 工作流随 PR 运行。先同步（AI_ENGINEERING_GUARDRAILS 第 7.3 节）：`main` 前进了而本分支还没推送过，就 `git rebase origin/main` 并重跑六条验证命令；已经推送过就 `git merge origin/main`，不 rebase 已推送的提交。
 
 ```bash
-git fetch origin && git rebase origin/main   # only if main moved; then run the six commands again
+git fetch origin
+git status -sb
 git push -u origin feat/m3-release
-# First time only: open a draft PR whose description follows .github/pull_request_template.md.
-gh pr create --draft --title "feat: installers, CLI on PATH, signed auto-update and the release workflow (M3)" --body-file "$PR_BODY"
-gh run list --workflow release.yml --branch feat/m3-release --limit 1
-gh run watch "$(gh run list --workflow release.yml --branch feat/m3-release --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+mktemp -d   # first time only: prints a folder for the PR description
 ```
 
-（`$PR_BODY` 是按 `.github/pull_request_template.md` 填好的描述文件，放在 `mktemp -d` 的临时目录里。刚推送时运行可能还没出现在列表里，几秒后再查。）
-
-Expected：`verify`、两个 `test`、两个 `bundle` 成功，`create-release` 与 `verify-release` 跳过；`verify` 的输出 `updater=false`、`apple=false`、`windows=false`（拉取请求从不使用 secrets）；两个包内容检查通过。下载产物核对：
+第一次开 PR 时，把按 `.github/pull_request_template.md` 填好的描述用写文件的工具写进上面打印的目录下的 `pr.md`，再运行（`<目录>` 换成那个目录；变量不跨命令保留，所以直接写路径），之后删掉那个目录：
 
 ```bash
-SCRATCH=$(mktemp -d)
+gh pr create --draft --title "feat: installers, CLI on PATH, signed auto-update and the release workflow (M3)" --body-file "<目录>/pr.md"
+rm -rf "<目录>"
 run=$(gh run list --workflow release.yml --branch feat/m3-release --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run download "$run" -D "$SCRATCH"
-find "$SCRATCH" -type f | sed "s|$SCRATCH/||" | sort
-dmg=$(find "$SCRATCH" -name 'IssueRelay_*_universal.dmg' | head -1)
-mkdir "$SCRATCH/mnt" && hdiutil attach -nobrowse -readonly -mountpoint "$SCRATCH/mnt" "$dmg" > /dev/null
-lipo -archs "$SCRATCH/mnt/IssueRelay.app/Contents/MacOS/issuerelay" "$SCRATCH/mnt/IssueRelay.app/Contents/MacOS/issuerelay-app"
-codesign --verify --deep --strict "$SCRATCH/mnt/IssueRelay.app" && echo "signature ok"
-hdiutil detach "$SCRATCH/mnt" > /dev/null
+gh run watch "$run" --exit-status
 ```
 
-Expected：`bundles-macos-universal/…/IssueRelay_<版本>_universal.dmg`、`bundles-windows-x64/…/IssueRelay_<版本>_x64-setup.exe`、`…/IssueRelay_<版本>_x64_en-US.msi`（`<版本>` 是工作区版本；没有 `.sig`：试打包不签更新包）；两个 `lipo` 都是 `x86_64 arm64`；`signature ok`。把 `$SCRATCH` 留给 Task 6 用（Task 6 结束时删除）。任何一处与预期不同（资产名、目录结构、tauri-action 的行为），修好、推送、重跑，并在报告里写明差异与改法。
+（刚推送时运行可能还没出现在列表里：`run` 为空或是上一次的编号时，几秒后再运行一次 `gh run list` 那一行。）
+
+Expected：`verify`、两个 `test`、`bundle-dry-run` 的两个打包任务、`verify-dry-run` 成功，`create-release`、`bundle-release`、`verify-release` 跳过；`verify` 里门禁自测五行 `ok`，`tag` 与 `on-main` 两道门通过（将要打的标签、`origin/main`），输出 `updater=false`、`apple=false`、`windows=false`（拉取请求从不使用 secrets）；两个包内容检查与面板检查通过；`verify-dry-run` 的资产门通过（没有更新包时只查三个安装包）。下载产物核对（临时目录用完即删，Task 6 自己再下载）：
+
+```bash
+work=$(mktemp -d)
+run=$(gh run list --workflow release.yml --branch feat/m3-release --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -D "$work"
+find "$work" -type f | sed "s|$work/||" | sort
+dmg=$(find "$work" -name 'IssueRelay_*_universal.dmg' | head -1)
+mkdir "$work/mnt" && hdiutil attach -nobrowse -readonly -mountpoint "$work/mnt" "$dmg" > /dev/null
+lipo -archs "$work/mnt/IssueRelay.app/Contents/MacOS/issuerelay" "$work/mnt/IssueRelay.app/Contents/MacOS/issuerelay-app"
+codesign --verify --deep --strict "$work/mnt/IssueRelay.app" && echo "signature ok"
+hdiutil detach "$work/mnt" > /dev/null
+rm -rf "$work"
+```
+
+Expected：`bundles-macos-universal/…/IssueRelay_<版本>_universal.dmg`、`bundles-windows-x64/…/IssueRelay_<版本>_x64-setup.exe`、`…/IssueRelay_<版本>_x64_en-US.msi`（`<版本>` 是工作区版本；没有 `.sig`：试打包不签更新包）；两个 `lipo` 都是 `x86_64 arm64`；`signature ok`。任何一处与预期不同（资产名、目录结构、tauri-action 的行为），修好、推送、重跑，并在报告里写明差异与改法（资产名不同就同时改 `release-checks.mjs` 的 `expectedAssets` 与它的自测）。
 
 ---
 
@@ -3386,7 +4914,7 @@ IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）
 | Windows（推荐） | `IssueRelay_<版本>_x64-setup.exe` | 只装给你自己，不需要管理员权限 |
 | Windows（为所有用户安装） | `IssueRelay_<版本>_x64_en-US.msi` | 需要管理员权限；之后的更新也会要求管理员确认 |
 
-只从上面这个 Releases 页面下载。
+只从上面这个 Releases 页面下载。系统要求：macOS 13.3 及以后（Apple 芯片或 Intel）；Windows 10 或 11（x64）。每个版本的发布说明写明这一版是否经过 Apple 公证、Windows 安装包是否签名，以及是否带自动更新包。
 
 ## macOS 安装
 
@@ -3395,7 +4923,7 @@ IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）
 
 ## macOS 第一次打开
 
-在 Apple 公证之前，第一次打开会被 macOS 拦下来，只需放行一次：
+没有经过 Apple 公证的版本（发布说明里写着「not notarized」），第一次打开会被 macOS 拦下来，只需放行一次；经过公证的版本没有这一步，直接打开即可：
 
 - **macOS 15 及以后**：双击 IssueRelay，看到提示后点「完成」；打开「系统设置 → 隐私与安全性」，在「安全性」下面点 IssueRelay 旁边的「仍要打开」（被拦后大约一小时内可以点），输入登录密码，再确认一次。之后就能正常打开。
 - **macOS 14 及更早**：按住 Control 点按 IssueRelay，选「打开」，再点「打开」。
@@ -3404,7 +4932,7 @@ IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）
 
 ## Windows 安装
 
-1. 双击 `-setup.exe`。若出现「Windows 已保护你的电脑」，点「更多信息」，再点「仍要运行」（安装包没有代码签名时会这样）。
+1. 双击 `-setup.exe`。没有代码签名的安装包（发布说明里写着「not code-signed」）会出现「Windows 已保护你的电脑」：点「更多信息」，再点「仍要运行」。签过名的安装包通常不会这样，但新证书在积累信誉之前也可能出现同样的提示。
 2. 按提示安装；默认装到 `%LOCALAPPDATA%\IssueRelay`，不需要管理员权限。
 3. 若安装包或程序被直接拦截、没有「仍要运行」：打开「Windows 安全中心 → 应用和浏览器控制 → 智能应用控制」查看是否开启。公司管理的电脑请联系管理员。
 
@@ -3450,9 +4978,9 @@ IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）
 ```markdown
 ## 安装 / Install
 
-从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。安装包还没有经过 Apple 公证和 Windows 代码签名，第一次打开要放行一次；步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。
+从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次；经过公证、签名的版本没有这一步。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。
 
-Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). The installers are not yet notarized by Apple or code-signed for Windows, so the first start needs one approval (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway). See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
+Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, do not. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
 ```
 
 设计第 12 节「代码签名」一条改为：「代码签名：见第 18 节。未公证 / 未签名时，`docs/install.md` 与 README 写清放行步骤：macOS 15 起在『系统设置 → 隐私与安全性』点『仍要打开』（14 及更早：Control 点按 → 打开），Windows SmartScreen『更多信息 → 仍要运行』。」
@@ -3467,8 +4995,17 @@ Run: 六条验证命令
 Expected: 全部通过（`check-secrets` 不会命中：文档里的路径都以 `~`、`%LOCALAPPDATA%` 或 `/Applications` 开头）。
 
 ```bash
+git status --short
 git add docs/install.md README.md docs/superpowers/specs/2026-10-10-issuerelay-design.md
-git commit -m "docs: add installation instructions"
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs: add installation instructions
+
+docs/install.md and the README's install section; the signing state is worded per release
+(unsigned builds need one approval, signed builds do not), as each release's notes state it.
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 ```
 
 ---
@@ -3484,21 +5021,32 @@ git commit -m "docs: add installation instructions"
 - Modify: `docs/superpowers/specs/2026-10-10-issuerelay-design.md`（第 17 节 M3 一行的完成情况；按实测更新第 12 节里与实际不符的说法）、`docs/install.md`（按实测改提示文字）
 
 **Interfaces:**
-- Consumes：Task 4 Step 7 留下的试打包产物（`$SCRATCH`）；Task 1 的 `scripts/stage-cli.sh`、`tauri.bundle.conf.json`；Task 3 的 `~/.tauri/issuerelay.key`（只以路径交给构建，从不读出）；Task 5 的 `docs/install.md`；M2 Task 13 的沙箱项目与沙箱仓库。
+- Consumes：Task 4 Step 8 的试打包运行（本任务按运行编号重新下载产物，不靠别的任务留下的 shell 变量或临时文件）；Task 1 的 `scripts/stage-cli.sh`、`tauri.bundle.conf.json`；Task 3 的 `~/.tauri/issuerelay.key`（只以路径交给构建，从不读出）；Task 5 的 `docs/install.md`；M2 Task 13 的沙箱项目与沙箱仓库。
 - Produces：验收报告；`v<工作区版本>` 标签与一个通过 `verify-release` 的草稿 Release（由维护者公开）。
 
 - [ ] **Step 1: 前提**
 
-Task 4 Step 7 的试打包全绿；`gh secret list --repo sunkailun1992/issuerelay` 里有 `TAURI_SIGNING_PRIVATE_KEY`（只看名字）。没有时请维护者运行 Task 3 Step 0 的 `gh secret set` 命令；维护者决定先不上传时，第 8 步只核对打包（`updater=false`，没有签名可核对），第 9–10 步照常做，草稿会是「不含自动更新包」的版本，报告里写明。
+Task 4 Step 8 的试打包全绿；`gh secret list --repo sunkailun1992/issuerelay` 里有 `TAURI_SIGNING_PRIVATE_KEY`（只看名字）。没有时请维护者运行 Task 3 Step 0 的 `gh secret set` 命令；维护者决定先不上传时，第 8 步只核对打包（`updater=false`，没有签名可核对），第 9–10 步照常做，草稿会是「不含自动更新包」的版本，报告里写明。
 
 - [ ] **Step 2: 按说明安装（macOS，不需要管理员）**
 
-模拟浏览器下载（给 dmg 加上浏览器会加的隔离标记；能请用户用 Safari 从 PR 的产物页下载更好）后，按 `docs/install.md` 拖进个人「应用程序」：
+本任务的临时文件都放在一个 `mktemp -d` 建的目录里（Step 6 结束时删掉）。shell 变量不跨步骤保留，所以后面每一步开头都用同一段命令按名字重新找到它。先建目录，再按运行编号下载 Task 4 Step 8 的试打包产物，模拟浏览器下载（给 dmg 加上浏览器会加的隔离标记；能请用户用 Safari 从 PR 的产物页下载更好）后，按 `docs/install.md` 拖进个人「应用程序」：
 
 ```bash
-dmg=$(find "$SCRATCH" -name 'IssueRelay_*_universal.dmg' | head -1)
+ACCEPT=$(mktemp -d "${TMPDIR:-/tmp}/issuerelay-m3-acceptance.XXXXXX")
+run=$(gh run list --workflow release.yml --branch feat/m3-release --event pull_request --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run download "$run" -n bundles-macos-universal -D "$ACCEPT/dry-run"
+dmg=$(find "$ACCEPT/dry-run" -name 'IssueRelay_*_universal.dmg' | head -1)
 xattr -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Safari;" "$dmg"
 open "$dmg"   # drag IssueRelay to ~/Applications in Finder, then eject the disk image
+```
+
+后面的步骤开头用这三行重新求出 `ACCEPT`（找不到或不止一个就停下）：
+
+```bash
+set -- "${TMPDIR:-/tmp}"/issuerelay-m3-acceptance.*
+[[ $# -eq 1 && -d $1 ]] || { echo "expected one acceptance folder, found: $*"; exit 1; }
+ACCEPT=$1
 ```
 
 记录：本机 macOS 版本（`sw_vers -productVersion`）；拷贝后的应用是否带隔离标记（`xattr -l ~/Applications/IssueRelay.app | grep quarantine`）。
@@ -3518,33 +5066,44 @@ open "$dmg"   # drag IssueRelay to ~/Applications in Finder, then eject the disk
 
 - [ ] **Step 5: 本机更新测试：A → B（Review Focus 1；调研未确认 2、4）**
 
-用两份本机构建测试真正的更新：A 是当前版本，B 是临时升到下一个补丁版本、用真正的私钥签名的构建；两者的更新地址都临时指向本机。这两份只用于测试，不进仓库、不发布。
+用两份本机构建测试真正的更新：A 是当前版本，B 是下一个补丁版本、用真正的私钥签名的构建；两者的更新地址都临时指向本机。这两份只用于测试，不进仓库、不发布。B 的版本号只在 `$ACCEPT` 下的一次性 worktree 里改（`cargo update -w` 同步那里的 `Cargo.lock`，`stage-cli.sh` 的 `--locked` 才过得去），主检出的 `Cargo.toml`、`Cargo.lock` 从头到尾不动，也就没有「改回去」这一步（裁定 M3-AR4）：
 
 ```bash
-UPDATE_TEST=$(mktemp -d)
+set -- "${TMPDIR:-/tmp}"/issuerelay-m3-acceptance.*
+[[ $# -eq 1 && -d $1 ]] || { echo "expected one acceptance folder, found: $*"; exit 1; }
+ACCEPT=$1
+mkdir -p "$ACCEPT/A" "$ACCEPT/serve"
 bash scripts/stage-cli.sh
-# A: the current version, its updater pointed at this machine (test build only).
+pnpm --dir app build && node scripts/release-checks.mjs panel
+# A: the current version, its updater pointed at this machine (a test build; nothing is committed).
 CI=true pnpm --dir app tauri build --bundles app --config '{"bundle":{"externalBin":["binaries/issuerelay"]},"plugins":{"updater":{"endpoints":["http://127.0.0.1:8765/latest.json"],"dangerousInsecureTransportProtocol":true}}}'
-ditto target/release/bundle/macos/IssueRelay.app "$UPDATE_TEST/A/IssueRelay.app"
-# B: the next patch version, signed with the real key, which is passed as a path and never read.
-current=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+ditto target/release/bundle/macos/IssueRelay.app "$ACCEPT/A/IssueRelay.app"
+# B: the next patch version, in a throwaway worktree of the same commit, signed with the real key,
+# which is passed as a path and never read.
+git worktree add --detach "$ACCEPT/b-tree" HEAD
+current=$(node scripts/release-checks.mjs workspace-version)
 next=$(echo "$current" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
-sed -i '' "s/^version = \"$current\"$/version = \"$next\"/" Cargo.toml
-bash scripts/stage-cli.sh
-TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/issuerelay.key" CI=true pnpm --dir app tauri build --bundles app --config '{"bundle":{"externalBin":["binaries/issuerelay"],"createUpdaterArtifacts":true},"plugins":{"updater":{"endpoints":["http://127.0.0.1:8765/latest.json"],"dangerousInsecureTransportProtocol":true}}}'
-git checkout Cargo.toml Cargo.lock
-mkdir -p "$UPDATE_TEST/serve"
-cp target/release/bundle/macos/IssueRelay.app.tar.gz "$UPDATE_TEST/serve/"
-node scripts/verify-update-signature.mjs --version "$next" --artifacts "[\"$UPDATE_TEST/serve/IssueRelay.app.tar.gz\",\"$PWD/target/release/bundle/macos/IssueRelay.app.tar.gz.sig\"]"
+sed -i '' "/^\[workspace\.package\]/,/^\[/ s/^version = \"$current\"$/version = \"$next\"/" "$ACCEPT/b-tree/Cargo.toml"
+cargo update -w --manifest-path "$ACCEPT/b-tree/Cargo.toml"
+pnpm --dir "$ACCEPT/b-tree/app" install --frozen-lockfile
+bash "$ACCEPT/b-tree/scripts/stage-cli.sh"
+TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/issuerelay.key" CI=true pnpm --dir "$ACCEPT/b-tree/app" tauri build --bundles app --config '{"bundle":{"externalBin":["binaries/issuerelay"],"createUpdaterArtifacts":true},"plugins":{"updater":{"endpoints":["http://127.0.0.1:8765/latest.json"],"dangerousInsecureTransportProtocol":true}}}'
+cp "$ACCEPT/b-tree/target/release/bundle/macos/IssueRelay.app.tar.gz" "$ACCEPT/b-tree/target/release/bundle/macos/IssueRelay.app.tar.gz.sig" "$ACCEPT/serve/"
+node scripts/verify-update-signature.mjs --version "$next" --artifacts "[\"$ACCEPT/serve/IssueRelay.app.tar.gz\",\"$ACCEPT/serve/IssueRelay.app.tar.gz.sig\"]"
+git status --short
 ```
 
-（`--config` 写在一个 JSON 里：一次只传一个。`dangerousInsecureTransportProtocol` 只用于这两份测试构建。最后一行用提交的公钥核对 B 的签名，Expected：`verified IssueRelay.app.tar.gz`。`git checkout` 之后 `git status` 应当干净。）
+（`--config` 写在一个 JSON 里：一次只传一个。`dangerousInsecureTransportProtocol` 只用于这两份测试构建。Expected：`verified IssueRelay.app.tar.gz`（用提交的公钥核对 B 的签名）；最后的 `git status --short` 里没有这一步带来的改动——worktree 在主检出之外。）
 
 写本机清单并在另一个终端里起一个只监听本机的服务（测试结束时 Ctrl+C）：
 
 ```bash
-sig=$(cat target/release/bundle/macos/IssueRelay.app.tar.gz.sig)
-cat > "$UPDATE_TEST/serve/latest.json" <<EOF
+set -- "${TMPDIR:-/tmp}"/issuerelay-m3-acceptance.*
+[[ $# -eq 1 && -d $1 ]] || { echo "expected one acceptance folder, found: $*"; exit 1; }
+ACCEPT=$1
+next=$(node "$ACCEPT/b-tree/scripts/release-checks.mjs" workspace-version)
+sig=$(cat "$ACCEPT/serve/IssueRelay.app.tar.gz.sig")
+cat > "$ACCEPT/serve/latest.json" <<EOF
 {
   "version": "$next",
   "notes": "Local update test",
@@ -3554,17 +5113,17 @@ cat > "$UPDATE_TEST/serve/latest.json" <<EOF
   }
 }
 EOF
-python3 -m http.server 8765 --bind 127.0.0.1 --directory "$UPDATE_TEST/serve"
+python3 -m http.server 8765 --bind 127.0.0.1 --directory "$ACCEPT/serve"
 ```
 
 测试：
 
-1. 退出第 2 步装的应用，换上 A：`rm -rf ~/Applications/IssueRelay.app && ditto "$UPDATE_TEST/A/IssueRelay.app" ~/Applications/IssueRelay.app`，从访达打开；登录 Linear（用户操作），确认连上。
+1. 退出第 2 步装的应用，把它挪开（不删）再换上 A：`mv ~/Applications/IssueRelay.app "$ACCEPT/installed.app" && ditto "$ACCEPT/A/IssueRelay.app" ~/Applications/IssueRelay.app`（先重新求出 `ACCEPT`），从访达打开；登录 Linear（用户操作），确认连上。
 2. 在沙箱项目建一条会跑一两分钟的需求，等它开始运行。
-3. 「设置 → 检查更新」：显示「IssueRelay <next> 已发布」，顶部出现横幅。点「安装并重启」：出现与退出相同的询问（「1 个运行正在进行…」，并说明会重启安装更新）。选「等待完成」→ 说明变为「等运行结束后安装更新并重启」→ 再改选「立即停止」：运行记为已取消、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`），程序安装并重启。
+3. 「设置 → 检查更新」：显示「IssueRelay <next> 已发布」，顶部出现横幅。点「安装并重启」：出现与退出相同的询问（「1 个运行正在进行…」，并说明会重启安装更新）。选「等待完成」→ 说明变为「等运行结束后安装更新并重启」→ 关掉面板窗口再从托盘打开（等待中关窗只隐藏，程序不退出）→ 再改选「立即停止」：运行记为已取消、沙箱里没有残留进程（`ps -axo pid,ppid,pgid,command | grep -E 'claude|codex'`），程序安装并重启。
 4. 重启后：面板侧栏版本为 `<next>`；`pgrep -x issuerelay-app | wc -l` 为 `1`（单实例插件没有挡住新实例，调研未确认 4）；托盘与面板正常；再 `open -b com.sunkailun.issuerelay` 只把面板带到前面。
 5. 钥匙串（调研未确认 2）：重启后是否弹出「想要使用钥匙串中的机密信息」之类的授权框（原文记录；由用户决定点「始终允许」还是「允许」，记录点了哪个）；Linear 是否仍是已连接；再从托盘退出、重新打开一次，是否还弹。开机自启打开时，`~/Library/LaunchAgents/` 里的条目是否仍指向 `~/Applications/IssueRelay.app`，「登录项与扩展」里显示为什么。
-6. 再来一次「点安装并重启 → 继续运行（Keep running）→ 从托盘退出」：程序只退出、不安装（版本仍是装着的那个）。
+6. 再来一次「点安装并重启 → 继续运行（Keep running）→ 从托盘退出」：程序只退出、不安装（版本仍是装着的那个）。再来一次「点安装并重启 → 等待完成 → 从托盘退出」：询问框仍在等待，文字改为「…之后 IssueRelay 退出」；运行结束后程序只退出、不安装。
 
 - [ ] **Step 6: 失败的更新只提示（Review Focus 2 实机）**
 
@@ -3573,16 +5132,33 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory "$UPDATE_TEST/serve"
 1. 签名换成另一把一次性密钥签的签名，版本仍为 `<next>`：「更新包的签名校验没有通过，什么都没安装」。生成那份签名（不碰真正的私钥）：
 
    ```bash
-   pnpm --dir app tauri signer generate --ci -w "$UPDATE_TEST/other.key" > /dev/null
-   cp "$UPDATE_TEST/serve/IssueRelay.app.tar.gz" "$UPDATE_TEST/other.tar.gz"
-   pnpm --dir app tauri signer sign -f "$UPDATE_TEST/other.key" -p "" --app-version "$next" "$UPDATE_TEST/other.tar.gz" > /dev/null
-   cat "$UPDATE_TEST/other.tar.gz.sig"   # a signature, safe to show: paste it into the "signature" field of latest.json
+   set -- "${TMPDIR:-/tmp}"/issuerelay-m3-acceptance.*
+   [[ $# -eq 1 && -d $1 ]] || { echo "expected one acceptance folder, found: $*"; exit 1; }
+   ACCEPT=$1
+   next=$(node "$ACCEPT/b-tree/scripts/release-checks.mjs" workspace-version)
+   pnpm --dir app tauri signer generate --ci -w "$ACCEPT/other.key" > /dev/null
+   cp "$ACCEPT/serve/IssueRelay.app.tar.gz" "$ACCEPT/other.tar.gz"
+   pnpm --dir app tauri signer sign -f "$ACCEPT/other.key" -p "" --app-version "$next" "$ACCEPT/other.tar.gz" > /dev/null
+   cat "$ACCEPT/other.tar.gz.sig"   # a signature, safe to show: paste it into the "signature" field of latest.json
    ```
 2. `version` 改成当前版本：「已是最新版本」。
 3. 停掉本机服务：「连不上更新服务器」（横幅若已显示，仍保留）。
 4. `platforms` 里只留一个 `windows-x86_64`：「新版本还没有适合这台电脑的安装包」。
 
-测试完：停掉服务，删掉 `$UPDATE_TEST` 与 `app/src-tauri/binaries/`（里面是 `<next>` 版的命令行程序），把第 2 步的正式安装（Task 4 的试打包产物）重新装回 `~/Applications`。
+测试完：停掉服务，退出 IssueRelay，把第 2 步的安装放回去，再收掉一次性 worktree 与临时目录（里面只有本任务建的测试构建、下载与一次性密钥）：
+
+```bash
+set -- "${TMPDIR:-/tmp}"/issuerelay-m3-acceptance.*
+[[ $# -eq 1 && -d $1 ]] || { echo "expected one acceptance folder, found: $*"; exit 1; }
+ACCEPT=$1
+mv ~/Applications/IssueRelay.app "$ACCEPT/tested.app"
+mv "$ACCEPT/installed.app" ~/Applications/IssueRelay.app
+git worktree remove --force "$ACCEPT/b-tree"
+rm -rf "$ACCEPT"
+git worktree list
+```
+
+Expected：`git worktree list` 只剩主检出。主检出的 `app/src-tauri/binaries/` 里仍是当前版本的命令行程序（B 是在 worktree 里编的），不用动。
 
 - [ ] **Step 7: 报告（合入之前）**
 
@@ -3595,10 +5171,19 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory "$UPDATE_TEST/serve"
 更新设计第 17 节 M3 一行：「安装包、发布流程、自动更新、把命令行加入 PATH 已在 macOS 实机验收（`docs/gates/<日期>-m3-acceptance.md`）；Windows 与同事安装待实机。」
 
 ```bash
-git add docs
-git commit -m "docs(m3): record the installer acceptance on macOS"
+git status --short
+git add "docs/gates/$(date +%Y-%m-%d)-m3-acceptance.md" docs/superpowers/specs/2026-10-10-issuerelay-design.md docs/install.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs(m3): record the installer acceptance on macOS
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
+git fetch origin
 git push
 ```
+
+（报告的文件名用写报告当天的日期；`docs/install.md` 只在实测改了文字时才有改动，没有就从 `git add` 里去掉。推送前按 AI_ENGINEERING_GUARDRAILS 第 7.3 节同步。）
 
 然后请维护者按 `MAINTAINERS.md` 合并 M3 的 PR（CI 与 `release` 试打包全绿）。
 
@@ -3610,10 +5195,13 @@ git push
 gh workflow run release.yml --ref main
 run=$(gh run list --workflow release.yml --branch main --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$run" --exit-status
-gh run download "$run" -D "$(mktemp -d)"
+work=$(mktemp -d)
+gh run download "$run" -D "$work"
+find "$work" -type f | sed "s|$work/||" | sort
+rm -rf "$work"
 ```
 
-Expected：`verify` 的输出 `updater=true`（私钥已上传时）；两个 `bundle` 的「Check the update signatures against the committed public key」步骤输出 `verified IssueRelay.app.tar.gz`、`verified IssueRelay_<版本>_x64-setup.exe`、`verified IssueRelay_<版本>_x64_en-US.msi`；产物里有 `.app.tar.gz` 与三个 `.sig`。失败时修好再来，不推标签。
+Expected：`verify` 的输出 `updater=true`（私钥已上传时）；`verify-dry-run` 通过（资产门查到 `.app.tar.gz` 与三个 `.sig`，由产物得出的 `latest.json` 每个平台键都有签名）；`bundle-dry-run` 的两个打包任务里「Check the update signatures against the committed public key」步骤输出 `verified IssueRelay.app.tar.gz`、`verified IssueRelay_<版本>_x64-setup.exe`、`verified IssueRelay_<版本>_x64_en-US.msi`；产物里有 `.app.tar.gz` 与三个 `.sig`。失败时修好再来，不推标签。
 
 （刚触发时运行可能还没出现在列表里：`run` 为空或是上一次的编号时，几秒后再运行一次 `gh run list` 那一行。）
 
@@ -3630,7 +5218,7 @@ gh run watch "$run" --exit-status
 gh release list --limit 3
 ```
 
-（同样，刚推送时运行可能还没出现，几秒后再查一次 `run`。）Expected：工作流全绿（`verify`、两个 `test`、`create-release`、两个 `bundle`、`verify-release`）；`gh release list` 里有一个 `Draft` 状态的 `IssueRelay v<版本>`，标题不含「incomplete」。从草稿下载 dmg 在本机装一遍（第 2–3 步的简版）。失败时按 `MAINTAINERS.md`「发布」第 6 条删草稿与标签，修好后重推同一个标签。
+（同样，刚推送时运行可能还没出现，几秒后再查一次 `run`。）Expected：工作流全绿（`verify`、两个 `test`、`create-release`、`bundle-release` 的两个打包任务、`verify-release`；`bundle-dry-run` 与 `verify-dry-run` 跳过）；`gh release list` 里有一个 `Draft` 状态的 `IssueRelay v<版本>`，标题不含「incomplete」。从草稿下载 dmg 在本机装一遍（第 2–3 步的简版）。失败时按 `MAINTAINERS.md`「发布」第 6 条删草稿与标签，修好后重推同一个标签。
 
 **不公开草稿**：把草稿链接、资产列表与 `verify-release` 的结果交给维护者，由维护者检查后在 GitHub 页面上点「Publish release」。
 
@@ -3639,22 +5227,30 @@ gh release list --limit 3
 在一个只改文档的小 PR 里，把第 8–9 步的结果（运行编号、资产列表、`latest.json` 的平台键）补进验收报告，设计第 17 节注明「v<版本> 草稿已生成，待维护者公开」：
 
 ```bash
+git fetch origin
 git switch -c docs/m3-first-draft origin/main
-git add docs
-git commit -m "docs(m3): record the first draft release"
+# Edit the acceptance report and the design's section 17 here, then:
+git status --short
+git add docs/gates/*-m3-acceptance.md docs/superpowers/specs/2026-10-10-issuerelay-design.md
+git diff --cached --stat
+git commit -F - <<'EOF'
+docs(m3): record the first draft release
+
+Co-Authored-By: <实际参与的模型> <noreply@anthropic.com>
+EOF
 git push -u origin docs/m3-first-draft
-gh pr create --title "docs(m3): record the first draft release" --body-file "$PR_BODY"   # the description follows .github/pull_request_template.md
+mktemp -d   # prints a folder for the PR description
 ```
 
-结束时删掉 Task 4 Step 7 留下的 `$SCRATCH`。
+把按 `.github/pull_request_template.md` 填好的描述写进上面打印的目录下的 `pr.md`，再 `gh pr create --title "docs(m3): record the first draft release" --body-file "<目录>/pr.md"`，之后 `rm -rf "<目录>"`。
 
 ---
 
 ## 自查记录（写计划时）
 
-- **设计覆盖**：2.1 安装包、自动更新、命令行小程序——Task 1、3、4；2.2 第一版不做代码签名——默认 ad-hoc（macOS）与不签名（Windows），secrets 齐全时自动改用正式签名（Task 1、4）；4.1 命令行「托盘程序没在运行时给出提示，并可代为启动」——Task 2（`issuerelay start`，MCP 不启动）；10.1 / 10.3 命令行子命令与 MCP 服务——Task 2；12 打包目标、附带程序、把命令行加入 PATH、自动更新、代码签名的放行步骤、版本号——Task 1–5；16 验证命令——每个任务都跑六条，发布工作流的 `test` 任务也跑六条；16.1 维护者发布、只由维护者升版本号——Task 4 的 `MAINTAINERS.md`；17 M3 完成标志（同事按说明装好）——Task 6，同事安装与 Windows 待实机；18.2 代码签名——Task 4 的可选 secrets 与设计第 18 节的现状说明；18.4 Windows 验证环境——Task 6 的待实机清单。
-- **占位扫描**：没有「待定」「以后再写」。需要执行时才有的值都由具体命令产生：公钥由 Task 3 Step 0 的 `node -e` 从 `.pub` 文件写入；工作区版本在 CI 里由 Python 的 `tomllib`、在本机由 `sed` 从 `Cargo.toml` 读出；Rust 与 npm 的依赖版本由 `cargo add` / `pnpm add` 解析后锁定；验收报告的日期是执行当天。`zh-TW`、`ja`、`ko` 的文案按 M2 Task 2 的规则由实现者翻译（与 M2 计划的做法相同：计划给出 `en` 与 `zh-CN` 的确切文案）。几处库细节（`tauri_plugin_updater::Error` 的变体、`request_restart`、`winreg` 的 `RegValue`、`windows-sys` 的函数签名、tauri-action 对空 `releaseId` 的处理、`7z` 列 NSIS 内容、`gh api` 跟随重定向）都写明了按解析到的版本核对与不同时的改法。
-- **与 M2 计划的名字和类型一致**：主程序名 `mainBinaryName: "issuerelay-app"`（现在由 `paths::APP_EXECUTABLE` 与配置测试共同守住）；`cli_next_to`、`cli_path`、`app_info().cli_path` 不改；退出状态机的 `QuitState`、`QuitEvent::Requested { host_ready, running }`、`QuitStep`、`next`、`handle`、`on_run_event` 不改，`request` 的对外行为不变（多了先丢掉已下载的更新），新增 `request_update`；`QUIT_REQUESTED` 的载荷从 `usize` 改为 `QuitPrompt { running, purpose }`，所有用到它的地方都在 Task 3 里改：`quit.rs` 的 `handle`、`backend.ts` 的 `onQuitRequested`、`mock.ts` 的 `listeners.quit`、`QuitDialog.tsx` 与它的测试（`api.ts` 的 `on<T>` 是泛型，只改类型参数）；命令名表由 M2 的 33 条加到 39 条（Task 2 的 `cli_on_path`、`install_cli_on_path`、`remove_cli_from_path`，Task 3 的 `update_status`、`check_update`、`install_update`），`backend.ts`、`api.ts`、`mock.ts`、`generate_handler!` 同步；事件名 `update-status` 在 `events.rs` 与 `api.ts` 一致；`Settings.auto_update` 沿用 M2 第一部分的字段，只改文档注释；错误代码经 M2 的 `ERROR_CODES` 与 `describeError` 翻译（`errors.update_*`）；变更钩子用 M2 的 `useAction(fn, invalidate, failureKey)`。
+- **设计覆盖**：2.1 安装包、自动更新、命令行小程序——Task 1、3、4；2.2 第一版不做代码签名——默认 ad-hoc（macOS）与不签名（Windows），secrets 齐全时自动改用正式签名（Task 1、4）；4.1 命令行「托盘程序没在运行时给出提示，并可代为启动」——Task 2（`issuerelay start`，MCP 不启动）；9.5 通知——Task 3（四种运行通知不变，新版本通知跟随「自动检查更新」，装不上只在面板里说）；10.1 / 10.3 命令行子命令与 MCP 服务——Task 2；12 打包目标、附带程序、把命令行加入 PATH、自动更新、代码签名的放行步骤、版本号——Task 1–5；16 验证命令——每个任务都跑六条，发布工作流的 `test` 任务也跑六条；16.1 维护者发布、只由维护者升版本号（升版本是普通 PR）——Task 4 的 `MAINTAINERS.md`；17 M3 完成标志（同事按说明装好）——Task 6，同事安装与 Windows 待实机；18.2 代码签名——Task 4 的可选 secrets 与设计第 18 节的现状说明；18.4 Windows 验证环境——Task 6 的待实机清单。
+- **占位扫描**：没有「待定」「以后再写」。需要执行时才有的值都由具体命令产生：公钥由 Task 3 Step 0 的 `node -e` 从 `.pub` 文件写入；工作区版本由 `scripts/release-checks.mjs workspace-version`（CI 与本机同一个解析）或 `MAINTAINERS.md` 的 `sed` 从 `Cargo.toml` 读出；Rust 与 npm 的依赖版本由 `cargo add` / `pnpm add` 解析后锁定；actionlint 的版本由 Task 4 Step 4 查最新发布。只有三类写法要在执行时换成真实的值：提交信息的 `Co-Authored-By: <实际参与的模型> …`（写实际参与的模型）、验收报告文件名里的日期（命令里用 `$(date +%Y-%m-%d)` 求出）、PR 描述文件所在的 `<目录>`（`mktemp -d` 打印出来的那个，变量不跨命令保留）。`zh-TW`、`ja`、`ko` 的文案按 M2 Task 2 的规则由实现者翻译（与 M2 计划的做法相同：计划给出 `en` 与 `zh-CN` 的确切文案）。几处库细节（`tauri_plugin_updater::Error` 的变体、`Update` 是否 `Sync`、`request_restart`、`winreg` 的 `RegValue`、`windows-sys` 的函数签名、tauri-action 对空 `releaseId` 的处理与它写的资产名和 `latest.json` 平台键、空的 `TAURI_SIGNING_PRIVATE_KEY` 与空字符串 secret 的处理、`7z` 列 NSIS 内容、`gh api` 跟随重定向、Tailwind 4 的最低 Safari 版本）都写明了按解析到的版本核对与不同时的改法。
+- **与 M2 落地的代码一致（2ebda38）**：主程序名 `mainBinaryName: "issuerelay-app"`（由 `paths::APP_EXECUTABLE` 与配置测试共同守住）；`cli_next_to`、`cli_path`、`app_info().cli_path` 不改；面板命令由 M2 的 34 条加到 37 条（Task 2 的 `cli_on_path`、`install_cli_on_path`、`remove_cli_from_path`）再到 40 条（Task 3 的 `update_status`、`check_update`、`install_update`），每条在同一步里登记进 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json` 的 `allow-*` 与 `backend.ts`、`api.ts`、`mock.ts`，`lib.rs` 的两个绊线测试与 `api.test.ts`（监听 4 → 5 个）守住；退出状态机的 `QuitState`、`QuitEvent`、`QuitStep` 加的是新成员（`Installing`、`Installed`、`Install`、`Restart`），`next` 已有的分支不改，`handle`、`request`、`request_update`、`ask` 与 `update::*` 都对 `R: Runtime` 泛型，M2 在 MockRuntime 上的退出测试扩展到 `Installing` 后照样跑；`QUIT_REQUESTED` 的载荷从 `usize` 改为 `QuitPrompt { running, purpose }`，用到它的地方全在 Task 3 里改：`events.rs` 的文档、`quit.rs` 的 `QuitStep::Ask` 文档与 `handle`、`backend.ts` 的 `onQuitRequested`、`api.ts` 的 `on<QuitPrompt>`、`mock.ts` 的 `listeners.quit`、`QuitDialog.tsx` 与它的测试（M2 的七个全部保留）、`App.test.tsx` 的启动失败页测试；`ERROR_CODES` 保留 `not_a_linear_link` 与 `login_cancelled`，加六个 `update_*`，与 Rust 的 `error_code()` 和文案键由 `update-failure-cases.json` 钉住；shell 那一行由 `shell-line.json` 钉住；假后端的更新状态叫 `updateState`（M2 已有 `update` 这个辅助函数）；变更钩子照 M2 的 `useAction<Variables, Result>(run(backend, variables), refreshes, failureKey, options?)` 写在 `queries.ts` 里；新版本通知沿用 `notify.rs` 的翻译与发送；版本号用 M2 的 `shell.version`；`Settings.auto_update` 沿用 M2 第一部分的字段，只改文档注释，M2 钉住旧旁注的测试随文案改写。
 - **调研里未确认的事项 → 验收或检查步骤**：
 
 | 未确认事项（调研） | 在哪里核对 |
@@ -3665,17 +5261,19 @@ gh pr create --title "docs(m3): record the first draft release" --body-file "$PR
 | ad-hoc 签名的新版本更新后是否再弹钥匙串授权、Linear 是否仍连接 | Task 6 第 5 步第 5 项 |
 | 更新后开机自启条目与「登录项」的显示 | Task 6 第 5 步第 5 项 |
 | `request_restart()` 与单实例插件：更新后程序确实在运行、只有一个实例 | Task 6 第 5 步第 4 项 |
-| 「安装并重启」走等待 / 停止询问（面板流程，调研建议用 `request_restart` / 退出事件） | Task 3 的测试；Task 6 第 5 步第 3、6 项 |
+| 「安装并重启」走等待 / 停止询问，安装期间关窗不结束进程（面板流程，调研建议用 `request_restart` / 退出事件） | Task 3 的 `quit.rs` 与前端测试；Task 6 第 5 步第 3、6 项 |
 | 正在运行的 `issuerelay.exe` 挡不挡 NSIS 更新与卸载 | Task 6 第 7 步待实机清单（带测试方法与候选改法） |
 | Windows 用户 PATH 的往返（`%VAR%` 条目逐字保留、类型不变） | Task 2 的纯函数测试；Task 6 第 7 步待实机 |
 | 智能应用控制与 SmartScreen 的实际表现 | `docs/install.md`；Task 6 第 7 步待实机 |
-| 通用包里的命令行程序真是双架构 | `stage-cli.sh --universal` 的自检；Task 4 `bundle` 的包内容检查；Task 4 Step 7 |
-| 工作区继承的版本是否进入资产名 | Task 1 Step 5；Task 4 Step 7 与 `verify-release` 的资产名检查 |
+| 通用包里的命令行程序真是双架构 | `stage-cli.sh --universal` 的自检；`bundle.yml` 的包内容检查；Task 4 Step 8 |
+| 工作区继承的版本是否进入资产名 | Task 1 Step 7；Task 4 Step 8 的 `verify-dry-run` 与正式发布的 `verify-release`（同一个 `assets` 门） |
+| tauri-action 写进 `latest.json` 的平台键（含 `darwin-universal*`）与资产地址 | `release-checks.mjs` 的 `PLATFORM_KEYS` 与自测；试打包检查由产物得出的那份；真实那份第一次出现在正式标签的 `verify-release`，不对就标记草稿 |
 | 两个矩阵任务并发合并 `latest.json` 丢平台、重复草稿 | `create-release` 只建一次 + `max-parallel: 1` + `verify-release` |
-| 空的 `APPLE_SIGNING_IDENTITY` 等环境变量的处理 | 只在 secrets 齐全时写进 `$GITHUB_ENV`，不出现空值 |
-| 私钥与公钥不配对时 `tauri build` 只警告 | `scripts/verify-update-signature.mjs`（Task 4 Step 1 自测、`bundle` 里运行、Task 6 第 8 步） |
+| 空的 `APPLE_SIGNING_IDENTITY` 等环境变量的处理 | 不出现空值：Apple 的六个值只在「有 Apple 证书」那一个 tauri-action 步骤里；空的 `TAURI_SIGNING_PRIVATE_KEY` 在不打更新包时是否被忽略，第一次试打包核对（Task 4 Step 3 的说明） |
+| 私钥与公钥不配对时 `tauri build` 只警告 | `scripts/verify-update-signature.mjs`（Task 4 Step 1 自测、`bundle.yml` 里运行、Task 6 第 8 步） |
 | 从磁盘映像或临时副本运行时建链接、更新 | `cli_path::bundle_location` 的测试；Task 6 第 4 步第 6 项 |
 | GUI 启动的 AI 客户端看不到 `~/.local/bin` | MCP 注册一直用绝对路径（M2）；`docs/install.md` 写明 |
 | `api.github.com` 资产地址的未登录限额 | Task 6 第 7 步「未闭环」 |
 
-- **Review Focus → 测试**：第 1 条——`quit.rs` 的 `the_quit_prompt_tells_the_panel_what_follows` 与 M2 的退出状态机测试、`update.rs` 的 `a_verified_download_waits_for_the_quit_flow_and_is_reused`、`QuitDialog.test.tsx` 的 `installing an update with runs in progress…`、`UpdateBanner.test.tsx` 的第一个测试、Task 6 第 5 步；第 2 条——`update.rs` 的 `only_a_newer_version_is_offered`、`a_failed_check_only_informs`、`a_bad_signature_keeps_nothing_to_install`、`a_failed_check_keeps_the_version_already_offered`、`UpdateBanner.test.tsx` 的第二个测试、`Settings.test.tsx` 的检查更新测试、Task 6 第 6 步；第 3 条——`release.yml` 的 `verify`（标签、`origin/main`、密钥扫描、secrets）、`create-release`（同标签已有 Release）、`bundle`（包内容、签名核对）、`verify-release`（资产、`latest.json`、标记草稿），Task 4 Step 7 与 Task 6 第 8–9 步实际运行；第 4 条——`cli_path.rs` 的全部纯函数测试与 `link` 子模块的四个读写测试、`Settings.test.tsx` 的三个 PATH 测试、Task 6 第 4 步；第 5 条——`main.rs` 的 `start_launches_the_app_only_when_it_is_not_running`、`start_reports_an_app_that_never_answers_and_other_failures`、`a_stopped_app_points_to_issuerelay_start`，`mcp_tools.rs` 的两条新断言，Task 6 第 4 步第 4–5 项。
+- **Review Focus → 测试**：第 1 条——`quit.rs` 的 `the_quit_prompt_tells_the_panel_what_follows`、`a_verified_update_is_installed_where_quitting_would_exit`、`the_process_outlives_the_install_and_then_restarts`、`a_forced_exit_while_installing_stops_nothing_again`、扩展到 `Installing` 的 `every_exit_request_before_quitting_is_done_is_held` 与 M2 的退出状态机测试，`update.rs` 的 `a_verified_download_waits_for_the_quit_flow_and_is_reused`、`the_quit_flow_helpers_run_on_any_runtime`，`QuitDialog.test.tsx` 的「installing an update with runs in progress…」「a tray Quit while waiting to install…」，`UpdateBanner.test.tsx` 的第一个测试，Task 6 第 5 步；第 2 条——`update.rs` 的 `only_a_newer_version_is_offered`、`a_failed_check_only_informs`、`a_bad_signature_keeps_nothing_to_install`、`a_failed_check_keeps_the_version_already_offered`、`a_failed_install_is_shown_once_after_the_restart`，`UpdateBanner.test.tsx` 的第二、五、六个测试，`Settings.test.tsx` 的检查更新测试，Task 6 第 6 步；第 3 条——`release-checks.mjs` 的自测（`panel`、`tag`、`on-main`、`assets`、`latest-json` 各有反例），`release.yml` 的 `verify`（自测、标签、`origin/main`、密钥扫描、secrets）、`create-release`（同标签已有 Release）、`bundle.yml`（面板、包内容、签名核对）、`verify-release` 与 `verify-dry-run`（资产、`latest.json`、标记草稿），Task 4 Step 8 与 Task 6 第 8–9 步实际运行；第 4 条——`cli_path.rs` 的全部纯函数测试与 `link` 子模块的四个读写测试、`Settings.test.tsx` 的四个 PATH 测试、Task 6 第 4 步；第 5 条——`main.rs` 的 `start_launches_the_app_only_when_it_is_not_running`、`start_reports_an_app_that_never_answers_and_other_failures`、`a_stopped_app_points_to_issuerelay_start`，`mcp_tools.rs` 的两条新断言，Task 6 第 4 步第 4–5 项。
+- **2026-10-14 按预检修订**：本计划写在 M2 桌面应用落地之前；预检（只读，对照 M2 落地的 2ebda38）找出 38 处问题，控制者给出裁定 M3-AR1–AR8 与逐条裁定，本次修订全部照办：新命令同一步登记进 `PANEL_COMMANDS`、能力文件与绊线测试，命令数 34 → 37 → 40（AR1）；Task 3 编辑而不替换 M2 的文件，`ERROR_CODES` 留着 `login_cancelled`，监听数 4 → 5，假后端的状态改名 `updateState`，`QuitPrompt` 改到每个用到它的地方，`QuitDialog` 的七个旧测试全部保留（AR2）；更新与退出的函数对 `R: Runtime` 泛型，在 MockRuntime 上测（AR3）；验收不再「升版本、打包、改回去」，升版本是普通 PR，更高版本的测试构建在一次性 worktree 里做（AR4）；最低 macOS 13.3（AR5）；打包前确认内嵌的不是占位页（AR6）；发布门禁成为带反例自测的 `scripts/release-checks.mjs`，试打包对将要打的标签与试打包产物跑同样的门（AR7）；每个任务都有时限，试打包只读、只有标签发布能写，secrets 只经步骤级 `env:`，jq 用 `--arg`，临时目录用完即删、变量每步重新求出，CI 用 actionlint 检查工作流（AR8）；以及逐条裁定（`useAction` 的真实签名、测试等真实条件、由 PATH 得出的非秘密事实与规则改写、不加第五个通知开关且装不上只在面板里说、新行的换行规则与 620 / 605 px 检查、规则改动单独提交、明确的 `git add` 与 `Co-Authored-By`、用例表、沿用 `notify.rs`、`missing_cli` 文案、`cleanDisplayText`、CODEOWNERS 与安全规范的更新段落、安装期间与托盘退出的边界、订阅的清理、按签名情况措辞的安装说明）。照原样接受、未改的：预检「未检查」一节的各项（`tauri-plugin-updater` 的 API、tauri-action 对 `releaseId` 的行为、Windows 上的编译、`gh api` 的重定向）仍由实现者按解析到的版本文档核对，由 CI 与试打包确认。修订时另外改正了几处新发现的不一致：M2 钉住旧「自动更新」旁注的测试要随文案改写；「系统」分组合起来的顺序（开机自启、PATH、自动检查更新、版本与检查更新）；`latest.json` 的 `notes` 是写给下载页的 Release 正文，面板不再显示它；Task 6 不再依赖 Task 4 留下的 `$SCRATCH`，自己按运行编号下载产物。

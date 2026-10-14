@@ -15,10 +15,11 @@ use issuerelay_core::{
         LinearApi, auth,
         mcp::{LinearClient, McpLinear},
     },
+    logscrub::CleanWriter,
     paths::AppPaths,
-    text::{clean_text, is_invisible},
+    text::{clean_text, strip_control},
 };
-use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
@@ -59,61 +60,6 @@ async fn connect() -> Result<LinearClient> {
     bail!("no Linear credentials; run `issuerelay-devhost login` (or `api-key`) first")
 }
 
-/// `text` with every control character turned into a space and every invisible character
-/// (zero-width and direction-changing ones) removed. This is `clean_text` without the trimming
-/// and the length cap, for text that must keep its end, such as the root cause of an error.
-fn strip_control(text: &str) -> String {
-    text.chars()
-        .filter_map(|c| {
-            if c.is_control() {
-                Some(' ')
-            } else if is_invisible(c) {
-                None
-            } else {
-                Some(c)
-            }
-        })
-        .collect()
-}
-
-/// Passes what is written to `W` with `strip_control` applied, keeping only the line ending that
-/// closes the text (the last byte, when it is a newline). A log line can then neither move the
-/// cursor, change the terminal's state nor forge a second line. The tracing subscriber hands
-/// over each line in a single `write_all`; a character split across two writes would show as
-/// U+FFFD.
-struct CleanLines<W>(W);
-
-impl<W: Write> Write for CleanLines<W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let text = String::from_utf8_lossy(bytes);
-        let (body, ending) = match text.strip_suffix('\n') {
-            Some(body) => (body, "\n"),
-            None => (&*text, ""),
-        };
-        let mut clean = strip_control(body);
-        clean.push_str(ending);
-        self.0.write_all(clean.as_bytes())?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
-
-/// Where the logs go: stderr, through `CleanLines`. The subscriber escapes only the message and
-/// error values of an event; named fields are written as they are, and the engine and the IPC
-/// server log fields (`error = %…`) that can hold Linear's text.
-struct CleanStderr;
-
-impl<'a> MakeWriter<'a> for CleanStderr {
-    type Writer = CleanLines<io::Stderr>;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        CleanLines(io::stderr())
-    }
-}
-
 /// What is logged unless `RUST_LOG` says otherwise. `run` is the long-lived host and logs what the
 /// engine does; the other commands print their result and stay quiet unless something is wrong
 /// (rmcp logs every connection at `info`).
@@ -133,7 +79,7 @@ fn init_logging(default_filter: &str) {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_ansi(false)
-        .with_writer(CleanStderr)
+        .with_writer(CleanWriter(io::stderr))
         // The subscriber reports a failed log write with `eprintln!`, which panics when stderr is
         // gone, as it is once the terminal has closed (SIGHUP). The host must keep shutting down.
         .log_internal_errors(false)
@@ -391,42 +337,6 @@ mod tests {
 
     use super::*;
 
-    /// What `CleanLines` passes on when `text` is written to it in one go.
-    fn written(text: &str) -> String {
-        let mut out = CleanLines(Vec::new());
-        out.write_all(text.as_bytes()).unwrap();
-        String::from_utf8(out.0).unwrap()
-    }
-
-    #[test]
-    fn a_log_line_carries_no_terminal_escapes() {
-        // Clear screen, OSC 52 (write the clipboard, ended by BEL), a lone BEL, a carriage return
-        // that would overwrite the line, and a right-to-left override.
-        let hostile =
-            "WARN poll: error=boom\u{1b}[2J\u{1b}]52;c;ZXZpbA==\u{7} more\rrewritten \u{202e}end\n";
-        assert_eq!(
-            written(hostile),
-            "WARN poll: error=boom [2J ]52;c;ZXZpbA==  more rewritten end\n"
-        );
-    }
-
-    #[test]
-    fn only_the_closing_newline_survives() {
-        // A newline inside the text would let a field forge a second log line.
-        assert_eq!(
-            written("INFO a: x=one\nINFO forged: y=two\n"),
-            "INFO a: x=one INFO forged: y=two\n"
-        );
-        assert_eq!(written("\n"), "\n");
-        assert_eq!(written("no ending"), "no ending");
-        // Text that already ends in a newline before the closing one keeps just one.
-        assert_eq!(written("tail\n\n"), "tail \n");
-        // Other scripts and punctuation are untouched; so is the C1 range's neighbour U+00A0.
-        assert_eq!(written("日本語 é \u{a0}…\n"), "日本語 é \u{a0}…\n");
-        // The C1 controls (here NEL and CSI) are controls too.
-        assert_eq!(written("a\u{85}b\u{9b}c\n"), "a b c\n");
-    }
-
     /// A writer whose every write fails with `kind`.
     struct Failing(io::ErrorKind);
 
@@ -438,19 +348,6 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(self.0.into())
         }
-    }
-
-    #[test]
-    fn a_write_reports_the_bytes_it_was_given_and_passes_errors_on() {
-        let mut out = CleanLines(Vec::new());
-        // `write_all` relies on this: the cleaned text is shorter than what came in.
-        assert_eq!(out.write(b"a\x1b[2Jb\n").unwrap(), 7);
-        assert_eq!(out.0, b"a [2Jb\n");
-
-        let error = CleanLines(Failing(io::ErrorKind::BrokenPipe))
-            .write_all(b"gone\n")
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[test]
@@ -580,20 +477,6 @@ mod tests {
         assert_eq!(
             outcome.expect("the runtime waited for the blocked call"),
             Ok(7)
-        );
-    }
-
-    #[test]
-    fn the_error_line_keeps_the_root_cause_however_long_the_chain() {
-        let error = anyhow!("root cause\u{1b}[2J")
-            .context("x".repeat(600))
-            .context("outer\n");
-        let line = strip_control(&format!("{error:#}"));
-        assert!(line.starts_with("outer : xxx"), "{line}");
-        assert!(line.ends_with(": root cause [2J"), "{line}");
-        assert_eq!(
-            line.chars().count(),
-            "outer : ".len() + 600 + ": root cause [2J".len()
         );
     }
 }

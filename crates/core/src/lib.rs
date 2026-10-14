@@ -9,6 +9,7 @@ pub mod host;
 pub mod ipc;
 pub mod linear;
 pub mod logs;
+pub mod logscrub;
 pub mod model;
 pub mod paths;
 pub mod prompt;
