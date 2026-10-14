@@ -1,4 +1,5 @@
 import { type QueryKey, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
@@ -369,6 +370,31 @@ export function useRemoveCliFromPath() {
 /** Checks for an update now: what this check found is the action's `data`; the kept status is read again. */
 export function useCheckUpdate() {
   return useAction<void, UpdateStatus>((backend) => backend.checkUpdate(), [queryKeys.update], "actions.failed.check_update");
+}
+
+/**
+ * The settings row for updates: what the app keeps (`useUpdateStatus`), with the result of the
+ * row's own check on top for as long as it is the last word. The kept status cannot tell a failed
+ * check while it keeps an offer (the banner goes on offering it), so the button's result is shown;
+ * but only until the kept status is something else, because then a later check, the background
+ * one say, has found something newer. The status read again and found the same is the same
+ * object (structural sharing), which is no news.
+ */
+export function useUpdateCheck() {
+  const client = useQueryClient();
+  const status = useUpdateStatus();
+  const check = useCheckUpdate();
+  const [found, setFound] = useState<{ outcome: UpdateStatus; kept: UpdateStatus | undefined } | null>(null);
+  const { mutate } = check;
+  const run = useCallback(
+    () =>
+      mutate(undefined, {
+        onSuccess: (outcome) => setFound({ outcome, kept: client.getQueryData<UpdateStatus>(queryKeys.update) }),
+      }),
+    [client, mutate],
+  );
+  const shown = found !== null && status.data === found.kept ? found.outcome : status.data;
+  return { shown, run, isPending: check.isPending };
 }
 
 /** "Install and restart": the Rust side downloads, verifies and goes through the quit flow. */

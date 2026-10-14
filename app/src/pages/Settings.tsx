@@ -21,7 +21,6 @@ import {
   queryKeys,
   useAppInfo,
   useAutostart,
-  useCheckUpdate,
   useCliPath,
   useControlServers,
   useInstallCliOnPath,
@@ -30,7 +29,7 @@ import {
   useSetAutostart,
   useSetupAction,
   useSettings,
-  useUpdateStatus,
+  useUpdateCheck,
 } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
@@ -348,17 +347,15 @@ function UpdateCheck() {
   const { t } = useTranslation();
   const lang = useLang();
   const info = useAppInfo();
-  const status = useUpdateStatus();
-  const check = useCheckUpdate();
-  // This check's own outcome first; otherwise what the app keeps (a background check's, or a
-  // failed install's after the restart).
-  const shown = check.data ?? status.data;
+  // The button's own result while it is the last word; otherwise what the app keeps (a
+  // background check's, or a failed install's after the restart).
+  const { shown, run, isPending } = useUpdateCheck();
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-sm font-medium">{info.data ? t("shell.version", { version: info.data.version }) : t("common.loading")}</span>
-        <Button size="sm" variant="outline" disabled={check.isPending} onClick={() => check.mutate()}>
-          {check.isPending && <LoaderCircle aria-hidden className="animate-spin" />}
+        <Button size="sm" variant="outline" disabled={isPending} onClick={() => run()}>
+          {isPending && <LoaderCircle aria-hidden className="animate-spin" />}
           {t("update.check")}
         </Button>
       </div>

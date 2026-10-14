@@ -1,15 +1,16 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import App from "@/App";
+import { EngineEventsBridge } from "@/components/EngineEventsBridge";
 import { LinearStatus } from "@/components/LinearStatus";
 import { queryKeys } from "@/hooks/queries";
 import { initI18nOnce, setLanguage } from "@/i18n";
 import ja from "@/i18n/locales/ja.json";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import { DEMO_SHELL_LINE } from "@/lib/mock-fixtures";
-import type { AppInfo, CliPathStatus, ControlServers, Settings as SettingsData } from "@/lib/types";
+import { ago, DEMO_SHELL_LINE } from "@/lib/mock-fixtures";
+import type { AppInfo, CliPathStatus, ControlServers, Settings as SettingsData, UpdateStatus } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Settings from "./Settings";
 
@@ -512,6 +513,62 @@ test("a new version found by a check is named, and checking again is possible", 
   await waitFor(() => expect(screen.getByRole("button", { name: "Check for updates" })).toBeEnabled());
   await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+});
+
+/** A backend whose `update-status` events the test sends itself, as the app sends them after a background check. */
+function backendWithUpdateEvents() {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  let announce: (status: UpdateStatus) => void = () => {};
+  backend.onUpdateStatus = async (listener) => {
+    announce = listener;
+    return () => {};
+  };
+  return { backend, announce: (status: UpdateStatus) => act(async () => announce(status)) };
+}
+
+test("what the button found gives way to what a later check finds", async () => {
+  const { backend, announce } = backendWithUpdateEvents();
+  backend.checkUpdate = vi.fn().mockResolvedValue({ kind: "up_to_date", checked_at: ago(1) });
+  await renderWithProviders(
+    <>
+      <EngineEventsBridge />
+      <Settings />
+    </>,
+    { backend },
+  );
+  await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByText("Up to date (last check: 1 minute ago)")).toBeInTheDocument();
+  // Hours later a background check finds a version: the open page says so, not what it found before.
+  await announce({ kind: "available", version: "0.3.0" });
+  expect(await screen.findByText("IssueRelay 0.3.0 is available")).toBeInTheDocument();
+  expect(screen.queryByText(/Up to date/)).not.toBeInTheDocument();
+});
+
+test("a failed check of the button stays while nothing newer comes, and gives way when something does", async () => {
+  const { backend, announce } = backendWithUpdateEvents();
+  // The app keeps the offer it found before: a failed check does not take it from the banner.
+  backend.updateStatus = async () => ({ kind: "available", version: "0.2.0" });
+  backend.checkUpdate = vi.fn().mockResolvedValue({ kind: "failed", code: "unreachable", detail: "error sending request" });
+  const { client } = await renderWithProviders(
+    <>
+      <EngineEventsBridge />
+      <Settings />
+    </>,
+    { backend },
+  );
+  expect(await screen.findByText("IssueRelay 0.2.0 is available")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByText("Could not reach the update server")).toBeInTheDocument();
+  expect(screen.queryByText("IssueRelay 0.2.0 is available")).not.toBeInTheDocument();
+  // Reading the status again (the window is focused again, say) is no news.
+  await act(async () => {
+    await client.refetchQueries({ queryKey: queryKeys.update });
+  });
+  expect(screen.getByText("Could not reach the update server")).toBeInTheDocument();
+  // A later check that finds something else is.
+  await announce({ kind: "available", version: "0.3.0" });
+  expect(await screen.findByText("IssueRelay 0.3.0 is available")).toBeInTheDocument();
+  expect(screen.queryByText("Could not reach the update server")).not.toBeInTheDocument();
 });
 
 test("while a check runs the button cannot be pressed again", async () => {
