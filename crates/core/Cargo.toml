@@ -40,13 +40,15 @@ libc = "0.2.190"
 # `windows` version process-wrap itself uses, or the flags are not of its type.
 windows = { version = "0.62", features = ["Win32_System_Threading"] }
 # The named pipe's security descriptor and the check of which user serves the pipe
-# (`ipc::pipe_security`).
+# (`ipc::pipe_security`), and the `WM_SETTINGCHANGE` broadcast after the user PATH changes
+# (`cli_path`).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Pipes",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # `env::resolve` reads the system proxy from the current user's Internet Settings and the PATH
 # from the machine's and the user's environment in the registry.

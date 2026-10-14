@@ -56,6 +56,7 @@ test("every field the form edits reaches the settings", () => {
     prompt_template: "Push to the test branch.",
     auto_update: false,
     full_access_acknowledged: true,
+    show_in_dock: false,
     notifications: { run_started: false, awaiting_acceptance: false, needs_info: false, failed: false },
     trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" },
   });
@@ -74,9 +75,21 @@ test("every field the form edits reaches the settings", () => {
     prompt_template: "Push to the test branch.",
     auto_update: false,
     full_access_acknowledged: true,
+    show_in_dock: false,
     notifications: { run_started: false, awaiting_acceptance: false, needs_info: false, failed: false },
     trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" },
   });
+});
+
+test("the Dock switch is part of the draft: it comes from the settings and a draft that left it alone gives it back", () => {
+  const off: Settings = { ...DEFAULT_SETTINGS, show_in_dock: false };
+  expect(draftOf(DEFAULT_SETTINGS).show_in_dock).toBe(true);
+  expect(draftOf(off).show_in_dock).toBe(false);
+  expect(settingsOf(off, draftOf(off))).toEqual(off);
+  const draft = draftOf(off);
+  draft.show_in_dock = true;
+  expect(settingsOf(off, draft)?.show_in_dock).toBe(true);
+  expect(sameDraft(draft, draftOf(off))).toBe(false);
 });
 
 test("names are saved without the blanks around them, the template as it was typed", () => {

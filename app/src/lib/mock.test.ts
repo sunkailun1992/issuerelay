@@ -204,6 +204,22 @@ describe("mock backend", () => {
     }
   });
 
+  test("the app's last update check is up to date, unless the demo is asked to offer a version or fail an install", async () => {
+    const quiet = createMockBackend("demo", { latencyMs: 0 });
+    expect(await quiet.updateStatus()).toMatchObject({ kind: "up_to_date" });
+    expect(await quiet.checkUpdate()).toEqual(await quiet.updateStatus());
+    await expect(quiet.installUpdate()).resolves.toBeUndefined();
+    const offered = createMockBackend("demo", { latencyMs: 0, update: "available" });
+    expect(await offered.updateStatus()).toEqual({ kind: "available", version: "0.2.0" });
+    expect(await offered.checkUpdate()).toEqual({ kind: "available", version: "0.2.0" });
+    const failed = await createMockBackend("demo", { latencyMs: 0, update: "install-failed" }).updateStatus();
+    // A reason long enough to need wrapping, for the layout checks.
+    expect(failed).toMatchObject({ kind: "failed", code: "install_failed" });
+    expect(failed.kind === "failed" && failed.detail.length).toBeGreaterThan(190);
+    // A name the mock does not know changes nothing.
+    expect((await createMockBackend("demo", { latencyMs: 0, update: "nonsense" }).updateStatus()).kind).toBe("up_to_date");
+  });
+
   test("control servers report one state per executor", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     expect(await backend.controlServers()).toEqual({ claude: "not_registered", codex: "not_registered" });

@@ -434,9 +434,10 @@ impl Host {
     }
 
     /// The executors' environment as last resolved, with the real values: a proxy URL in it keeps
-    /// its user name and password. It is for starting processes only (the one-click setup
-    /// commands run with it through `SystemRunner::with_env`); never show it or send it to the
-    /// panel. `Engine::doctor` gives the form to show, with the proxy values masked
+    /// its user name and password. It is for starting processes (the one-click setup commands
+    /// run with it through `SystemRunner::with_env`) and for facts that hold no secret, such as
+    /// whether a folder is on its PATH (`cli_path`); never show it or send it to the panel.
+    /// `Engine::doctor` gives the form to show, with the proxy values masked
     /// (`ExecEnv::proxy_for_display`, which `ExecEnv`'s `Debug` uses too).
     pub fn env(&self) -> ExecEnv {
         self.inner

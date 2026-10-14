@@ -4,6 +4,11 @@
 *                                  @sunkailun1992
 /AGENTS.md                         @sunkailun1992
 /scripts/check-secrets.sh          @sunkailun1992
+/scripts/check-secrets-self-test.sh @sunkailun1992
+/scripts/stage-cli.sh                 @sunkailun1992
+/scripts/stage-cli.ps1                @sunkailun1992
+/scripts/verify-update-signature.mjs  @sunkailun1992
+/scripts/release-checks.mjs           @sunkailun1992
 /.github/                          @sunkailun1992
 /crates/core/src/prompt.rs         @sunkailun1992
 /crates/core/src/config.rs         @sunkailun1992
@@ -13,6 +18,7 @@
 /crates/core/src/setup.rs          @sunkailun1992
 /crates/core/src/runner.rs         @sunkailun1992
 /crates/core/src/env.rs            @sunkailun1992
+/crates/core/src/cli_path.rs       @sunkailun1992
 /crates/core/src/linear/auth.rs    @sunkailun1992
 /crates/core/src/ipc/protocol.rs   @sunkailun1992
 /crates/core/src/ipc/pipe_security.rs @sunkailun1992
@@ -27,4 +33,6 @@
 /app/src-tauri/src/                @sunkailun1992
 /app/src-tauri/build.rs            @sunkailun1992
 /app/src-tauri/capabilities/       @sunkailun1992
+/app/src-tauri/tauri.conf.json     @sunkailun1992
+/app/src-tauri/tauri.*.conf.json   @sunkailun1992
 /app/src/lib/clean.ts              @sunkailun1992

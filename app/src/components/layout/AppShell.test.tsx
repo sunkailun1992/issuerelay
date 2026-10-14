@@ -1,8 +1,11 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Route, Routes } from "react-router";
+import { vi } from "vitest";
+import { queryKeys } from "@/hooks/queries";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import type { StatusView } from "@/lib/types";
+import type { StatusView, UpdateStatus } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import iconSvg from "../../../public/icon.svg?raw";
 import { AppShell } from "./AppShell";
@@ -103,4 +106,46 @@ test("following a link moves the highlight", async () => {
   await userEvent.click(screen.getByRole("link", { name: "Settings" }));
   expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+});
+
+test("a new version shows its banner above the page, and nothing is shown while up to date", async () => {
+  const page = (
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<h1>Demo page</h1>} />
+      </Route>
+    </Routes>
+  );
+  const quiet = await renderWithProviders(page);
+  await waitFor(() => expect(quiet.client.getQueryState(queryKeys.update)?.status).toBe("success"));
+  expect(screen.getByRole("heading", { name: "Demo page" })).toBeInTheDocument();
+  expect(screen.queryByText(/is available/)).not.toBeInTheDocument();
+  quiet.unmount();
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.updateStatus = async (): Promise<UpdateStatus> => ({ kind: "available", version: "0.2.0" });
+  await renderWithProviders(page, { backend });
+  const banner = await screen.findByText("IssueRelay 0.2.0 is available");
+  const heading = screen.getByRole("heading", { name: "Demo page" });
+  expect(banner.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("a banner that cannot be drawn shows nothing, and the shell and the page stay", async () => {
+  // React reports an error it hands to a boundary; keep the output of the test run readable.
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // A reply the banner cannot make sense of: a reason that is no text.
+  backend.updateStatus = async () => ({ kind: "failed", code: "install_failed", detail: 5 }) as unknown as UpdateStatus;
+  const { client } = await renderWithProviders(
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<h1>Demo page</h1>} />
+      </Route>
+    </Routes>,
+    { backend },
+  );
+  await waitFor(() => expect(client.getQueryState(queryKeys.update)?.status).toBe("success"));
+  await waitFor(() => expect(error.mock.calls.map(([message]) => message)).toContain("a part of the panel stopped on an error"));
+  expect(screen.getByRole("heading", { name: "Demo page" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+  expect(screen.queryByText("The update could not be installed")).not.toBeInTheDocument();
 });

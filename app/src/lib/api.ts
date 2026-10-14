@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type Backend, BackendError } from "./backend";
-import type { QuitPrompt, StartupState } from "./types";
+import type { QuitPrompt, StartupState, UpdateStatus } from "./types";
 
 export const isTauri = (): boolean => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -50,12 +50,19 @@ export const tauriBackend: Backend = {
   chooseDirectory: () => call("choose_directory"),
   autostartEnabled: () => call("autostart_enabled"),
   setAutostart: (enabled) => call("set_autostart", { enabled }),
+  cliOnPath: () => call("cli_on_path"),
+  installCliOnPath: () => call("install_cli_on_path"),
+  removeCliFromPath: () => call("remove_cli_from_path"),
   quit: (mode) => call("quit", { mode }),
   requestQuit: () => call("request_quit"),
+  updateStatus: () => call("update_status"),
+  checkUpdate: () => call("check_update"),
+  installUpdate: () => call("install_update"),
   onEngineEvent: (listener) => on("engine-event", listener),
   onResync: (listener) => on("engine-resync", () => listener()),
   onQuitRequested: (listener) => on<QuitPrompt>("quit-requested", listener),
   onStartupFailed: (listener) => on<StartupState>("startup-failed", listener),
+  onUpdateStatus: (listener) => on<UpdateStatus>("update-status", listener),
 };
 
 /**
@@ -75,11 +82,20 @@ function mockLanguage(): string | undefined {
 }
 
 /**
+ * `?update=available` or `?update=install-failed` in a browser makes the mock's app offer a new
+ * version, or tell that an update could not be installed (the layout checks of the banner).
+ */
+function mockUpdate(): string | undefined {
+  const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  return params.get("update") ?? undefined;
+}
+
+/**
  * The backend the panel uses: the real commands inside Tauri; in a plain browser the mock,
  * loaded with `import()` only then, so the demo data stays out of the app's own start-up code.
  */
 export async function loadBackend(): Promise<Backend> {
   if (isTauri()) return tauriBackend;
   const { createMockBackend } = await import("./mock");
-  return createMockBackend(mockScenario(), { language: mockLanguage() });
+  return createMockBackend(mockScenario(), { language: mockLanguage(), update: mockUpdate() });
 }

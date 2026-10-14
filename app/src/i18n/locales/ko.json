@@ -70,7 +70,9 @@
     "run_started": "실행을 시작했습니다.",
     "awaiting_acceptance": "검수할 준비가 되었습니다. 이슈가 테스트 중 상태입니다.",
     "needs_info": "AI가 이슈에 질문을 남겼습니다. 내용을 보충한 뒤 ai-ready 라벨을 다시 붙여 주세요.",
-    "failed": "실행에 실패했습니다. 원인은 패널에서 확인할 수 있습니다."
+    "failed": "실행에 실패했습니다. 원인은 패널에서 확인할 수 있습니다.",
+    "update_available": "IssueRelay {{version}} 업데이트가 있습니다",
+    "update_available_body": "패널을 열어 설치하세요."
   },
   "quit": {
     "title": "실행 중인 작업이 있습니다",
@@ -80,6 +82,18 @@
     "stop": "지금 중지",
     "cancel": "계속 실행",
     "waiting": "작업이 끝나기를 기다리고 있습니다. 끝나면 IssueRelay가 종료됩니다."
+  },
+  "update": {
+    "available": "IssueRelay {{version}} 업데이트가 있습니다",
+    "install": "설치하고 다시 시작",
+    "downloading": "다운로드하고 확인하는 중…",
+    "later": "나중에",
+    "dismiss": "닫기",
+    "restart_note": "설치하려면 IssueRelay가 다시 시작됩니다. 실행 중인 작업이 있으면 먼저 물어봅니다.",
+    "restart_body": "이 작업들이 끝나면 IssueRelay가 다시 시작되어 업데이트를 설치합니다.",
+    "waiting": "작업이 끝나기를 기다리고 있습니다. 끝나면 IssueRelay가 업데이트를 설치하고 다시 시작합니다.",
+    "check": "업데이트 확인",
+    "up_to_date": "최신 버전입니다 (마지막 확인: {{time}})"
   },
   "startup": {
     "failed_title": "IssueRelay를 시작할 수 없습니다",
@@ -155,13 +169,22 @@
       "linear_reconnect": "Linear에 다시 연결하지 못했습니다",
       "setup_action": "설정 명령이 실패했습니다",
       "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다",
+      "cli_path": "명령줄 PATH 추가 설정을 바꾸지 못했습니다",
       "open_linear": "Linear를 열지 못했습니다",
-      "copy": "복사하지 못했습니다"
+      "copy": "복사하지 못했습니다",
+      "check_update": "업데이트를 확인하지 못했습니다",
+      "install_update": "업데이트를 설치하지 못했습니다"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay는 Linear의 페이지만 엽니다",
-    "login_cancelled": "브라우저 로그인이 취소되었습니다"
+    "login_cancelled": "브라우저 로그인이 취소되었습니다",
+    "update_unreachable": "업데이트 서버에 연결할 수 없습니다",
+    "update_no_platform": "새 버전에는 아직 이 컴퓨터용 설치 파일이 없습니다",
+    "update_bad_signature": "업데이트의 서명을 확인하지 못했습니다. 아무것도 설치하지 않았습니다",
+    "update_unavailable": "설치된 앱만 업데이트할 수 있습니다. 먼저 IssueRelay를 '응용 프로그램' 폴더로 옮기세요",
+    "update_install_failed": "업데이트를 설치하지 못했습니다",
+    "update_failed": "업데이트 확인에 실패했습니다"
   },
   "overview": {
     "monitoring": "모니터링",
@@ -432,8 +455,24 @@
     "autostart": "로그인 시 자동 시작",
     "applies_at_once": "바로 적용되며 '저장'과는 별개입니다.",
     "autostart_failed": "로그인 시 자동 시작 여부를 읽지 못했습니다",
+    "show_in_dock": "Dock에 아이콘 표시",
+    "show_in_dock_note": "끄면 패널이 열려 있는 동안에만 아이콘이 표시됩니다. 메뉴 막대 아이콘은 항상 남아 있습니다.",
+    "cli": {
+      "title": "명령줄을 PATH에 추가",
+      "description": "터미널에서 {{command}}을(를) 바로 입력해 쓸 수 있게 됩니다. 관리자 권한은 필요하지 않습니다.",
+      "on_new_terminal": "추가되었습니다. 새 터미널을 열면 사용할 수 있습니다.",
+      "shell_line": "아래 줄을 셸 설정 파일(zsh는 ~/.zshrc)에 추가한 뒤 새 터미널을 여세요:",
+      "stale": "링크가 다른 IssueRelay({{target}})를 가리키고 있습니다. 켜면 이 앱을 가리키도록 바뀝니다.",
+      "blocked": "{{path}}이(가) 이미 있고 IssueRelay가 만든 것이 아닙니다. 삭제하거나 이름을 바꾼 뒤 다시 시도하세요.",
+      "unavailable": {
+        "missing_cli": "이 IssueRelay에는 명령줄 프로그램이 없습니다. 릴리스 페이지에서 IssueRelay를 다시 설치하세요.",
+        "not_installed": "IssueRelay가 디스크 이미지 또는 임시 사본에서 실행되고 있습니다. 먼저 '응용 프로그램' 폴더로 옮기세요.",
+        "development": "개발 빌드에서는 사용할 수 없습니다."
+      },
+      "load_failed": "PATH 설정을 읽지 못했습니다"
+    },
     "auto_update": "업데이트 자동 확인",
-    "auto_update_note": "자동 업데이트는 이후 버전에서 제공됩니다. 선택한 내용은 미리 저장됩니다.",
+    "auto_update_note": "시작 1분 뒤에 한 번, 이후 6시간마다 확인합니다. 설치는 항상 직접 누를 때까지 기다립니다.",
     "control_server_intro": "MCP 제어 서버를 쓰면 Claude Code와 Codex가 IssueRelay의 상태를 볼 수 있습니다.",
     "control_server_note": "사용자 범위로 등록되므로 무인 실행에서도 불러옵니다. 도구에는 모니터링 일시 중지도 있습니다.",
     "control_failed": "MCP 제어 서버를 확인하지 못했습니다",

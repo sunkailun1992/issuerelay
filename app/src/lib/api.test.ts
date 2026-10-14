@@ -41,6 +41,32 @@ describe("backend selection", () => {
     expect(invoke).toHaveBeenCalledWith("settings", undefined);
   });
 
+  test("?update= in the address makes the mock's app offer an update or report a failed install", async () => {
+    window.history.replaceState(null, "", "/?update=available");
+    vi.resetModules();
+    const { loadBackend } = await import("./api");
+    expect(await (await loadBackend()).updateStatus()).toEqual({ kind: "available", version: "0.2.0" });
+    window.history.replaceState(null, "", "/?update=install-failed");
+    vi.resetModules();
+    const failed = await (await (await import("./api")).loadBackend()).updateStatus();
+    expect(failed).toMatchObject({ kind: "failed", code: "install_failed" });
+    // A name the mock does not know leaves the app up to date, as without the parameter.
+    window.history.replaceState(null, "", "/?update=nonsense");
+    vi.resetModules();
+    expect((await (await (await import("./api")).loadBackend()).updateStatus()).kind).toBe("up_to_date");
+  });
+
+  test("inside Tauri ?update= picks nothing either: the status comes from the app", async () => {
+    window.history.replaceState(null, "", "/?update=available");
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue({ kind: "unchecked" });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { loadBackend } = await import("./api");
+    expect(await (await loadBackend()).updateStatus()).toEqual({ kind: "unchecked" });
+    expect(invoke).toHaveBeenCalledWith("update_status", undefined);
+  });
+
   test("without ?lang= the mock's settings follow the system", async () => {
     vi.resetModules();
     const { loadBackend } = await import("./api");
@@ -53,7 +79,8 @@ describe("backend selection", () => {
       .fn()
       .mockRejectedValueOnce("job 7 not found")
       .mockRejectedValueOnce("not_a_linear_link")
-      .mockRejectedValueOnce("login_cancelled");
+      .mockRejectedValueOnce("login_cancelled")
+      .mockRejectedValueOnce("update_bad_signature");
     vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     const { loadBackend } = await import("./api");
@@ -66,6 +93,8 @@ describe("backend selection", () => {
     expect(refused).toMatchObject({ code: "not_a_linear_link" });
     const cancelled = await backend.linearLogin().catch((error: unknown) => error);
     expect(cancelled).toMatchObject({ code: "login_cancelled" });
+    const unsigned = await backend.installUpdate().catch((error: unknown) => error);
+    expect(unsigned).toMatchObject({ code: "update_bad_signature" });
   });
 });
 
@@ -104,7 +133,7 @@ describe("the webview boundary", () => {
       .filter((permission) => permission.startsWith("allow-"))
       .map((permission) => permission.slice("allow-".length).replaceAll("-", "_"));
     expect(called).toEqual(new Set(granted));
-    expect(listen).toHaveBeenCalledTimes(4);
+    expect(listen).toHaveBeenCalledTimes(5);
     // `listen` and the function it returns need exactly these two; nothing else of Tauri's own.
     expect(capability.permissions.filter((permission) => !permission.startsWith("allow-"))).toEqual([
       "core:event:allow-listen",

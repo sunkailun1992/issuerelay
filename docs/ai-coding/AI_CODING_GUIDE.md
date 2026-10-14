@@ -20,6 +20,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 前端检查与测试 | `pnpm --dir app lint`（含 `tsc` 类型检查）；`pnpm --dir app test` |
 | 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对（容差见 `TESTING_SPEC.md`），再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图，换了机器或 Chrome 的大版本用 `pnpm --dir app exec playwright test --update-snapshots=all` 整套重拍（它也重写 README 用的四张图，单独重拍那四张用 `pnpm --dir app readme-screenshots`）。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
 | 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束，加 `?lang=zh-CN`（或别的语言代码）让设置里的界面语言是它 |
+| 本机安装包（macOS） | `bash scripts/stage-cli.sh && pnpm --dir app build && node scripts/release-checks.mjs panel && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`：产物在 `target/release/bundle/`（git 忽略）；`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，免得弹出「控制访达」的授权框；打包配置去掉了 `beforeBuildCommand`，`tauri build` 不会再自己构建面板，所以面板要像命令里那样先构建并过 `panel` 门禁 |
 
 工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22.22.2+、24.15+ 或 26 及以上（`app/package.json` 的 `engines`），pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 
@@ -64,6 +65,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 环境检查 | `crates/core/src/doctor.rs` |
 | 一键配置命令（Linear MCP、控制服务注册） | `crates/core/src/setup.rs` |
 | 执行者环境（PATH、代理） | `crates/core/src/env.rs` |
+| 把命令行加入 PATH、应用安装位置 | `crates/core/src/cli_path.rs` |
 | 状态流转与编排 | `crates/core/src/engine.rs` |
 | 宿主组装（IPC、后台循环、Linear 连接切换；启动不等 Linear，首次连接在后台） | `crates/core/src/host.rs` |
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |
@@ -71,6 +73,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
 | 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
 | 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
+| 自动更新（检查、验签、经退出流程安装） | `app/src-tauri/src/update.rs` |
 | 面板命令（含仅面板可用的标记完成、重试、停止） | `app/src-tauri/src/commands.rs` |
 | 面板能调什么（应用清单、能力文件） | `app/src-tauri/build.rs`、`app/src-tauri/capabilities/default.json` |
 | 前端数据层、假后端与虚构数据 | `app/src/lib/` |
@@ -91,7 +94,10 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘；改用 API key 时清掉 OAuth 凭据，OAuth 登录时清掉 API key（`auth::clear_oauth_credentials`、`clear_api_key`） |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
-| 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二次打开应用只把已运行的面板带到前面；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
+| 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二个进程（例如 Windows 再次打开应用）经单实例回调只把已运行的面板带到前面；macOS 经访达、Spotlight 或程序坞再次打开不启动第二个进程，系统给运行中的实例发「重新打开」事件，走 `RunEvent::Reopen` → `window::on_reopen`，不经单实例回调；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
+| 命令行的 PATH 入口 | macOS：`~/.local/bin/issuerelay`（指向应用包内命令行程序的符号链接）；Windows：用户级 `Path`（`HKCU\Environment`）里的安装目录 | 只在用户打开设置里的开关时建，关掉时删，且只删 IssueRelay 自己建的；macOS 不覆盖别人的文件，指向别份应用的旧链接换成指向这一份；Windows 保持原来的注册表类型、不分大小写去重；都不需要管理员（`cli_path.rs`） |
+| 装不上的更新 | `<数据目录>/com.sunkailun.issuerelay/update-install-failure.txt` | 「安装并重启」在宿主停下后没装上时写下清洗过的一行原因（只记安装函数返回的错误：macOS 换不了应用包，Windows 启动不了安装程序）；程序按原版本重启后读出、删除，面板顶部的横幅显示一次。Windows 上安装程序一启动，IssueRelay 就已经退出，之后安装程序失败或 MSI 的管理员确认被拒绝都不会留下这条记录，用户从开始菜单重新打开即可 |
+| 更新后显示面板 | `<数据目录>/com.sunkailun.issuerelay/update-show-panel` | 「安装并重启」在调用安装**之前**留下的空文件（Windows 上安装一开始进程就结束，安装之后的代码不会再跑）；下一次启动读出并删除，面板照常显示，开机自启也不例外（重启沿用 `--autostart`，否则安装的结果和失败原因没人看见）；删不掉就当没有，免得每次登录都弹出面板（`update::{leave,take}_show_panel_marker`、`startup::shows_panel`） |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 
@@ -100,7 +106,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`（`fields` 的取值同步 `REQUIRED_FIELDS`）、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试；面板的时间线读同样的输出和日志里 IssueRelay 自己的 `{"stream":…,"text":…}` 行（`app/src/lib/timeline.ts`，测试直接读 `crates/core/tests/fixtures/{claude-stream,codex-exec}.jsonl`，不复制），格式变了一并改。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
-- **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`，以及 `quit-requested` 的载荷 `quit::QuitPrompt { running, waiting }`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
+- **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`，以及 `quit-requested` 的载荷 `quit::QuitPrompt { running, waiting, purpose }`、`update-status` 与 `update_status`、`check_update` 给出的 `update::UpdateStatus`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`），以及读它们的组件（`QuitDialog`、`UpdateBanner`、设置页的版本一行）。
 - **面板命令**：增删命令要同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json`（`allow-<命令>`，下划线写成连字符）和前端的 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 与 `api.test.ts` 的测试拦住不一致。面板要用 Tauri 自带的其他接口（窗口、路径等）时，只在能力文件里加用到的那一条权限，并在提交说明里写明理由；插件权限不给，插件只在 Rust 侧用。
 - **开发者工具**：调试构建里 Cmd+Opt+I（macOS）/ Ctrl+Shift+I（Windows）什么也不做，因为能力文件没有给 `core:webview:allow-internal-toggle-devtools`；需要时只在本机临时加上（`lib.rs` 与 `api.test.ts` 的边界测试会因此失败），不要提交；发布构建没有开发者工具。
 
@@ -121,7 +127,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - 发布时，上次发布以来有运行行为变化才升版本，一次发布只升一次；只改了文档、测试、规范不升。
 - 升版本的提交同样经 PR 进 `main`。推送前按 `origin/main` 的最新值顺延，开工时算的号不作数；PR 里的号在合入前都是暂定，合入时已被占用就再顺延，并同步改 PR 标题、提交信息和文档里写到的版本号。PR 里写明旧版本、新版本和这次发布包含的行为变化。
 - 版本号只用 `X.Y.Z` 三段数字，不带 `-rc.1` 这类预发布后缀（M3 起打的 Windows MSI 安装包不接受）。
-- M3 起推送 `vX.Y.Z` 标签触发发布。
+- M3 起推送 `vX.Y.Z` 标签触发发布（`.github/workflows/release.yml`）：标签必须等于工作区版本、标签提交必须在 `origin/main` 上（`scripts/release-checks.mjs`，试打包同样检查），工作流只建草稿，步骤见 `MAINTAINERS.md`「发布」。
 
 ## 11. 分支与提交
 
@@ -174,8 +180,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ### 12.7 窗口尺寸
 
-- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。需求与运行记录的表格、绑定对话框、首次引导在 900×600 与 885×600 下由 `app/tests/screens.spec.ts` 检查（`pnpm --dir app test:screens`，只在本机跑）；其他页面没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
-- 表格每行最多放一个操作按钮（需求编号本身就是「在 Linear 中打开」，`IssueLink`）；长文本允许在词中断行（`wrap-anywhere`），长路径中间省略（`MiddleEllipsis`）。
+- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。需求与运行记录的表格、绑定对话框、首次引导、设置里「把命令行加入 PATH」一行（打开开关、显示出 shell 那一行时）、概览页顶部的更新横幅与设置里版本和「检查更新」一行（有新版本，以及装不上的更新带一段很长的原因）在 900×600 与 885×600 下由 `app/tests/screens.spec.ts` 检查（`pnpm --dir app test:screens`，只在本机跑）；其他页面和设置的其余部分没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
+- 表格每行最多放一个操作按钮（需求编号本身就是「在 Linear 中打开」，`IssueLink`）；长文本允许在词中断行（`wrap-anywhere`），长路径中间省略（`MiddleEllipsis`）；放进提示框（`Alert`，文字那一列是 `1fr` 的网格）的长文本，标题与正文要加 `min-w-0`，否则那一列会撑到最长那个词的宽度（`UpdateBanner`）。
 - 表单对话框（`BindingDialog`）不高过窗口，字段在框内滚动，按钮始终看得见。
 
 ### 12.8 无障碍

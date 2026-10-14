@@ -37,6 +37,8 @@ export interface Draft extends Record<CountField, string> {
   trigger: TriggerNames;
   /** The user confirmed what full access means (it is saved with the page). */
   full_access_acknowledged: boolean;
+  /** Whether the app keeps its icon in the macOS Dock; only the macOS page offers it, and on Windows it stays as it is saved. */
+  show_in_dock: boolean;
 }
 
 export const COUNT_FIELDS = Object.keys(MINIMUM) as CountField[];
@@ -59,6 +61,7 @@ export function draftOf(settings: Settings): Draft {
     auto_update: settings.auto_update,
     trigger: { ...settings.trigger },
     full_access_acknowledged: settings.full_access_acknowledged,
+    show_in_dock: settings.show_in_dock,
   };
 }
 
@@ -132,6 +135,7 @@ export function settingsOf(base: Settings, draft: Draft): Settings | null {
       done: draft.trigger.done.trim(),
     },
     full_access_acknowledged: draft.full_access_acknowledged,
+    show_in_dock: draft.show_in_dock,
   };
 }
 

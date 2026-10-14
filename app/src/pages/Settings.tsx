@@ -7,7 +7,7 @@ import { ApiKeyForm } from "@/components/ApiKeyForm";
 import { Field, Hint } from "@/components/FormField";
 import { FullAccessWarning } from "@/components/FullAccessWarning";
 import { PageHeader } from "@/components/PageHeader";
-import { ErrorState, LoadingState } from "@/components/states";
+import { DetailLine, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,15 +21,22 @@ import {
   queryKeys,
   useAppInfo,
   useAutostart,
+  useCliPath,
   useControlServers,
+  useInstallCliOnPath,
+  useRemoveCliFromPath,
   useSaveSettings,
   useSetAutostart,
   useSetupAction,
   useSettings,
+  useUpdateCheck,
 } from "@/hooks/queries";
+import { useCopyText } from "@/hooks/useCopyText";
+import { useLang } from "@/hooks/useLang";
 import { LANGUAGES } from "@/i18n/language";
 import { cleanDisplayText } from "@/lib/clean";
-import { reportFailure } from "@/lib/errors";
+import { reportFailure, updateFailureKey } from "@/lib/errors";
+import { formatRelative } from "@/lib/format";
 import {
   type CountField,
   type Draft,
@@ -41,11 +48,21 @@ import {
   settingsOf,
   unsaved,
 } from "@/lib/settings-form";
-import type { ControlServer, ExecutorKind, NotificationSettings, PermissionProfile, Settings as SettingsData, TriggerNames } from "@/lib/types";
+import type {
+  CliPathStatus,
+  ControlServer,
+  ExecutorKind,
+  NotificationSettings,
+  PermissionProfile,
+  Settings as SettingsData,
+  TriggerNames,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** The command that builds IssueRelay's command-line program, for a development build that has none yet. */
 const BUILD_CLI = "cargo build -p issuerelay-cli";
+/** The command the PATH switch makes available in a terminal. */
+const CLI_COMMAND = "issuerelay";
 
 /** A group of settings: a card named by its heading. */
 function Group({ title, children }: { title: string; children: ReactNode }) {
@@ -74,22 +91,26 @@ function SwitchRow({
   id,
   label,
   note,
+  describedBy,
   checked,
   disabled,
   onChange,
 }: {
   id: string;
   label: string;
-  note?: string;
+  note?: ReactNode;
+  /** The id of more text outside the row's own note that describes the switch, such as the state it is in. */
+  describedBy?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const described = [note === undefined ? undefined : `${id}-note`, describedBy].filter((part) => part !== undefined).join(" ");
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-3">
         <Label htmlFor={id}>{label}</Label>
-        <Switch id={id} checked={checked} disabled={disabled} aria-describedby={note === undefined ? undefined : `${id}-note`} onCheckedChange={onChange} />
+        <Switch id={id} checked={checked} disabled={disabled} aria-describedby={described === "" ? undefined : described} onCheckedChange={onChange} />
       </div>
       {note !== undefined && <Hint id={`${id}-note`}>{note}</Hint>}
     </div>
@@ -220,6 +241,141 @@ function Autostart() {
       disabled={change.isPending}
       onChange={(enabled) => change.mutate(enabled)}
     />
+  );
+}
+
+/**
+ * What the PATH row says under its switch. The paths are the system's text: cleaned, and allowed to
+ * break anywhere. The sentence about the state has the `id` the switch is described by, which is
+ * how the reason a switch cannot be used is read with it; the shell line and its button are not
+ * part of that description. Nothing is said while it is off.
+ */
+function CliPathNote({ id, status }: { id: string; status: CliPathStatus }) {
+  const { t } = useTranslation();
+  const copy = useCopyText();
+  switch (status.kind) {
+    case "off":
+      return null;
+    case "on": {
+      const line = status.shell_line;
+      if (line === null) {
+        return (
+          <p id={id} className="text-xs text-muted-foreground">
+            {t("settings.cli.on_new_terminal")}
+          </p>
+        );
+      }
+      return (
+        <div className="flex flex-col gap-1">
+          <p id={id} className="text-xs text-muted-foreground">
+            {t("settings.cli.shell_line")}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 rounded bg-muted px-2 py-1 font-mono text-xs wrap-anywhere text-foreground select-text">{line}</code>
+            <Button size="sm" variant="outline" onClick={() => copy(line)}>
+              {t("common.copy")}
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    case "stale":
+      return (
+        <p id={id} className="text-xs text-muted-foreground wrap-anywhere">
+          {t("settings.cli.stale", { target: cleanDisplayText(status.target) })}
+        </p>
+      );
+    case "blocked":
+      return (
+        <p id={id} className="text-xs text-destructive wrap-anywhere">
+          {t("settings.cli.blocked", { path: cleanDisplayText(status.path) })}
+        </p>
+      );
+    case "unavailable":
+      return (
+        <p id={id} className="text-xs text-muted-foreground">
+          {t(`settings.cli.unavailable.${status.reason}`)}
+        </p>
+      );
+  }
+}
+
+/**
+ * Putting the command line on PATH (design 12). It acts at once and is not saved with the page,
+ * like starting at login; the switch shows only once the state is read, so it is never shown in a
+ * state it is not in. Only where the app runs from does not allow it is the switch locked. A file
+ * IssueRelay did not make in the way leaves it usable, shown off: the user removes or renames the
+ * file, then turns it on, and the command looks at the slot again (it links if the file is gone,
+ * and says "in the way" again if not, which is an answer and no failure).
+ */
+function CliOnPath() {
+  const { t } = useTranslation();
+  const id = useId();
+  const status = useCliPath();
+  const install = useInstallCliOnPath();
+  const remove = useRemoveCliFromPath();
+  if (status.isError && !status.isFetching) {
+    return <ErrorState error={status.error} headline="settings.cli.load_failed" onRetry={() => void status.refetch()} />;
+  }
+  if (status.data === undefined) return <LoadingState rows={1} />;
+  const current = status.data;
+  const stateId = `${id}-state`;
+  return (
+    <div className="flex flex-col gap-1">
+      <SwitchRow
+        id={id}
+        label={t("settings.cli.title")}
+        note={<WithCommands text={t("settings.cli.description", { command: CLI_COMMAND })} commands={[CLI_COMMAND]} />}
+        describedBy={current.kind === "off" ? undefined : stateId}
+        checked={current.kind === "on"}
+        disabled={install.isPending || remove.isPending || status.isFetching || current.kind === "unavailable"}
+        onChange={(on) => (on ? install.mutate() : remove.mutate())}
+      />
+      <CliPathNote id={stateId} status={current} />
+    </div>
+  );
+}
+
+/**
+ * The running version, "Check for updates", and what the last check found (design 12). Like the
+ * PATH row it acts at once and is no part of Save. Wrapping: the version and the button sit in
+ * a row that wraps, so the button goes under the version when they do not fit side by side; the
+ * result is one short sentence, and the reason of a failure is a `DetailLine`, which breaks
+ * wherever it must.
+ */
+function UpdateCheck() {
+  const { t } = useTranslation();
+  const lang = useLang();
+  const info = useAppInfo();
+  // The button's own result while it is the last word; otherwise what the app keeps (a
+  // background check's, or a failed install's after the restart).
+  const { shown, run, isPending } = useUpdateCheck();
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium">{info.data ? t("shell.version", { version: info.data.version }) : t("common.loading")}</span>
+        <Button size="sm" variant="outline" disabled={isPending} onClick={() => run()}>
+          {isPending && <LoaderCircle aria-hidden className="animate-spin" />}
+          {t("update.check")}
+        </Button>
+      </div>
+      {shown?.kind === "up_to_date" && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("update.up_to_date", { time: formatRelative(shown.checked_at, lang) })}
+        </p>
+      )}
+      {shown?.kind === "available" && (
+        <p role="status" className="text-xs text-muted-foreground wrap-anywhere">
+          {t("update.available", { version: shown.version })}
+        </p>
+      )}
+      {shown?.kind === "failed" && (
+        <div role="alert">
+          <p className="text-xs text-destructive">{t(updateFailureKey(shown.code))}</p>
+          <DetailLine text={shown.detail} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -372,6 +528,10 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   const [edits, setEdits] = useState<Partial<Draft>>({});
   const [asking, setAsking] = useState(false);
   const save = useSaveSettings();
+  const info = useAppInfo();
+  // The Dock is macOS's: Windows has no such icon (the taskbar button follows the window), so the
+  // switch is not offered there. Until the platform is known it is not shown either.
+  const hasDock = info.data?.platform === "macos";
   const draft: Draft = { ...base, ...edits };
   const problems = problemsOf(draft);
   const blocked = Object.keys(problems).length > 0;
@@ -508,6 +668,16 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
 
         <Group title={t("settings.group.system")}>
           <Autostart />
+          {hasDock && (
+            <SwitchRow
+              id={id("show-in-dock")}
+              label={t("settings.show_in_dock")}
+              note={t("settings.show_in_dock_note")}
+              checked={draft.show_in_dock}
+              onChange={(on) => edit("show_in_dock", on)}
+            />
+          )}
+          <CliOnPath />
           <SwitchRow
             id={id("auto-update")}
             label={t("settings.auto_update")}
@@ -515,6 +685,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             checked={draft.auto_update}
             onChange={(on) => edit("auto_update", on)}
           />
+          <UpdateCheck />
         </Group>
 
         <Group title={t("settings.group.mcp")}>

@@ -23,6 +23,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v6
@@ -47,4 +49,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The scan's own patterns, against made-up samples: an edit that stops one from catching what
+      # it was added for fails here, before the scan below could pass without it.
+      - run: bash scripts/check-secrets-self-test.sh
       - run: bash scripts/check-secrets.sh --strict
+      # actionlint checks every workflow: expressions, job outputs and needs, reusable workflow
+      # inputs, and the shell in `run:` steps through shellcheck. It is the author's container
+      # image, pinned to a release and to the digest of that release's multi-architecture index
+      # (the tag alone could be moved); move both when a newer release comes out.
+      - name: Lint the workflows
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color

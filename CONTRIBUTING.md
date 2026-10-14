@@ -52,6 +52,8 @@ pnpm --dir app build   # tauri build（custom-protocol）构建的应用内嵌 a
 
 实机验收才需要真实环境：你自己的 Linear 测试项目（不是真实业务项目），加上已登录的 Claude Code 或 Codex。步骤见 [docs/gates/](docs/gates/) 和 [TESTING_SPEC.md](docs/ai-coding/TESTING_SPEC.md)。
 
+想在本机打安装包：先 `bash scripts/stage-cli.sh`（Windows 上 `pwsh scripts/stage-cli.ps1`）把命令行程序放进 `app/src-tauri/binaries/`，再 `pnpm --dir app build`、`node scripts/release-checks.mjs panel`（确认内嵌的是真正的面板；打包配置去掉了 `beforeBuildCommand`，`tauri build` 不会再自己构建面板，所以这两步不能省，顺序也不能换），最后 `CI=true pnpm --dir app tauri build --config src-tauri/tauri.bundle.conf.json`（macOS 上再加 `--bundles app,dmg`；`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，免得弹出「控制访达」的授权框，Windows 的 PowerShell 里先设 `$env:CI = 'true'`）。只开发面板与托盘时不需要这一步。
+
 ## 提交前检查
 
 提交前在仓库根目录跑这六条，全部通过再推送。先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`：`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`，CI 也是这个顺序（没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板）：

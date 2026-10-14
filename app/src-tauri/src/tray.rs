@@ -340,15 +340,16 @@ fn show_view(app: &AppHandle, view: &TrayView, labels: &Labels) {
 /// Their setters called from another thread would wait for the main thread to run them, and an
 /// exit the system forces keeps the main thread waiting for the host's stop (`quit::forced_exit`),
 /// which runs on the async runtime's threads: the event forwarder or a panel command waiting there
-/// could hold up that stop. From the main thread itself, `apply` runs at once.
-fn on_main_thread<R: Runtime>(
+/// could hold up that stop. From the main thread itself, `apply` runs at once. A window's getters
+/// are no different (`window::refresh_dock` asks whether the panel is visible).
+pub(crate) fn on_main_thread<R: Runtime>(
     app: &AppHandle<R>,
     apply: impl FnOnce(&AppHandle<R>) + Send + 'static,
 ) {
     let handle = app.clone();
     logging::warn_failed(
         app.run_on_main_thread(move || apply(&handle)),
-        "handing the tray an update",
+        "handing work to the main thread",
     );
 }
 

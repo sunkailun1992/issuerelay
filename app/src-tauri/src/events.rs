@@ -17,8 +17,11 @@ pub const ENGINE_EVENT: &str = "engine-event";
 /// Events were lost: the panel reads everything again.
 pub const RESYNC_EVENT: &str = "engine-resync";
 /// Quitting asks the panel "wait or stop now"; the payload is a `quit::QuitPrompt`: how many runs
-/// are in progress, and whether quitting already waits for them.
+/// are in progress, whether quitting already waits for them, and whether IssueRelay then quits or
+/// installs a downloaded update.
 pub const QUIT_REQUESTED: &str = "quit-requested";
+/// The update state the panel should show (an `update::UpdateStatus`).
+pub const UPDATE_STATUS: &str = "update-status";
 /// The host could not start; the payload is the `StartupState::Failed`.
 pub const STARTUP_FAILED: &str = "startup-failed";
 

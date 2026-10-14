@@ -5165,7 +5165,7 @@ Expected：`git worktree list` 只剩主检出。主检出的 `app/src-tauri/bin
 写 `docs/gates/<日期>-m3-acceptance.md`：环境（macOS 版本、芯片、安装位置）、第 2–6 步每项的结果与原文（脱敏：`DEMO-N`、`Demo Project`）、与设计或文档不一致之处及改法。「未闭环」至少列出：
 
 - macOS 15、26 上的 Gatekeeper 提示与「仍要打开」流程（本机不是这两个版本时）；「同事按说明用安装包装好并跑通」（设计第 17 节的完成标志，待同事）。
-- Windows 全部待实机（没有 Windows 机器）：NSIS 按用户安装不要管理员与 SmartScreen 的提示原文；智能应用控制开启时的表现；「把命令行加入 PATH」的往返（打开、新终端 `issuerelay --version`、关闭；用户 `Path` 里其他条目逐字不变，`REG_EXPAND_SZ` 不变成 `REG_SZ`）；从终端 `issuerelay start`、关掉终端后托盘程序仍在；**正在运行的 `issuerelay.exe` 是否挡住 NSIS 更新与卸载**（调研未确认 3：在一个终端里跑 `issuerelay logs <编号> --lines 5000` 之类的长命令或让 AI 客户端开着 `issuerelay mcp`，再触发「安装并重启」与卸载；若被挡住，候选改法是 NSIS 的 `NSIS_HOOK_PREINSTALL` / `NSIS_HOOK_PREUNINSTALL` 钩子把 `issuerelay.exe` 也交给重启管理器，或在安装说明里要求先关掉）；MSI 安装要管理员、更新经 `msiexec` 弹管理员确认；NSIS 卸载程序是否提供「删除应用数据」以及它删哪些目录。
+- Windows 全部待实机（没有 Windows 机器）：NSIS 按用户安装不要管理员与 SmartScreen 的提示原文；智能应用控制开启时的表现；「把命令行加入 PATH」的往返（打开、新终端 `issuerelay --version`、关闭；用户 `Path` 里其他条目逐字不变，`REG_EXPAND_SZ` 不变成 `REG_SZ`）；从终端 `issuerelay start`、关掉终端后托盘程序仍在；**正在运行的 `issuerelay.exe` 是否挡住 NSIS 更新与卸载**（调研未确认 3：在一个终端里跑 `issuerelay logs <编号> --lines 5000` 之类的长命令或让 AI 客户端开着 `issuerelay mcp`，再触发「安装并重启」与卸载；若被挡住，候选改法是 NSIS 的 `NSIS_HOOK_PREINSTALL` / `NSIS_HOOK_PREUNINSTALL` 钩子把 `issuerelay.exe` 也交给重启管理器，或在安装说明里要求先关掉）；MSI 安装要管理员、更新经 `msiexec` 弹管理员确认；NSIS 卸载程序是否提供「删除应用数据」以及它删哪些目录；另见文末「评审遗留的小项」里的「待实机的检查」：更新失败的两条路径（被占用的 `issuerelay.exe` 让 NSIS 更新失败、MSI 更新时拒绝管理员确认）与 MSI 更新后重新启动的程序是否带着管理员令牌，以及 macOS 15 / 26 的放行与钥匙串各条，逐条记入报告，没做的留作未闭环。
 - `latest.json` 里的下载地址是 `api.github.com` 的资产地址：同一出口 IP 的未登录 API 限额（每小时 60 次）在多人同时更新时是否够用，待观察。
 
 更新设计第 17 节 M3 一行：「安装包、发布流程、自动更新、把命令行加入 PATH 已在 macOS 实机验收（`docs/gates/<日期>-m3-acceptance.md`）；Windows 与同事安装待实机。」
@@ -5218,7 +5218,7 @@ gh run watch "$run" --exit-status
 gh release list --limit 3
 ```
 
-（同样，刚推送时运行可能还没出现，几秒后再查一次 `run`。）Expected：工作流全绿（`verify`、两个 `test`、`create-release`、`bundle-release` 的两个打包任务、`verify-release`；`bundle-dry-run` 与 `verify-dry-run` 跳过）；`gh release list` 里有一个 `Draft` 状态的 `IssueRelay v<版本>`，标题不含「incomplete」。从草稿下载 dmg 在本机装一遍（第 2–3 步的简版）。失败时按 `MAINTAINERS.md`「发布」第 6 条删草稿与标签，修好后重推同一个标签。
+（同样，刚推送时运行可能还没出现，几秒后再查一次 `run`。）Expected：工作流全绿（`verify`、两个 `test`、`create-release`、`bundle-release` 的两个打包任务、`verify-release`；`bundle-dry-run` 与 `verify-dry-run` 跳过）；`gh release list` 里有一个 `Draft` 状态的 `IssueRelay v<版本>`，标题不含「incomplete」。从草稿下载 dmg 在本机装一遍（第 2–3 步的简版）。失败时按 `MAINTAINERS.md`「发布」的「失败或放弃」一条删草稿与标签，修好后重推同一个标签（不要用「Re-run failed jobs」修补草稿）。
 
 **不公开草稿**：把草稿链接、资产列表与 `verify-release` 的结果交给维护者，由维护者检查后在 GitHub 页面上点「Publish release」。
 
@@ -5277,3 +5277,59 @@ mktemp -d   # prints a folder for the PR description
 
 - **Review Focus → 测试**：第 1 条——`quit.rs` 的 `the_quit_prompt_tells_the_panel_what_follows`、`a_verified_update_is_installed_where_quitting_would_exit`、`the_process_outlives_the_install_and_then_restarts`、`a_forced_exit_while_installing_stops_nothing_again`、扩展到 `Installing` 的 `every_exit_request_before_quitting_is_done_is_held` 与 M2 的退出状态机测试，`update.rs` 的 `a_verified_download_waits_for_the_quit_flow_and_is_reused`、`the_quit_flow_helpers_run_on_any_runtime`，`QuitDialog.test.tsx` 的「installing an update with runs in progress…」「a tray Quit while waiting to install…」，`UpdateBanner.test.tsx` 的第一个测试，Task 6 第 5 步；第 2 条——`update.rs` 的 `only_a_newer_version_is_offered`、`a_failed_check_only_informs`、`a_bad_signature_keeps_nothing_to_install`、`a_failed_check_keeps_the_version_already_offered`、`a_failed_install_is_shown_once_after_the_restart`，`UpdateBanner.test.tsx` 的第二、五、六个测试，`Settings.test.tsx` 的检查更新测试，Task 6 第 6 步；第 3 条——`release-checks.mjs` 的自测（`panel`、`tag`、`on-main`、`assets`、`latest-json` 各有反例），`release.yml` 的 `verify`（自测、标签、`origin/main`、密钥扫描、secrets）、`create-release`（同标签已有 Release）、`bundle.yml`（面板、包内容、签名核对）、`verify-release` 与 `verify-dry-run`（资产、`latest.json`、标记草稿），Task 4 Step 8 与 Task 6 第 8–9 步实际运行；第 4 条——`cli_path.rs` 的全部纯函数测试与 `link` 子模块的四个读写测试、`Settings.test.tsx` 的四个 PATH 测试、Task 6 第 4 步；第 5 条——`main.rs` 的 `start_launches_the_app_only_when_it_is_not_running`、`start_reports_an_app_that_never_answers_and_other_failures`、`a_stopped_app_points_to_issuerelay_start`，`mcp_tools.rs` 的两条新断言，Task 6 第 4 步第 4–5 项。
 - **2026-10-14 按预检修订**：本计划写在 M2 桌面应用落地之前；预检（只读，对照 M2 落地的 2ebda38）找出 38 处问题，控制者给出裁定 M3-AR1–AR8 与逐条裁定，本次修订全部照办：新命令同一步登记进 `PANEL_COMMANDS`、能力文件与绊线测试，命令数 34 → 37 → 40（AR1）；Task 3 编辑而不替换 M2 的文件，`ERROR_CODES` 留着 `login_cancelled`，监听数 4 → 5，假后端的状态改名 `updateState`，`QuitPrompt` 改到每个用到它的地方，`QuitDialog` 的七个旧测试全部保留（AR2）；更新与退出的函数对 `R: Runtime` 泛型，在 MockRuntime 上测（AR3）；验收不再「升版本、打包、改回去」，升版本是普通 PR，更高版本的测试构建在一次性 worktree 里做（AR4）；最低 macOS 13.3（AR5）；打包前确认内嵌的不是占位页（AR6）；发布门禁成为带反例自测的 `scripts/release-checks.mjs`，试打包对将要打的标签与试打包产物跑同样的门（AR7）；每个任务都有时限，试打包只读、只有标签发布能写，secrets 只经步骤级 `env:`，jq 用 `--arg`，临时目录用完即删、变量每步重新求出，CI 用 actionlint 检查工作流（AR8）；以及逐条裁定（`useAction` 的真实签名、测试等真实条件、由 PATH 得出的非秘密事实与规则改写、不加第五个通知开关且装不上只在面板里说、新行的换行规则与 620 / 605 px 检查、规则改动单独提交、明确的 `git add` 与 `Co-Authored-By`、用例表、沿用 `notify.rs`、`missing_cli` 文案、`cleanDisplayText`、CODEOWNERS 与安全规范的更新段落、安装期间与托盘退出的边界、订阅的清理、按签名情况措辞的安装说明）。照原样接受、未改的：预检「未检查」一节的各项（`tauri-plugin-updater` 的 API、tauri-action 对 `releaseId` 的行为、Windows 上的编译、`gh api` 的重定向）仍由实现者按解析到的版本文档核对，由 CI 与试打包确认。修订时另外改正了几处新发现的不一致：M2 钉住旧「自动更新」旁注的测试要随文案改写；「系统」分组合起来的顺序（开机自启、PATH、自动检查更新、版本与检查更新）；`latest.json` 的 `notes` 是写给下载页的 Release 正文，面板不再显示它；Task 6 不再依赖 Task 4 留下的 `$SCRATCH`，自己按运行编号下载产物。
+
+## 评审遗留的小项
+
+本计划执行中，各任务评审、对整条 M3 分支的最终评审与最终修复波决定接受、没有修复的项，以及还要在真实机器上确认的事。SDD 工作区在合并后删除，这里是这些结论唯一的存放处；写后续计划或做验收时逐条认领，或写明不做及原因。
+
+**最终评审接受的遗留项**
+
+| 内容 | 接受的理由 | 认领 |
+|---|---|---|
+| 第一个任务把文档单独拆成了第二个提交，与计划里的一个提交不同 | squash 合并之后没有区别 | 不做 |
+| `latestJsonProblems` 的 `where = null` 默认值偏宽：不传仓库时，地址的来源不核对 | 正式发布只有 `latest-json` 一个调用方，它由必填的 `--repo`（校验格式）和 `--sigs` 组出 `where`；默认值只给试打包那道门用；自测把两种模式都钉住了 | 不做 |
+| 草稿复查在构建之前，竞态窗口只是缩小、没有关上：复查之后、上传之前，草稿仍可能被公开或删除 | 彻底关上要改成「先构建，复查草稿，再上传」，属于重做；`verify-release` 会再复查一次，维护者也只在全绿之后才公开 | 以后要关上它时：把上传从 tauri-action 里拆出来，构建完再复查、再上传 |
+| `quit::on_run_event` 文档注释里「Not about quitting, but …」那句不成句，`quit.rs` 里同一条平台说明重复了五处 | 每处都在解释紧挨着的代码，属于观感问题 | 下次改 `quit.rs` 时顺手 |
+| 两条日语提示（Dock 开关的说明、自动更新的说明）为了在最小窗口不折行而缩短，措辞没有母语者看过 | 在 900x600 与 885x600 的窗口里量过：一行放得下，余量 28 px 以上；意思没变 | 有日语使用者时复核 |
+
+**评审时登记的后续改进**
+
+| 内容 | 认领 |
+|---|---|
+| 有第二个协作者之后，给发布用的 secrets 建一个只允许 `v*` 标签使用的 Environment（现在只有所有者有写权限；这是仓库设置，由所有者决定） | 有第二个协作者时 |
+| 把构建与签名拆成两步（先无 secrets 构建，再单独签名）：现在 cargo 的构建脚本与过程宏在带着签名 secrets 与可写令牌的环境里运行（`MAINTAINERS.md`「发布用的 secrets」写明） | 视需要，与上一行一起考虑 |
+| NSIS 安装包的 PREINSTALL（与 PREUNINSTALL）钩子把 `issuerelay.exe` 也登记给重启管理器：模板只让它关主程序，Claude Code、Codex 里运行着的 `issuerelay mcp` 会占着命令行；或更新前由应用自己结束它启动的命令行子进程（`on_before_exit`） | 实机确认被占用的 `issuerelay.exe` 会挡住更新之后（见下面「待实机的检查」第 1 行） |
+| `cli_path::expand_vars` 与 `env::expand_references` 是两份几乎一样的 `%变量%` 展开，合成一份 | 下次改其中一个时 |
+| Windows 上 `issuerelay start` 起的托盘程序继承终端的环境，而且只用了 `DETACHED_PROCESS` 与 `CREATE_NEW_PROCESS_GROUP`：终端在作业对象里运行、关掉时又会结束整个作业的话，托盘程序可能跟着被结束；可以试加 `CREATE_BREAKAWAY_FROM_JOB`（作业要允许脱离才有用） | Windows 实机确认之后 |
+| `issuerelay start --json` 打印的仍是文字，不是 JSON | 下次改 `start` 时 |
+| Windows 上任何非调试构建都算「已安装」（`cli_path::app_location`），包括从「下载」文件夹或临时目录直接运行的副本；这时「把命令行加入 PATH」会把那个目录写进 `Path` | 下次改 `cli_path.rs` 时：Windows 也要有「不是从安装目录运行」的判断 |
+| 本计划里还写着旧的锁定式 PATH 开关：Task 2 的设置页代码里 `disabled` 含 `current.kind === "blocked"`，对应的测试名也说「blocks the switch」，Task 6 第 4 步第 3 项写「开关不可用」。落地的行为是：开关保持关闭、仍然可点，点了而那个文件还在时，面板仍写「已存在，且不是 IssueRelay 建的」，什么也不改 | 不改计划文字；执行 Task 6 第 4 步第 3 项时按落地的行为做 |
+
+**第三个任务留下的小项**
+
+| 内容 | 认领 |
+|---|---|
+| `install_and_restart`（要用 `AppPaths::system()` 取数据目录，规则不许测试里用真实数据目录）与 `setup` 的其余接线没有单元测试。已测的部分：`install_leaving_notes`（标记与安装的先后、失败原因）、标记的读写、`startup::shows_panel` 与 `starts_hidden`，以及 `update::manage`（更新状态和退出流程读的那份句柄都被管理，且是同一份） | Task 6 第 5 步的实机更新 |
+| 设置页版本一行还有一个很窄的缺口：按钮上一次的失败还显示着，之后后台检查成功、而且找到的正好是应用早就保留的同一个版本（状态内容完全相同，对象不变）时，行里的失败不会被换掉，要再点一次或离开设置页 | 不做，除非有人碰到 |
+| 点「安装并重启」到应用重启之间（没有任务在跑时是停宿主加安装，几秒钟）面板没有「正在安装」的反馈：命令一返回，按钮就恢复原样。不能简单地在成功之后禁用它，因为选了「继续运行」之后用户要能再点；要做，得让 Rust 在进入 `Installing` 时发一个事件 | 视实机体验 |
+| 两个平台上的真实更新（下载、验签、等待任务、安装、重启）都没有验证过 | Task 6 第 5 步（macOS）；Windows 实机验收 |
+
+**Dock 图标（`show_in_dock`）留下的小项**
+
+| 内容 | 认领 |
+|---|---|
+| 激活策略的接线（`lib.rs` 里登录启动时的 `hide`、`startup.rs` 的 `refresh_dock`、`commands.rs` 保存设置后的 `refresh_dock`、`window.rs` 的 `show` 与 `hide`）没有自动测试：MockRuntime 的 `set_activation_policy` 什么也不做，看不出策略有没有被设置。已测的部分：决策表（`dock_policy`、`DockSetting`，含宿主没能启动的一行）、由启动状态得出设置的两支（启动中、启动失败）、两个策略与 AppKit 激活策略的对应 | 不为它造接缝；macOS 实机验收时看程序坞图标：开机自启的头几秒、关掉面板之后、更新重启之后、关掉设置之后、宿主没能启动时 |
+
+**待实机的检查**
+
+| 内容 | 由谁认领 |
+|---|---|
+| Windows：NSIS 更新遇到被占用的 `issuerelay.exe`（Claude Code、Codex 里运行着 `issuerelay mcp`，或开着 `issuerelay` 的终端）：安装程序怎么说，IssueRelay 是否保持关闭、能否从开始菜单重新打开，卸载同理 | Windows 实机验收（Task 6 第 7 步的 Windows 清单；候选改法是上面的 NSIS 钩子） |
+| Windows：MSI 更新时拒绝管理员确认：IssueRelay 是否保持关闭、旧版本能否从开始菜单正常打开 | 同上 |
+| Windows：MSI 更新后重新启动的程序是否带着管理员令牌（带的话，执行者也会以管理员身份运行，真实的 `claude`、`codex` 就在提权环境里跑） | 同上 |
+| Windows：安装前留下的「显示面板」标记在重启后确实让面板显示出来（NSIS 的 `/R` 带着原来的参数重启，含 `--autostart`）；安装程序一启动进程就退出这一点，目前是读更新插件的源码得出的 | 同上 |
+| Windows：`docs/install.md` 与设计第 12 节里标了「待 Windows 实机」的各条：安装、SmartScreen 与智能应用控制的提示原文、PATH 的写入与广播、更新、环境检查里「PATH 来自」显示「系统设置」 | 同上 |
+| macOS 15、26 上 Gatekeeper 的提示原文与「仍要打开」流程；点了「仍要打开」之后，包内的命令行程序（经 `~/.local/bin` 的链接运行）会不会又被拦一次，拦的话要 `xattr -dr`，并写进 `docs/install.md` | Task 6 第 3、4 步（本机的版本）；15、26 在同事的电脑上 |
+| ad hoc 签名的版本更新后，钥匙串是否再问、该点哪个按钮、Linear 是否仍连接（`docs/install.md` 已按预期写了「始终允许」，以及点「拒绝」的后果） | Task 6 第 5 步第 5 项 |
+| 更新后的重启：`request_restart()` 与单实例插件配合，程序在运行且只有一个实例；开机自启条目与「登录项」的显示；macOS 上换不了应用包时面板顶部的说明 | Task 6 第 5 步第 4、5 项 |
+| 第一次带私钥的手动试打包与第一次公开的更新：插件下载 API 资产地址时带 `Accept: application/octet-stream`，命令行在 CI 里用空密码签名 | Task 6 第 8 步，以及第一次公开之后的更新检查 |

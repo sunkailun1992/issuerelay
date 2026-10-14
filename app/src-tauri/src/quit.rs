@@ -17,6 +17,14 @@
 //! down) and Windows ending the session arrive only as `RunEvent::Exit`, which cannot be refused.
 //! So Cmd+Q is an item of IssueRelay's own (`app_menu`) that asks like the tray's Quit, and an
 //! exit that cannot be refused still stops the host first, for a bounded while.
+//!
+//! "Install and restart" (`quit::request_update`) goes through the same steps. Where quitting
+//! would exit, a verified update waiting in `update` is installed instead (`installing_instead`):
+//! quitting stays `Installing`, so a closed window only hides and an exit request is held, until
+//! the install has returned (`Installed`) and IssueRelay restarts. A plain quit (`request`) drops
+//! a downloaded update first, so quitting never installs it; one that comes while the update is
+//! still downloading is counted, and the download is discarded when it ends (`update::install`
+//! then does not ask to install).
 use std::{
     sync::{Mutex, PoisonError},
     time::Duration,
@@ -26,7 +34,7 @@ use issuerelay_core::host::StopMode;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 
-use crate::{events, i18n::Translator, logging, state::AppState, window};
+use crate::{events, i18n::Translator, logging, state::AppState, update, window};
 
 /// The id of the Quit items: the tray menu's and, on macOS, the application menu's. The tray's
 /// menu handler gets the events of every menu (`TrayIconBuilder::on_menu_event`), so both go to
@@ -49,7 +57,11 @@ pub enum QuitState {
     Waiting,
     /// Stopping the runs in progress.
     Stopping,
-    /// The host has stopped, or never started: the app exits.
+    /// The host has stopped and a verified update is being installed: the process must outlive
+    /// the install, so a closed window only hides and an exit request is held; `Installed` ends it.
+    /// (On Windows the plugin ends the process itself once it has handed over to the installer.)
+    Installing,
+    /// The host has stopped, or never started: the app exits (or restarts after an install).
     Done,
 }
 
@@ -66,17 +78,20 @@ pub enum QuitEvent {
     Stopped,
     /// The panel window is being closed.
     WindowClosed,
+    /// The update's install returned, installed or not (`update::install_and_restart`).
+    Installed,
 }
 
 /// What `handle` does after a transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitStep {
     Nothing,
-    /// Show the panel and ask (`quit-requested` with the runs in progress, not waiting yet).
+    /// Show the panel and ask (`quit-requested` with a `QuitPrompt`, not waiting yet).
     Ask(usize),
     /// Show the panel again and tell it that quitting waits for the runs in progress
     /// (`quit-requested` with `waiting`): a panel that was reloaded meanwhile has lost the waiting
-    /// prompt, and shows it again with "stop now".
+    /// prompt, and shows it again with "stop now". It is told again what follows, too, which a
+    /// tray Quit may just have changed.
     ShowPanel(usize),
     /// Stop the host as the mode says, in the background; `Stopped` follows.
     Stop(StopMode),
@@ -84,14 +99,44 @@ pub enum QuitStep {
     HideWindow,
     /// Exit the process.
     Exit,
+    /// Install the verified update in the background; `Installed` follows.
+    Install,
+    /// Restart into the installed version, or into the current one when installing failed.
+    Restart,
 }
 
-/// The panel's question (`quit-requested`): how many runs are in progress, and whether quitting
-/// already waits for them, in which case the panel offers only "stop now".
+/// What follows once quitting is done: IssueRelay exits, or installs the downloaded update and
+/// restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuitPurpose {
+    Quit,
+    Update,
+}
+
+/// The panel's question (`quit-requested`): how many runs are in progress, whether quitting
+/// already waits for them, in which case the panel offers only "stop now", and what follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct QuitPrompt {
     pub running: usize,
     pub waiting: bool,
+    pub purpose: QuitPurpose,
+}
+
+impl QuitPrompt {
+    /// The question for `running` runs in progress. A verified update waiting for the quit flow
+    /// (`update_pending`) makes it the question of "install and restart".
+    pub fn new(running: usize, waiting: bool, update_pending: bool) -> Self {
+        Self {
+            running,
+            waiting,
+            purpose: if update_pending {
+                QuitPurpose::Update
+            } else {
+                QuitPurpose::Quit
+            },
+        }
+    }
 }
 
 /// The next state and what to do, for `event` in `state`.
@@ -117,7 +162,23 @@ pub fn next(state: QuitState, event: QuitEvent) -> (QuitState, QuitStep) {
             (S::Stopping, QuitStep::Stop(StopMode::StopRuns))
         }
         (S::Waiting | S::Stopping, E::Stopped) => (S::Done, QuitStep::Exit),
+        (S::Installing, E::Installed) => (S::Done, QuitStep::Restart),
         _ => (state, QuitStep::Nothing),
+    }
+}
+
+/// `next`'s outcome when a verified update waits for quitting to end: where quitting would exit,
+/// IssueRelay installs the update instead, and quitting is not done until the install has
+/// returned (`Installed`). Any other outcome stands.
+pub fn installing_instead(
+    outcome: (QuitState, QuitStep),
+    update_pending: bool,
+) -> (QuitState, QuitStep) {
+    match outcome {
+        (QuitState::Done, QuitStep::Exit) if update_pending => {
+            (QuitState::Installing, QuitStep::Install)
+        }
+        outcome => outcome,
     }
 }
 
@@ -127,32 +188,41 @@ pub fn may_exit(state: QuitState) -> bool {
     state == QuitState::Done
 }
 
+/// The transition for `event`: moves quitting to its next state and says what to do. Where
+/// quitting would exit, it takes the verified update that waits, if there is one, and the step
+/// becomes installing it (`installing_instead`). Does nothing else: `handle` does what the step
+/// says, and tests read what was decided.
+fn decide<R: Runtime>(
+    app: &AppHandle<R>,
+    event: QuitEvent,
+) -> (QuitStep, Option<Box<dyn update::Install>>) {
+    let state = app.state::<AppState>();
+    let mut quit = state.quit.lock().unwrap_or_else(PoisonError::into_inner);
+    let outcome = next(*quit, event);
+    // Taken under the quit lock where quitting would exit. A tray Quit that drops the update
+    // (`request`) comes either before, and IssueRelay quits, or after, and finds it installing.
+    // One that comes while the update is still downloading drops nothing, because nothing is kept
+    // yet; it is counted, and the download is discarded when it ends (`Updates::prepare`).
+    let install = (outcome == (QuitState::Done, QuitStep::Exit))
+        .then(|| update::take_pending(app))
+        .flatten();
+    let (next_state, step) = installing_instead(outcome, install.is_some());
+    *quit = next_state;
+    (step, install)
+}
+
 /// Applies `event`: moves quitting to its next state and does what the step says. Returns the
 /// step, which the window hook reads (`HideWindow`).
 pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
+    let (step, install) = decide(app, event);
     let state = app.state::<AppState>();
-    let step = {
-        let mut quit = state.quit.lock().unwrap_or_else(PoisonError::into_inner);
-        let (next_state, step) = next(*quit, event);
-        *quit = next_state;
-        step
-    };
     match step {
         QuitStep::Nothing | QuitStep::HideWindow => {}
-        QuitStep::Ask(running) => ask_panel(
-            app,
-            QuitPrompt {
-                running,
-                waiting: false,
-            },
-        ),
-        QuitStep::ShowPanel(running) => ask_panel(
-            app,
-            QuitPrompt {
-                running,
-                waiting: true,
-            },
-        ),
+        QuitStep::Ask(running) => ask_panel(app, running, false),
+        // Still waiting: say again that it does, and what follows. A tray Quit has just dropped a
+        // downloaded update, so IssueRelay now quits instead of installing it, and the prompt
+        // says so.
+        QuitStep::ShowPanel(running) => ask_panel(app, running, true),
         QuitStep::Stop(mode) => match state.try_host() {
             Some(host) => {
                 let app = app.clone();
@@ -170,21 +240,50 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
             }
         },
         QuitStep::Exit => app.exit(0),
+        QuitStep::Install => {
+            if let Some(install) = install {
+                update::install_and_restart(app, install);
+            }
+        }
+        QuitStep::Restart => app.request_restart(),
     }
     step
 }
 
-/// Shows the panel and puts `prompt` to it (`quit-requested`).
-fn ask_panel<R: Runtime>(app: &AppHandle<R>, prompt: QuitPrompt) {
+/// Shows the panel and puts the question to it (`quit-requested`): the runs in progress, whether
+/// quitting waits for them already, and whether a downloaded update is installed once they are
+/// settled.
+fn ask_panel<R: Runtime>(app: &AppHandle<R>, running: usize, waiting: bool) {
     window::show(app);
+    let prompt = QuitPrompt::new(running, waiting, update::pending(app));
     logging::debug_failed(
         app.emit(events::QUIT_REQUESTED, prompt),
         "asking the panel about quitting",
     );
 }
 
-/// The tray's Quit, Cmd+Q and an exit request, with the host as it is now.
+/// The tray's Quit, Cmd+Q and an exit request: a quit, so an update downloaded for "install and
+/// restart" is dropped first and quitting never installs it (while the panel waits for runs to
+/// install, this turns it into a plain quit, and the prompt says so).
 pub fn request<R: Runtime>(app: &AppHandle<R>) {
+    handle(app, request_event(app));
+}
+
+/// "Install and restart", once the update is downloaded and verified: with runs in progress the
+/// same question as quitting; once the host has stopped, `handle` installs instead of exiting.
+pub fn request_update<R: Runtime>(app: &AppHandle<R>) {
+    handle(app, requested(app));
+}
+
+/// What a quit request is for the state machine: the update that waits is dropped first, then
+/// quitting starts with the host as it is now.
+fn request_event<R: Runtime>(app: &AppHandle<R>) -> QuitEvent {
+    update::clear_pending(app);
+    requested(app)
+}
+
+/// Quitting starts with the host as it is now.
+fn requested<R: Runtime>(app: &AppHandle<R>) -> QuitEvent {
     let host = app.state::<AppState>().try_host();
     let running = match &host {
         Some(host) => host.engine().status().running,
@@ -193,13 +292,10 @@ pub fn request<R: Runtime>(app: &AppHandle<R>) {
             0
         }
     };
-    handle(
-        app,
-        QuitEvent::Requested {
-            host_ready: host.is_some(),
-            running,
-        },
-    );
+    QuitEvent::Requested {
+        host_ready: host.is_some(),
+        running,
+    }
 }
 
 /// Says that quitting found no host to stop: it may still be starting (`Host::start` has not
@@ -210,7 +306,7 @@ fn no_host_to_stop<R: Runtime>(app: &AppHandle<R>, what: &str) {
 }
 
 /// Where quitting stands now.
-fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
+pub fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
     *app.state::<AppState>()
         .quit
         .lock()
@@ -267,7 +363,8 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
 /// What an exit that cannot be refused found, and how its stop went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForcedExit {
-    /// Quitting was done already: the host had stopped, or there never was one.
+    /// Quitting was done already, or an update is being installed: the host had stopped, or there
+    /// never was one.
     Done,
     /// No host, still starting or failed to start: nothing to stop.
     NoHost,
@@ -277,8 +374,9 @@ enum ForcedExit {
     TimedOut,
 }
 
-/// An exit that cannot be refused. Once quitting is done, or without a host to stop (`stop` is
-/// `None`), there is nothing to do. Otherwise quitting counts as stopping from here on, and
+/// An exit that cannot be refused. Once quitting is done, while an update installs (the host
+/// stopped before it began), or without a host to stop (`stop` is `None`), there is nothing to
+/// do. Otherwise quitting counts as stopping from here on, and
 /// `stop`, the host's `stop(StopRuns)`, runs on the async runtime while this thread, the event
 /// loop's, waits for it at most `limit`. Nothing that stop needs waits for the main thread in
 /// turn: the tray's updates are only handed to it (`tray::refresh`).
@@ -287,7 +385,8 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let mut state = quit.lock().unwrap_or_else(PoisonError::into_inner);
-    if may_exit(*state) {
+    // Installing: the host stopped before the install began, so there is nothing left to stop.
+    if may_exit(*state) || *state == QuitState::Installing {
         return ForcedExit::Done;
     }
     let Some(stop) = stop else {
@@ -509,12 +608,12 @@ mod tests {
 
     use tauri::{
         Listener, WebviewUrl, WebviewWindowBuilder,
-        test::{mock_builder, mock_context, noop_assets},
+        test::{MockRuntime, mock_builder, mock_context, noop_assets},
     };
 
-    use super::QuitEvent::{Requested, StopNow, Stopped, Wait, WindowClosed};
+    use super::QuitEvent::{Installed, Requested, StopNow, Stopped, Wait, WindowClosed};
     use super::*;
-    use crate::test_support::run_mock_app;
+    use crate::test_support::{InstallLog, fake_install, run_mock_app};
 
     #[test]
     fn quitting_asks_only_while_runs_are_in_progress() {
@@ -631,6 +730,7 @@ mod tests {
             QuitState::Asking,
             QuitState::Waiting,
             QuitState::Stopping,
+            QuitState::Installing,
         ] {
             assert_eq!(
                 next(state, WindowClosed),
@@ -832,19 +932,125 @@ mod tests {
         assert_eq!(
             serde_json::to_value(QuitPrompt {
                 running: 2,
-                waiting: false
+                waiting: false,
+                purpose: QuitPurpose::Quit
             })
             .unwrap(),
-            serde_json::json!({ "running": 2, "waiting": false })
+            serde_json::json!({ "running": 2, "waiting": false, "purpose": "quit" })
         );
         assert_eq!(
             serde_json::to_value(QuitPrompt {
                 running: 1,
-                waiting: true
+                waiting: true,
+                purpose: QuitPurpose::Update
             })
             .unwrap(),
-            serde_json::json!({ "running": 1, "waiting": true })
+            serde_json::json!({ "running": 1, "waiting": true, "purpose": "update" })
         );
+    }
+
+    #[test]
+    fn the_quit_prompt_tells_the_panel_what_follows() {
+        // A verified update waiting for the quit flow turns the question into the one of "install
+        // and restart"; waiting or not, the purpose is told every time the panel is asked.
+        for waiting in [false, true] {
+            assert_eq!(
+                serde_json::to_value(QuitPrompt::new(2, waiting, false)).unwrap(),
+                serde_json::json!({ "running": 2, "waiting": waiting, "purpose": "quit" })
+            );
+            assert_eq!(
+                serde_json::to_value(QuitPrompt::new(1, waiting, true)).unwrap(),
+                serde_json::json!({ "running": 1, "waiting": waiting, "purpose": "update" })
+            );
+        }
+    }
+
+    #[test]
+    fn a_verified_update_is_installed_where_quitting_would_exit() {
+        // Quitting is done (the host stopped, or there was none) and a verified update waits:
+        // it is installed instead, and quitting is not done until the install has returned.
+        assert_eq!(
+            installing_instead((QuitState::Done, QuitStep::Exit), true),
+            (QuitState::Installing, QuitStep::Install)
+        );
+        assert_eq!(
+            installing_instead((QuitState::Done, QuitStep::Exit), false),
+            (QuitState::Done, QuitStep::Exit)
+        );
+        // Every other step goes on as quitting does, update or not.
+        for outcome in [
+            (QuitState::Asking, QuitStep::Ask(1)),
+            (QuitState::Waiting, QuitStep::Stop(StopMode::WaitForRuns)),
+            (QuitState::Waiting, QuitStep::ShowPanel(1)),
+            (QuitState::Stopping, QuitStep::Stop(StopMode::StopRuns)),
+            (QuitState::Done, QuitStep::Nothing),
+        ] {
+            assert_eq!(installing_instead(outcome, true), outcome, "{outcome:?}");
+        }
+    }
+
+    #[test]
+    fn the_process_outlives_the_install_and_then_restarts() {
+        // While the update installs nothing ends the process: a closed window only hides, and
+        // another Quit, an answer or a late `Stopped` change nothing.
+        assert_eq!(
+            next(QuitState::Installing, WindowClosed),
+            (QuitState::Installing, QuitStep::HideWindow)
+        );
+        for event in [
+            Requested {
+                host_ready: true,
+                running: 0,
+            },
+            Wait,
+            StopNow,
+            Stopped,
+        ] {
+            assert_eq!(
+                next(QuitState::Installing, event),
+                (QuitState::Installing, QuitStep::Nothing),
+                "{event:?}"
+            );
+        }
+        assert!(
+            !may_exit(QuitState::Installing),
+            "an exit request is held while installing"
+        );
+        // The install returned, installed or not: restart; only now may the process end.
+        assert_eq!(
+            next(QuitState::Installing, Installed),
+            (QuitState::Done, QuitStep::Restart)
+        );
+        assert!(may_exit(QuitState::Done));
+        for state in [
+            QuitState::Idle,
+            QuitState::Asking,
+            QuitState::Waiting,
+            QuitState::Stopping,
+            QuitState::Done,
+        ] {
+            assert_eq!(
+                next(state, Installed),
+                (state, QuitStep::Nothing),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forced_exit_while_installing_stops_nothing_again() {
+        let quit = Mutex::new(QuitState::Installing);
+        let outcome = forced_exit(
+            &quit,
+            Some(std::future::pending::<()>()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            outcome,
+            ForcedExit::Done,
+            "the host stopped before the install began"
+        );
+        assert_eq!(*quit.lock().unwrap(), QuitState::Installing);
     }
 
     /// What `handle` tells the panel (`quit-requested`, each payload as JSON) for `event` with
@@ -856,6 +1062,14 @@ mod tests {
             .build(mock_context(noop_assets()))
             .unwrap();
         *app.state::<AppState>().quit.lock().unwrap() = state;
+        let told = questions(&app);
+        handle(app.handle(), event);
+        let told = told.lock().unwrap().clone();
+        (told, current(app.handle()))
+    }
+
+    /// What the app tells the panel from now on (`quit-requested`, each payload as JSON).
+    fn questions(app: &tauri::App<MockRuntime>) -> Arc<Mutex<Vec<serde_json::Value>>> {
         let told = Arc::new(Mutex::new(Vec::new()));
         let log = told.clone();
         app.listen(events::QUIT_REQUESTED, move |event| {
@@ -863,9 +1077,121 @@ mod tests {
                 .unwrap()
                 .push(serde_json::from_str(event.payload()).unwrap());
         });
-        handle(app.handle(), event);
-        let told = told.lock().unwrap().clone();
-        (told, current(app.handle()))
+        told
+    }
+
+    /// A mock app with a verified update waiting for the quit flow (the handle the app manages,
+    /// filled with a fake, so no plugin is involved), and the log of what gets installed.
+    fn app_with_update() -> (tauri::App<MockRuntime>, InstallLog) {
+        let app = mock_builder()
+            .manage(AppState::new(false))
+            .manage(update::PendingInstall::default())
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let (install, installed) = fake_install("0.2.0", b"payload");
+        app.state::<update::PendingInstall>().keep(install);
+        assert!(update::pending(app.handle()));
+        (app, installed)
+    }
+
+    #[test]
+    fn a_quit_request_drops_the_update_that_waits_and_quitting_ends_in_exit() {
+        // The tray's Quit, Cmd+Q, an exit request: `request` clears the update first, and with no
+        // host to stop quitting is done at once. (`handle` would call `AppHandle::exit`, which the
+        // mock runtime does not implement; `decide` is what it asks.)
+        let (app, installed) = app_with_update();
+        let (step, install) = decide(app.handle(), request_event(app.handle()));
+        assert_eq!(step, QuitStep::Exit);
+        assert!(install.is_none(), "a quit never installs");
+        assert!(!update::pending(app.handle()), "the download was dropped");
+        assert_eq!(current(app.handle()), QuitState::Done);
+        assert!(installed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_update_that_waits_is_installed_where_quitting_would_exit_and_then_the_app_restarts() {
+        let (app, installed) = app_with_update();
+        // "Install and restart" (`request_update`) clears nothing: with no host to stop, quitting
+        // is done at once, and the update is installed instead of exiting.
+        let (step, install) = decide(app.handle(), requested(app.handle()));
+        assert_eq!(step, QuitStep::Install);
+        assert_eq!(current(app.handle()), QuitState::Installing);
+        let install = install.expect("the update that waited is taken, once");
+        assert_eq!(install.version(), "0.2.0");
+        assert!(!update::pending(app.handle()));
+        // While it installs, nothing ends the process: a closed window only hides, and another
+        // Quit, an answer or a late stop change nothing.
+        let (step, _) = decide(app.handle(), WindowClosed);
+        assert_eq!(step, QuitStep::HideWindow);
+        for event in [
+            Requested {
+                host_ready: true,
+                running: 0,
+            },
+            Wait,
+            StopNow,
+            Stopped,
+        ] {
+            let (step, install) = decide(app.handle(), event);
+            assert_eq!(step, QuitStep::Nothing, "{event:?}");
+            assert!(install.is_none(), "{event:?}");
+        }
+        assert_eq!(current(app.handle()), QuitState::Installing);
+        // The install runs and returns (installed or not), and only then quitting is done.
+        install.install().unwrap();
+        assert_eq!(*installed.lock().unwrap(), [b"payload".to_vec()]);
+        let (step, install) = decide(app.handle(), Installed);
+        assert_eq!(step, QuitStep::Restart);
+        assert!(install.is_none());
+        assert_eq!(current(app.handle()), QuitState::Done);
+    }
+
+    #[test]
+    fn the_question_says_it_is_for_an_update_while_one_waits() {
+        let (app, _) = app_with_update();
+        let told = questions(&app);
+        // Runs are in progress when "install and restart" is asked for: the same question as
+        // quitting, and the panel is told what follows.
+        let step = handle(
+            app.handle(),
+            Requested {
+                host_ready: true,
+                running: 2,
+            },
+        );
+        assert_eq!(step, QuitStep::Ask(2));
+        assert_eq!(
+            *told.lock().unwrap(),
+            [serde_json::json!({ "running": 2, "waiting": false, "purpose": "update" })]
+        );
+        assert!(update::pending(app.handle()), "asking keeps the download");
+    }
+
+    #[test]
+    fn the_waiting_prompt_says_what_follows_until_a_tray_quit_drops_the_update() {
+        let (app, _) = app_with_update();
+        *app.state::<AppState>().quit.lock().unwrap() = QuitState::Waiting;
+        let told = questions(&app);
+        // A panel that was reloaded while the app waits to install is told again, with the update.
+        handle(
+            app.handle(),
+            Requested {
+                host_ready: true,
+                running: 1,
+            },
+        );
+        // The tray's Quit while waiting: the real `request`. It drops the download, the prompt
+        // says IssueRelay quits instead, and quitting goes on waiting.
+        request(app.handle());
+        assert_eq!(
+            *told.lock().unwrap(),
+            [
+                serde_json::json!({ "running": 1, "waiting": true, "purpose": "update" }),
+                serde_json::json!({ "running": 0, "waiting": true, "purpose": "quit" }),
+            ]
+        );
+        assert!(!update::pending(app.handle()));
+        assert_eq!(current(app.handle()), QuitState::Waiting);
     }
 
     #[test]
@@ -878,7 +1204,7 @@ mod tests {
             assert_eq!(
                 told_for(state, request),
                 (
-                    vec![serde_json::json!({ "running": 2, "waiting": false })],
+                    vec![serde_json::json!({ "running": 2, "waiting": false, "purpose": "quit" })],
                     QuitState::Asking
                 ),
                 "{state:?}"
@@ -898,7 +1224,7 @@ mod tests {
                 }
             ),
             (
-                vec![serde_json::json!({ "running": 1, "waiting": true })],
+                vec![serde_json::json!({ "running": 1, "waiting": true, "purpose": "quit" })],
                 QuitState::Waiting
             )
         );
@@ -981,8 +1307,14 @@ mod tests {
         // window going does (`code: None`): its `request_exit` is unimplemented, and so is every
         // way that ends in `AppHandle::exit`. Idle and Asking are therefore left out: without a
         // host, `request` there quits at once. The hook does not look at the state otherwise
-        // (`may_exit`, tested above).
-        for state in [QuitState::Waiting, QuitState::Stopping] {
+        // (`may_exit`, tested above). On the mock runtime the hook goes through the generic
+        // `request`, which drops a pending update (`update::clear_pending`; none is managed here)
+        // and starts quitting (`requested`), as in the app.
+        for state in [
+            QuitState::Waiting,
+            QuitState::Stopping,
+            QuitState::Installing,
+        ] {
             assert_eq!(
                 exit_requests_while(state),
                 [

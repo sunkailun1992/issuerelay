@@ -12,6 +12,7 @@ pub mod state;
 #[cfg(test)]
 mod test_support;
 pub mod tray;
+pub mod update;
 pub mod window;
 
 use tauri::{Manager, RunEvent};
@@ -50,6 +51,9 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // Only IssueRelay's own commands drive it (`commands::{update_status, check_update,
+        // install_update}`): the panel's capability grants no permission of this plugin.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state::AppState::new(autostarted))
         .manage(commands::PendingLogin::default())
         .invoke_handler(tauri::generate_handler![
@@ -87,15 +91,37 @@ pub fn run() {
             commands::set_autostart,
             commands::quit,
             commands::request_quit,
+            commands::cli_on_path,
+            commands::install_cli_on_path,
+            commands::remove_cli_from_path,
+            commands::update_status,
+            commands::check_update,
+            commands::install_update,
         ])
         .setup(|app| {
+            // What the previous run's install left for this start, both once. The reason it could
+            // not install (the banner says why), and the request that the panel shows: the restart
+            // after an install keeps `--autostart`, which would hide the outcome.
+            let data_dir = issuerelay_core::paths::AppPaths::system()
+                .ok()
+                .map(|paths| paths.data_dir);
+            let install_failure = data_dir.as_deref().and_then(update::take_install_failure);
+            let panel_requested = data_dir
+                .as_deref()
+                .is_some_and(update::take_show_panel_marker);
+            // The update state and, next to it, what the quit flow sees of an update (the verified
+            // download, not the plugin): one function, so that a test sees all of it is there.
+            update::manage(app.handle(), env!("CARGO_PKG_VERSION"), install_failure);
             tray::create(app.handle())?;
-            if app.state::<state::AppState>().autostarted {
+            if startup::starts_hidden(app.state::<state::AppState>().autostarted, panel_requested) {
                 // A login start stays in the tray: through the same `hide` as closing the panel,
                 // so macOS shows no Dock icon either.
+                // That holds until the settings are read: `startup::start` brings the icon back
+                // when "Show in Dock" is on, which it is unless the user switched it off.
                 window::hide(app.handle());
             }
-            tauri::async_runtime::spawn(startup::start(app.handle().clone()));
+            tauri::async_runtime::spawn(startup::start(app.handle().clone(), panel_requested));
+            update::spawn_checker(app.handle().clone());
             Ok(())
         })
         .on_window_event(window::on_event);

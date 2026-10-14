@@ -128,13 +128,19 @@ pub struct Settings {
     pub paused: bool,
     pub trigger: TriggerNames,
     pub notifications: NotificationSettings,
-    /// Check for and install updates automatically (from M3).
+    /// Check for updates automatically and offer them in the panel (design 12); installing always
+    /// waits for the user's "install and restart".
     pub auto_update: bool,
     /// The desktop panel's first-run guide was finished, or set aside with "Set up later": either
     /// way the panel no longer opens on it (it can still be run again from the environment check).
     pub onboarding_completed: bool,
     /// The user confirmed the full-access warning (design section 14) once.
     pub full_access_acknowledged: bool,
+    /// Keep the app's icon in the macOS Dock for as long as it runs, so that it is easy to find
+    /// (design 4.1). Off: the icon shows only while the panel is open; the menu bar icon always
+    /// stays. Windows has no Dock (a window's taskbar button follows the window), so it ignores
+    /// this setting; the value is still saved.
+    pub show_in_dock: bool,
 }
 
 impl Default for Settings {
@@ -157,6 +163,7 @@ impl Default for Settings {
             auto_update: true,
             onboarding_completed: false,
             full_access_acknowledged: false,
+            show_in_dock: true,
         }
     }
 }
@@ -998,6 +1005,23 @@ mod tests {
     }
 
     #[test]
+    fn the_dock_icon_stays_by_default_also_for_a_file_from_before_the_setting() {
+        assert!(Settings::default().show_in_dock);
+        let old: Config = toml::from_str("[settings]\npoll_interval_secs = 30\n").unwrap();
+        assert!(
+            old.settings.show_in_dock,
+            "a file written before the setting existed gets the default"
+        );
+        let off: Config = toml::from_str("[settings]\nshow_in_dock = false\n").unwrap();
+        assert!(!off.settings.show_in_dock);
+        // Off survives a save and a load: it is a choice, not something the load fills in.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        off.save(&path).unwrap();
+        assert!(!Config::load(&path).unwrap().settings.show_in_dock);
+    }
+
+    #[test]
     fn unknown_keys_are_named() {
         let text = "typo = 1\n[settings]\npoll_interval_secs = 30\npol_interval = 5\n[settings.trigger]\nlabel = \"ai-ready\"\ncolour = \"red\"\n[[bindings]]\nid = \"proj-1\"\nproject_id = \"proj-1\"\nproject_name = \"Demo Project\"\ndirectory = \"/tmp/demo\"\nfolder = \"x\"\n";
         let mut found = unknown_keys(text);
@@ -1029,6 +1053,7 @@ mod tests {
         config.settings.auto_update = false;
         config.settings.onboarding_completed = true;
         config.settings.full_access_acknowledged = true;
+        config.settings.show_in_dock = false;
         config.bindings.push(Binding {
             id: "proj-1".into(),
             project_id: "proj-1".into(),

@@ -1,9 +1,10 @@
 import { type QueryKey, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
-import type { Binding, ExecutorKind, LinearSetup, Settings, SetupAction, Viewer } from "@/lib/types";
+import type { Binding, CliPathStatus, ExecutorKind, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
 
 /**
  * Every query of the panel. The engine events (`useEngineEvents`) and the actions below refresh
@@ -24,6 +25,8 @@ export const queryKeys = {
   controlServers: ["controlServers"] as const,
   linearServerNamed: (executor: ExecutorKind) => ["linearServerNamed", executor] as const,
   autostart: ["autostart"] as const,
+  cliPath: ["cliPath"] as const,
+  update: ["update"] as const,
   appInfo: ["appInfo"] as const,
 };
 
@@ -147,6 +150,18 @@ export function useLinearServerNamed(executor: ExecutorKind, enabled = true) {
 export function useAutostart() {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.autostart, queryFn: () => backend.autostartEnabled() });
+}
+
+/** Whether the command line is on PATH through IssueRelay, and what is still to do (design 12). */
+export function useCliPath() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath() });
+}
+
+/** What the app's last update check found; `update-status` keeps it current (`useEngineEvents`). */
+export function useUpdateStatus() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.update, queryFn: () => backend.updateStatus() });
 }
 
 /** Version, command line path, platform and system language; fixed while the app runs. */
@@ -342,4 +357,47 @@ export function useSetAutostart() {
     [queryKeys.autostart],
     "actions.failed.set_autostart",
   );
+}
+
+export function useInstallCliOnPath() {
+  return useAction<void, CliPathStatus>((backend) => backend.installCliOnPath(), [queryKeys.cliPath], "actions.failed.cli_path");
+}
+
+export function useRemoveCliFromPath() {
+  return useAction<void, CliPathStatus>((backend) => backend.removeCliFromPath(), [queryKeys.cliPath], "actions.failed.cli_path");
+}
+
+/** Checks for an update now: what this check found is the action's `data`; the kept status is read again. */
+export function useCheckUpdate() {
+  return useAction<void, UpdateStatus>((backend) => backend.checkUpdate(), [queryKeys.update], "actions.failed.check_update");
+}
+
+/**
+ * The settings row for updates: what the app keeps (`useUpdateStatus`), with the result of the
+ * row's own check on top for as long as it is the last word. The kept status cannot tell a failed
+ * check while it keeps an offer (the banner goes on offering it), so the button's result is shown;
+ * but only until the kept status is something else, because then a later check, the background
+ * one say, has found something newer. The status read again and found the same is the same
+ * object (structural sharing), which is no news.
+ */
+export function useUpdateCheck() {
+  const client = useQueryClient();
+  const status = useUpdateStatus();
+  const check = useCheckUpdate();
+  const [found, setFound] = useState<{ outcome: UpdateStatus; kept: UpdateStatus | undefined } | null>(null);
+  const { mutate } = check;
+  const run = useCallback(
+    () =>
+      mutate(undefined, {
+        onSuccess: (outcome) => setFound({ outcome, kept: client.getQueryData<UpdateStatus>(queryKeys.update) }),
+      }),
+    [client, mutate],
+  );
+  const shown = found !== null && status.data === found.kept ? found.outcome : status.data;
+  return { shown, run, isPending: check.isPending };
+}
+
+/** "Install and restart": the Rust side downloads, verifies and goes through the quit flow. */
+export function useInstallUpdate() {
+  return useAction<void, void>((backend) => backend.installUpdate(), [], "actions.failed.install_update");
 }

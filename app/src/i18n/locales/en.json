@@ -70,7 +70,9 @@
     "run_started": "The run has started.",
     "awaiting_acceptance": "Ready for you to accept: it is in testing now.",
     "needs_info": "The AI asked a question on the issue; add the details and label it ai-ready again.",
-    "failed": "The run failed. The panel shows why."
+    "failed": "The run failed. The panel shows why.",
+    "update_available": "IssueRelay {{version}} is available",
+    "update_available_body": "Open the panel to install it."
   },
   "quit": {
     "title": "Runs are still in progress",
@@ -80,6 +82,18 @@
     "stop": "Stop now",
     "cancel": "Keep running",
     "waiting": "Waiting for the runs to finish, then IssueRelay quits."
+  },
+  "update": {
+    "available": "IssueRelay {{version}} is available",
+    "install": "Install and restart",
+    "downloading": "Downloading and verifying…",
+    "later": "Later",
+    "dismiss": "Dismiss",
+    "restart_note": "IssueRelay restarts to install it; if runs are in progress you are asked first.",
+    "restart_body": "IssueRelay restarts to install the update once these runs are settled.",
+    "waiting": "Waiting for the runs to finish, then IssueRelay installs the update and restarts.",
+    "check": "Check for updates",
+    "up_to_date": "Up to date (last check: {{time}})"
   },
   "startup": {
     "failed_title": "IssueRelay could not start",
@@ -155,13 +169,22 @@
       "linear_reconnect": "Could not reconnect to Linear",
       "setup_action": "The setup command failed",
       "set_autostart": "Could not change start at login",
+      "cli_path": "Could not change the command line on PATH",
       "open_linear": "Could not open Linear",
-      "copy": "Could not copy"
+      "copy": "Could not copy",
+      "check_update": "Could not check for updates",
+      "install_update": "Could not install the update"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay only opens Linear's own pages",
-    "login_cancelled": "The browser login was cancelled"
+    "login_cancelled": "The browser login was cancelled",
+    "update_unreachable": "Could not reach the update server",
+    "update_no_platform": "The new version has no package for this computer yet",
+    "update_bad_signature": "The update's signature did not verify; nothing was installed",
+    "update_unavailable": "Updates install only into the installed app: move IssueRelay to Applications first",
+    "update_install_failed": "The update could not be installed",
+    "update_failed": "The update check failed"
   },
   "overview": {
     "monitoring": "Monitoring",
@@ -432,8 +455,24 @@
     "autostart": "Start at login",
     "applies_at_once": "Takes effect at once; it is not part of Save.",
     "autostart_failed": "Could not read whether IssueRelay starts at login",
+    "show_in_dock": "Show in Dock",
+    "show_in_dock_note": "Off: the icon shows only while the panel is open. The menu bar icon always stays.",
+    "cli": {
+      "title": "Command line on PATH",
+      "description": "Lets you type {{command}} in a terminal. No administrator rights needed.",
+      "on_new_terminal": "On. Open a new terminal to use it.",
+      "shell_line": "Add this line to your shell profile (for zsh, ~/.zshrc), then open a new terminal:",
+      "stale": "The link points at another copy of IssueRelay ({{target}}). Turn this on to point it here.",
+      "blocked": "{{path}} already exists and was not made by IssueRelay. Remove or rename it, then try again.",
+      "unavailable": {
+        "missing_cli": "The command-line program is missing from this copy of IssueRelay. Install IssueRelay again from the release page.",
+        "not_installed": "IssueRelay runs from the disk image or a temporary copy. Move it to Applications first.",
+        "development": "Not available in a development build."
+      },
+      "load_failed": "Could not read the PATH setting"
+    },
     "auto_update": "Check for updates automatically",
-    "auto_update_note": "Updates arrive in a later version; your choice is kept until then.",
+    "auto_update_note": "Checks a minute after start and every 6 hours. Installing always waits for your click.",
     "control_server_intro": "The MCP control server lets Claude Code and Codex see how IssueRelay stands.",
     "control_server_note": "It is registered for your user, so unattended runs load it too; its tools can pause monitoring.",
     "control_failed": "Could not check the MCP control server",
