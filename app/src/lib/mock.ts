@@ -2,12 +2,12 @@ import { type Backend, BackendError } from "./backend";
 import { MOCK_NOW, now, setFixedClock } from "./clock";
 import {
   DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LOGS,
-  DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_VIEWER, FRESH_DOCTOR, ago,
+  DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_UPDATES, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
 import { isActive } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup,
-  QuitPrompt, Settings, StartupState, StatusView, Viewer,
+  QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
 
 export interface MockOptions {
@@ -15,6 +15,12 @@ export interface MockOptions {
   latencyMs?: number;
   /** The `language` of the settings ("system" or a language code); the screenshots ask for one in the address. */
   language?: string;
+  /**
+   * What the app's update check has found at the start: `available` offers a new version,
+   * `install-failed` tells that an update could not be installed (`DEMO_UPDATES`); any other name,
+   * or none, is up to date. The layout checks ask for one in the address.
+   */
+  update?: string;
 }
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
@@ -77,11 +83,18 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const controlServers: ControlServers = { claude: "not_registered", codex: "not_registered" };
   let autostart = false;
   let cliPath: CliPathStatus = { kind: "off" };
+  // What the app's last update check found; the fake never sends `update-status` by itself.
+  const updateState: UpdateStatus =
+    (options.update !== undefined && Object.hasOwn(DEMO_UPDATES, options.update) ? DEMO_UPDATES[options.update] : undefined) ?? {
+      kind: "up_to_date",
+      checked_at: ago(30),
+    };
   const listeners = {
     event: new Set<(event: EngineEvent) => void>(),
     resync: new Set<() => void>(),
     quit: new Set<(prompt: QuitPrompt) => void>(),
     startup: new Set<(state: StartupState) => void>(),
+    update: new Set<(status: UpdateStatus) => void>(),
   };
 
   const wait = () => new Promise<void>((resolve) => setTimeout(resolve, latencyMs));
@@ -281,9 +294,13 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       }),
     quit: () => reply(() => undefined),
     requestQuit: () => reply(() => undefined),
+    updateStatus: () => reply(() => updateState),
+    checkUpdate: () => reply(() => updateState),
+    installUpdate: () => reply(() => undefined),
     onEngineEvent: (listener) => subscribe(listeners.event, listener),
     onResync: (listener) => subscribe(listeners.resync, listener),
     onQuitRequested: (listener) => subscribe(listeners.quit, listener),
     onStartupFailed: (listener) => subscribe(listeners.startup, listener),
+    onUpdateStatus: (listener) => subscribe(listeners.update, listener),
   };
 }

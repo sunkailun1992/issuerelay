@@ -128,7 +128,8 @@ pub struct Settings {
     pub paused: bool,
     pub trigger: TriggerNames,
     pub notifications: NotificationSettings,
-    /// Check for and install updates automatically (from M3).
+    /// Check for updates automatically and offer them in the panel (design 12); installing always
+    /// waits for the user's "install and restart".
     pub auto_update: bool,
     /// The desktop panel's first-run guide was finished, or set aside with "Set up later": either
     /// way the panel no longer opens on it (it can still be run again from the environment check).

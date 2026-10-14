@@ -70,7 +70,9 @@
     "run_started": "実行を開始しました。",
     "awaiting_acceptance": "確認をお願いします。課題はテスト中になりました。",
     "needs_info": "AI が課題に質問を残しました。内容を補足して、もう一度 ai-ready ラベルを付けてください。",
-    "failed": "実行に失敗しました。原因はパネルで確認できます。"
+    "failed": "実行に失敗しました。原因はパネルで確認できます。",
+    "update_available": "IssueRelay {{version}} が利用可能です",
+    "update_available_body": "パネルを開くとインストールできます。"
   },
   "quit": {
     "title": "実行中のタスクがあります",
@@ -80,6 +82,18 @@
     "stop": "今すぐ停止",
     "cancel": "実行を続ける",
     "waiting": "タスクの完了を待っています。完了後に IssueRelay を終了します。"
+  },
+  "update": {
+    "available": "IssueRelay {{version}} が利用可能です",
+    "install": "インストールして再起動",
+    "downloading": "ダウンロードして検証しています…",
+    "later": "後で",
+    "dismiss": "閉じる",
+    "restart_note": "インストールのため IssueRelay が再起動します。実行中のタスクがある場合は、先に確認します。",
+    "restart_body": "これらのタスクが終わったあと、IssueRelay は再起動してアップデートをインストールします。",
+    "waiting": "タスクの完了を待っています。完了後に IssueRelay がアップデートをインストールして再起動します。",
+    "check": "アップデートを確認",
+    "up_to_date": "最新バージョンです（最終確認: {{time}}）"
   },
   "startup": {
     "failed_title": "IssueRelay を起動できませんでした",
@@ -155,12 +169,20 @@
       "set_autostart": "ログイン時の自動起動を変更できませんでした",
       "cli_path": "コマンドラインの PATH への追加を変更できませんでした",
       "open_linear": "Linear を開けませんでした",
-      "copy": "コピーできませんでした"
+      "copy": "コピーできませんでした",
+      "check_update": "アップデートを確認できませんでした",
+      "install_update": "アップデートをインストールできませんでした"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay は Linear 自身のページしか開きません",
-    "login_cancelled": "ブラウザでのログインをキャンセルしました"
+    "login_cancelled": "ブラウザでのログインをキャンセルしました",
+    "update_unreachable": "アップデートサーバーに接続できません",
+    "update_no_platform": "新しいバージョンには、このコンピューター向けのパッケージがまだありません",
+    "update_bad_signature": "アップデートの署名を検証できませんでした。何もインストールしていません",
+    "update_unavailable": "アップデートできるのはインストール済みのアプリだけです。先に IssueRelay を「アプリケーション」フォルダへ移動してください",
+    "update_install_failed": "アップデートをインストールできませんでした",
+    "update_failed": "アップデートの確認に失敗しました"
   },
   "overview": {
     "monitoring": "監視",
@@ -446,7 +468,7 @@
       "load_failed": "PATH の設定を読み取れませんでした"
     },
     "auto_update": "更新を自動的に確認",
-    "auto_update_note": "自動更新は今後のバージョンで提供されます。選択は今から保存されます。",
+    "auto_update_note": "起動の 1 分後と、その後 6 時間ごとに確認します。インストールは、必ずあなたがクリックしてから行います。",
     "control_server_intro": "MCP コントロールサーバーを使うと、Claude Code や Codex が IssueRelay の状況を確認できます。",
     "control_server_note": "ユーザー単位で登録されるため、無人実行でも読み込まれます。ツールには監視の一時停止も含まれます。",
     "control_failed": "MCP コントロールサーバーを確認できませんでした",

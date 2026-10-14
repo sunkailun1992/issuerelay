@@ -195,5 +195,20 @@ export type StartupState =
   | { kind: "failed"; code: StartupCode; detail: string };
 export type EngineEvent = { kind: "status" } | { kind: "job"; job: Job } | { kind: "config" };
 export type QuitMode = "wait" | "stop";
-/** The question quitting asks (`quit-requested`): the runs in progress, and whether quitting already waits for them. */
-export interface QuitPrompt { running: number; waiting: boolean }
+/** What follows once the runs are settled: IssueRelay quits, or installs the downloaded update and restarts. */
+export type QuitPurpose = "quit" | "update";
+/**
+ * The question quitting asks (`quit-requested`): the runs in progress, whether quitting already waits
+ * for them, and what follows (`QuitPrompt` in quit.rs).
+ */
+export interface QuitPrompt { running: number; waiting: boolean; purpose: QuitPurpose }
+
+/** The update failure codes (`FailureCode` in update.rs); update-failure-cases.json pins both sides. */
+export const UPDATE_FAILURE_CODES = ["unreachable", "no_platform", "bad_signature", "unavailable", "install_failed", "other"] as const;
+export type UpdateFailureCode = (typeof UPDATE_FAILURE_CODES)[number];
+/** What the app knows about updates (`update-status`, `update_status`, `check_update`; `UpdateStatus` in update.rs). */
+export type UpdateStatus =
+  | { kind: "unchecked" }
+  | { kind: "up_to_date"; checked_at: string }
+  | { kind: "available"; version: string }
+  | { kind: "failed"; code: UpdateFailureCode; detail: string };

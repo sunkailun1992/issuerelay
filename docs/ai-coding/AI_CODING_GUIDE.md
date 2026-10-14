@@ -73,6 +73,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 外来文本清洗（Linear 标题、AI 摘要、错误信息）| `crates/core/src/text.rs`、`crates/cli/src/format.rs` |
 | 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
 | 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
+| 自动更新（检查、验签、经退出流程安装） | `app/src-tauri/src/update.rs` |
 | 面板命令（含仅面板可用的标记完成、重试、停止） | `app/src-tauri/src/commands.rs` |
 | 面板能调什么（应用清单、能力文件） | `app/src-tauri/build.rs`、`app/src-tauri/capabilities/default.json` |
 | 前端数据层、假后端与虚构数据 | `app/src/lib/` |
@@ -95,6 +96,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
 | 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二次打开应用只把已运行的面板带到前面；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
 | 命令行的 PATH 入口 | macOS：`~/.local/bin/issuerelay`（指向应用包内命令行程序的符号链接）；Windows：用户级 `Path`（`HKCU\Environment`）里的安装目录 | 只在用户打开设置里的开关时建，关掉时删，且只删 IssueRelay 自己建的；macOS 不覆盖别人的文件，指向别份应用的旧链接换成指向这一份；Windows 保持原来的注册表类型、不分大小写去重；都不需要管理员（`cli_path.rs`） |
+| 装不上的更新 | `<数据目录>/com.sunkailun.issuerelay/update-install-failure.txt` | 「安装并重启」在宿主停下后没装上时写下清洗过的一行原因，程序按原版本重启后读出、删除，面板顶部的横幅显示一次 |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 

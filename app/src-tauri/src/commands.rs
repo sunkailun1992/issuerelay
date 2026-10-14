@@ -1,13 +1,14 @@
 //! The commands the panel calls. Each waits for the host, does one thing and returns something
 //! the panel can show; an error comes back as one cleaned line, or as a code the panel
-//! translates (`not_a_linear_link`, `login_cancelled`). `mark_done`, `retry_job` and
-//! `cancel_job` exist only here (design 5.6): IPC, the CLI and MCP never offer them. Plugins
-//! (opener, dialog, autostart) are used from here, so the panel itself needs no plugin
-//! permission. `Host::env()` holds the real proxy values (user name and password unmasked):
-//! neither it nor any proxy value ever reaches the panel. The commands use it to start
-//! processes, and `cli_setup` reads its PATH only to tell whether `~/.local/bin` is on it, a fact
-//! without secrets (the environment check shows the PATH anyway); the environment the panel sees
-//! is `Engine::doctor`'s, with the proxy values masked.
+//! translates (`not_a_linear_link`, `login_cancelled`, and the `update_*` codes of
+//! `install_update`). `mark_done`, `retry_job` and `cancel_job` exist only here (design 5.6): IPC,
+//! the CLI and MCP never offer them. Plugins (opener, dialog, autostart; the updater through
+//! `update.rs`) are used from here, so the panel itself needs no plugin permission.
+//! `Host::env()` holds the real proxy values (user name and password unmasked): neither it nor
+//! any proxy value ever reaches the panel. The commands use it to start processes, and
+//! `cli_setup` reads its PATH only to tell whether `~/.local/bin` is on it, a fact without
+//! secrets (the environment check shows the PATH anyway); the environment the panel sees is
+//! `Engine::doctor`'s, with the proxy values masked.
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -37,6 +38,7 @@ use crate::{
     quit::{self, QuitEvent},
     state::{AppState, StartupState},
     tray,
+    update::{self, AppUpdates, UpdateStatus},
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -661,6 +663,28 @@ pub async fn install_cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPat
 #[tauri::command]
 pub async fn remove_cli_from_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
     cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::remove).await
+}
+
+/// The last update check's outcome, for a panel opened after it; answers at once.
+#[tauri::command]
+pub fn update_status(updates: State<'_, AppUpdates>) -> UpdateStatus {
+    updates.status()
+}
+
+/// Checks for an update now (the settings page's button); never installs anything.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> UpdateStatus {
+    update::check(&app).await
+}
+
+/// "Install and restart": downloads and verifies the offered update, then hands over to the quit
+/// flow. A failure is answered as a code (`update_*`) the panel translates and changes nothing.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> CmdResult<()> {
+    update::install(&app).await.map_err(|failure| {
+        tracing::warn!(code = ?failure.code, detail = %failure.detail, "the update was not installed");
+        failure.code.error_code().to_string()
+    })
 }
 
 #[cfg(test)]

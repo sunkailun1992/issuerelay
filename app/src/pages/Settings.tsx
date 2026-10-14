@@ -7,7 +7,7 @@ import { ApiKeyForm } from "@/components/ApiKeyForm";
 import { Field, Hint } from "@/components/FormField";
 import { FullAccessWarning } from "@/components/FullAccessWarning";
 import { PageHeader } from "@/components/PageHeader";
-import { ErrorState, LoadingState } from "@/components/states";
+import { DetailLine, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,7 @@ import {
   queryKeys,
   useAppInfo,
   useAutostart,
+  useCheckUpdate,
   useCliPath,
   useControlServers,
   useInstallCliOnPath,
@@ -29,11 +30,14 @@ import {
   useSetAutostart,
   useSetupAction,
   useSettings,
+  useUpdateStatus,
 } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
+import { useLang } from "@/hooks/useLang";
 import { LANGUAGES } from "@/i18n/language";
 import { cleanDisplayText } from "@/lib/clean";
-import { reportFailure } from "@/lib/errors";
+import { reportFailure, updateFailureKey } from "@/lib/errors";
+import { formatRelative } from "@/lib/format";
 import {
   type CountField,
   type Draft,
@@ -333,6 +337,51 @@ function CliOnPath() {
   );
 }
 
+/**
+ * The running version, "Check for updates", and what the last check found (design 12). Like the
+ * PATH row it acts at once and is no part of Save. Wrapping: the version and the button sit in
+ * a row that wraps, so the button goes under the version when they do not fit side by side; the
+ * result is one short sentence, and the reason of a failure is a `DetailLine`, which breaks
+ * wherever it must.
+ */
+function UpdateCheck() {
+  const { t } = useTranslation();
+  const lang = useLang();
+  const info = useAppInfo();
+  const status = useUpdateStatus();
+  const check = useCheckUpdate();
+  // This check's own outcome first; otherwise what the app keeps (a background check's, or a
+  // failed install's after the restart).
+  const shown = check.data ?? status.data;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-medium">{info.data ? t("shell.version", { version: info.data.version }) : t("common.loading")}</span>
+        <Button size="sm" variant="outline" disabled={check.isPending} onClick={() => check.mutate()}>
+          {check.isPending && <LoaderCircle aria-hidden className="animate-spin" />}
+          {t("update.check")}
+        </Button>
+      </div>
+      {shown?.kind === "up_to_date" && (
+        <p role="status" className="text-xs text-muted-foreground">
+          {t("update.up_to_date", { time: formatRelative(shown.checked_at, lang) })}
+        </p>
+      )}
+      {shown?.kind === "available" && (
+        <p role="status" className="text-xs text-muted-foreground wrap-anywhere">
+          {t("update.available", { version: shown.version })}
+        </p>
+      )}
+      {shown?.kind === "failed" && (
+        <div role="alert">
+          <p className="text-xs text-destructive">{t(updateFailureKey(shown.code))}</p>
+          <DetailLine text={shown.detail} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** One executor's row: whether IssueRelay's control server is registered with it, and the button that changes that. */
 function ControlServerRow({
   executor,
@@ -626,6 +675,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             checked={draft.auto_update}
             onChange={(on) => edit("auto_update", on)}
           />
+          <UpdateCheck />
         </Group>
 
         <Group title={t("settings.group.mcp")}>

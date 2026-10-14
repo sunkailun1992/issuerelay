@@ -12,6 +12,7 @@ pub mod state;
 #[cfg(test)]
 mod test_support;
 pub mod tray;
+pub mod update;
 pub mod window;
 
 use tauri::{Manager, RunEvent};
@@ -48,6 +49,9 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // Only IssueRelay's own commands drive it (`commands::{update_status, check_update,
+        // install_update}`): the panel's capability grants no permission of this plugin.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state::AppState::new(autostarted))
         .manage(commands::PendingLogin::default())
         .invoke_handler(tauri::generate_handler![
@@ -88,8 +92,24 @@ pub fn run() {
             commands::cli_on_path,
             commands::install_cli_on_path,
             commands::remove_cli_from_path,
+            commands::update_status,
+            commands::check_update,
+            commands::install_update,
         ])
         .setup(|app| {
+            let updates = update::AppUpdates::new(
+                update::PluginSource(app.handle().clone()),
+                env!("CARGO_PKG_VERSION"),
+            );
+            // The previous run could not install an update and restarted as it was: the banner
+            // says why, once.
+            if let Some(failure) = issuerelay_core::paths::AppPaths::system()
+                .ok()
+                .and_then(|paths| update::take_install_failure(&paths.data_dir))
+            {
+                updates.show_failure(failure);
+            }
+            app.manage(updates);
             tray::create(app.handle())?;
             if app.state::<state::AppState>().autostarted {
                 // A login start stays in the tray: through the same `hide` as closing the panel,
@@ -97,6 +117,7 @@ pub fn run() {
                 window::hide(app.handle());
             }
             tauri::async_runtime::spawn(startup::start(app.handle().clone()));
+            update::spawn_checker(app.handle().clone());
             Ok(())
         })
         .on_window_event(window::on_event);

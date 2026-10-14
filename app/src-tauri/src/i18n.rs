@@ -52,6 +52,8 @@ pub const USED_KEYS: &[&str] = &[
     "notify.awaiting_acceptance",
     "notify.needs_info",
     "notify.failed",
+    "notify.update_available",
+    "notify.update_available_body",
 ];
 
 /// The interface language for a `language` setting ("system" or one of `LANGUAGES`) and the

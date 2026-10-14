@@ -14,7 +14,7 @@ import { subscription } from "@/hooks/subscription";
 import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
-import type { QuitMode } from "@/lib/types";
+import type { QuitMode, QuitPurpose } from "@/lib/types";
 
 /** Where the focus goes after the prompt when what had it is gone: the page's heading. */
 const pageHeading = () => document.querySelector<HTMLElement>("h1");
@@ -26,8 +26,11 @@ const pageHeading = () => document.querySelector<HTMLElement>("h1");
  * a question nobody answers like no question at all and asks again the next time. When quitting
  * already waits (`QuitPrompt.waiting`: a panel reloaded after "wait" has lost the prompt, and the
  * app tells it again at the next Quit), the prompt opens on the waiting state with "stop now".
- * The app opens it, not a button of the page: when it closes, the focus goes back to where it was
- * (`useFocusReturn`), or to the page's heading.
+ * "Install and restart" asks the same question (design 12) and says that IssueRelay then installs
+ * the update and restarts (`QuitPrompt.purpose`); every question says again what follows, which a
+ * Quit of the tray changes while the prompt waits (it drops a downloaded update, so IssueRelay
+ * quits instead). The app opens it, not a button of the page: when it closes, the focus goes back
+ * to where it was (`useFocusReturn`), or to the page's heading.
  */
 export function QuitDialog() {
   const backend = useBackend();
@@ -35,6 +38,7 @@ export function QuitDialog() {
   const [open, setOpen] = useState(false);
   // Kept after the prompt closes, so that it does not read "0 runs" while it fades out.
   const [running, setRunning] = useState(0);
+  const [purpose, setPurpose] = useState<QuitPurpose>("quit");
   const [waiting, setWaiting] = useState(false);
   const [stopping, setStopping] = useState(false);
   const returnFocus = useFocusReturn(open, pageHeading);
@@ -44,6 +48,7 @@ export function QuitDialog() {
       subscription(
         backend.onQuitRequested((prompt) => {
           setRunning(prompt.running);
+          setPurpose(prompt.purpose);
           setWaiting(prompt.waiting);
           setStopping(false);
           setOpen(true);
@@ -62,6 +67,7 @@ export function QuitDialog() {
     });
   };
 
+  const update = purpose === "update";
   return (
     <AlertDialog
       open={open}
@@ -73,7 +79,10 @@ export function QuitDialog() {
       <AlertDialogContent onCloseAutoFocus={returnFocus}>
         <AlertDialogHeader>
           <AlertDialogTitle>{t("quit.title")}</AlertDialogTitle>
-          <AlertDialogDescription>{waiting ? t("quit.waiting") : t("quit.body", { count: running })}</AlertDialogDescription>
+          <AlertDialogDescription>
+            {waiting ? t(update ? "update.waiting" : "quit.waiting") : t("quit.body", { count: running })}
+            {update && !waiting && <span className="mt-2 block">{t("update.restart_body")}</span>}
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           {!waiting && <AlertDialogCancel disabled={stopping}>{t("quit.cancel")}</AlertDialogCancel>}

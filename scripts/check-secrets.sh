@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Scan tracked files for values that must never be committed: private keys,
-# Linear / Anthropic / OpenAI / GitHub / AWS tokens, private network addresses
-# and machine-specific absolute paths; and for raw invisible, direction-changing
-# and control characters (Trojan Source: code that reads differently from what
-# runs; SECURITY_CODING_SPEC.md section 7), which needs a git built with PCRE2
-# (`git grep -P`). Prints file:line for each hit, never the matched text, so CI
-# logs cannot leak a secret. New files are scanned only after `git add`.
+# Tauri updater signing keys, Linear / Anthropic / OpenAI / GitHub / AWS
+# tokens, private network addresses and machine-specific absolute paths; and
+# for raw invisible, direction-changing and control characters (Trojan Source:
+# code that reads differently from what runs; SECURITY_CODING_SPEC.md section
+# 7), which needs a git built with PCRE2 (`git grep -P`). Prints file:line for
+# each hit, never the matched text, so CI logs cannot leak a secret. New files
+# are scanned only after `git add`.
 # `git grep -I` skips files Git treats as binary (a NUL byte near the start, or
 # a `binary` / `-diff` attribute in .gitattributes), so samples and fixtures
 # must stay plain text to be scanned.
@@ -49,6 +50,11 @@ PATTERNS=(
   'gh[pousr]_[A-Za-z0-9]{30,}'
   'github_pat_[A-Za-z0-9_]{30,}'
   'AKIA[0-9A-Z]{16}'
+  # A Tauri updater signing key: the minisign secret key box, as text or base64-encoded as
+  # `tauri signer generate` writes it (docs/release/updater-key.md). The brackets keep plans
+  # and docs that quote these lines from matching themselves.
+  'untrusted comment: rsign encrypted secret k[e]y'
+  'dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V[5]'
   '(^|[^0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
   '(^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}'
   '(^|[^0-9.])172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}'

@@ -70,7 +70,9 @@
     "run_started": "已開始執行。",
     "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
     "needs_info": "AI 在需求下提出了問題。補充資訊後，請重新加上 ai-ready 標籤。",
-    "failed": "執行失敗，原因請見面板。"
+    "failed": "執行失敗，原因請見面板。",
+    "update_available": "IssueRelay {{version}} 已發佈",
+    "update_available_body": "開啟面板即可安裝。"
   },
   "quit": {
     "title": "仍有任務正在執行",
@@ -80,6 +82,18 @@
     "stop": "立即停止",
     "cancel": "繼續執行",
     "waiting": "正在等待任務執行完畢，完成後 IssueRelay 會自動結束。"
+  },
+  "update": {
+    "available": "IssueRelay {{version}} 已發佈",
+    "install": "安裝並重新啟動",
+    "downloading": "正在下載並驗證…",
+    "later": "稍後",
+    "dismiss": "知道了",
+    "restart_note": "安裝時 IssueRelay 會重新啟動；有任務在執行時會先詢問你。",
+    "restart_body": "這些任務執行完畢後，IssueRelay 會重新啟動並安裝更新。",
+    "waiting": "正在等待任務執行完畢，之後 IssueRelay 會安裝更新並重新啟動。",
+    "check": "檢查更新",
+    "up_to_date": "已是最新版本（{{time}}檢查）"
   },
   "startup": {
     "failed_title": "IssueRelay 無法啟動",
@@ -155,12 +169,20 @@
       "set_autostart": "無法變更開機自動啟動的設定",
       "cli_path": "沒能修改「把命令列加入 PATH」",
       "open_linear": "無法開啟 Linear",
-      "copy": "無法複製"
+      "copy": "無法複製",
+      "check_update": "沒能檢查更新",
+      "install_update": "沒能安裝更新"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay 只會開啟 Linear 自己的頁面",
-    "login_cancelled": "已取消瀏覽器登入"
+    "login_cancelled": "已取消瀏覽器登入",
+    "update_unreachable": "連不上更新伺服器",
+    "update_no_platform": "新版本還沒有適合這台電腦的安裝檔",
+    "update_bad_signature": "更新檔的簽章驗證沒有通過，什麼都沒安裝",
+    "update_unavailable": "只能更新已安裝的應用程式：請先把 IssueRelay 移到「應用程式」",
+    "update_install_failed": "更新沒能安裝",
+    "update_failed": "檢查更新失敗"
   },
   "overview": {
     "monitoring": "監控",
@@ -446,7 +468,7 @@
       "load_failed": "讀不到 PATH 設定"
     },
     "auto_update": "自動檢查更新",
-    "auto_update_note": "自動更新會在之後的版本提供；你的選擇會先保存下來。",
+    "auto_update_note": "啟動 1 分鐘後檢查一次，之後每 6 小時一次；安裝一律等你按下才進行。",
     "control_server_intro": "MCP 控制服務讓 Claude Code 與 Codex 能看到 IssueRelay 的執行情況。",
     "control_server_note": "依使用者範圍註冊，無人值守的執行也會載入它；它的工具包含「暫停監控」。",
     "control_failed": "無法檢查 MCP 控制服務",

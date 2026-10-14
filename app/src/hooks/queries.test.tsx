@@ -15,10 +15,12 @@ import {
   useAutostart,
   useBindings,
   useCancelJob,
+  useCheckUpdate,
   useCliPath,
   useControlServers,
   useDoctor,
   useInstallCliOnPath,
+  useInstallUpdate,
   useIssues,
   useJob,
   useJobLog,
@@ -43,6 +45,7 @@ import {
   useSetupAction,
   useSettings,
   useStatus,
+  useUpdateStatus,
 } from "./queries";
 
 afterEach(() => {
@@ -64,6 +67,7 @@ describe("the query keys", () => {
     expect(queryKeys.settings).toEqual(["settings"]);
     expect(queryKeys.bindings).toEqual(["bindings"]);
     expect(queryKeys.cliPath).toEqual(["cliPath"]);
+    expect(queryKeys.update).toEqual(["update"]);
     expect(queryKeys.linearServerNamed("codex")).toEqual(["linearServerNamed", "codex"]);
   });
 
@@ -72,7 +76,7 @@ describe("the query keys", () => {
       queryKeys.startup, queryKeys.status, queryKeys.jobs, queryKeys.job(1), queryKeys.log(1), queryKeys.issues,
       queryKeys.bindings, queryKeys.projects, queryKeys.settings, queryKeys.doctor, queryKeys.controlServers,
       queryKeys.linearServerNamed("claude"), queryKeys.linearServerNamed("codex"), queryKeys.autostart, queryKeys.cliPath,
-      queryKeys.appInfo,
+      queryKeys.appInfo, queryKeys.update,
     ].map((key) => JSON.stringify(key));
     expect(new Set(keys).size).toBe(keys.length);
   });
@@ -90,6 +94,7 @@ describe("reading", () => {
     const autostart = useAutostart();
     const servers = useControlServers();
     const cliPath = useCliPath();
+    const update = useUpdateStatus();
     return (
       <p>
         {[
@@ -103,6 +108,7 @@ describe("reading", () => {
           autostart.data === undefined ? undefined : String(autostart.data),
           servers.data?.claude,
           cliPath.data?.kind,
+          update.data?.kind,
         ].join(" ")}
       </p>
     );
@@ -110,7 +116,7 @@ describe("reading", () => {
 
   test("the hooks read from the backend they are given", async () => {
     await renderWithProviders(<Reader />);
-    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered off")).toBeInTheDocument();
+    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered off up_to_date")).toBeInTheDocument();
   });
 
   test("jobs are asked for with a limit of two hundred unless another is given", async () => {
@@ -300,6 +306,7 @@ describe("acting", () => {
       const autostart = useSetAutostart();
       const installCli = useInstallCliOnPath();
       const removeCli = useRemoveCliFromPath();
+      const checkUpdate = useCheckUpdate();
       return (
         <>
           <Act label="pause" run={() => pause.mutate()} />
@@ -321,6 +328,7 @@ describe("acting", () => {
           <Act label="autostart" run={() => autostart.mutate(true)} />
           <Act label="put the CLI on PATH" run={() => installCli.mutate()} />
           <Act label="take the CLI off PATH" run={() => removeCli.mutate()} />
+          <Act label="check for updates" run={() => checkUpdate.mutate()} />
         </>
       );
     }
@@ -343,10 +351,42 @@ describe("acting", () => {
       ["autostart", [key("autostart")]],
       ["put the CLI on PATH", [key("cliPath")]],
       ["take the CLI off PATH", [key("cliPath")]],
+      ["check for updates", [key("update")]],
     ];
     for (const [label, expected] of expectations) {
       expect(await keysAfterClicking(label, spy), label).toEqual(expect.arrayContaining(expected));
     }
+  });
+
+  test("installing an update only asks the app: the quit flow restarts it, so nothing is read again", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const install = vi.spyOn(backend, "installUpdate");
+    function Install() {
+      const run = useInstallUpdate();
+      return <Act run={() => run.mutate()} />;
+    }
+    const { client } = await renderWithProviders(<Install />, { backend });
+    const spy = vi.spyOn(client, "invalidateQueries");
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    await waitFor(() => expect(install).toHaveBeenCalledTimes(1));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test("a check for updates gives its own outcome as the action's data", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.checkUpdate = async () => ({ kind: "available", version: "0.2.0" });
+    function Check() {
+      const run = useCheckUpdate();
+      return (
+        <>
+          <Act run={() => run.mutate()} />
+          {run.data?.kind === "available" && <p>offered {run.data.version}</p>}
+        </>
+      );
+    }
+    await renderWithProviders(<Check />, { backend });
+    await userEvent.click(screen.getByRole("button", { name: "go" }));
+    expect(await screen.findByText("offered 0.2.0")).toBeInTheDocument();
   });
 
   test("saving the settings is over only once they have been read again, so a page that moves on sees them", async () => {
@@ -539,6 +579,7 @@ describe("acting", () => {
       pause: refuse, resume: refuse, pollNow: refuse, cancelJob: refuse, retryJob: refuse, markDone: refuse,
       saveBinding: refuse, removeBinding: refuse, saveSettings: refuse, linearUseApiKey: refuse, linearLogout: refuse,
       linearReconnect: refuse, setupAction: refuse, setAutostart: refuse, installCliOnPath: refuse, removeCliFromPath: refuse,
+      checkUpdate: refuse, installUpdate: refuse,
     });
     function Everything() {
       const hooks = {
@@ -547,6 +588,7 @@ describe("acting", () => {
         "save settings": useSaveSettings(), "api key": useLinearApiKey(), "log out": useLinearLogout(),
         reconnect: useLinearReconnect(), setup: useSetupAction(), autostart: useSetAutostart(),
         "install cli": useInstallCliOnPath(), "remove cli": useRemoveCliFromPath(),
+        "check update": useCheckUpdate(), "install update": useInstallUpdate(),
       };
       const run = (name: keyof typeof hooks) => (hooks[name].mutate as (variables?: unknown) => void)(undefined);
       return (
@@ -575,6 +617,8 @@ describe("acting", () => {
       ["autostart", "Could not change start at login"],
       ["install cli", "Could not change the command line on PATH"],
       ["remove cli", "Could not change the command line on PATH"],
+      ["check update", "Could not check for updates"],
+      ["install update", "Could not install the update"],
     ];
     const error = vi.spyOn(toast, "error");
     for (const [label, headline] of headlines) {

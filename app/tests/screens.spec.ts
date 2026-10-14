@@ -70,9 +70,18 @@ test.afterEach(({ page }) => {
   expect(errorsOf.get(page), "what the page reported").toEqual([]);
 });
 
-/** Opens the panel at a hash route in `language`, on the mock's `scenario`. */
-async function open(page: Page, language: Language, route: string, scenario: "demo" | "fresh" = "demo"): Promise<void> {
-  await page.goto(`/?mock=${scenario}&lang=${language}#${route}`);
+/**
+ * Opens the panel at a hash route in `language`, on the mock's `scenario`; `update` makes the mock's
+ * app offer a new version or tell of an install that could not be finished (`?update=`).
+ */
+async function open(
+  page: Page,
+  language: Language,
+  route: string,
+  scenario: "demo" | "fresh" = "demo",
+  update?: "available" | "install-failed",
+): Promise<void> {
+  await page.goto(`/?mock=${scenario}&lang=${language}${update === undefined ? "" : `&update=${update}`}#${route}`);
   // The panel starts in the system's language and changes to the one in its settings once it has read them.
   await expect(page.locator("html")).toHaveAttribute("lang", language);
 }
@@ -393,6 +402,58 @@ for (const { width, height } of SMALLEST) {
         const pastWindow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
         expect(pastWindow, "the window").toBeLessThanOrEqual(0);
       });
+    }
+
+    // The update banner above the overview, for a new version and for an install that could not be finished (a
+    // reason of about 200 characters with a name that cannot break by itself): the title, the reason and the
+    // buttons stay inside the page, and the buttons are in reach (the two of an offer go under each other when
+    // they do not fit side by side).
+    for (const language of LAYOUT_LANGUAGES) {
+      for (const update of ["available", "install-failed"] as const) {
+        test(`the update banner (${update}) in ${language} keeps its text and buttons inside the page`, async ({ page }) => {
+          const t = words(language);
+          await open(page, language, "/", "demo", update);
+          await expect(title(page, t("nav.overview"))).toBeVisible();
+          // The overview has alerts of its own: the banner is the one that holds the version, or the reason.
+          const banner = page.locator('[data-slot="alert"]', { hasText: update === "available" ? "0.2.0" : "permission denied" });
+          await expect(banner).toHaveCount(1);
+          await settled(page);
+          const buttons =
+            update === "available"
+              ? [t("update.install"), t("update.later")]
+              : [t("update.dismiss")];
+          for (const name of buttons) await expectWithinWindow(banner.getByRole("button", { name, exact: true }));
+          await expectWithinWindow(banner);
+          expect(await reachPastRightEdge(banner), "the banner").toEqual({ overflow: 0, past: [] });
+          expect(await reachPastRightEdge(page.locator("main")), "the page").toEqual({ overflow: 0, past: [] });
+          const pastWindow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+          expect(pastWindow, "the window").toBeLessThanOrEqual(0);
+        });
+      }
+    }
+
+    // The settings' row of the version and "Check for updates", with what the last check found: the offer, or the
+    // reason of an install that failed. Both buttons and every line stay inside the System card.
+    for (const language of LAYOUT_LANGUAGES) {
+      for (const update of ["available", "install-failed"] as const) {
+        test(`the version row of the settings (${update}) in ${language} keeps the version, the button and the result inside`, async ({ page }) => {
+          const t = words(language);
+          await open(page, language, "/settings", "demo", update);
+          await expect(title(page, t("nav.settings"))).toBeVisible();
+          const system = page.getByRole("region", { name: t("settings.group.system"), exact: true });
+          const check = system.getByRole("button", { name: t("update.check"), exact: true });
+          await expect(check).toBeVisible();
+          // The result of the last check is on show before any click.
+          await expect(system).toContainText(update === "available" ? "0.2.0" : "permission denied");
+          await settled(page);
+          await check.scrollIntoViewIfNeeded();
+          await expectWithinWindow(check);
+          expect(await reachPastRightEdge(system), "the System card").toEqual({ overflow: 0, past: [] });
+          expect(await reachPastRightEdge(page.locator("main")), "the page").toEqual({ overflow: 0, past: [] });
+          const pastWindow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+          expect(pastWindow, "the window").toBeLessThanOrEqual(0);
+        });
+      }
     }
   });
 }

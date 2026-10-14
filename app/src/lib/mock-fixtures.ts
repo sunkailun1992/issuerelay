@@ -1,7 +1,7 @@
 import { MOCK_NOW } from "./clock";
 import shellLine from "./shell-line.json";
 import triggerDefaults from "./trigger-defaults.json";
-import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, Project, Settings, Viewer } from "./types";
+import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, Project, Settings, UpdateStatus, Viewer } from "./types";
 
 /** `MOCK_NOW` minus `minutes`, as the engine sends times. */
 export function ago(minutes: number): string {
@@ -19,6 +19,22 @@ export const DEMO_APP_INFO: AppInfo = {
 
 /** The line the panel shows when ~/.local/bin is not on the login shell's PATH: core's `cli_path::SHELL_LINE`. */
 export const DEMO_SHELL_LINE: string = shellLine.shell_line;
+
+/**
+ * What the app's update check can have found, by the name the browser preview asks for with
+ * `?update=` (the layout checks of the banner and of the settings row). The reason of the failed
+ * install is as long as a real one gets (about 200 characters): a sentence, a path whose name cannot
+ * break by itself, and the system's note.
+ */
+export const DEMO_UPDATES: Record<string, UpdateStatus> = {
+  available: { kind: "available", version: "0.2.0" },
+  "install-failed": {
+    kind: "failed",
+    code: "install_failed",
+    detail:
+      "failed to install the update and to restore the previous app, which was left at /Applications/IssueRelay_previous_version_0_1_0_kept_because_it_could_not_be_moved_back_to_its_place.app (permission denied, os error 13)",
+  },
+};
 
 export const DEMO_PROJECTS: Project[] = [
   { id: "proj-1", name: "Demo Project", team_ids: ["team-1"] },

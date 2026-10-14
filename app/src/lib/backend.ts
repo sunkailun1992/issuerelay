@@ -1,10 +1,19 @@
 import type {
   AppInfo, Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job,
-  LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, Viewer,
+  LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
-export const ERROR_CODES = ["not_a_linear_link", "login_cancelled"] as const;
+export const ERROR_CODES = [
+  "not_a_linear_link",
+  "login_cancelled",
+  "update_unreachable",
+  "update_no_platform",
+  "update_bad_signature",
+  "update_unavailable",
+  "update_install_failed",
+  "update_failed",
+] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** A command failed. `message` is the backend's one cleaned line; `code` is set when it is one of `ERROR_CODES`. */
@@ -56,8 +65,12 @@ export interface Backend {
   removeCliFromPath(): Promise<CliPathStatus>;
   quit(mode: QuitMode): Promise<void>;
   requestQuit(): Promise<void>;
+  updateStatus(): Promise<UpdateStatus>;
+  checkUpdate(): Promise<UpdateStatus>;
+  installUpdate(): Promise<void>;
   onEngineEvent(listener: (event: EngineEvent) => void): Promise<() => void>;
   onResync(listener: () => void): Promise<() => void>;
   onQuitRequested(listener: (prompt: QuitPrompt) => void): Promise<() => void>;
   onStartupFailed(listener: (state: StartupState) => void): Promise<() => void>;
+  onUpdateStatus(listener: (status: UpdateStatus) => void): Promise<() => void>;
 }

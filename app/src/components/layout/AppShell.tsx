@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { NavLink, Outlet } from "react-router";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { UpdateBanner } from "@/components/UpdateBanner";
 import { useAppInfo, useStatus } from "@/hooks/queries";
 import { trayState } from "@/lib/problem";
 import type { StatusView } from "@/lib/types";
@@ -44,7 +46,13 @@ function monitoring({ status, linear }: StatusView): { key: string; failed: bool
   }
 }
 
-/** The frame of every page: the sidebar with the pages, the monitoring state and the version, and the page itself. */
+/**
+ * The frame of every page: the sidebar with the pages, the monitoring state and the version, and
+ * the page itself under the update banner. The banner is an extra, in a boundary of its own that
+ * shows nothing when it fails, so a banner that cannot be drawn never takes the shell or a page
+ * with it. It stands beside the page's place (`Outlet`), not in it, so that a boundary around that
+ * place leaves it standing when a page fails.
+ */
 export function AppShell() {
   const { t } = useTranslation();
   const status = useStatus();
@@ -87,6 +95,9 @@ export function AppShell() {
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-(--content-max-width) px-(--page-padding) py-6">
+          <ErrorBoundary fallback="nothing">
+            <UpdateBanner />
+          </ErrorBoundary>
           <Outlet />
         </div>
       </main>

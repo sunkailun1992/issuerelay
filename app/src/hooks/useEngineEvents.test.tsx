@@ -5,7 +5,7 @@ import { vi } from "vitest";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
 import { queryKeys, useDoctor, useIssues, useJob, useJobs, useProjects, useStatus } from "@/hooks/queries";
 import { createMockBackend } from "@/lib/mock";
-import type { EngineEvent } from "@/lib/types";
+import type { EngineEvent, UpdateStatus } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 
 /** Waits until the status has been read and nothing is being read any more. */
@@ -116,6 +116,36 @@ test("unmounting the bridge unsubscribes from both event sources", async () => {
   expect(stopResync).toHaveBeenCalledTimes(1);
 });
 
+test("unmounting the bridge also stops listening to the app's update status", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const stopUpdate = vi.fn();
+  const listenUpdate = vi.fn(async () => stopUpdate);
+  backend.onUpdateStatus = listenUpdate;
+  const { unmount } = await renderWithProviders(<EngineEventsBridge />, { backend });
+  await waitFor(() => expect(listenUpdate).toHaveBeenCalledTimes(1));
+  expect(stopUpdate).not.toHaveBeenCalled();
+  unmount();
+  await waitFor(() => expect(stopUpdate).toHaveBeenCalledTimes(1));
+});
+
+test("what the app says about updates is put into the cache as it comes", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  let announce: (status: UpdateStatus) => void = () => {};
+  const listen = vi.fn(async (listener: (status: UpdateStatus) => void) => {
+    announce = listener;
+    return () => {};
+  });
+  backend.onUpdateStatus = listen;
+  const { client } = await renderWithProviders(<EngineEventsBridge />, { backend });
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  await settled(client);
+  expect(client.getQueryData(queryKeys.update)).toBeUndefined();
+  const status: UpdateStatus = { kind: "available", version: "0.2.0" };
+  act(() => announce(status));
+  // The event carries the status itself: it is in the cache at once, without a read behind it.
+  expect(client.getQueryData(queryKeys.update)).toEqual(status);
+});
+
 test("a job event makes the lists and pages that show the job read it again", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   let emit: (event: EngineEvent) => void = () => {};
@@ -151,7 +181,7 @@ test("a job event makes the lists and pages that show the job read it again", as
 
 test("React's double mount in development leaves exactly one subscription", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
-  const live = { events: 0, resync: 0 };
+  const live = { events: 0, resync: 0, update: 0 };
   backend.onEngineEvent = async () => {
     live.events++;
     return () => {
@@ -164,15 +194,21 @@ test("React's double mount in development leaves exactly one subscription", asyn
       live.resync--;
     };
   };
+  backend.onUpdateStatus = async () => {
+    live.update++;
+    return () => {
+      live.update--;
+    };
+  };
   const { unmount } = await renderWithProviders(
     <StrictMode>
       <EngineEventsBridge />
     </StrictMode>,
     { backend },
   );
-  await waitFor(() => expect(live).toEqual({ events: 1, resync: 1 }));
+  await waitFor(() => expect(live).toEqual({ events: 1, resync: 1, update: 1 }));
   unmount();
-  await waitFor(() => expect(live).toEqual({ events: 0, resync: 0 }));
+  await waitFor(() => expect(live).toEqual({ events: 0, resync: 0, update: 0 }));
 });
 
 describe("when the connection to Linear changes", () => {

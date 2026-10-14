@@ -67,7 +67,7 @@ test("the quit prompt works while the panel is replaced by the start failure", a
   };
   render(<App backend={backend} />);
   expect(await screen.findByText("Something stopped IssueRelay from starting")).toBeInTheDocument();
-  await act(async () => ask({ running: 1, waiting: false }));
+  await act(async () => ask({ running: 1, waiting: false, purpose: "quit" }));
   expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
 });
 
@@ -165,7 +165,7 @@ test("a page that cannot read what the backend gave shows the error page, not a 
   expect(screen.getByRole("button", { name: en.crash.reload })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
   // The quit prompt is outside what failed, and still asks.
-  await act(async () => ask({ running: 2, waiting: false }));
+  await act(async () => ask({ running: 2, waiting: false, purpose: "quit" }));
   expect(screen.getByText(/2 runs are in progress/)).toBeInTheDocument();
 });
 
@@ -198,7 +198,7 @@ test("a page that fails leaves the quit prompt and the toasts working", async ()
   render(<App backend={backend} />);
   expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
   // The tray's Quit with a run in progress: the prompt opens over the error page and answers.
-  await ask({ running: 1, waiting: false });
+  await ask({ running: 1, waiting: false, purpose: "quit" });
   expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
   // The answer the app refused is told in a toast, which still has a place to appear.

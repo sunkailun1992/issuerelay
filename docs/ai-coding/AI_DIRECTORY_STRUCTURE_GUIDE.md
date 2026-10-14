@@ -79,6 +79,7 @@
 | `docs/gates/` | 实机验收报告 `<日期>-<主题>.md`；脱敏样本放 `docs/gates/samples/<里程碑>/` |
 | `docs/gates/screenshots/` | 面板截图（`docs/gates/screenshots/m2/`：2 种语言 × 浅色深色 × 12 屏共 48 张，`<语言>-<主题>-<屏>.png`，Playwright 比对用的基准图，README 引用其中四张）；只含虚构数据，真实验收截图只留在本机 |
 | `docs/design/` | 设计素材的预览。`docs/design/icons/preview.png` 是图标三套方案的对比图（`pnpm --dir app icons --preview` 生成） |
+| `docs/release/` | 发布相关说明（维护者读，中文）：`updater-key.md` 更新签名密钥的生成、上传、备份、核对与轮换 |
 | `docs/install.md` | 安装说明（给使用者读，中文）：下载哪个文件、第一次打开的放行步骤、首次引导、把命令行加入 PATH、自动更新、卸载、常见问题；每个 Release 的说明和 README 的「安装 / Install」一节都链接到它 |
 
 ## 6. scripts/ 与 .github/

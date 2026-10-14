@@ -2,6 +2,8 @@ import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import { BackendError } from "./backend";
 import { cleanDisplayText } from "./clean";
+import type { UpdateFailureCode } from "./types";
+import updateFailures from "./update-failure-cases.json";
 
 /**
  * A failure as the panel shows it (design 9.3: no bare error text): a translated headline, and
@@ -20,4 +22,10 @@ export function describeError(error: unknown, t: TFunction, headlineKey: string)
 export function reportFailure(error: unknown, t: TFunction, headlineKey: string): void {
   const { headline, detail } = describeError(error, t, headlineKey);
   toast.error(headline, { description: detail ?? undefined });
+}
+
+/** The translation key of an update failure's headline: `errors.<error code>`, by update-failure-cases.json. */
+export function updateFailureKey(code: UpdateFailureCode): string {
+  const entry = updateFailures.find((candidate) => candidate.code === code);
+  return `errors.${entry?.error_code ?? "update_failed"}`;
 }

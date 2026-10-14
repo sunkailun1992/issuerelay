@@ -1,0 +1,8 @@
+[
+  { "code": "unreachable", "error_code": "update_unreachable" },
+  { "code": "no_platform", "error_code": "update_no_platform" },
+  { "code": "bad_signature", "error_code": "update_bad_signature" },
+  { "code": "unavailable", "error_code": "update_unavailable" },
+  { "code": "install_failed", "error_code": "update_install_failed" },
+  { "code": "other", "error_code": "update_failed" }
+]

@@ -470,17 +470,98 @@ test.each([
   expect(lastSaved(save).notifications).toEqual({ run_started: true, awaiting_acceptance: true, needs_info: true, failed: true, [key]: false });
 });
 
-test("automatic updates are saved with the page, and say they take effect later", async () => {
+test("automatic updates are saved with the page, and say when they check", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const save = vi.spyOn(backend, "saveSettings");
   await renderWithProviders(<Settings />, { backend });
   const toggle = await screen.findByRole("switch", { name: "Check for updates automatically" });
   expect(toggle).toBeChecked();
-  expect(toggle).toHaveAccessibleDescription("Updates arrive in a later version; your choice is kept until then.");
+  expect(toggle).toHaveAccessibleDescription("Checks a minute after start and every 6 hours. Installing always waits for your click.");
   await userEvent.click(toggle);
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(lastSaved(save).auto_update).toBe(false);
+});
+
+// ---- updates ------------------------------------------------------------------------------------
+
+test("checking for updates shows the version and the result; a failure is a translated headline with the detail", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.checkUpdate = vi.fn().mockResolvedValue({ kind: "failed", code: "unreachable", detail: "error sending request" });
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("Version 0.1.0")).toBeInTheDocument();
+  expect(await screen.findByText(/Up to date/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByText("Could not reach the update server")).toBeInTheDocument();
+  expect(screen.getByText("error sending request")).toBeInTheDocument();
+});
+
+test("the result of the last check is there before any click, and says how long ago it was", async () => {
+  await renderWithProviders(<Settings />);
+  expect(await screen.findByText("Up to date (last check: 30 minutes ago)")).toBeInTheDocument();
+});
+
+test("a new version found by a check is named, and checking again is possible", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const check = vi.fn().mockResolvedValue({ kind: "available", version: "0.2.0" });
+  backend.checkUpdate = check;
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByText("IssueRelay 0.2.0 is available")).toBeInTheDocument();
+  expect(screen.queryByText(/Up to date/)).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Check for updates" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+  await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+});
+
+test("while a check runs the button cannot be pressed again", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.checkUpdate = vi.fn(() => new Promise<never>(() => {}));
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+  expect(screen.getByRole("button", { name: "Check for updates" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
+  expect(backend.checkUpdate).toHaveBeenCalledTimes(1);
+});
+
+test("an update that could not be installed before the restart is told in the row too, with its reason", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.updateStatus = async () => ({ kind: "failed", code: "install_failed", detail: "cannot replace the app" });
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("The update could not be installed")).toBeInTheDocument();
+  expect(screen.getByText("cannot replace the app")).toBeInTheDocument();
+});
+
+test("a check that the app could not even run is told with its reason, and the row stays", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.checkUpdate = vi.fn().mockRejectedValue(new BackendError("the update service is not running"));
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+  expect(await screen.findByText("Could not check for updates")).toBeInTheDocument();
+  expect(screen.getByText("the update service is not running")).toBeInTheDocument();
+  expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+});
+
+test("the version row reads in Chinese", async () => {
+  await renderWithProviders(<Settings />, { lang: "zh-CN" });
+  expect(await screen.findByText("版本 0.1.0")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+  expect(await screen.findByText("已是最新版本（30 分钟前检查）")).toBeInTheDocument();
+});
+
+test("the row for updates is in the System group, after the switch for automatic checks, and is no part of Save", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const system = await screen.findByRole("region", { name: "System" });
+  const switchRow = within(system).getByRole("switch", { name: "Check for updates automatically" });
+  const button = await within(system).findByRole("button", { name: "Check for updates" });
+  expect(switchRow.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await userEvent.click(button);
+  await waitFor(() => expect(button).toBeEnabled());
+  // Checking is no change of the settings: nothing was saved and the page has nothing to save.
+  expect(save).not.toHaveBeenCalled();
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
 });
 
 // ---- the names in Advanced --------------------------------------------------------------------

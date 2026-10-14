@@ -32,4 +32,6 @@
 /app/src-tauri/src/                @sunkailun1992
 /app/src-tauri/build.rs            @sunkailun1992
 /app/src-tauri/capabilities/       @sunkailun1992
+/app/src-tauri/tauri.conf.json     @sunkailun1992
+/app/src-tauri/tauri.*.conf.json   @sunkailun1992
 /app/src/lib/clean.ts              @sunkailun1992

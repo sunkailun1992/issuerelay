@@ -9,7 +9,8 @@ import { subscription } from "./subscription";
  * it is now: a changed job refreshes the lists and that job's pages, a changed setup the status
  * (it carries the Linear connection, so "connecting" turns into "connected" without a reload),
  * a changed configuration the settings and bindings. When events were lost (`resync`) everything
- * is read again. Must run inside `QueryClientProvider` and `BackendProvider`.
+ * is read again. The app's update check (`update-status`) is put into the cache as it comes.
+ * Must run inside `QueryClientProvider` and `BackendProvider`.
  */
 export function useEngineEvents(): void {
   const backend = useBackend();
@@ -35,9 +36,11 @@ export function useEngineEvents(): void {
       }),
     );
     const stopResync = subscription(backend.onResync(() => void client.invalidateQueries()));
+    const stopUpdate = subscription(backend.onUpdateStatus((status) => client.setQueryData(queryKeys.update, status)));
     return () => {
       stopEvents();
       stopResync();
+      stopUpdate();
     };
   }, [backend, client]);
 }

@@ -1,6 +1,7 @@
 //! The packaging configuration (design 12). `tauri.conf.json` is read by every build, including
 //! `tauri dev` and ci.yml's clippy and tests; what only bundling needs is merged from
-//! `tauri.bundle.conf.json` with `--config`.
+//! `tauri.bundle.conf.json` with `--config`, or, when the release workflow signs update payloads,
+//! from `tauri.updater.conf.json` (one `--config` at most).
 use serde_json::{Value, json};
 
 fn config(name: &str) -> Value {
@@ -78,9 +79,55 @@ fn bundling_adds_the_cli() {
     );
 }
 
-/// The configs `--config` merges when bundling: the CLI always, the update payloads once the
-/// release workflow switches them on (`tauri.updater.conf.json`, which exists from the day the
-/// updater does).
+#[test]
+fn updates_come_signed_from_the_fixed_manifest() {
+    let updater = &config("tauri.conf.json")["plugins"]["updater"];
+    assert_eq!(
+        updater["endpoints"],
+        json!(["https://github.com/sunkailun1992/issuerelay/releases/latest/download/latest.json"])
+    );
+    // A signed payload names the version it was signed for, and that must be the version the
+    // manifest announces: a newer number cannot be paired with an older, genuine payload.
+    assert_eq!(updater["requireSignedVersion"], true);
+    assert_eq!(updater["windows"]["installMode"], "passive");
+    // The .pub file's one base64 line: a minisign public key box, which starts with
+    // "untrusted comment: minisign public k". A file path, or anything else, is refused here.
+    let pubkey = updater["pubkey"].as_str().expect("pubkey is set");
+    assert!(
+        pubkey.starts_with("dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBr"),
+        "not a minisign public key"
+    );
+    assert!(!pubkey.contains(char::is_whitespace));
+}
+
+#[test]
+fn release_builds_add_the_cli_and_the_update_payloads() {
+    let release = &config("tauri.updater.conf.json")["bundle"];
+    assert_eq!(
+        release["externalBin"],
+        config("tauri.bundle.conf.json")["bundle"]["externalBin"]
+    );
+    // A boolean, not a string: tauri-action reads it with `=== true` to pick the signed names
+    // that scripts/release-checks.mjs expects.
+    assert_eq!(release["createUpdaterArtifacts"], true);
+}
+
+#[test]
+fn bundle_configs_never_change_what_the_app_trusts() {
+    // scripts/verify-update-signature.mjs checks every payload against the pubkey committed in
+    // tauri.conf.json. A bundle config with a `plugins` section would let the shipped app trust
+    // another key than the one the release is checked against.
+    for name in bundle_configs() {
+        assert!(
+            config(name).get("plugins").is_none(),
+            "{name} must not touch the plugins' configuration"
+        );
+    }
+}
+
+/// The configs `--config` is given when bundling, one at most per build (bundle.yml): the CLI's
+/// (`tauri.bundle.conf.json`), or `tauri.updater.conf.json` instead when the release workflow
+/// signs update payloads, which repeats the CLI's part.
 fn bundle_configs() -> Vec<&'static str> {
     ["tauri.bundle.conf.json", "tauri.updater.conf.json"]
         .into_iter()

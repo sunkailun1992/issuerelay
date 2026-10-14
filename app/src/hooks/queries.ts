@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
-import type { Binding, CliPathStatus, ExecutorKind, LinearSetup, Settings, SetupAction, Viewer } from "@/lib/types";
+import type { Binding, CliPathStatus, ExecutorKind, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
 
 /**
  * Every query of the panel. The engine events (`useEngineEvents`) and the actions below refresh
@@ -25,6 +25,7 @@ export const queryKeys = {
   linearServerNamed: (executor: ExecutorKind) => ["linearServerNamed", executor] as const,
   autostart: ["autostart"] as const,
   cliPath: ["cliPath"] as const,
+  update: ["update"] as const,
   appInfo: ["appInfo"] as const,
 };
 
@@ -154,6 +155,12 @@ export function useAutostart() {
 export function useCliPath() {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath() });
+}
+
+/** What the app's last update check found; `update-status` keeps it current (`useEngineEvents`). */
+export function useUpdateStatus() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.update, queryFn: () => backend.updateStatus() });
 }
 
 /** Version, command line path, platform and system language; fixed while the app runs. */
@@ -357,4 +364,14 @@ export function useInstallCliOnPath() {
 
 export function useRemoveCliFromPath() {
   return useAction<void, CliPathStatus>((backend) => backend.removeCliFromPath(), [queryKeys.cliPath], "actions.failed.cli_path");
+}
+
+/** Checks for an update now: what this check found is the action's `data`; the kept status is read again. */
+export function useCheckUpdate() {
+  return useAction<void, UpdateStatus>((backend) => backend.checkUpdate(), [queryKeys.update], "actions.failed.check_update");
+}
+
+/** "Install and restart": the Rust side downloads, verifies and goes through the quit flow. */
+export function useInstallUpdate() {
+  return useAction<void, void>((backend) => backend.installUpdate(), [], "actions.failed.install_update");
 }

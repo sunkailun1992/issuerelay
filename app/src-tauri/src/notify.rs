@@ -1,12 +1,15 @@
-//! System notifications for the four moments design 9.5 names, each of which can be switched
-//! off. A notification names the issue and says what happened in the user's language; the
-//! engine's own text (a failure's reason) stays in the panel, under a translated headline.
+//! System notifications (design 9.5): the four moments of a run, each of which can be switched
+//! off, plus the notice of a new version, which has no switch of its own: only the background
+//! update check shows it (`update::spawn_checker`), and that check runs only while "check for
+//! updates automatically" is on. A notification names the issue (or the version) and says what
+//! happened in the user's language; the engine's own text stays in the panel, under a translated
+//! headline. A failed update install is shown in the panel, never here.
 use issuerelay_core::{
     config::NotificationSettings,
     host::Host,
     model::{Job, JobState},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::i18n::Translator;
@@ -63,6 +66,29 @@ pub fn show(app: &AppHandle, host: &Host, kind: NotificationKind, job: &Job) {
         return;
     }
     let (title, body) = content(kind, job, &Translator::for_settings(&settings));
+    deliver(app, title, body);
+}
+
+/// Title and body of the new-version notice: the version and a translated sentence.
+pub fn update_content(version: &str, t: &Translator) -> (String, String) {
+    (
+        t.t_with("notify.update_available", &[("version", version)]),
+        t.t("notify.update_available_body"),
+    )
+}
+
+/// The notice that a background check found `version` (once per version,
+/// `Updates::should_notify`).
+pub fn show_update_available<R: Runtime>(app: &AppHandle<R>, host: &Host, version: &str) {
+    let (title, body) = update_content(
+        version,
+        &Translator::for_settings(&host.engine().settings()),
+    );
+    deliver(app, title, body);
+}
+
+/// Hands a notification to the system; a failure is only logged.
+fn deliver<R: Runtime>(app: &AppHandle<R>, title: String, body: String) {
     if let Err(e) = app.notification().builder().title(title).body(body).show() {
         tracing::warn!(error = %e, "could not show a notification");
     }
@@ -118,6 +144,17 @@ mod tests {
         settings.failed = false;
         assert!(!enabled(NotificationKind::Failed, &settings));
         assert!(enabled(NotificationKind::RunStarted, &settings));
+    }
+
+    #[test]
+    fn the_new_version_notice_names_the_version_in_the_users_language() {
+        let (title, body) = update_content("0.2.0", &Translator::new("en"));
+        assert_eq!(title, "IssueRelay 0.2.0 is available");
+        assert_eq!(body, "Open the panel to install it.");
+        // Another language reads its own words; the version is the same in all of them.
+        let (title, body) = update_content("0.2.0", &Translator::new("zh-CN"));
+        assert_eq!(title, "IssueRelay 0.2.0 已发布");
+        assert_eq!(body, "打开面板即可安装。");
     }
 
     #[test]

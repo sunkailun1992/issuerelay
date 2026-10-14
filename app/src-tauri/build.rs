@@ -48,6 +48,9 @@ const PANEL_COMMANDS: &[&str] = &[
     "cli_on_path",
     "install_cli_on_path",
     "remove_cli_from_path",
+    "update_status",
+    "check_update",
+    "install_update",
 ];
 
 /// What tauri-build embeds into the app by default: it asks Windows for Common Controls v6.

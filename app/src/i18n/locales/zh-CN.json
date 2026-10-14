@@ -70,7 +70,9 @@
     "run_started": "已开始运行。",
     "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
     "needs_info": "AI 在需求下提了问题。补充信息后，请重新加上 ai-ready 标签。",
-    "failed": "运行失败，原因见面板。"
+    "failed": "运行失败，原因见面板。",
+    "update_available": "IssueRelay {{version}} 已发布",
+    "update_available_body": "打开面板即可安装。"
   },
   "quit": {
     "title": "仍有任务在运行",
@@ -80,6 +82,18 @@
     "stop": "立即停止",
     "cancel": "继续运行",
     "waiting": "正在等待任务运行完毕，完成后 IssueRelay 会自动退出。"
+  },
+  "update": {
+    "available": "IssueRelay {{version}} 已发布",
+    "install": "安装并重启",
+    "downloading": "正在下载并校验…",
+    "later": "稍后",
+    "dismiss": "知道了",
+    "restart_note": "安装时 IssueRelay 会重启；有任务在运行时会先问你。",
+    "restart_body": "这些运行处理完后，IssueRelay 会重启并安装更新。",
+    "waiting": "正在等待运行结束，之后 IssueRelay 会安装更新并重启。",
+    "check": "检查更新",
+    "up_to_date": "已是最新版本（{{time}}检查）"
   },
   "startup": {
     "failed_title": "IssueRelay 无法启动",
@@ -155,12 +169,20 @@
       "set_autostart": "无法更改开机自启设置",
       "cli_path": "没能修改「把命令行加入 PATH」",
       "open_linear": "无法打开 Linear",
-      "copy": "无法复制"
+      "copy": "无法复制",
+      "check_update": "没能检查更新",
+      "install_update": "没能安装更新"
     }
   },
   "errors": {
     "not_a_linear_link": "IssueRelay 只会打开 Linear 自己的页面",
-    "login_cancelled": "已取消浏览器登录"
+    "login_cancelled": "已取消浏览器登录",
+    "update_unreachable": "连不上更新服务器",
+    "update_no_platform": "新版本还没有适合这台电脑的安装包",
+    "update_bad_signature": "更新包的签名校验没有通过，什么都没安装",
+    "update_unavailable": "只能更新已安装的应用：请先把 IssueRelay 移到「应用程序」",
+    "update_install_failed": "更新没能安装",
+    "update_failed": "检查更新失败"
   },
   "overview": {
     "monitoring": "监控",
@@ -446,7 +468,7 @@
       "load_failed": "读不到 PATH 设置"
     },
     "auto_update": "自动检查更新",
-    "auto_update_note": "自动更新会在以后的版本里提供；你的选择会先保存下来。",
+    "auto_update_note": "启动 1 分钟后检查一次，之后每 6 小时一次；安装总要等你点。",
     "control_server_intro": "MCP 控制服务让 Claude Code 和 Codex 能看到 IssueRelay 的运行情况。",
     "control_server_note": "按用户范围注册，无人值守的运行也会加载它；它的工具里有「暂停监控」。",
     "control_failed": "无法检查 MCP 控制服务",
