@@ -55,6 +55,11 @@ PATTERNS=(
   # and docs that quote these lines from matching themselves.
   'untrusted comment: rsign encrypted secret k[e]y'
   'dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V[5]'
+  # The second line of that file alone, as someone may paste it: base64 of the key itself, which
+  # begins the same for every key (the tags of the algorithm, the key derivation and the checksum)
+  # and is 212 characters long. The public key line cannot match: it is 56 characters long and
+  # its first characters are the algorithm and the key number.
+  '(^|[^A-Za-z0-9+/])RWRTY0Iy[A-Za-z0-9+/]{100,}'
   '(^|[^0-9.])10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
   '(^|[^0-9.])192\.168\.[0-9]{1,3}\.[0-9]{1,3}'
   '(^|[^0-9.])172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}'

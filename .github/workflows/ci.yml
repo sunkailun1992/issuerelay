@@ -51,6 +51,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The scan's own patterns, against made-up samples: an edit that stops one from catching what
+      # it was added for fails here, before the scan below could pass without it.
+      - run: bash scripts/check-secrets-self-test.sh
       - run: bash scripts/check-secrets.sh --strict
       # actionlint checks every workflow: expressions, job outputs and needs, reusable workflow
       # inputs, and the shell in `run:` steps through shellcheck. It is the author's container

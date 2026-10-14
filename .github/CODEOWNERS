@@ -4,6 +4,7 @@
 *                                  @sunkailun1992
 /AGENTS.md                         @sunkailun1992
 /scripts/check-secrets.sh          @sunkailun1992
+/scripts/check-secrets-self-test.sh @sunkailun1992
 /scripts/stage-cli.sh                 @sunkailun1992
 /scripts/stage-cli.ps1                @sunkailun1992
 /scripts/verify-update-signature.mjs  @sunkailun1992
