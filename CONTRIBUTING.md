@@ -5,7 +5,7 @@
 - Issues and pull requests are welcome, in English or Chinese. Ask questions with the Question issue form (Discussions are off and blank issues are disabled).
 - Open an issue first for large changes and new features, and for anything that touches the six Critical areas: executor flags and permission tiers, the prompt's fixed rules, ending the process tree, credential storage and authorization, the IPC method table, and mark-done.
 - Read [AGENTS.md](AGENTS.md) before you code. It is written for AI tools, and its rules apply to people too.
-- Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (the app crate's release build embeds `app/dist`); the panel needs Node.js 22 or later and pnpm. On Windows the scan needs Git Bash or WSL.
+- Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (a `tauri build`, that is a build with the `custom-protocol` feature, embeds `app/dist`); the panel needs Node.js 22.22.2+, 24.15+ or 26+ (`engines` in `app/package.json`) and pnpm. On Windows the scan needs Git Bash or WSL.
 - Write commit messages and PR titles as English Conventional Commits, for example `fix(runner): kill the whole process tree on timeout`. Do not change version numbers; maintainers do that when they release.
 - Changes to the desktop panel (`app/`) follow section 12 of [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md): every text goes through the five translation files, colours and sizes come from the design tokens, every page has loading, empty and error states, and every action stays reachable in the smallest window (900×600).
 - A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts. AI tools never approve a contributor's PR, and never merge one that a maintainer has not approved.
@@ -41,11 +41,11 @@ rustup toolchain install   # 按 rust-toolchain.toml 装好 1.99.0 及 rustfmt�
 cargo build --workspace
 ```
 
-桌面面板（`app/`）还需要 [Node.js](https://nodejs.org/) 22 以上和 [pnpm](https://pnpm.io/)（版本见 `app/package.json` 的 `packageManager`）：
+桌面面板（`app/`）还需要 [Node.js](https://nodejs.org/) 22.22.2+、24.15+ 或 26 及以上（`app/package.json` 的 `engines`）和 [pnpm](https://pnpm.io/)（版本见 `app/package.json` 的 `packageManager`）：
 
 ```bash
 pnpm --dir app install
-pnpm --dir app build   # 应用 crate 的发布构建内嵌 app/dist，所以先构建面板，再跑 cargo
+pnpm --dir app build   # tauri build（custom-protocol）构建的应用内嵌 app/dist，所以先构建面板，再跑 cargo
 ```
 
 单元测试和集成测试用假执行者和假 Linear MCP，所以不需要 Linear 账号，也不需要安装 Claude Code 或 Codex。
@@ -54,7 +54,7 @@ pnpm --dir app build   # 应用 crate 的发布构建内嵌 app/dist，所以先
 
 ## 提交前检查
 
-提交前在仓库根目录跑这六条，全部通过再推送。先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`：应用 crate 的发布构建内嵌 `app/dist`，CI 也是这个顺序（没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板）：
+提交前在仓库根目录跑这六条，全部通过再推送。先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`：`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`，CI 也是这个顺序（没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板）：
 
 ```bash
 pnpm --dir app build   # 前置步骤，不算在六条里

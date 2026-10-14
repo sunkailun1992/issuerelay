@@ -31,21 +31,21 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 界面预览 / Screenshots
 
-桌面面板的两个页面：概览，和一次运行的详情（信息、时间线、原始日志）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者与权限档位）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`），侧栏左上角的应用图标在截图里遮成了一块靛蓝；两种语言、浅色与深色共 48 张都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
 
-*Two pages of the desktop panel: the overview, and the detail of one run (facts, timeline, raw log). The screenshots show only the fictional data of the built-in mock backend; all 48 (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor and permission level of each Linear project). The screenshots show only the fictional data of the built-in mock backend, and the app icon is masked as an indigo square; all 48 (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
 
 **中文界面**
 
-![概览：监控开关、连接状态、运行中、排队与最近结果](docs/gates/screenshots/m2/zh-CN-light-overview.png)
+![需求：每条需求的 Linear 状态、本地状态、原因与操作](docs/gates/screenshots/m2/zh-CN-light-issues.png)
 
-![运行详情：运行信息、时间线与原始日志](docs/gates/screenshots/m2/zh-CN-light-run-detail.png)
+![项目绑定：每个项目的目录、执行者、权限档位与检查](docs/gates/screenshots/m2/zh-CN-light-bindings.png)
 
 **English interface**
 
-![Overview: the monitoring switch, the Linear connection, running, queued and recent runs](docs/gates/screenshots/m2/en-light-overview.png)
+![Issues: each issue's Linear status, local status, reason and action](docs/gates/screenshots/m2/en-light-issues.png)
 
-![Run detail: the run's facts, the timeline and the raw log](docs/gates/screenshots/m2/en-light-run-detail.png)
+![Bindings: each project's folder, executor, permission level and check](docs/gates/screenshots/m2/en-light-bindings.png)
 
 ## 安全须知
 
@@ -56,7 +56,7 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 开发
 
-需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。桌面面板（`app/`）还需要 Node.js 22 以上和 pnpm（版本见 `app/package.json` 的 `packageManager`）。
+需要 Rust 1.99：装好 rustup 后在仓库根目录运行 `rustup toolchain install`（按 `rust-toolchain.toml` 安装 1.99.0 及 rustfmt、clippy）。桌面面板（`app/`）还需要 Node.js 22.22.2+、24.15+ 或 26 及以上和 pnpm（版本见 `app/package.json` 的 `engines` 与 `packageManager`）。
 
 ```bash
 cargo test --workspace
@@ -68,7 +68,7 @@ pnpm --dir app dev                          # 只在浏览器里看面板，用�
 pnpm --dir app test:screens                 # 面板截图比对与版面检查，只在本机运行，不进 CI
 ```
 
-`pnpm --dir app build` 排在 cargo 命令之前：应用 crate 的发布构建内嵌 `app/dist`（`pnpm --dir app tauri build` 会自己先构建，`tauri dev` 连开发服务器、不需要）。
+`pnpm --dir app build` 排在 cargo 命令之前：`pnpm --dir app tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`，它会自己先构建；`tauri dev`、`cargo test` 等调试构建不内嵌、连开发服务器。
 
 提交前的检查、代码规范与开发流程见 [AGENTS.md](AGENTS.md) 和 [docs/ai-coding](docs/ai-coding/README.md)。
 

@@ -61,7 +61,7 @@
 
 ## 验证命令
 
-前端需要 Node.js 22 以上与 pnpm（版本见 `app/package.json` 的 `packageManager`），先 `pnpm --dir app install`。`pnpm --dir app build` 排在 cargo 命令之前：应用 crate 的发布构建内嵌 `app/dist`，CI 也是这个顺序。没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板。
+前端需要 Node.js 22.22.2+、24.15+ 或 26 及以上（`app/package.json` 的 `engines`）与 pnpm（版本见 `app/package.json` 的 `packageManager`），先 `pnpm --dir app install`。`pnpm --dir app build` 排在 cargo 命令之前，CI 也是这个顺序：`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌 `app/dist`（调试构建、`cargo test` 与 `cargo clippy` 不内嵌，连 `devUrl`）。没有先构建时，`build.rs` 会在 `app/dist` 放一个占位页让任何构建都能编过，但那样内嵌的不是真实面板。
 
 ```bash
 pnpm --dir app build

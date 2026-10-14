@@ -53,11 +53,13 @@ pnpm --dir app tauri icon icons-src/build/app-1024.png   # 由 1024 px 图生成
 - `app/src-tauri/icons/tray/<状态>.png`：Windows 彩色托盘图，32 × 32。
 - `app/public/icon.svg`：去掉透明边的应用图标，面板侧栏左上角与首次引导的页眉用（`AppShell.tsx`、`Onboarding.tsx`）。
 
-状态是 `idle`、`running`、`paused`、`problem`。加 `--out <目录>` 把同样的目录树写到那个目录下，不动仓库里的文件，用来试渲染。
+状态是 `idle`、`running`、`paused`、`problem`。加 `--out <目录>` 把同样的目录树写到那个目录下，不动仓库里的文件，用来试渲染。`--preview` 的对比图里的文字用本机的系统字体渲染（`loadSystemFonts`），换一台机器文字的样子会有点不同；图标本身不含文字，不受影响。
 
 `tauri icon`（`@tauri-apps/cli` 2.12）会同时写出 `icons/android/` 和 `icons/ios/`，删掉，不提交：本项目只做桌面。它还会写 `64x64.png`，那是桌面图标，要提交。`tauri.conf.json` 的 `bundle.icon` 列的五个文件（`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.icns`、`icon.ico`）都在它的输出里，换方案时不用改。
 
-脚本会检查：每个 SVG 的 `viewBox`；macOS 模板图的每个像素都是黑色加透明度；四种状态的图两两不同；应用图标的四角透明、中心不透明。`--option` 的检查不过，就不写任何文件。
+脚本会检查：每个 SVG 的 `viewBox`；macOS 模板图的每个像素都是黑色加透明度；四种状态的图两两不同；应用图标的四角透明、中心不透明；方形底的投影是唯一一个 `lift` 滤镜（`public/icon.svg` 要去掉它）。`--option` 的检查不过，就不写任何文件（所有文件都先做好、检查过，才开始写）。
+
+已知的限制（留到 M3 在 Windows 上处理）：Windows 的 `.ico` 与 Store 图标用的是同一张 1024 px 母图，带着 macOS 网格的透明边（圆角方形只占 81%–88%），所以在 Windows 上看起来比别的应用图标小一圈；托盘的 Windows 彩色图只有 32 px 一种，100% 缩放的屏幕上由系统缩到 16 px，可能发虚。满版的 Windows 母图与 16 px 托盘图要在 Windows 实机上看过再定。
 
 ## 改选方案
 
