@@ -301,5 +301,28 @@ for (const { width, height } of SMALLEST) {
         });
       });
     }
+
+    // The settings' PATH row with its switch on, which adds the shell line and its Copy button: the switch, the
+    // line and the button are in reach and nothing runs past the System card (a long line breaks, Copy moves down).
+    for (const language of LAYOUT_LANGUAGES) {
+      test(`the PATH row of the settings in ${language} keeps its switch, the shell line and Copy inside`, async ({ page }) => {
+        const t = words(language);
+        await open(page, language, "/settings");
+        await expect(title(page, t("nav.settings"))).toBeVisible();
+        // The switch is there once the state has been read.
+        const toggle = page.getByRole("switch", { name: t("settings.cli.title"), exact: true });
+        await toggle.click();
+        const system = page.getByRole("region", { name: t("settings.group.system"), exact: true });
+        const line = system.locator("code", { hasText: "export PATH" });
+        await expect(line).toBeVisible();
+        await settled(page);
+        await system.scrollIntoViewIfNeeded();
+        await expectWithinWindow(toggle, line, system.getByRole("button", { name: t("common.copy"), exact: true }));
+        expect(await reachPastRightEdge(system), "the System card").toEqual({ overflow: 0, past: [] });
+        expect(await reachPastRightEdge(page.locator("main")), "the page").toEqual({ overflow: 0, past: [] });
+        const pastWindow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+        expect(pastWindow, "the window").toBeLessThanOrEqual(0);
+      });
+    }
   });
 }

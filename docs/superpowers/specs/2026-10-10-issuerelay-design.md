@@ -92,7 +92,7 @@ IssueRelay 是装在每个开发者电脑上的托盘程序：实时监听 Linea
   - 开机自启而首次引导还没完成时也显示面板（引导总要走完）。启动失败时托盘图标转为出问题，面板显示原因。
   - 进程只在 `Host::stop` 返回之后才结束：那时运行已连同进程树结束、结果已记录、宿主的单实例锁（本机通信端点的锁）已释放。`AppHandle::exit` 以 `std::process::exit` 结束进程，不执行析构，所以不能把结束进程树留给析构。
   - macOS 的 Cmd+Q 是 IssueRelay 自己的『退出』菜单项，与托盘的『退出』一样先问。系统自己的退出拦不下来（Tauri 2.12.3、tao 0.37.1 只把它报成无法阻止的退出事件）：macOS 程序坞的『退出』、注销、关机，Windows 结束会话。这时不问，直接按『立即停止』收尾，最多等 10 秒，然后程序结束；没收完的由下次启动的清扫（macOS）或随进程关闭的 Job Object（Windows）结束。
-- **命令行小程序** `issuerelay`（控制台程序）：自己不执行任务，只经本机通信通道向托盘程序发请求；托盘程序没在运行时给出提示，并可代为启动。Windows 上带窗口的程序无法向终端输出，所以分成两个程序，装在同一个安装包里。
+- **命令行小程序** `issuerelay`（控制台程序）：自己不执行任务，只经本机通信通道向托盘程序发请求；托盘程序没在运行时给出提示：命令行指向 `issuerelay start`，它启动托盘程序（macOS 经 `open -b com.sunkailun.issuerelay`，Windows 启动同目录的 `issuerelay-app.exe`），已在运行就只说明，并等到宿主应答；MCP 服务只报错，请 AI 转告用户打开应用，从不自己启动（AI 不能静默启动有完全权限的程序）。Windows 上带窗口的程序无法向终端输出，所以分成两个程序，装在同一个安装包里。
 - **执行者进程**：引擎启动的 `claude` / `codex` 子进程，工作目录为绑定目录。
 
 宿主逻辑在 `crates/core/src/host.rs`：托盘程序与开发宿主共用。
@@ -261,7 +261,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 | 运行记录 | 历史运行列表；详情页显示可读的时间线和原始日志，支持复制 |
 | 项目绑定 | 每个绑定的目录、执行者、权限档位、提示词覆盖和检查结果 |
 | 环境检查 | 第 8 节的各项检查和修复按钮 |
-| 设置 | 语言、检查间隔、总并发上限、超时、默认执行者与权限档位、默认提示词模板、AI 评论语言、通知、开机自启、自动更新；高级设置：标签名、状态名、个人 API key |
+| 设置 | 语言、检查间隔、总并发上限、超时、默认执行者与权限档位、默认提示词模板、AI 评论语言、通知、开机自启、把命令行加入 PATH、自动更新；高级设置：标签名、状态名、个人 API key |
 | 使用说明 | 触发条件、状态流转、需求示例写法、常见问题 |
 
 需求页按原因代码显示等待原因；排队中因启动失败暂缓的任务显示下次重试的时间。需求页里需求的编号就是「在 Linear 中打开」（最小窗口下表格放不下另一个按钮）；满足触发条件的需求，如果它上一次运行已结束、Linear 上又没有变化，会写明「Linear 上有改动后才会再次运行」（轮询不会再次入队，只有手动「重新运行」），引擎用判定入队的同一个函数得出这一点（`IssueStatus::Eligible` 的 `picked_up`）；运行还在进行时不重复说需求的状态不是 Todo。
@@ -298,7 +298,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ### 10.1 命令行
 
-`issuerelay status | pause | resume | poll | doctor | bind list|add|remove | jobs | logs <任务>`。默认输出给人看的格式，加 `--json` 输出机器可读格式。
+`issuerelay status | pause | resume | poll | doctor | bind list|add|remove | jobs | logs <任务> | start`。默认输出给人看的格式，加 `--json` 输出机器可读格式。
 
 ### 10.2 本机通信协议
 
@@ -308,7 +308,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ### 10.3 MCP 服务
 
-`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除（移除命令为 `claude mcp remove --scope user issuerelay`、`codex mcp remove issuerelay`）。注册命令为 `claude mcp add --scope user issuerelay -- <命令行程序> mcp`、`codex mcp add issuerelay -- <命令行程序> mcp`；是否已注册看 `mcp get issuerelay` 的退出码。
+`issuerelay mcp`（stdio）供 Claude Code / Codex 注册，提供工具 `status`、`list_jobs`、`pause`、`resume`、`poll_now`，不提供「标记完成」和「重新运行」。是否注册到 Claude Code / Codex 由用户在设置里选择，可一键注册或移除（移除命令为 `claude mcp remove --scope user issuerelay`、`codex mcp remove issuerelay`）。注册命令为 `claude mcp add --scope user issuerelay -- <命令行程序> mcp`、`codex mcp add issuerelay -- <命令行程序> mcp`；是否已注册看 `mcp get issuerelay` 的退出码。宿主没运行时工具返回错误（`isError`），文字里请 AI 转告用户打开 IssueRelay。
 
 ## 11. 配置与数据位置
 
@@ -322,6 +322,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 ## 12. 安装包、更新与发布
 
 - Tauri 打包：macOS 出一个通用 `.dmg`（Apple 芯片与 Intel 通用，最低 macOS 13.3），Windows 出 NSIS `.exe`（按用户安装，不需要管理员，推荐）和 `.msi`（为所有用户安装，需要管理员）。命令行小程序作为附带程序（`externalBin`）装在主程序 `issuerelay-app` 旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录下的 `issuerelay.exe`。`externalBin` 只写在打包专用的 `app/src-tauri/tauri.bundle.conf.json` 里，由 `scripts/stage-cli.sh` / `stage-cli.ps1` 先把命令行程序编译好放进 `app/src-tauri/binaries/`；开发构建不需要它。打包前确认内嵌的是真正的面板（`scripts/release-checks.mjs panel`），不是 `build.rs` 的占位页。没有 Apple 证书时 macOS 包做 ad-hoc 签名（未签名的 arm64 应用下载后会被报「已损坏」）；设置里提供「把命令行加入 PATH」。
+- 把命令行加入 PATH（设置里的开关）：macOS 在 `~/.local/bin/issuerelay` 建指向应用包内命令行程序的链接（不覆盖别人的文件，旧链接自动改指向；`~/.local/bin` 不在登录 shell 的 PATH 里时面板给出要加的一行，不改 shell 配置文件；从磁盘映像运行时不建）；Windows 把安装目录加进用户级 `Path`（保持原来的注册表类型，通常是 `REG_EXPAND_SZ`，不分大小写去重，广播 `WM_SETTINGCHANGE`，移除时只删这一项）。都不需要管理员。注册 MCP 控制服务用的是命令行程序的绝对路径，不依赖 PATH。
 - GitHub Actions（`release.yml`）：推送版本标签时先跑门禁（`scripts/release-checks.mjs`：标签与版本、标签提交在 `main` 上）并扫描密钥，在 macOS 和 Windows 上跑全部验证命令，建一个草稿 Release，逐个平台打包上传，最后核对资产与 `latest.json` 齐全；由维护者确认后公开。手动运行与改了打包配置的 PR 只试打包（只读，拉取请求拿不到 secrets），对将要打的标签与试打包产物跑同样的门禁。
 - 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只存在维护者本机和 GitHub Actions secrets 里），从 GitHub Releases 拉取；仓库已公开，M3 起即可启用。
 - 代码签名：见第 18 节。未签名时，README 写清 macOS「右键 → 打开」和 Windows「更多信息 → 仍要运行」的放行步骤。

@@ -65,6 +65,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 环境检查 | `crates/core/src/doctor.rs` |
 | 一键配置命令（Linear MCP、控制服务注册） | `crates/core/src/setup.rs` |
 | 执行者环境（PATH、代理） | `crates/core/src/env.rs` |
+| 把命令行加入 PATH、应用安装位置 | `crates/core/src/cli_path.rs` |
 | 状态流转与编排 | `crates/core/src/engine.rs` |
 | 宿主组装（IPC、后台循环、Linear 连接切换；启动不等 Linear，首次连接在后台） | `crates/core/src/host.rs` |
 | IPC 方法表 | `crates/core/src/ipc/protocol.rs` |
@@ -93,6 +94,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
 | 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二次打开应用只把已运行的面板带到前面；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
+| 命令行的 PATH 入口 | macOS：`~/.local/bin/issuerelay`（指向应用包内命令行程序的符号链接）；Windows：用户级 `Path`（`HKCU\Environment`）里的安装目录 | 只在用户打开设置里的开关时建，关掉时删，且只删 IssueRelay 自己建的；macOS 不覆盖别人的文件，指向别份应用的旧链接换成指向这一份；Windows 保持原来的注册表类型、不分大小写去重；都不需要管理员（`cli_path.rs`） |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 
@@ -174,7 +176,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ### 12.7 窗口尺寸
 
-- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。需求与运行记录的表格、绑定对话框、首次引导在 900×600 与 885×600 下由 `app/tests/screens.spec.ts` 检查（`pnpm --dir app test:screens`，只在本机跑）；其他页面没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
+- 窗口默认 1100×720，最小 900×600（`tauri.conf.json`）。最小窗口下内容区约 620 px（减去 232 px 的侧栏和两侧页边距），Windows 出现滚动条时约 605 px：每个操作在 605 px 下都要够得着，不出现横向溢出。需求与运行记录的表格、绑定对话框、首次引导、设置里「把命令行加入 PATH」一行（打开开关、显示出 shell 那一行时）在 900×600 与 885×600 下由 `app/tests/screens.spec.ts` 检查（`pnpm --dir app test:screens`，只在本机跑）；其他页面和设置的其余部分没有自动测试，改布局时在 620 与 605 px 两个宽度下各量一遍，结果写进提交说明。
 - 表格每行最多放一个操作按钮（需求编号本身就是「在 Linear 中打开」，`IssueLink`）；长文本允许在词中断行（`wrap-anywhere`），长路径中间省略（`MiddleEllipsis`）。
 - 表单对话框（`BindingDialog`）不高过窗口，字段在框内滚动，按钮始终看得见。
 

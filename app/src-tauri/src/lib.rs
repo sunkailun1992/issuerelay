@@ -83,6 +83,9 @@ pub fn run() {
             commands::set_autostart,
             commands::quit,
             commands::request_quit,
+            commands::cli_on_path,
+            commands::install_cli_on_path,
+            commands::remove_cli_from_path,
         ])
         .setup(|app| {
             tray::create(app.handle())?;

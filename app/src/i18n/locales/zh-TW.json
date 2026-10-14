@@ -130,6 +130,7 @@
       "linear_reconnect": "無法重新連線至 Linear",
       "setup_action": "設定指令執行失敗",
       "set_autostart": "無法變更開機自動啟動的設定",
+      "cli_path": "沒能修改「把命令列加入 PATH」",
       "open_linear": "無法開啟 Linear",
       "copy": "無法複製"
     }
@@ -395,6 +396,20 @@
     "autostart": "開機自動啟動",
     "applies_at_once": "立即生效，不經「儲存」。",
     "autostart_failed": "無法讀取是否開機自動啟動",
+    "cli": {
+      "title": "把命令列加入 PATH",
+      "description": "之後在終端機裡可以直接輸入 {{command}}，不需要管理員權限。",
+      "on_new_terminal": "已加入。新開一個終端機即可使用。",
+      "shell_line": "把下面這一行加到 shell 設定檔（zsh 是 ~/.zshrc），再新開一個終端機：",
+      "stale": "連結指向另一份 IssueRelay（{{target}}）。開啟開關即改為指向這一份。",
+      "blocked": "{{path}} 已存在，且不是 IssueRelay 建立的。刪除或改名後再試。",
+      "unavailable": {
+        "missing_cli": "這份 IssueRelay 裡缺少命令列程式。請從發佈頁重新安裝 IssueRelay。",
+        "not_installed": "IssueRelay 正從磁碟映像檔或暫存副本執行。請先把它移到「應用程式」。",
+        "development": "開發版不提供這一項。"
+      },
+      "load_failed": "讀不到 PATH 設定"
+    },
     "auto_update": "自動檢查更新",
     "auto_update_note": "自動更新會在之後的版本提供；你的選擇會先保存下來。",
     "control_server_intro": "MCP 控制服務讓 Claude Code 與 Codex 能看到 IssueRelay 的執行情況。",

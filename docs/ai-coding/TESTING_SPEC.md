@@ -44,7 +44,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 重拍：`pnpm --dir app screenshots`（即 `playwright test --update-snapshots`，不带模式的写法在 Playwright 1.64.0 里等于 `changed`，2026-10-14 核对）只重写与现有基准图不再相符的图，所以改完要看 `git diff --stat` 与新图；改动小于下面说的容差时它不会重写，要整套重拍就用 `pnpm --dir app exec playwright test --update-snapshots=all`。
 - 容差：`maxDiffPixelRatio: 0.01`（一屏 1% 的像素，约 7900 个），加 Playwright 默认的逐像素颜色容差。所以它拦得住版面位移、大块的颜色和内容变化，拦不住很小的改动（一个状态色、一个徽章、几个字）；小改动靠组件测试，窗口尺寸靠同一个文件里的版面检查。
 - 只在本机跑，不进 CI：面板用系统字体，同一页在不同机器上像素不同，CI 的机器上比对不稳定；它能防的是同一台机器上页面的意外变化。换了机器或升了 Chrome 的大版本，先整套重拍再比对。
-- 版面检查（同一个文件，不拍图）：最小窗口 900×600 与带 Windows 滚动条的 885×600 下，需求与运行记录两页没有横向溢出、每个按钮都在容器的右边界之内；绑定对话框（添加与编辑）装得进窗口、「取消」「保存」看得见；首次引导每一步的出口与「上一步 / 下一步」看得见。
+- 版面检查（同一个文件，不拍图）：最小窗口 900×600 与带 Windows 滚动条的 885×600 下，需求与运行记录两页没有横向溢出、每个按钮都在容器的右边界之内；绑定对话框（添加与编辑）装得进窗口、「取消」「保存」看得见；首次引导每一步的出口与「上一步 / 下一步」看得见；设置里「把命令行加入 PATH」打开之后，开关、shell 那一行与「复制」按钮都在窗口里，「系统」卡片没有横向溢出。
 - `app/tests/*.spec.ts` 不是 Vitest 的测试：Vitest 只收 `app/src/**/*.test.{ts,tsx}`；`app/test-results/` 与 `app/playwright-report/` 是输出，git 忽略。
 
 ## 面板与 core 共用的用例表
@@ -59,6 +59,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `app/src/lib/problem-cases.json` | `problem.test.ts`（侧栏的「需要处理」） | `app/src-tauri/src/tray.rs` 的测试（托盘图标） |
 | `app/src/i18n/language-cases.json` | `i18n.test.ts`（`resolveLanguage`） | `app/src-tauri/src/i18n.rs` 的测试（`resolve_language`） |
 | `app/src/lib/trigger-defaults.json` | `useTriggerNames`、假后端的默认设置 | `commands.rs` 的测试，对照 `TriggerNames::default()` |
+| `app/src/lib/shell-line.json` | `mock-fixtures.ts` 的 `DEMO_SHELL_LINE`（Settings 的测试按它找那一行） | `app/src-tauri/src/commands.rs` 的测试，对照 core 的 `cli_path::SHELL_LINE` |
 
 前端测试要用 core 的样本时直接读 `crates/core/tests/fixtures/`（`timeline.test.ts` 以 `?raw` 导入 `claude-stream.jsonl`、`codex-exec.jsonl`），`vite.config.ts` 只在测试运行时允许读仓库根目录。用例里的不可见字符写成转义（`SECURITY_CODING_SPEC.md` 第 7 节）。
 

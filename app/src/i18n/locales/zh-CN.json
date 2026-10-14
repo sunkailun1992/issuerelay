@@ -130,6 +130,7 @@
       "linear_reconnect": "无法重新连接 Linear",
       "setup_action": "配置命令执行失败",
       "set_autostart": "无法更改开机自启设置",
+      "cli_path": "没能修改「把命令行加入 PATH」",
       "open_linear": "无法打开 Linear",
       "copy": "无法复制"
     }
@@ -395,6 +396,20 @@
     "autostart": "开机自启",
     "applies_at_once": "立即生效，不经「保存」。",
     "autostart_failed": "无法读取是否开机自启",
+    "cli": {
+      "title": "把命令行加入 PATH",
+      "description": "之后在终端里可以直接输入 {{command}}，不需要管理员权限。",
+      "on_new_terminal": "已加入。新开一个终端即可使用。",
+      "shell_line": "把下面这一行加到 shell 配置文件（zsh 是 ~/.zshrc），再新开一个终端：",
+      "stale": "链接指向另一份 IssueRelay（{{target}}）。打开开关即改为指向这一份。",
+      "blocked": "{{path}} 已存在，且不是 IssueRelay 建的。删除或改名后再试。",
+      "unavailable": {
+        "missing_cli": "这份 IssueRelay 里缺少命令行程序。请从发布页重新安装 IssueRelay。",
+        "not_installed": "IssueRelay 正从磁盘映像或临时副本运行。请先把它移到「应用程序」。",
+        "development": "开发版不提供这一项。"
+      },
+      "load_failed": "读不到 PATH 设置"
+    },
     "auto_update": "自动检查更新",
     "auto_update_note": "自动更新会在以后的版本里提供；你的选择会先保存下来。",
     "control_server_intro": "MCP 控制服务让 Claude Code 和 Codex 能看到 IssueRelay 的运行情况。",

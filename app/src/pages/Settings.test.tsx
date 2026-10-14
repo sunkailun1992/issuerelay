@@ -8,7 +8,8 @@ import { initI18nOnce, setLanguage } from "@/i18n";
 import ja from "@/i18n/locales/ja.json";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import type { AppInfo, ControlServers, Settings as SettingsData } from "@/lib/types";
+import { DEMO_SHELL_LINE } from "@/lib/mock-fixtures";
+import type { AppInfo, CliPathStatus, ControlServers, Settings as SettingsData } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Settings from "./Settings";
 
@@ -540,6 +541,236 @@ test("when it cannot be read whether it starts at login the row says so, with a 
   const system = screen.getByRole("region", { name: "System" });
   await userEvent.click(within(system).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(backend.autostartEnabled).toHaveBeenCalledTimes(2));
+});
+
+// ---- the command line on PATH ----------------------------------------------------------------
+
+/** The clipboard of the test: what is written to it. Removed again after each test. */
+function stubClipboard(writeText = vi.fn().mockResolvedValue(undefined)) {
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  return writeText;
+}
+afterEach(() => {
+  Reflect.deleteProperty(navigator, "clipboard");
+});
+
+test("the command line goes on PATH from the system group and the shell line is shown", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const install = vi.spyOn(backend, "installCliOnPath");
+  await renderWithProviders(<Settings />, { backend });
+  // Only there once the state is read: before that the row is a loading row.
+  const toggle = await screen.findByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeEnabled();
+  await userEvent.click(toggle);
+  expect(install).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
+  expect(screen.getByText(/Add this line to your shell profile/)).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
+});
+
+test("a file IssueRelay did not make is named, cleaned, and does not lock the switch", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "blocked", path: "~/.local/bin/issuerelay\u001b[31m" });
+  await renderWithProviders(<Settings />, { backend });
+  const note = await screen.findByText(/already exists and was not made by IssueRelay/);
+  expect(note.textContent).toContain("~/.local/bin/issuerelay");
+  // The system's text goes through cleanDisplayText (AI_CODING_GUIDE 12.4).
+  expect(note.textContent).not.toContain("\u001b");
+  // Shown off, and there to be tried again once the user has removed or renamed the file.
+  const toggle = screen.getByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).toBeEnabled();
+  expect(toggle).not.toBeChecked();
+});
+
+test("once the file in the way is gone, turning the switch on installs", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // What the command line finds in the slot: the file is there until the user has removed it.
+  let status: CliPathStatus = { kind: "blocked", path: "~/.local/bin/issuerelay" };
+  backend.cliOnPath = async () => status;
+  const install = vi.fn(async (): Promise<CliPathStatus> => {
+    // The command looks at the slot again: the file is gone, so it links.
+    status = { kind: "on", shell_line: DEMO_SHELL_LINE };
+    return status;
+  });
+  backend.installCliOnPath = install;
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText(/already exists and was not made by IssueRelay/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(1);
+  // The row follows what the command found.
+  expect(await screen.findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
+  expect(screen.queryByText(/already exists and was not made by IssueRelay/)).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
+});
+
+test("while the file in the way is still there, turning the switch on says so again and tells no failure", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const blocked: CliPathStatus = { kind: "blocked", path: "~/.local/bin/issuerelay" };
+  backend.cliOnPath = vi.fn(async () => blocked);
+  const install = vi.fn(async () => blocked);
+  backend.installCliOnPath = install;
+  await renderWithProviders(<Settings />, { backend });
+  await screen.findByText(/already exists and was not made by IssueRelay/);
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(1);
+  // The row reads the slot again and says the same, and the switch is there to be tried again.
+  await waitFor(() => expect(backend.cliOnPath).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeEnabled());
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).not.toBeChecked();
+  expect(screen.getByText(/already exists and was not made by IssueRelay/)).toBeInTheDocument();
+  // Still in the way is an answer, not a failure of the command.
+  expect(screen.queryByText("Could not change the command line on PATH")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(2);
+});
+
+test("from the disk image the switch explains what to do first", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "unavailable", reason: "not_installed" });
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText(/Move it to Applications first/)).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeDisabled();
+});
+
+test("when the PATH setting cannot be read the row says so, with a retry", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.cliOnPath = vi.fn().mockRejectedValue(new BackendError("cannot read the link"));
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("Could not read the PATH setting")).toBeInTheDocument();
+  expect(screen.getByText("cannot read the link")).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Command line on PATH" })).not.toBeInTheDocument();
+  const system = screen.getByRole("region", { name: "System" });
+  await userEvent.click(within(system).getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(backend.cliOnPath).toHaveBeenCalledTimes(2));
+});
+
+test("the switch takes it off again, and it is not part of Save", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const remove = vi.spyOn(backend, "removeCliFromPath");
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("switch", { name: "Command line on PATH" }));
+  expect(await screen.findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(remove).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(screen.queryByText(DEMO_SHELL_LINE)).not.toBeInTheDocument());
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).not.toBeChecked();
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+});
+
+test("the explanation sets the command it makes available as code", async () => {
+  await renderWithProviders(<Settings />);
+  await screen.findByRole("switch", { name: "Command line on PATH" });
+  expect(screen.getByText("issuerelay", { selector: "code" })).toBeInTheDocument();
+  expect(screen.getByText(/in a terminal. No administrator rights needed./)).toBeInTheDocument();
+});
+
+test("while the PATH setting is read the row is a loading row, and the switch comes with the answer", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  let answer: ((status: CliPathStatus) => void) | undefined;
+  backend.cliOnPath = vi.fn(() => new Promise<CliPathStatus>((resolve) => (answer = resolve)));
+  await renderWithProviders(<Settings />, { backend });
+  // The row above it is there once it has been read; the PATH row is still waiting.
+  await screen.findByRole("switch", { name: "Start at login" });
+  const system = screen.getByRole("region", { name: "System" });
+  expect(within(system).getByRole("status", { name: "Loading…" })).toBeInTheDocument();
+  expect(within(system).queryByRole("switch", { name: "Command line on PATH" })).not.toBeInTheDocument();
+  answer?.({ kind: "off" });
+  expect(await within(system).findByRole("switch", { name: "Command line on PATH" })).toBeEnabled();
+  expect(within(system).queryByRole("status", { name: "Loading…" })).not.toBeInTheDocument();
+});
+
+test("the switch is described by what the row says about its state, and only a place the app cannot work from locks it", async () => {
+  const explanation = "Lets you type issuerelay in a terminal. No administrator rights needed.";
+  const cases: [CliPathStatus, RegExp | null][] = [
+    [{ kind: "off" }, null],
+    [{ kind: "on", shell_line: DEMO_SHELL_LINE }, /Add this line to your shell profile \(for zsh, ~\/\.zshrc\), then open a new terminal:$/],
+    [{ kind: "on", shell_line: null }, /On\. Open a new terminal to use it\.$/],
+    [{ kind: "stale", target: "/tmp/demo-home/Downloads/IssueRelay.app/Contents/MacOS/issuerelay" }, /points at another copy of IssueRelay/],
+    [{ kind: "blocked", path: "~/.local/bin/issuerelay" }, /already exists and was not made by IssueRelay/],
+    [{ kind: "unavailable", reason: "not_installed" }, /Move it to Applications first/],
+    [{ kind: "unavailable", reason: "development" }, /Not available in a development build/],
+    [{ kind: "unavailable", reason: "missing_cli" }, /command-line program is missing from this copy of IssueRelay/],
+  ];
+  for (const [status, words] of cases) {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.cliOnPath = async () => status;
+    const { unmount } = await renderWithProviders(<Settings />, { backend });
+    const toggle = await screen.findByRole("switch", { name: "Command line on PATH" });
+    // Only a place the app cannot work from locks the switch: a file in the way, a link to another
+    // copy, being on PATH already all leave it to be used (the sentence tells what turning it does).
+    if (status.kind === "unavailable") expect(toggle, status.kind).toBeDisabled();
+    else expect(toggle, status.kind).toBeEnabled();
+    // The explanation of the switch itself is always part of it; the state's sentence follows it.
+    expect(toggle).toHaveAccessibleDescription(words === null ? explanation : new RegExp(`^${explanation.replace(/[.]/g, "\\.")} .*`));
+    if (words !== null) expect(toggle, status.kind).toHaveAccessibleDescription(words);
+    unmount();
+  }
+});
+
+test("the shell line is copied from its own button", async () => {
+  const writeText = stubClipboard();
+  await renderWithProviders(<Settings />);
+  await userEvent.click(await screen.findByRole("switch", { name: "Command line on PATH" }));
+  const system = screen.getByRole("region", { name: "System" });
+  expect(await within(system).findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
+  await userEvent.click(within(system).getByRole("button", { name: "Copy" }));
+  expect(writeText).toHaveBeenCalledWith(DEMO_SHELL_LINE);
+  expect(await screen.findByText("Copied")).toBeInTheDocument();
+});
+
+test("when the shell already finds the folder only a new terminal is needed", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "on", shell_line: null });
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText("On. Open a new terminal to use it.")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
+  expect(screen.queryByText(/Add this line to your shell profile/)).not.toBeInTheDocument();
+});
+
+test("a link to another copy is named, cleaned, and the switch points it here", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const target = "/tmp/demo-home/Downloads/IssueRelay.app/Contents/MacOS/issuerelay";
+  vi.spyOn(backend, "cliOnPath").mockResolvedValueOnce({ kind: "stale", target: `${target}\u001b[31m` });
+  const install = vi.spyOn(backend, "installCliOnPath");
+  await renderWithProviders(<Settings />, { backend });
+  const note = await screen.findByText(/points at another copy of IssueRelay/);
+  expect(note.textContent).toContain(target);
+  expect(note.textContent).not.toContain("\u001b");
+  const toggle = screen.getByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeEnabled();
+  await userEvent.click(toggle);
+  expect(install).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(screen.queryByText(/points at another copy of IssueRelay/)).not.toBeInTheDocument());
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
+});
+
+test("a change that fails is told with its reason and leaves the switch as it was", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.installCliOnPath = vi.fn().mockRejectedValue(new BackendError("cannot create the link"));
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("switch", { name: "Command line on PATH" }));
+  expect(await screen.findByText("Could not change the command line on PATH")).toBeInTheDocument();
+  expect(screen.getByText("cannot create the link")).toBeInTheDocument();
+  const toggle = screen.getByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).not.toBeChecked();
+  expect(toggle).toBeEnabled();
+});
+
+test("a development build and a copy without the command-line program say why the switch is off limits", async () => {
+  const cases: [CliPathStatus, RegExp][] = [
+    [{ kind: "unavailable", reason: "development" }, /Not available in a development build/],
+    [{ kind: "unavailable", reason: "missing_cli" }, /command-line program is missing from this copy of IssueRelay/],
+  ];
+  for (const [status, words] of cases) {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.cliOnPath = async () => status;
+    const { unmount } = await renderWithProviders(<Settings />, { backend });
+    expect(await screen.findByText(words)).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeDisabled();
+    unmount();
+  }
 });
 
 // ---- full access ------------------------------------------------------------------------------

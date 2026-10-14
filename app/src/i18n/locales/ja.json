@@ -130,6 +130,7 @@
       "linear_reconnect": "Linear に再接続できませんでした",
       "setup_action": "セットアップコマンドが失敗しました",
       "set_autostart": "ログイン時の自動起動を変更できませんでした",
+      "cli_path": "コマンドラインの PATH への追加を変更できませんでした",
       "open_linear": "Linear を開けませんでした",
       "copy": "コピーできませんでした"
     }
@@ -395,6 +396,20 @@
     "autostart": "ログイン時に自動起動",
     "applies_at_once": "すぐに反映されます。「保存」の対象ではありません。",
     "autostart_failed": "ログイン時の自動起動の状態を読み取れませんでした",
+    "cli": {
+      "title": "コマンドラインを PATH に追加",
+      "description": "ターミナルで {{command}} と入力して使えるようになります。管理者権限は不要です。",
+      "on_new_terminal": "追加しました。新しいターミナルを開くと使えます。",
+      "shell_line": "次の行をシェルの設定ファイル（zsh なら ~/.zshrc）に追加し、新しいターミナルを開いてください：",
+      "stale": "リンクは別の IssueRelay（{{target}}）を指しています。オンにすると、こちらを指すように変わります。",
+      "blocked": "{{path}} は既に存在し、IssueRelay が作ったものではありません。削除するか名前を変えてから、もう一度お試しください。",
+      "unavailable": {
+        "missing_cli": "この IssueRelay にはコマンドラインプログラムがありません。リリースページから IssueRelay をインストールし直してください。",
+        "not_installed": "IssueRelay はディスクイメージまたは一時的なコピーから実行されています。先に「アプリケーション」フォルダへ移動してください。",
+        "development": "開発ビルドでは利用できません。"
+      },
+      "load_failed": "PATH の設定を読み取れませんでした"
+    },
     "auto_update": "更新を自動的に確認",
     "auto_update_note": "自動更新は今後のバージョンで提供されます。選択は今から保存されます。",
     "control_server_intro": "MCP コントロールサーバーを使うと、Claude Code や Codex が IssueRelay の状況を確認できます。",

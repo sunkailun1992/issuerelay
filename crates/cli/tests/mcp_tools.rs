@@ -79,6 +79,12 @@ async fn exposes_only_safe_control_tools_and_reports_engine_down() {
         text.starts_with("error:") && text.contains("not running"),
         "{text}"
     );
+    // The MCP server never starts the app and never tells the AI to: the user opens it.
+    assert!(
+        text.contains("ask the user to open the IssueRelay app"),
+        "{text}"
+    );
+    assert!(!text.contains("issuerelay start"), "{text}");
     // A stopped host is a failure for clients and hooks that branch on `isError`.
     assert_eq!(result.is_error, Some(true));
     client.cancel().await.unwrap();

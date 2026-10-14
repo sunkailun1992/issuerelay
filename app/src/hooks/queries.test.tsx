@@ -15,8 +15,10 @@ import {
   useAutostart,
   useBindings,
   useCancelJob,
+  useCliPath,
   useControlServers,
   useDoctor,
+  useInstallCliOnPath,
   useIssues,
   useJob,
   useJobLog,
@@ -32,6 +34,7 @@ import {
   usePollNow,
   useProjects,
   useRemoveBinding,
+  useRemoveCliFromPath,
   useResume,
   useRetryJob,
   useSaveBinding,
@@ -60,6 +63,7 @@ describe("the query keys", () => {
     expect(queryKeys.issues).toEqual(["issues"]);
     expect(queryKeys.settings).toEqual(["settings"]);
     expect(queryKeys.bindings).toEqual(["bindings"]);
+    expect(queryKeys.cliPath).toEqual(["cliPath"]);
     expect(queryKeys.linearServerNamed("codex")).toEqual(["linearServerNamed", "codex"]);
   });
 
@@ -67,7 +71,8 @@ describe("the query keys", () => {
     const keys = [
       queryKeys.startup, queryKeys.status, queryKeys.jobs, queryKeys.job(1), queryKeys.log(1), queryKeys.issues,
       queryKeys.bindings, queryKeys.projects, queryKeys.settings, queryKeys.doctor, queryKeys.controlServers,
-      queryKeys.linearServerNamed("claude"), queryKeys.linearServerNamed("codex"), queryKeys.autostart, queryKeys.appInfo,
+      queryKeys.linearServerNamed("claude"), queryKeys.linearServerNamed("codex"), queryKeys.autostart, queryKeys.cliPath,
+      queryKeys.appInfo,
     ].map((key) => JSON.stringify(key));
     expect(new Set(keys).size).toBe(keys.length);
   });
@@ -84,6 +89,7 @@ describe("reading", () => {
     const settings = useSettings();
     const autostart = useAutostart();
     const servers = useControlServers();
+    const cliPath = useCliPath();
     return (
       <p>
         {[
@@ -96,6 +102,7 @@ describe("reading", () => {
           settings.data?.poll_interval_secs,
           autostart.data === undefined ? undefined : String(autostart.data),
           servers.data?.claude,
+          cliPath.data?.kind,
         ].join(" ")}
       </p>
     );
@@ -103,7 +110,7 @@ describe("reading", () => {
 
   test("the hooks read from the backend they are given", async () => {
     await renderWithProviders(<Reader />);
-    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered")).toBeInTheDocument();
+    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered off")).toBeInTheDocument();
   });
 
   test("jobs are asked for with a limit of two hundred unless another is given", async () => {
@@ -291,6 +298,8 @@ describe("acting", () => {
       const reconnect = useLinearReconnect();
       const setup = useSetupAction();
       const autostart = useSetAutostart();
+      const installCli = useInstallCliOnPath();
+      const removeCli = useRemoveCliFromPath();
       return (
         <>
           <Act label="pause" run={() => pause.mutate()} />
@@ -310,6 +319,8 @@ describe("acting", () => {
           <Act label="reconnect" run={() => reconnect.mutate()} />
           <Act label="setup" run={() => setup.mutate({ kind: "add_linear_mcp", executor: "claude" })} />
           <Act label="autostart" run={() => autostart.mutate(true)} />
+          <Act label="put the CLI on PATH" run={() => installCli.mutate()} />
+          <Act label="take the CLI off PATH" run={() => removeCli.mutate()} />
         </>
       );
     }
@@ -330,6 +341,8 @@ describe("acting", () => {
       ["reconnect", [key("status"), key("issues"), key("projects"), key("doctor")]],
       ["setup", [key("doctor"), key("controlServers"), key("linearServerNamed")]],
       ["autostart", [key("autostart")]],
+      ["put the CLI on PATH", [key("cliPath")]],
+      ["take the CLI off PATH", [key("cliPath")]],
     ];
     for (const [label, expected] of expectations) {
       expect(await keysAfterClicking(label, spy), label).toEqual(expect.arrayContaining(expected));
@@ -525,7 +538,7 @@ describe("acting", () => {
     Object.assign(backend, {
       pause: refuse, resume: refuse, pollNow: refuse, cancelJob: refuse, retryJob: refuse, markDone: refuse,
       saveBinding: refuse, removeBinding: refuse, saveSettings: refuse, linearUseApiKey: refuse, linearLogout: refuse,
-      linearReconnect: refuse, setupAction: refuse, setAutostart: refuse,
+      linearReconnect: refuse, setupAction: refuse, setAutostart: refuse, installCliOnPath: refuse, removeCliFromPath: refuse,
     });
     function Everything() {
       const hooks = {
@@ -533,6 +546,7 @@ describe("acting", () => {
         "mark done": useMarkDone(), "save binding": useSaveBinding(), "remove binding": useRemoveBinding(),
         "save settings": useSaveSettings(), "api key": useLinearApiKey(), "log out": useLinearLogout(),
         reconnect: useLinearReconnect(), setup: useSetupAction(), autostart: useSetAutostart(),
+        "install cli": useInstallCliOnPath(), "remove cli": useRemoveCliFromPath(),
       };
       const run = (name: keyof typeof hooks) => (hooks[name].mutate as (variables?: unknown) => void)(undefined);
       return (
@@ -559,6 +573,8 @@ describe("acting", () => {
       ["reconnect", "Could not reconnect to Linear"],
       ["setup", "The setup command failed"],
       ["autostart", "Could not change start at login"],
+      ["install cli", "Could not change the command line on PATH"],
+      ["remove cli", "Could not change the command line on PATH"],
     ];
     const error = vi.spyOn(toast, "error");
     for (const [label, headline] of headlines) {

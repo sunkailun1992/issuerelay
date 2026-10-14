@@ -130,6 +130,7 @@
       "linear_reconnect": "Linear에 다시 연결하지 못했습니다",
       "setup_action": "설정 명령이 실패했습니다",
       "set_autostart": "로그인 시 자동 시작 설정을 바꾸지 못했습니다",
+      "cli_path": "명령줄 PATH 추가 설정을 바꾸지 못했습니다",
       "open_linear": "Linear를 열지 못했습니다",
       "copy": "복사하지 못했습니다"
     }
@@ -395,6 +396,20 @@
     "autostart": "로그인 시 자동 시작",
     "applies_at_once": "바로 적용되며 '저장'과는 별개입니다.",
     "autostart_failed": "로그인 시 자동 시작 여부를 읽지 못했습니다",
+    "cli": {
+      "title": "명령줄을 PATH에 추가",
+      "description": "터미널에서 {{command}}을(를) 바로 입력해 쓸 수 있게 됩니다. 관리자 권한은 필요하지 않습니다.",
+      "on_new_terminal": "추가되었습니다. 새 터미널을 열면 사용할 수 있습니다.",
+      "shell_line": "아래 줄을 셸 설정 파일(zsh는 ~/.zshrc)에 추가한 뒤 새 터미널을 여세요:",
+      "stale": "링크가 다른 IssueRelay({{target}})를 가리키고 있습니다. 켜면 이 앱을 가리키도록 바뀝니다.",
+      "blocked": "{{path}}이(가) 이미 있고 IssueRelay가 만든 것이 아닙니다. 삭제하거나 이름을 바꾼 뒤 다시 시도하세요.",
+      "unavailable": {
+        "missing_cli": "이 IssueRelay에는 명령줄 프로그램이 없습니다. 릴리스 페이지에서 IssueRelay를 다시 설치하세요.",
+        "not_installed": "IssueRelay가 디스크 이미지 또는 임시 사본에서 실행되고 있습니다. 먼저 '응용 프로그램' 폴더로 옮기세요.",
+        "development": "개발 빌드에서는 사용할 수 없습니다."
+      },
+      "load_failed": "PATH 설정을 읽지 못했습니다"
+    },
     "auto_update": "업데이트 자동 확인",
     "auto_update_note": "자동 업데이트는 이후 버전에서 제공됩니다. 선택한 내용은 미리 저장됩니다.",
     "control_server_intro": "MCP 제어 서버를 쓰면 Claude Code와 Codex가 IssueRelay의 상태를 볼 수 있습니다.",

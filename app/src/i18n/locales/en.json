@@ -130,6 +130,7 @@
       "linear_reconnect": "Could not reconnect to Linear",
       "setup_action": "The setup command failed",
       "set_autostart": "Could not change start at login",
+      "cli_path": "Could not change the command line on PATH",
       "open_linear": "Could not open Linear",
       "copy": "Could not copy"
     }
@@ -395,6 +396,20 @@
     "autostart": "Start at login",
     "applies_at_once": "Takes effect at once; it is not part of Save.",
     "autostart_failed": "Could not read whether IssueRelay starts at login",
+    "cli": {
+      "title": "Command line on PATH",
+      "description": "Lets you type {{command}} in a terminal. No administrator rights needed.",
+      "on_new_terminal": "On. Open a new terminal to use it.",
+      "shell_line": "Add this line to your shell profile (for zsh, ~/.zshrc), then open a new terminal:",
+      "stale": "The link points at another copy of IssueRelay ({{target}}). Turn this on to point it here.",
+      "blocked": "{{path}} already exists and was not made by IssueRelay. Remove or rename it, then try again.",
+      "unavailable": {
+        "missing_cli": "The command-line program is missing from this copy of IssueRelay. Install IssueRelay again from the release page.",
+        "not_installed": "IssueRelay runs from the disk image or a temporary copy. Move it to Applications first.",
+        "development": "Not available in a development build."
+      },
+      "load_failed": "Could not read the PATH setting"
+    },
     "auto_update": "Check for updates automatically",
     "auto_update_note": "Updates arrive in a later version; your choice is kept until then.",
     "control_server_intro": "The MCP control server lets Claude Code and Codex see how IssueRelay stands.",
