@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub const APP_ID: &str = "com.sunkailun.issuerelay";
+/// The desktop app's executable (`mainBinaryName` in tauri.conf.json): `issuerelay-app`, and
+/// `issuerelay-app.exe` on Windows. Never `issuerelay` in any case: the CLI sits next to it.
+pub const APP_EXECUTABLE: &str = "issuerelay-app";
 /// The longest Unix socket path we bind, in bytes. macOS's `sun_path` holds 104 bytes including
 /// the terminating NUL.
 pub(crate) const UNIX_SOCKET_MAX: usize = 103;
