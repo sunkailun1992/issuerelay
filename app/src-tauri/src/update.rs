@@ -137,12 +137,54 @@ pub trait UpdateSource: Send + Sync + 'static {
         &self,
         offer: &Self::Offer,
     ) -> impl Future<Output = Result<Vec<u8>, Failure>> + Send;
+    /// What installs `offer`'s verified `bytes`; the quit flow only ever sees that (`Install`).
+    fn installer(&self, offer: &Arc<Self::Offer>, bytes: Vec<u8>) -> Box<dyn Install>;
 }
 
-/// A downloaded and verified update waiting for the quit flow.
-pub struct Pending<O> {
-    pub offer: Arc<O>,
-    pub bytes: Vec<u8>,
+/// A downloaded and verified update, ready to be installed by whoever holds it: the updater
+/// plugin's `Update` with its payload in the app (`PluginSource`), a fake in the tests. It is all
+/// the quit flow knows of an update, so the quit flow's tests need no plugin.
+pub trait Install: Send + 'static {
+    /// The version it installs.
+    fn version(&self) -> &str;
+    /// Installs it. May block: on macOS the install can wait for the main thread (administrator
+    /// rights), and on Windows it starts the installer and ends the process.
+    fn install(self: Box<Self>) -> Result<(), String>;
+}
+
+/// The verified download that waits for the quit flow. The app manages one handle of it, which
+/// the quit flow reads (`pending`, `take_pending`, `clear_pending`); `Updates` keeps the other and
+/// fills it.
+#[derive(Clone, Default)]
+pub struct PendingInstall(Arc<Waiting>);
+
+#[derive(Default)]
+struct Waiting {
+    install: Mutex<Option<Box<dyn Install>>>,
+}
+
+impl PendingInstall {
+    /// The version that waits.
+    pub fn version(&self) -> Option<String> {
+        lock(&self.0.install)
+            .as_ref()
+            .map(|install| install.version().to_string())
+    }
+
+    /// Keeps `install` for the quit flow, in place of one that waits.
+    pub fn keep(&self, install: Box<dyn Install>) {
+        *lock(&self.0.install) = Some(install);
+    }
+
+    /// The download, once: the quit flow installs it.
+    pub fn take(&self) -> Option<Box<dyn Install>> {
+        lock(&self.0.install).take()
+    }
+
+    /// Drops the download: the user quit instead of installing.
+    pub fn clear(&self) {
+        lock(&self.0.install).take();
+    }
 }
 
 /// The update state the app keeps: the last check, the offer it found, the verified download
@@ -152,7 +194,7 @@ pub struct Updates<S: UpdateSource> {
     current: String,
     status: Mutex<UpdateStatus>,
     offer: Mutex<Option<Arc<S::Offer>>>,
-    pending: Mutex<Option<Pending<S::Offer>>>,
+    waiting: PendingInstall,
     notified: Mutex<Option<String>>,
 }
 
@@ -179,9 +221,14 @@ impl<S: UpdateSource> Updates<S> {
             current: current.to_string(),
             status: Mutex::new(UpdateStatus::Unchecked),
             offer: Mutex::new(None),
-            pending: Mutex::new(None),
+            waiting: PendingInstall::default(),
             notified: Mutex::new(None),
         }
+    }
+
+    /// The handle of the verified download that the app manages for the quit flow.
+    pub fn waiting(&self) -> PendingInstall {
+        self.waiting.clone()
     }
 
     /// What the panel shows now.
@@ -239,32 +286,27 @@ impl<S: UpdateSource> Updates<S> {
             )
         })?;
         let version = S::version(&offer).to_string();
-        if lock(&self.pending)
-            .as_ref()
-            .is_some_and(|pending| S::version(&pending.offer) == version)
-        {
+        if self.waiting.version().as_deref() == Some(version.as_str()) {
             return Ok(version);
         }
         let bytes = self.source.download(&offer).await?;
         tracing::info!(%version, bytes = bytes.len(), "the update was downloaded and verified");
-        *lock(&self.pending) = Some(Pending { offer, bytes });
+        self.waiting.keep(self.source.installer(&offer, bytes));
         Ok(version)
     }
 
     pub fn pending_version(&self) -> Option<String> {
-        lock(&self.pending)
-            .as_ref()
-            .map(|pending| S::version(&pending.offer).to_string())
+        self.waiting.version()
     }
 
     /// The verified download, once: the quit flow installs it.
-    pub fn take_pending(&self) -> Option<Pending<S::Offer>> {
-        lock(&self.pending).take()
+    pub fn take_pending(&self) -> Option<Box<dyn Install>> {
+        self.waiting.take()
     }
 
     /// Drops the verified download: the user quit instead of installing.
     pub fn clear_pending(&self) {
-        lock(&self.pending).take();
+        self.waiting.clear();
     }
 
     /// Whether a background check that found `version` shows a notification: once per version.
@@ -309,6 +351,29 @@ impl<R: Runtime> UpdateSource for PluginSource<R> {
             .await
             .map_err(plugin_failure)
     }
+
+    fn installer(&self, offer: &Arc<Self::Offer>, bytes: Vec<u8>) -> Box<dyn Install> {
+        Box::new(PluginInstall {
+            update: Arc::clone(offer),
+            bytes,
+        })
+    }
+}
+
+/// The plugin's `Update` with the payload it verified.
+struct PluginInstall {
+    update: Arc<tauri_plugin_updater::Update>,
+    bytes: Vec<u8>,
+}
+
+impl Install for PluginInstall {
+    fn version(&self) -> &str {
+        &self.update.version
+    }
+
+    fn install(self: Box<Self>) -> Result<(), String> {
+        self.update.install(&self.bytes).map_err(|e| e.to_string())
+    }
 }
 
 fn plugin_failure(error: tauri_plugin_updater::Error) -> Failure {
@@ -336,22 +401,21 @@ pub fn failure_code(error: &tauri_plugin_updater::Error) -> FailureCode {
 /// The update state the app manages; `tauri::Wry` in the app, tauri's mock runtime in tests.
 pub type AppUpdates<R = tauri::Wry> = Updates<PluginSource<R>>;
 
-/// Whether a verified update waits for the quit flow.
+/// Whether a verified update waits for the quit flow. These three read the `PendingInstall` the
+/// app manages, not the plugin's state: without it nothing waits.
 pub fn pending<R: Runtime>(app: &AppHandle<R>) -> bool {
-    app.try_state::<AppUpdates<R>>()
-        .is_some_and(|updates| updates.pending_version().is_some())
+    app.try_state::<PendingInstall>()
+        .is_some_and(|waiting| waiting.version().is_some())
 }
 
-pub fn take_pending<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Option<Pending<tauri_plugin_updater::Update>> {
-    app.try_state::<AppUpdates<R>>()
-        .and_then(|updates| updates.take_pending())
+pub fn take_pending<R: Runtime>(app: &AppHandle<R>) -> Option<Box<dyn Install>> {
+    app.try_state::<PendingInstall>()
+        .and_then(|waiting| waiting.take())
 }
 
 pub fn clear_pending<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(updates) = app.try_state::<AppUpdates<R>>() {
-        updates.clear_pending();
+    if let Some(waiting) = app.try_state::<PendingInstall>() {
+        waiting.clear();
     }
 }
 
@@ -396,18 +460,15 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), Failure> {
 /// restart opens the new one; on Windows `install` starts the NSIS installer (`/P /UPDATE /R`),
 /// which ends this process and starts the new version itself. If installing fails the app
 /// restarts as it is, so monitoring resumes, and the panel says why after the restart.
-pub fn install_and_restart<R: Runtime>(
-    app: &AppHandle<R>,
-    pending: Pending<tauri_plugin_updater::Update>,
-) {
+pub fn install_and_restart<R: Runtime>(app: &AppHandle<R>, install: Box<dyn Install>) {
     let app = app.clone();
     // Off the main thread: `install` may wait for the main thread (macOS asks for administrator
     // rights there), and the restart that follows then delivers the exit event first, so the
     // single-instance lock is released before the new instance starts.
     tauri::async_runtime::spawn_blocking(move || {
-        let version = pending.offer.version.clone();
+        let version = install.version().to_string();
         tracing::info!(%version, "installing the update");
-        if let Err(detail) = install_outcome(|| pending.offer.install(&pending.bytes)) {
+        if let Err(detail) = install_outcome(|| install.install()) {
             tracing::error!(error = %detail, %version, "installing the update failed; restarting the current version");
             match AppPaths::system() {
                 Ok(paths) => record_install_failure(&paths.data_dir, &detail),
@@ -486,19 +547,22 @@ pub fn spawn_checker<R: Runtime>(app: AppHandle<R>) {
 mod tests {
     use std::sync::Mutex;
 
-    use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
+    use tauri::test::{mock_builder, mock_context, noop_assets};
 
     use super::*;
+    use crate::test_support::{FakeInstall, InstallLog, fake_install};
 
     /// What the fake source offers.
     #[derive(Debug)]
     struct FakeOffer(String);
 
-    /// Answers checks and downloads from a script and counts the downloads.
+    /// Answers checks and downloads from a script, counts the downloads, and hands out installs
+    /// that record the payload they were given in `installed`.
     struct FakeSource {
         check: Mutex<Result<Option<String>, Failure>>,
         download: Mutex<Result<Vec<u8>, Failure>>,
         downloads: Mutex<usize>,
+        installed: InstallLog,
     }
 
     impl FakeSource {
@@ -507,6 +571,7 @@ mod tests {
                 check: Mutex::new(check.map(|offered| offered.map(str::to_string))),
                 download: Mutex::new(download.map(<[u8]>::to_vec)),
                 downloads: Mutex::new(0),
+                installed: InstallLog::default(),
             }
         }
     }
@@ -529,6 +594,14 @@ mod tests {
         async fn download(&self, _offer: &FakeOffer) -> Result<Vec<u8>, Failure> {
             *self.downloads.lock().unwrap() += 1;
             self.download.lock().unwrap().clone()
+        }
+
+        fn installer(&self, offer: &Arc<FakeOffer>, bytes: Vec<u8>) -> Box<dyn Install> {
+            Box::new(FakeInstall {
+                version: offer.0.clone(),
+                payload: bytes,
+                installed: self.installed.clone(),
+            })
         }
     }
 
@@ -613,8 +686,13 @@ mod tests {
         updates.clear_pending();
         assert_eq!(updates.pending_version(), None);
         updates.prepare().await.unwrap();
-        let pending = updates.take_pending().expect("downloaded");
-        assert_eq!(pending.bytes, b"payload");
+        let install = updates.take_pending().expect("downloaded");
+        assert_eq!(install.version(), "0.2.0");
+        install.install().unwrap();
+        assert_eq!(
+            *updates.source.installed.lock().unwrap(),
+            [b"payload".to_vec()]
+        );
         assert!(updates.take_pending().is_none(), "installed once");
     }
 
@@ -629,7 +707,12 @@ mod tests {
         // "Install and restart" now means the newest one, not the download that was waiting.
         assert_eq!(updates.prepare().await.unwrap(), "0.3.0");
         assert_eq!(updates.pending_version().as_deref(), Some("0.3.0"));
-        assert_eq!(updates.take_pending().expect("downloaded").bytes, b"new");
+        updates
+            .take_pending()
+            .expect("downloaded")
+            .install()
+            .unwrap();
+        assert_eq!(*updates.source.installed.lock().unwrap(), [b"new".to_vec()]);
     }
 
     #[tokio::test]
@@ -832,12 +915,33 @@ mod tests {
         assert!(!pending(app.handle()));
         assert!(take_pending(app.handle()).is_none());
         clear_pending(app.handle());
-        // With the state the app manages: still nothing until a verified download exists.
-        app.manage(AppUpdates::new(PluginSource(app.handle().clone()), "0.1.0"));
+        // With the state the app manages (lib.rs manages the updates and, next to them, the
+        // handle the quit flow reads): still nothing until a verified download exists.
+        let updates = AppUpdates::new(PluginSource(app.handle().clone()), "0.1.0");
+        app.manage(updates.waiting());
+        app.manage(updates);
         assert!(!pending(app.handle()));
         assert_eq!(
-            app.state::<AppUpdates<MockRuntime>>().status(),
+            app.state::<AppUpdates<tauri::test::MockRuntime>>().status(),
             UpdateStatus::Unchecked
+        );
+        // A download that waits is what the three functions see, whoever put it there.
+        let (install, installed) = fake_install("0.2.0", b"payload");
+        app.state::<PendingInstall>().keep(install);
+        assert!(pending(app.handle()));
+        take_pending(app.handle())
+            .expect("it waits")
+            .install()
+            .unwrap();
+        assert_eq!(*installed.lock().unwrap(), [b"payload".to_vec()]);
+        assert!(!pending(app.handle()));
+        let (install, installed) = fake_install("0.3.0", b"later");
+        app.state::<PendingInstall>().keep(install);
+        clear_pending(app.handle());
+        assert!(!pending(app.handle()));
+        assert!(
+            installed.lock().unwrap().is_empty(),
+            "dropped, not installed"
         );
     }
 }

@@ -111,6 +111,8 @@ pub fn run() {
             {
                 updates.show_failure(failure);
             }
+            // What the quit flow sees of an update: the verified download, not the plugin.
+            app.manage(updates.waiting());
             app.manage(updates);
             tray::create(app.handle())?;
             if app.state::<state::AppState>().autostarted {

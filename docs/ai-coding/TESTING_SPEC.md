@@ -78,6 +78,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `Orphan` | `crates/core/tests/common/orphan.rs` | 宿主崩溃后留下的执行者（macOS：领着自己进程组的 `fake-agent`）；测试结束时没被回收就整组结束并回收 |
 | `FakeRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令的输出（计数调用）；`SystemRunner` 本身用 `fake-agent` 测超时 |
 | `FakeSource` | `app/src-tauri/src/update.rs` 的测试模块 | 更新插件（按脚本给出检查结果与下载结果，并计数下载）；测试不访问网络 |
+| `FakeInstall` | `app/src-tauri/src/test_support.rs` | 已下载并验过签的更新：装上时记下收到的载荷（`InstallLog`），退出流程的测试（`quit.rs`，tauri 的 mock 运行时）与 `FakeSource` 共用，不涉及插件 |
 | `Recorder` | `crates/core/src/setup.rs` 的测试模块 | 设置命令的运行：记录每次调用的程序、参数与时间上限，按设定答复输出，或报告无法运行 |
 | `BarrierRunner` | `crates/core/src/doctor.rs` 的测试模块 | 检查命令：要求几条命令同时在运行，检查才能结束（证明它们真的并行） |
 | `createMockBackend`（面板的假后端） | `app/src/lib/mock.ts`，数据在 `app/src/lib/mock-fixtures.ts` | 面板的 Tauri 命令与事件（`Backend`）：组件测试、浏览器开发与截图共用，规则与报错文本照引擎；数据全部虚构，后续测试依赖的确切字符串都定义在 `mock-fixtures.ts`；场景 `demo`、`fresh`（首次运行）、`connecting`（首次连接 Linear 还没结束）；选项 `latencyMs`（每个调用的延迟）、`language`（写进设置的 `language`，浏览器里地址的 `?lang=` 传给它，截图用）与 `update`（应用上次检查更新的结果：`available` 有新版本、`install-failed` 上次装不上，别的名字是已是最新；地址的 `?update=` 传给它，版面检查用） |

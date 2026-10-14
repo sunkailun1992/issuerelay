@@ -1,8 +1,12 @@
 //! What the unit tests of several modules share: a job with every field filled in, the status of
-//! an engine whose last check worked (all of it fictional), and a mock app (tauri's
-//! `MockRuntime`) whose event loop runs on a thread of its own.
+//! an engine whose last check worked (all of it fictional), a mock app (tauri's `MockRuntime`)
+//! whose event loop runs on a thread of its own, and a downloaded update that installs by writing
+//! down what it was given.
 use std::{
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, RecvTimeoutError},
+    },
     time::Duration,
 };
 
@@ -18,7 +22,7 @@ use tauri::{
     test::{MockRuntime, mock_builder, mock_context, noop_assets},
 };
 
-use crate::state::AppState;
+use crate::{state::AppState, update::Install};
 
 /// Builds a mock app with `AppState` managed, lets `setup` prepare it, runs its event loop with
 /// `on_event` as the hook and returns once the loop has ended; fails if it has not ended within
@@ -96,5 +100,38 @@ pub fn checked() -> StatusSnapshot {
         waiting: 0,
         draining: false,
         held: Vec::new(),
+    }
+}
+
+/// What the fake installs wrote down: the payload of each install, in order.
+pub type InstallLog = Arc<Mutex<Vec<Vec<u8>>>>;
+
+/// A verified update that installs by recording its payload in `installed`, so that a test can see
+/// whether, and what, was installed. Nothing of the updater plugin is involved.
+pub struct FakeInstall {
+    pub version: String,
+    pub payload: Vec<u8>,
+    pub installed: InstallLog,
+}
+
+/// A fake for `version` with a payload, and the log of what its install records.
+pub fn fake_install(version: &str, payload: &[u8]) -> (Box<dyn Install>, InstallLog) {
+    let installed = InstallLog::default();
+    let fake = FakeInstall {
+        version: version.to_string(),
+        payload: payload.to_vec(),
+        installed: installed.clone(),
+    };
+    (Box::new(fake), installed)
+}
+
+impl Install for FakeInstall {
+    fn version(&self) -> &str {
+        &self.version
+    }
+
+    fn install(self: Box<Self>) -> Result<(), String> {
+        self.installed.lock().unwrap().push(self.payload);
+        Ok(())
     }
 }
