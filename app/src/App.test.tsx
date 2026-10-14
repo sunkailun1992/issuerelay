@@ -232,7 +232,7 @@ test("a page that fails shows the error inside the shell, and another page from 
   // The shell is still there, with its sidebar and the way to the other pages.
   expect(screen.getByRole("link", { name: "Runs" })).toBeInTheDocument();
   // The quit prompt still asks.
-  await ask({ running: 1, waiting: false });
+  await ask({ running: 1, waiting: false, purpose: "quit" });
   expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
   await userEvent.click(screen.getByRole("link", { name: "Overview" }));
@@ -248,7 +248,7 @@ test("closing the quit prompt over a page that failed puts the focus on the erro
   render(<App backend={backend} />);
   const heading = await screen.findByRole("heading", { name: en.crash.page_title });
   // The tray's Quit, with nothing in the window focused.
-  await ask({ running: 1, waiting: false });
+  await ask({ running: 1, waiting: false, purpose: "quit" });
   await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
   await waitFor(() => expect(heading).toHaveFocus());
 });
@@ -264,7 +264,7 @@ test("closing the quit prompt over the start failure puts the focus on its headi
   };
   render(<App backend={backend} />);
   const heading = await screen.findByRole("heading", { name: "IssueRelay could not start" });
-  await act(async () => ask({ running: 1, waiting: false }));
+  await act(async () => ask({ running: 1, waiting: false, purpose: "quit" }));
   await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
   await waitFor(() => expect(heading).toHaveFocus());
 });
