@@ -20,6 +20,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 前端检查与测试 | `pnpm --dir app lint`（含 `tsc` 类型检查）；`pnpm --dir app test` |
 | 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对，再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
 | 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束，加 `?lang=zh-CN`（或别的语言代码）让设置里的界面语言是它 |
+| 本机安装包（macOS） | `bash scripts/stage-cli.sh && pnpm --dir app build && node scripts/release-checks.mjs panel && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`：产物在 `target/release/bundle/`（git 忽略）；`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，免得弹出「控制访达」的授权框 |
 
 工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22 以上，pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 

@@ -321,7 +321,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 
 ## 12. 安装包、更新与发布
 
-- Tauri 打包：macOS 出 `.dmg`（Apple 芯片与 Intel 各一个，或一个通用包），Windows 出 `.msi` 和 NSIS `.exe`。命令行小程序作为附带程序一起安装；设置里提供「把命令行加入 PATH」。
+- Tauri 打包：macOS 出一个通用 `.dmg`（Apple 芯片与 Intel 通用，最低 macOS 13.3），Windows 出 NSIS `.exe`（按用户安装，不需要管理员，推荐）和 `.msi`（为所有用户安装，需要管理员）。命令行小程序作为附带程序（`externalBin`）装在主程序 `issuerelay-app` 旁边：macOS `IssueRelay.app/Contents/MacOS/issuerelay`，Windows 安装目录下的 `issuerelay.exe`。`externalBin` 只写在打包专用的 `app/src-tauri/tauri.bundle.conf.json` 里，由 `scripts/stage-cli.sh` / `stage-cli.ps1` 先把命令行程序编译好放进 `app/src-tauri/binaries/`；开发构建不需要它。打包前确认内嵌的是真正的面板（`scripts/release-checks.mjs panel`），不是 `build.rs` 的占位页。没有 Apple 证书时 macOS 包做 ad-hoc 签名（未签名的 arm64 应用下载后会被报「已损坏」）；设置里提供「把命令行加入 PATH」。
 - GitHub Actions：推送版本标签时，在 macOS 和 Windows 上分别构建、测试、打包，发布到 GitHub Releases。
 - 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只放在 GitHub Actions secrets），从 GitHub Releases 拉取；仓库已公开，M3 起即可启用。
 - 代码签名：见第 18 节。未签名时，README 写清 macOS「右键 → 打开」和 Windows「更多信息 → 仍要运行」的放行步骤。

@@ -44,6 +44,7 @@
 | `app/src/test-setup.ts`、`app/src/lib/clock.ts` | 测试公共设置（Radix 需要的 jsdom 桩、每个测试后复位固定时钟并收掉没消失的提示 toast、缺翻译键守卫）；假后端与测试共用的固定时钟 |
 | `app/src/components/ui/` | shadcn/ui 生成的组件（照原样提交，不手改；不按本仓库的 ESLint 规则检查）。唯一的改动：`dialog.tsx` 两处写死的英文「Close」换成了翻译键 `common.close`（重新生成时要带上，`components/DialogLabels.test.tsx` 把关） |
 | `app/src-tauri/Cargo.toml`、`build.rs`、`tauri.conf.json`、`capabilities/default.json` | Tauri crate 与配置（`build.rs` 在应用清单里登记面板的全部命令，Tauri 因此按能力文件检查本程序的命令；能力文件只给主窗口每条命令一个 `allow-<命令>`，加事件的 `listen`、`unlisten`，不给插件权限） |
+| `app/src-tauri/tauri.bundle.conf.json`、`app/src-tauri/binaries/`、`app/src-tauri/tests/`（M3） | 打包：`tauri.bundle.conf.json` 是打包时用 `--config` 合并的配置，只放 `externalBin`，所以 `tauri.conf.json` 在没有放好命令行程序时也能 `cargo build`、`clippy`、`test`；`binaries/` 是生成目录，git 忽略，放 `scripts/stage-cli.*` 编译好的命令行程序（`issuerelay-<三元组>[.exe]`，Tauri 装进包时去掉三元组）；`tests/` 放打包配置的守卫测试（`packaging.rs`） |
 | `app/src/i18n/`（含 `language-cases.json`）、`app/src-tauri/src/i18n.rs` | 五种语言的翻译文件与语言解析用例表；前端与 Rust 共用 |
 | `app/src-tauri/src/{lib,main,state,startup,window,quit,logging,events,notify,tray,test_support}.rs`、`app/src-tauri/icons/tray/` | 宿主接入、启动状态、窗口、退出状态机、日志、事件转发、通知、托盘、测试辅助 |
 | `app/src-tauri/src/commands.rs` | 面板调用的全部命令 |
@@ -82,6 +83,8 @@
 ## 6. scripts/ 与 .github/
 
 - `scripts/check-secrets.sh`：扫描密钥和本机信息。新脚本的文件头写清用途、用法、退出码。
+- `scripts/stage-cli.sh`、`scripts/stage-cli.ps1`：编译命令行程序，放到 Tauri 的 `externalBin` 找它的地方（`app/src-tauri/binaries/issuerelay-<三元组>[.exe]`）。
+- `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门（用法见文件头）；现在有 `panel`：打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；标签、资产与 `latest.json` 的门禁随发布工作流再加。
 - `.github/workflows/ci.yml`：在 macOS 与 Windows 上先装前端依赖、跑前端检查与测试并构建面板，再跑 Rust 的格式、静态检查、测试；另在 Ubuntu 上扫描密钥。
 - `.github/copilot-instructions.md`：只转发到 `AGENTS.md`。
 - `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。
