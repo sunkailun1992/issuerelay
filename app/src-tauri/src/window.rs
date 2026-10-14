@@ -3,17 +3,18 @@
 //! lost on a crowded menu bar and then nobody can find the app (design 4.1); with "Show in Dock"
 //! off (`Settings::show_in_dock`) the icon follows the window as it used to, shown only while the
 //! panel is, also after a login start (lib.rs hides through `hide` too). `dock_policy` is that
-//! one decision. Windows needs nothing of the kind: it has no Dock, and a window's taskbar button
-//! comes and goes with the window itself (a hidden window has none). Opening the app again brings
-//! the panel back: macOS reports it to the running process (`on_reopen`; clicking the Dock icon
-//! does the same), Windows starts a second one (the single-instance callback in lib.rs).
+//! one decision; `DockSetting` is how much of the setting is known when it is made. Windows needs
+//! nothing of the kind: it has no Dock, and a window's taskbar button comes and goes with the
+//! window itself (a hidden window has none). Opening the app again brings the panel back: macOS
+//! reports it to the running process (`on_reopen`; clicking the Dock icon does the same), Windows
+//! starts a second one (the single-instance callback in lib.rs).
 use issuerelay_core::config::Settings;
 use tauri::{AppHandle, Manager, Runtime, WindowEvent};
 
 use crate::{
     logging,
     quit::{self, QuitEvent, QuitStep},
-    state::AppState,
+    state::{AppState, StartupState},
     tray,
 };
 
@@ -38,28 +39,55 @@ impl DockPolicy {
     }
 }
 
-/// Whether the Dock shows the app. With "Show in Dock" on it always does; off, only while the panel
-/// is visible, which is how the app behaved before the setting existed.
-pub fn dock_policy(show_in_dock: bool, panel_visible: bool) -> DockPolicy {
-    if show_in_dock || panel_visible {
+/// What is known of "Show in Dock" when the icon is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockSetting {
+    /// The host is still starting, so the settings are not read yet. The icon follows the panel, as
+    /// it always did: someone who switched the icon off must not see it flash at a login start.
+    NotRead,
+    /// The host could not start, so the settings never will be read. The panel shows why, and it
+    /// is all there is of the app: the icon stays, as it does by default, so that closing that page
+    /// does not take away the one place the user then looks for the app.
+    HostFailed,
+    /// The setting as the settings say.
+    Read(bool),
+}
+
+impl DockSetting {
+    /// Whether the icon stays after the panel is hidden.
+    fn show_in_dock(self) -> bool {
+        match self {
+            Self::NotRead => false,
+            Self::HostFailed => Settings::default().show_in_dock,
+            Self::Read(show_in_dock) => show_in_dock,
+        }
+    }
+}
+
+/// Whether the Dock shows the app. A visible panel always has the icon; a hidden one has it only
+/// with "Show in Dock" on, which is how the app behaved before the setting existed. The setting is
+/// asked only when the answer depends on it: asking copies the whole configuration out of the
+/// engine, which showing the panel does not need.
+pub fn dock_policy(panel_shown: bool, show_in_dock: impl FnOnce() -> bool) -> DockPolicy {
+    if panel_shown || show_in_dock() {
         DockPolicy::Regular
     } else {
         DockPolicy::Accessory
     }
 }
 
-/// `dock_policy` for the settings as far as they are known. Until the host has started and the
-/// settings are read (`None`) the setting counts as off, so the icon follows the panel as it
-/// always did.
-fn dock_policy_for(settings: Option<&Settings>, panel_visible: bool) -> DockPolicy {
-    dock_policy(settings.is_some_and(|s| s.show_in_dock), panel_visible)
-}
-
-/// The settings once the host has started, which is when they are first read; `None` before that,
-/// and for good when the host could not start.
-fn settings_if_started<R: Runtime>(app: &AppHandle<R>) -> Option<Settings> {
-    let state = app.try_state::<AppState>()?;
-    state.try_host().map(|host| host.engine().settings())
+/// What is known of the setting now, from how the start of the host went (`AppState`).
+fn dock_setting<R: Runtime>(app: &AppHandle<R>) -> DockSetting {
+    let Some(state) = app.try_state::<AppState>() else {
+        return DockSetting::NotRead;
+    };
+    match state.startup_state() {
+        StartupState::Starting => DockSetting::NotRead,
+        StartupState::Failed(_) => DockSetting::HostFailed,
+        StartupState::Ready => state.try_host().map_or(DockSetting::NotRead, |host| {
+            DockSetting::Read(host.engine().settings().show_in_dock)
+        }),
+    }
 }
 
 /// Gives the app the Dock icon that `policy` says, or takes it away.
@@ -78,11 +106,13 @@ fn apply_dock<R: Runtime>(app: &AppHandle<R>, policy: DockPolicy) {
     let _ = (app, policy);
 }
 
-/// Puts the Dock icon where `dock_policy` says for the settings as they are, with the panel
-/// visible or not.
-fn apply_for_panel<R: Runtime>(app: &AppHandle<R>, panel_visible: bool) {
-    let settings = settings_if_started(app);
-    apply_dock(app, dock_policy_for(settings.as_ref(), panel_visible));
+/// Puts the Dock icon where `dock_policy` says, for the panel shown or hidden and the setting as
+/// far as it is known. Every change of the icon goes through `apply_dock`.
+fn apply_for_panel<R: Runtime>(app: &AppHandle<R>, panel_shown: bool) {
+    apply_dock(
+        app,
+        dock_policy(panel_shown, || dock_setting(app).show_in_dock()),
+    );
 }
 
 /// Whether the panel is on the screen now; a window that cannot say counts as hidden. Only the
@@ -164,7 +194,10 @@ fn reopen_with(has_visible_windows: bool, show_panel: impl FnOnce()) {
 
 #[cfg(test)]
 mod tests {
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+
     use super::*;
+    use crate::state::{StartupCode, StartupFailure};
 
     /// Whether a reopen with `has_visible_windows` asks for the panel to be shown.
     fn shown_on_reopen(has_visible_windows: bool) -> bool {
@@ -188,44 +221,76 @@ mod tests {
 
     #[test]
     fn the_icon_shows_while_the_panel_is_up_and_otherwise_as_the_setting_says() {
-        // (show in Dock, panel visible) -> what the Dock shows: every row of the decision.
-        for (show_in_dock, panel_visible, expected) in [
+        // (panel shown, show in Dock) -> what the Dock shows: every row of the decision.
+        for (panel_shown, show_in_dock, expected) in [
             (true, true, DockPolicy::Regular),
             (true, false, DockPolicy::Regular),
             (false, true, DockPolicy::Regular),
             (false, false, DockPolicy::Accessory),
         ] {
             assert_eq!(
-                dock_policy(show_in_dock, panel_visible),
+                dock_policy(panel_shown, || show_in_dock),
                 expected,
-                "show in Dock {show_in_dock}, panel visible {panel_visible}"
+                "panel shown {panel_shown}, show in Dock {show_in_dock}"
             );
         }
     }
 
     #[test]
-    fn until_the_settings_are_read_the_icon_follows_the_panel_as_it_always_did() {
-        assert_eq!(dock_policy_for(None, true), DockPolicy::Regular);
-        assert_eq!(dock_policy_for(None, false), DockPolicy::Accessory);
+    fn showing_the_panel_does_not_ask_for_the_setting() {
+        // Asking copies the whole configuration out of the engine, and a visible panel has the icon
+        // whatever it says.
+        assert_eq!(
+            dock_policy(true, || panic!("the setting was asked for")),
+            DockPolicy::Regular
+        );
     }
 
     #[test]
-    fn a_new_install_keeps_the_icon_while_the_panel_is_hidden_and_switching_it_off_ends_that() {
-        let new_install = Settings::default();
-        assert_eq!(
-            dock_policy_for(Some(&new_install), false),
-            DockPolicy::Regular
-        );
-        let off = Settings {
-            show_in_dock: false,
-            ..Settings::default()
-        };
-        assert_eq!(dock_policy_for(Some(&off), false), DockPolicy::Accessory);
-        assert_eq!(
-            dock_policy_for(Some(&off), true),
-            DockPolicy::Regular,
-            "off still shows the icon while the panel is up"
-        );
+    fn what_is_known_of_the_setting_decides_the_icon_of_a_hidden_panel() {
+        // (what is known of the setting, panel shown) -> what the Dock shows.
+        for (setting, panel_shown, expected) in [
+            // Until the settings are read the icon follows the panel, as it always did.
+            (DockSetting::NotRead, true, DockPolicy::Regular),
+            (DockSetting::NotRead, false, DockPolicy::Accessory),
+            // The host could not start, so they never will be: the failure page is all there is of
+            // the app, and closing it keeps the icon, as the default does.
+            (DockSetting::HostFailed, true, DockPolicy::Regular),
+            (DockSetting::HostFailed, false, DockPolicy::Regular),
+            // A new install keeps the icon while the panel is hidden; switching it off ends that,
+            // except while the panel is up.
+            (
+                DockSetting::Read(Settings::default().show_in_dock),
+                false,
+                DockPolicy::Regular,
+            ),
+            (DockSetting::Read(false), true, DockPolicy::Regular),
+            (DockSetting::Read(false), false, DockPolicy::Accessory),
+        ] {
+            assert_eq!(
+                dock_policy(panel_shown, || setting.show_in_dock()),
+                expected,
+                "{setting:?}, panel shown {panel_shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_known_of_the_setting_follows_how_the_start_of_the_host_went() {
+        // `Read` needs a host that has started, which no unit test builds: the acceptance on the
+        // real app looks at it.
+        let bare = mock_builder().build(mock_context(noop_assets())).unwrap();
+        assert_eq!(dock_setting(bare.handle()), DockSetting::NotRead);
+        let app = mock_builder()
+            .manage(AppState::new(false))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        assert_eq!(dock_setting(app.handle()), DockSetting::NotRead, "starting");
+        app.state::<AppState>().set_host(Err(StartupFailure {
+            code: StartupCode::AlreadyRunning,
+            detail: "another IssueRelay instance is already running".into(),
+        }));
+        assert_eq!(dock_setting(app.handle()), DockSetting::HostFailed);
     }
 
     #[cfg(target_os = "macos")]

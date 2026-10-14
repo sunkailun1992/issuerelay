@@ -349,7 +349,7 @@ pub(crate) fn on_main_thread<R: Runtime>(
     let handle = app.clone();
     logging::warn_failed(
         app.run_on_main_thread(move || apply(&handle)),
-        "handing the tray an update",
+        "handing work to the main thread",
     );
 }
 
