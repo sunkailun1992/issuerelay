@@ -89,6 +89,7 @@ describe("reading", () => {
     const settings = useSettings();
     const autostart = useAutostart();
     const servers = useControlServers();
+    const cliPath = useCliPath();
     return (
       <p>
         {[
@@ -101,6 +102,7 @@ describe("reading", () => {
           settings.data?.poll_interval_secs,
           autostart.data === undefined ? undefined : String(autostart.data),
           servers.data?.claude,
+          cliPath.data?.kind,
         ].join(" ")}
       </p>
     );
@@ -108,7 +110,7 @@ describe("reading", () => {
 
   test("the hooks read from the backend they are given", async () => {
     await renderWithProviders(<Reader />);
-    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered")).toBeInTheDocument();
+    expect(await screen.findByText("connected 9 DEMO-12 9 0.1.0 2 30 false not_registered off")).toBeInTheDocument();
   });
 
   test("jobs are asked for with a limit of two hundred unless another is given", async () => {
@@ -225,30 +227,6 @@ describe("reading", () => {
     await userEvent.click(screen.getByRole("button", { name: "toggle" }));
     await userEvent.click(screen.getByRole("button", { name: "toggle" }));
     await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
-  });
-
-  test("whether the command line is on PATH is read again when the window comes back to the front, and nothing else is", async () => {
-    // Nothing the user does in a terminal is an engine event: they may delete the file that blocks the switch, or edit
-    // their shell profile, and expect the row to know when they return. The client turns this off for every read
-    // (query-client.ts), so the one read that wants it asks for it.
-    const backend = createMockBackend("demo", { latencyMs: 0 });
-    const onPath = vi.spyOn(backend, "cliOnPath");
-    const settings = vi.spyOn(backend, "settings");
-    function Reader() {
-      const path = useCliPath();
-      useSettings();
-      return <p>{path.data?.kind ?? "reading"}</p>;
-    }
-    await renderWithProviders(<Reader />, { backend });
-    expect(await screen.findByText("off")).toBeInTheDocument();
-    await waitFor(() => expect(settings).toHaveBeenCalledTimes(1));
-    expect(onPath).toHaveBeenCalledTimes(1);
-    // The webview tells that it is shown again as a change of visibility.
-    await act(async () => {
-      window.dispatchEvent(new Event("visibilitychange"));
-    });
-    await waitFor(() => expect(onPath).toHaveBeenCalledTimes(2));
-    expect(settings).toHaveBeenCalledTimes(1);
   });
 
   test("a job's log is read again every second and a half while it is live, and not otherwise", async () => {

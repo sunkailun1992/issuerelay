@@ -632,7 +632,8 @@ pub async fn cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus>
 }
 
 /// Puts the command line on PATH without administrator rights: `~/.local/bin` on macOS, the
-/// user's own `Path` on Windows.
+/// user's own `Path` on Windows. The panel offers it again while a file that is not IssueRelay's is
+/// in the way: each call looks at the slot afresh and answers `blocked` while the file is there.
 #[tauri::command]
 pub async fn install_cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
     cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::install).await

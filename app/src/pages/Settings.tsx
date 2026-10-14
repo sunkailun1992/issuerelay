@@ -297,8 +297,10 @@ function CliPathNote({ id, status }: { id: string; status: CliPathStatus }) {
 /**
  * Putting the command line on PATH (design 12). It acts at once and is not saved with the page,
  * like starting at login; the switch shows only once the state is read, so it is never shown in a
- * state it is not in, and it cannot be used while a file IssueRelay did not make is in the way or
- * where the app runs from does not allow it.
+ * state it is not in. Only where the app runs from does not allow it is the switch locked. A file
+ * IssueRelay did not make in the way leaves it usable, shown off: the user removes or renames the
+ * file, then turns it on, and the command looks at the slot again (it links if the file is gone,
+ * and says "in the way" again if not, which is an answer and no failure).
  */
 function CliOnPath() {
   const { t } = useTranslation();
@@ -320,9 +322,7 @@ function CliOnPath() {
         note={<WithCommands text={t("settings.cli.description", { command: CLI_COMMAND })} commands={[CLI_COMMAND]} />}
         describedBy={current.kind === "off" ? undefined : stateId}
         checked={current.kind === "on"}
-        disabled={
-          install.isPending || remove.isPending || status.isFetching || current.kind === "blocked" || current.kind === "unavailable"
-        }
+        disabled={install.isPending || remove.isPending || status.isFetching || current.kind === "unavailable"}
         onChange={(on) => (on ? install.mutate() : remove.mutate())}
       />
       <CliPathNote id={stateId} status={current} />

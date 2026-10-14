@@ -383,6 +383,8 @@ pub fn status(setup: &CliSetup) -> Result<CliPathStatus> {
 }
 
 /// Puts the CLI on PATH; returns the new status (a blocked or unavailable one changes nothing).
+/// The slot is looked at again on every call, so trying again after the user has removed the file
+/// that was in the way links, and while it is there the answer is `Blocked` again.
 pub fn install(setup: &CliSetup) -> Result<CliPathStatus> {
     match setup.usable_cli() {
         Ok(cli) => platform::install(setup, cli),
@@ -1010,6 +1012,38 @@ mod tests {
             assert_eq!(
                 std::fs::read_link(&link).unwrap(),
                 Path::new("/opt/demo/bin/issuerelay")
+            );
+        }
+
+        #[test]
+        fn once_the_file_in_the_way_is_gone_turning_it_on_links_the_cli() {
+            let root = tempfile::tempdir().unwrap();
+            let setup = setup(root.path(), None);
+            let link = link_path(&setup.home);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::fs::write(&link, "someone else's script").unwrap();
+            let blocked = CliPathStatus::Blocked {
+                path: link.display().to_string(),
+            };
+            // Trying again while it is there says the same and changes nothing, as often as asked.
+            assert_eq!(install(&setup).unwrap(), blocked);
+            assert_eq!(install(&setup).unwrap(), blocked);
+            assert_eq!(
+                std::fs::read_to_string(&link).unwrap(),
+                "someone else's script"
+            );
+            // The user removes it; the next try looks at the slot again and links.
+            std::fs::remove_file(&link).unwrap();
+            assert_eq!(status(&setup).unwrap(), CliPathStatus::Off);
+            assert_eq!(
+                install(&setup).unwrap(),
+                CliPathStatus::On {
+                    shell_line: Some(SHELL_LINE.to_string())
+                }
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                setup.cli.clone().unwrap()
             );
         }
 

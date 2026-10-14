@@ -569,7 +569,7 @@ test("the command line goes on PATH from the system group and the shell line is 
   expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
 });
 
-test("a file IssueRelay did not make blocks the switch and is named, cleaned", async () => {
+test("a file IssueRelay did not make is named, cleaned, and does not lock the switch", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   backend.cliOnPath = async (): Promise<CliPathStatus> => ({ kind: "blocked", path: "~/.local/bin/issuerelay\u001b[31m" });
   await renderWithProviders(<Settings />, { backend });
@@ -577,7 +577,52 @@ test("a file IssueRelay did not make blocks the switch and is named, cleaned", a
   expect(note.textContent).toContain("~/.local/bin/issuerelay");
   // The system's text goes through cleanDisplayText (AI_CODING_GUIDE 12.4).
   expect(note.textContent).not.toContain("\u001b");
-  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeDisabled();
+  // Shown off, and there to be tried again once the user has removed or renamed the file.
+  const toggle = screen.getByRole("switch", { name: "Command line on PATH" });
+  expect(toggle).toBeEnabled();
+  expect(toggle).not.toBeChecked();
+});
+
+test("once the file in the way is gone, turning the switch on installs", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // What the command line finds in the slot: the file is there until the user has removed it.
+  let status: CliPathStatus = { kind: "blocked", path: "~/.local/bin/issuerelay" };
+  backend.cliOnPath = async () => status;
+  const install = vi.fn(async (): Promise<CliPathStatus> => {
+    // The command looks at the slot again: the file is gone, so it links.
+    status = { kind: "on", shell_line: DEMO_SHELL_LINE };
+    return status;
+  });
+  backend.installCliOnPath = install;
+  await renderWithProviders(<Settings />, { backend });
+  expect(await screen.findByText(/already exists and was not made by IssueRelay/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(1);
+  // The row follows what the command found.
+  expect(await screen.findByText(DEMO_SHELL_LINE)).toBeInTheDocument();
+  expect(screen.queryByText(/already exists and was not made by IssueRelay/)).not.toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeChecked();
+});
+
+test("while the file in the way is still there, turning the switch on says so again and tells no failure", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const blocked: CliPathStatus = { kind: "blocked", path: "~/.local/bin/issuerelay" };
+  backend.cliOnPath = vi.fn(async () => blocked);
+  const install = vi.fn(async () => blocked);
+  backend.installCliOnPath = install;
+  await renderWithProviders(<Settings />, { backend });
+  await screen.findByText(/already exists and was not made by IssueRelay/);
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(1);
+  // The row reads the slot again and says the same, and the switch is there to be tried again.
+  await waitFor(() => expect(backend.cliOnPath).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole("switch", { name: "Command line on PATH" })).toBeEnabled());
+  expect(screen.getByRole("switch", { name: "Command line on PATH" })).not.toBeChecked();
+  expect(screen.getByText(/already exists and was not made by IssueRelay/)).toBeInTheDocument();
+  // Still in the way is an answer, not a failure of the command.
+  expect(screen.queryByText("Could not change the command line on PATH")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("switch", { name: "Command line on PATH" }));
+  expect(install).toHaveBeenCalledTimes(2);
 });
 
 test("from the disk image the switch explains what to do first", async () => {
@@ -635,7 +680,7 @@ test("while the PATH setting is read the row is a loading row, and the switch co
   expect(within(system).queryByRole("status", { name: "Loading…" })).not.toBeInTheDocument();
 });
 
-test("the switch is described by what the row says about its state, so that the reason it is off limits is read with it", async () => {
+test("the switch is described by what the row says about its state, and only a place the app cannot work from locks it", async () => {
   const explanation = "Lets you type issuerelay in a terminal. No administrator rights needed.";
   const cases: [CliPathStatus, RegExp | null][] = [
     [{ kind: "off" }, null],
@@ -652,6 +697,10 @@ test("the switch is described by what the row says about its state, so that the 
     backend.cliOnPath = async () => status;
     const { unmount } = await renderWithProviders(<Settings />, { backend });
     const toggle = await screen.findByRole("switch", { name: "Command line on PATH" });
+    // Only a place the app cannot work from locks the switch: a file in the way, a link to another
+    // copy, being on PATH already all leave it to be used (the sentence tells what turning it does).
+    if (status.kind === "unavailable") expect(toggle, status.kind).toBeDisabled();
+    else expect(toggle, status.kind).toBeEnabled();
     // The explanation of the switch itself is always part of it; the state's sentence follows it.
     expect(toggle).toHaveAccessibleDescription(words === null ? explanation : new RegExp(`^${explanation.replace(/[.]/g, "\\.")} .*`));
     if (words !== null) expect(toggle, status.kind).toHaveAccessibleDescription(words);
