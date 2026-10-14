@@ -1,6 +1,6 @@
 import type {
   AppInfo, Binding, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job, LinearSetup,
-  Project, QuitMode, Settings, SetupAction, StartupState, StatusView, Viewer,
+  Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, Viewer,
 } from "./types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
@@ -55,6 +55,6 @@ export interface Backend {
   requestQuit(): Promise<void>;
   onEngineEvent(listener: (event: EngineEvent) => void): Promise<() => void>;
   onResync(listener: () => void): Promise<() => void>;
-  onQuitRequested(listener: (running: number) => void): Promise<() => void>;
+  onQuitRequested(listener: (prompt: QuitPrompt) => void): Promise<() => void>;
   onStartupFailed(listener: (state: StartupState) => void): Promise<() => void>;
 }

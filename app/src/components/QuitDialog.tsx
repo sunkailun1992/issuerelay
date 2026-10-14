@@ -19,7 +19,9 @@ import type { QuitMode } from "@/lib/types";
  * The question that quitting with runs in progress asks (design 4.1, 6.2): wait for them, stop
  * them now, or keep running. Waiting can still become stopping, so once chosen the prompt stays
  * up with "stop now" until the app exits. "Keep running" only closes the prompt: the app treats
- * a question nobody answers like no question at all and asks again the next time.
+ * a question nobody answers like no question at all and asks again the next time. When quitting
+ * already waits (`QuitPrompt.waiting`: a panel reloaded after "wait" has lost the prompt, and the
+ * app tells it again at the next Quit), the prompt opens on the waiting state with "stop now".
  */
 export function QuitDialog() {
   const backend = useBackend();
@@ -33,9 +35,9 @@ export function QuitDialog() {
   useEffect(
     () =>
       subscription(
-        backend.onQuitRequested((count) => {
-          setRunning(count);
-          setWaiting(false);
+        backend.onQuitRequested((prompt) => {
+          setRunning(prompt.running);
+          setWaiting(prompt.waiting);
           setStopping(false);
           setOpen(true);
         }),

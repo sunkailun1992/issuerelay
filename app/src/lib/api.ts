@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type Backend, BackendError } from "./backend";
-import type { StartupState } from "./types";
+import type { QuitPrompt, StartupState } from "./types";
 
 export const isTauri = (): boolean => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -54,7 +54,7 @@ export const tauriBackend: Backend = {
   requestQuit: () => call("request_quit"),
   onEngineEvent: (listener) => on("engine-event", listener),
   onResync: (listener) => on("engine-resync", () => listener()),
-  onQuitRequested: (listener) => on("quit-requested", listener),
+  onQuitRequested: (listener) => on<QuitPrompt>("quit-requested", listener),
   onStartupFailed: (listener) => on<StartupState>("startup-failed", listener),
 };
 

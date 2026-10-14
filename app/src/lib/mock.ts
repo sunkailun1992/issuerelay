@@ -6,8 +6,8 @@ import {
 } from "./mock-fixtures";
 import { isActive } from "./runs";
 import type {
-  Binding, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup, Settings,
-  StartupState, StatusView, Viewer,
+  Binding, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup, QuitPrompt,
+  Settings, StartupState, StatusView, Viewer,
 } from "./types";
 
 export interface MockOptions {
@@ -76,7 +76,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const listeners = {
     event: new Set<(event: EngineEvent) => void>(),
     resync: new Set<() => void>(),
-    quit: new Set<(running: number) => void>(),
+    quit: new Set<(prompt: QuitPrompt) => void>(),
     startup: new Set<(state: StartupState) => void>(),
   };
 

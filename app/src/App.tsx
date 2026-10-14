@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { HashRouter, Navigate, Route, Routes } from "react-router";
+import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { FirstRunGate } from "@/components/FirstRunGate";
@@ -48,10 +48,22 @@ function LanguageSync() {
 }
 
 /**
+ * The boundary around the pages, inside the router: a page that fails is replaced by the crash
+ * page, and going to another address clears it (the hash route is the reset key).
+ */
+function PageBoundary({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  return <ErrorBoundary resetKey={`${location.pathname}${location.search}`}>{children}</ErrorBoundary>;
+}
+
+/**
  * The panel: the backend it talks to, the data cache, the engine's events, the pages inside the
  * shell and, outside the shell, the first-run guide. The start-failure page replaces the pages
- * (not the quit prompt and the toasts, which also work then). A render error anywhere below shows
- * the crash page (ErrorBoundary) instead of a blank window.
+ * (not the quit prompt and the toasts, which also work then). A render error shows the crash page
+ * instead of a blank window: for a page, in place of the pages (another address recovers); for
+ * the parts around them, in place of the panel. The quit prompt and the toasts are outside both,
+ * each in a boundary of its own that shows nothing if it fails: quitting must still ask while runs
+ * are in progress, whatever page failed.
  */
 export default function App({ backend }: { backend: Backend }) {
   const [client] = useState(createQueryClient);
@@ -59,31 +71,39 @@ export default function App({ backend }: { backend: Backend }) {
     <ErrorBoundary>
       <BackendProvider backend={backend}>
         <QueryClientProvider client={client}>
-          <EngineEventsBridge />
-          <ThemeSync />
-          <LanguageSync />
-          <StartupGate>
-            <HashRouter>
-              <Routes>
-                <Route path="/onboarding" element={<Onboarding />} />
-                <Route element={<FirstRunGate />}>
-                  <Route element={<AppShell />}>
-                    <Route index element={<Overview />} />
-                    <Route path="issues" element={<Issues />} />
-                    <Route path="runs" element={<Runs />} />
-                    <Route path="runs/:id" element={<RunDetail />} />
-                    <Route path="bindings" element={<Bindings />} />
-                    <Route path="doctor" element={<Doctor />} />
-                    <Route path="settings" element={<Settings />} />
-                    <Route path="help" element={<Help />} />
-                    <Route path="*" element={<Navigate to="/" replace />} />
-                  </Route>
-                </Route>
-              </Routes>
-            </HashRouter>
-          </StartupGate>
-          <QuitDialog />
-          <Toaster />
+          <ErrorBoundary>
+            <EngineEventsBridge />
+            <ThemeSync />
+            <LanguageSync />
+            <StartupGate>
+              <HashRouter>
+                <PageBoundary>
+                  <Routes>
+                    <Route path="/onboarding" element={<Onboarding />} />
+                    <Route element={<FirstRunGate />}>
+                      <Route element={<AppShell />}>
+                        <Route index element={<Overview />} />
+                        <Route path="issues" element={<Issues />} />
+                        <Route path="runs" element={<Runs />} />
+                        <Route path="runs/:id" element={<RunDetail />} />
+                        <Route path="bindings" element={<Bindings />} />
+                        <Route path="doctor" element={<Doctor />} />
+                        <Route path="settings" element={<Settings />} />
+                        <Route path="help" element={<Help />} />
+                        <Route path="*" element={<Navigate to="/" replace />} />
+                      </Route>
+                    </Route>
+                  </Routes>
+                </PageBoundary>
+              </HashRouter>
+            </StartupGate>
+          </ErrorBoundary>
+          <ErrorBoundary fallback="nothing">
+            <QuitDialog />
+          </ErrorBoundary>
+          <ErrorBoundary fallback="nothing">
+            <Toaster />
+          </ErrorBoundary>
         </QueryClientProvider>
       </BackendProvider>
     </ErrorBoundary>
