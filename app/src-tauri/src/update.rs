@@ -8,8 +8,14 @@
 //! completion / stop now" as quitting, and once the host has stopped the quit flow installs
 //! (`QuitState::Installing`) and then restarts. A failed check, a missing platform, a bad
 //! signature or a version that is not newer is shown and logged and changes nothing else:
-//! monitoring goes on. An install that fails after the host stopped restarts the app as it is and
-//! is shown by the panel after the restart (`record_install_failure`), never as a notification.
+//! monitoring goes on. What an install leaves for the next start (`install_leaving_notes`): a
+//! one-shot request that the panel shows even after a login start, and, if it failed, the reason,
+//! which the panel shows once (`record_install_failure`), never as a notification. On macOS the
+//! app swaps its bundle in place and restarts, into the new version or, when that failed, as it
+//! is. On Windows the plugin hands over to the installer (NSIS or MSI, through `msiexec`) and ends
+//! this process at once: only an installer that could not even be started comes back, and the app
+//! restarts as it is; one that fails later, or an MSI whose administrator prompt is declined,
+//! leaves IssueRelay closed until the user opens it from the Start menu.
 //! A quit never turns into an install: a quit request drops the download that waits, and one that
 //! comes while the download is still under way is counted, so that the download is discarded when
 //! it ends (`Updates::prepare`) and the quit flow is not asked to install it.
@@ -52,9 +58,15 @@ const CHECK_LIMIT: Duration = Duration::from_secs(30);
 /// How long the download of a payload may take, from the request to its last byte. Generous for a
 /// slow line, but a download that stalls ends and can be started again.
 const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
-/// What a failed install leaves in the data folder for the next start: the process restarts as it
-/// is right after the failure, and the panel then shows the cleaned reason once.
+/// What a failed install leaves in the data folder for the next start: the cleaned reason, which
+/// the panel then shows once (`take_install_failure`).
 pub const INSTALL_FAILURE_FILE: &str = "update-install-failure.txt";
+/// What every install leaves in the data folder before it begins: a one-shot request that the next
+/// start shows the panel (`take_show_panel_marker`). The restart after an install keeps the
+/// arguments of this start, so an app the login item started (`--autostart`) would stay in the
+/// tray with the outcome unseen, and the reason of a failure would wait in a panel nobody opened
+/// until the background check replaced it.
+pub const SHOW_PANEL_MARKER_FILE: &str = "update-show-panel";
 
 /// Why a check, a download or an install failed, as a code the panel translates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -558,9 +570,13 @@ async fn install_with<S: UpdateSource>(
 
 /// Installs a verified download once the quit flow has stopped the host (`QuitState::Installing`)
 /// and then lets it restart (`QuitEvent::Installed`). macOS swaps the app bundle in place and the
-/// restart opens the new one; on Windows `install` starts the NSIS installer (`/P /UPDATE /R`),
-/// which ends this process and starts the new version itself. If installing fails the app
-/// restarts as it is, so monitoring resumes, and the panel says why after the restart.
+/// restart opens the new one. On Windows `install` starts the installer (NSIS or MSI, through
+/// `msiexec`) with `ShellExecuteW` and then ends this process with `std::process::exit(0)`:
+/// nothing after it runs, and the installer starts the new version itself, with the arguments of
+/// this one. If `install` returns an error (the installer could not be put in place or started),
+/// the app restarts as it is, so monitoring resumes, and the panel says why after the restart. A
+/// Windows installer that fails once it runs leaves no trace here: IssueRelay is closed, and the
+/// user opens it again from the Start menu.
 pub fn install_and_restart<R: Runtime>(app: &AppHandle<R>, install: Box<dyn Install>) {
     let app = app.clone();
     // Off the main thread: `install` may wait for the main thread (macOS asks for administrator
@@ -569,17 +585,36 @@ pub fn install_and_restart<R: Runtime>(app: &AppHandle<R>, install: Box<dyn Inst
     tauri::async_runtime::spawn_blocking(move || {
         let version = install.version().to_string();
         tracing::info!(%version, "installing the update");
-        if let Err(detail) = install_outcome(|| install.install()) {
-            tracing::error!(error = %detail, %version, "installing the update failed; restarting the current version");
-            match AppPaths::system() {
-                Ok(paths) => record_install_failure(&paths.data_dir, &detail),
-                Err(error) => {
-                    tracing::warn!(error = %format!("{error:#}"), "cannot keep the install failure for the panel")
-                }
+        let data_dir = match AppPaths::system() {
+            Ok(paths) => Some(paths.data_dir),
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "cannot leave notes for the next start");
+                None
             }
+        };
+        if let Err(detail) = install_leaving_notes(data_dir.as_deref(), || install.install()) {
+            tracing::error!(error = %detail, %version, "installing the update failed; restarting the current version");
         }
         quit::handle(&app, QuitEvent::Installed);
     });
+}
+
+/// Runs `install` with the notes for the next start in `data_dir`: the panel marker first, and
+/// the reason after it if the install fails (`install_outcome`). The marker comes before `install`
+/// is called because on Windows nothing that follows it runs: the plugin hands over to the
+/// installer and ends the process. Without a data folder no notes are left.
+fn install_leaving_notes<E: std::fmt::Display>(
+    data_dir: Option<&Path>,
+    install: impl FnOnce() -> Result<(), E>,
+) -> Result<(), String> {
+    if let Some(data_dir) = data_dir {
+        leave_show_panel_marker(data_dir);
+    }
+    let outcome = install_outcome(install);
+    if let (Err(detail), Some(data_dir)) = (&outcome, data_dir) {
+        record_install_failure(data_dir, detail);
+    }
+    outcome
 }
 
 /// Runs `install` and says why it did not install, if it did not: its error, or a panic. An
@@ -614,6 +649,30 @@ pub fn take_install_failure(data_dir: &Path) -> Option<Failure> {
         tracing::warn!(error = %e, "cannot remove the install failure note; the panel may show it again");
     }
     Some(Failure::new(FailureCode::InstallFailed, detail))
+}
+
+/// Asks that the next start shows the panel (`take_show_panel_marker`); a failure to write the
+/// file is only logged.
+pub fn leave_show_panel_marker(data_dir: &Path) {
+    let written = std::fs::create_dir_all(data_dir)
+        .and_then(|()| std::fs::write(data_dir.join(SHOW_PANEL_MARKER_FILE), b""));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "cannot leave the panel marker for the next start");
+    }
+}
+
+/// Whether the previous run asked for the panel, once: the file is removed as it is read. One
+/// that cannot be removed counts as not there, so a start that always found it would not show the
+/// panel at every login.
+pub fn take_show_panel_marker(data_dir: &Path) -> bool {
+    match std::fs::remove_file(data_dir.join(SHOW_PANEL_MARKER_FILE)) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot remove the panel marker; the panel stays hidden");
+            false
+        }
+    }
 }
 
 /// The host, when the background check may run: started, and automatic checks on.
@@ -1170,6 +1229,84 @@ mod tests {
         let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
         updates.show_failure(failure.clone());
         assert_eq!(updates.status(), UpdateStatus::Failed(failure));
+    }
+
+    #[test]
+    fn the_panel_marker_is_left_once_and_taken_once() {
+        let data = tempfile::tempdir().unwrap();
+        assert!(!take_show_panel_marker(data.path()), "nothing left");
+        leave_show_panel_marker(data.path());
+        assert!(
+            take_show_panel_marker(data.path()),
+            "the next start finds it"
+        );
+        assert!(
+            !take_show_panel_marker(data.path()),
+            "and only that start: the file is gone"
+        );
+        // A data folder that is not there is made; the marker lands in it.
+        let nested = data.path().join("not-yet");
+        leave_show_panel_marker(&nested);
+        assert!(take_show_panel_marker(&nested));
+    }
+
+    #[test]
+    fn the_marker_is_left_before_the_installer_runs() {
+        // On Windows the plugin starts the installer and then ends this process
+        // (`std::process::exit(0)`): nothing after `install` runs there, so everything the next
+        // start needs is in place by the time the installer begins.
+        let data = tempfile::tempdir().unwrap();
+        let marker = data.path().join(SHOW_PANEL_MARKER_FILE);
+        let outcome = install_leaving_notes(Some(data.path()), || {
+            assert!(marker.exists(), "left before the installer begins");
+            assert_eq!(
+                take_install_failure(data.path()),
+                None,
+                "no reason before there is a failure"
+            );
+            Ok::<(), String>(())
+        });
+        assert_eq!(outcome, Ok(()));
+        assert!(
+            take_show_panel_marker(data.path()),
+            "an install that returns leaves it for the restart"
+        );
+        assert_eq!(take_install_failure(data.path()), None);
+    }
+
+    #[test]
+    fn a_failed_install_leaves_its_reason_next_to_the_marker() {
+        let data = tempfile::tempdir().unwrap();
+        let outcome = install_leaving_notes(Some(data.path()), || Err("disk is full"));
+        assert_eq!(outcome, Err("disk is full".to_string()));
+        assert!(
+            take_show_panel_marker(data.path()),
+            "the restarted app shows the panel with the reason"
+        );
+        assert_eq!(
+            take_install_failure(data.path()).map(|failure| failure.detail),
+            Some("disk is full".to_string())
+        );
+        // A panic is a failure too, with the same notes.
+        let outcome = install_leaving_notes(Some(data.path()), || -> Result<(), String> {
+            panic!("boom")
+        });
+        assert_eq!(
+            outcome,
+            Err("the installer stopped unexpectedly".to_string())
+        );
+        assert!(take_show_panel_marker(data.path()));
+        assert!(take_install_failure(data.path()).is_some());
+    }
+
+    #[test]
+    fn an_install_runs_where_no_notes_can_be_left() {
+        // The data folder is unknown: the notes are skipped, the install is not.
+        assert_eq!(install_leaving_notes(None, || Ok::<(), String>(())), Ok(()));
+        assert_eq!(
+            install_leaving_notes(None, || Err("no space")),
+            Err("no space".to_string())
+        );
     }
 
     #[test]

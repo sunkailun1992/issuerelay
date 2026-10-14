@@ -59,6 +59,7 @@ pub enum QuitState {
     Stopping,
     /// The host has stopped and a verified update is being installed: the process must outlive
     /// the install, so a closed window only hides and an exit request is held; `Installed` ends it.
+    /// (On Windows the plugin ends the process itself once it has handed over to the installer.)
     Installing,
     /// The host has stopped, or never started: the app exits (or restarts after an install).
     Done,

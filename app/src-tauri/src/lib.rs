@@ -103,24 +103,28 @@ pub fn run() {
                 update::PluginSource(app.handle().clone()),
                 env!("CARGO_PKG_VERSION"),
             );
-            // The previous run could not install an update and restarted as it was: the banner
-            // says why, once.
-            if let Some(failure) = issuerelay_core::paths::AppPaths::system()
+            // What the previous run's install left for this start, both once. The reason it could
+            // not install (the banner says why), and the request that the panel shows: the restart
+            // after an install keeps `--autostart`, which would hide the outcome.
+            let data_dir = issuerelay_core::paths::AppPaths::system()
                 .ok()
-                .and_then(|paths| update::take_install_failure(&paths.data_dir))
-            {
+                .map(|paths| paths.data_dir);
+            if let Some(failure) = data_dir.as_deref().and_then(update::take_install_failure) {
                 updates.show_failure(failure);
             }
+            let panel_requested = data_dir
+                .as_deref()
+                .is_some_and(update::take_show_panel_marker);
             // What the quit flow sees of an update: the verified download, not the plugin.
             app.manage(updates.waiting());
             app.manage(updates);
             tray::create(app.handle())?;
-            if app.state::<state::AppState>().autostarted {
+            if startup::starts_hidden(app.state::<state::AppState>().autostarted, panel_requested) {
                 // A login start stays in the tray: through the same `hide` as closing the panel,
                 // so macOS shows no Dock icon either.
                 window::hide(app.handle());
             }
-            tauri::async_runtime::spawn(startup::start(app.handle().clone()));
+            tauri::async_runtime::spawn(startup::start(app.handle().clone(), panel_requested));
             update::spawn_checker(app.handle().clone());
             Ok(())
         })

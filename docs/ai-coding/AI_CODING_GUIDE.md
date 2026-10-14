@@ -96,7 +96,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 单实例锁 | macOS：套接字所在目录下的 `issuerelay.lock`（0600，运行中的宿主持有排他锁，进程退出时由系统释放，文件本身不删）；Windows：靠管道的 `first_pipe_instance` | 第二个宿主启动时报「已在运行」；`Host::stop` 把本机通信放在最后停，锁要等运行都结束、结果记录完才释放 |
 | 桌面应用单实例 | macOS：`/tmp/com_sunkailun_issuerelay_si.sock`；Windows：命名互斥量 `com.sunkailun.issuerelay-sim`（tauri-plugin-single-instance 2.5.3） | 第二次打开应用只把已运行的面板带到前面；与上一行宿主的单实例锁是两回事：开发宿主不经过它，两个宿主之间靠宿主的锁报「已在运行」 |
 | 命令行的 PATH 入口 | macOS：`~/.local/bin/issuerelay`（指向应用包内命令行程序的符号链接）；Windows：用户级 `Path`（`HKCU\Environment`）里的安装目录 | 只在用户打开设置里的开关时建，关掉时删，且只删 IssueRelay 自己建的；macOS 不覆盖别人的文件，指向别份应用的旧链接换成指向这一份；Windows 保持原来的注册表类型、不分大小写去重；都不需要管理员（`cli_path.rs`） |
-| 装不上的更新 | `<数据目录>/com.sunkailun.issuerelay/update-install-failure.txt` | 「安装并重启」在宿主停下后没装上时写下清洗过的一行原因，程序按原版本重启后读出、删除，面板顶部的横幅显示一次 |
+| 装不上的更新 | `<数据目录>/com.sunkailun.issuerelay/update-install-failure.txt` | 「安装并重启」在宿主停下后没装上时写下清洗过的一行原因（只记安装函数返回的错误：macOS 换不了应用包，Windows 启动不了安装程序）；程序按原版本重启后读出、删除，面板顶部的横幅显示一次。Windows 上安装程序一启动，IssueRelay 就已经退出，之后安装程序失败或 MSI 的管理员确认被拒绝都不会留下这条记录，用户从开始菜单重新打开即可 |
+| 更新后显示面板 | `<数据目录>/com.sunkailun.issuerelay/update-show-panel` | 「安装并重启」在调用安装**之前**留下的空文件（Windows 上安装一开始进程就结束，安装之后的代码不会再跑）；下一次启动读出并删除，面板照常显示，开机自启也不例外（重启沿用 `--autostart`，否则安装的结果和失败原因没人看见）；删不掉就当没有，免得每次登录都弹出面板（`update::{leave,take}_show_panel_marker`、`startup::shows_panel`） |
 
 `<配置目录>` 取自 `dirs::config_dir()`，`<数据目录>` 取自 `dirs::data_local_dir()`：macOS 都是 `~/Library/Application Support`；Windows 分别是 `%APPDATA%`（随账户漫游）和 `%LOCALAPPDATA%`（只在本机，运行记录和日志不随账户同步）。这些都只在用户本机，不进仓库。
 

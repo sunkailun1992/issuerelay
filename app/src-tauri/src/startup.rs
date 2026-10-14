@@ -19,9 +19,24 @@ use crate::{
     tray, window,
 };
 
+/// Whether the panel shows once the host is up (`start`). A login start stays in the tray, unless
+/// the first-run guide has been neither finished nor set aside, which the panel must show, or the
+/// previous run left the panel marker: the install it began has ended
+/// (`update::install_and_restart`), and the restart keeps `--autostart`, so its outcome would go
+/// unseen.
+pub fn shows_panel(autostarted: bool, onboarding_completed: bool, panel_requested: bool) -> bool {
+    !autostarted || !onboarding_completed || panel_requested
+}
+
+/// Whether the window is hidden from the first moment (lib.rs): a login start does that, unless
+/// the previous run asked for the panel.
+pub fn starts_hidden(autostarted: bool, panel_requested: bool) -> bool {
+    autostarted && !panel_requested
+}
+
 /// Starts the host with the system's paths and the real connector, records how that went and
-/// shows the panel unless a login start with the first-run guide done keeps it in the tray.
-pub async fn start(app: AppHandle) {
+/// shows the panel as `shows_panel` says (`panel_requested`: the previous run's marker).
+pub async fn start(app: AppHandle, panel_requested: bool) {
     let result = match AppPaths::system() {
         Ok(paths) => {
             let state_db = paths.state_db();
@@ -48,7 +63,8 @@ pub async fn start(app: AppHandle) {
             tray::refresh(&app, &host);
             // A login start stays in the tray (lib.rs hid it already), unless the first-run guide
             // has been neither finished nor set aside ("Set up later"): then the panel shows it.
-            if !state.autostarted || !host.engine().settings().onboarding_completed {
+            let onboarded = host.engine().settings().onboarding_completed;
+            if shows_panel(state.autostarted, onboarded, panel_requested) {
                 window::show(&app);
             }
         }
@@ -102,6 +118,33 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    #[test]
+    fn a_login_start_shows_the_panel_only_when_it_has_something_to_tell() {
+        // (started by the login item, first-run guide done, an update's restart asked for the
+        // panel) and whether the panel shows once the host is up.
+        for (autostarted, onboarded, asked_for, shows) in [
+            (false, true, false, true),
+            (false, false, false, true),
+            (true, false, false, true),
+            (true, true, false, false),
+            (true, true, true, true),
+        ] {
+            assert_eq!(
+                shows_panel(autostarted, onboarded, asked_for),
+                shows,
+                "autostarted {autostarted}, onboarded {onboarded}, asked for {asked_for}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_login_start_is_hidden_from_the_first_moment_unless_the_panel_was_asked_for() {
+        assert!(starts_hidden(true, false));
+        assert!(!starts_hidden(true, true), "the update's restart asked");
+        assert!(!starts_hidden(false, false));
+        assert!(!starts_hidden(false, true));
+    }
 
     #[test]
     fn start_failures_are_told_apart() {
