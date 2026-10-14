@@ -810,3 +810,17 @@ test.each([
   await userEvent.click(await screen.findByRole("combobox", { name: field }));
   expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(texts);
 });
+
+test("while the first connection to Linear is under way the project list says so, not that it failed", async () => {
+  const backend = createMockBackend("connecting", { latencyMs: 0 });
+  const { client } = await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  expect(await screen.findByText("Connecting to Linear…")).toBeInTheDocument();
+  await waitFor(() => expect(client.getQueryState(queryKeys.projects)?.status).toBe("error"));
+  expect(screen.queryByText("Could not read the projects from Linear")).not.toBeInTheDocument();
+  // Connected: the projects are read again (the app's connection refresh does that).
+  await backend.linearReconnect();
+  await client.invalidateQueries({ queryKey: queryKeys.status });
+  await client.invalidateQueries({ queryKey: queryKeys.projects });
+  expect(await screen.findByRole("combobox", { name: "Linear project" })).toBeInTheDocument();
+  expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
+});

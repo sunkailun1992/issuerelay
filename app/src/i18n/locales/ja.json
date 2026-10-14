@@ -45,6 +45,27 @@
     "open_panel": "パネルを開く",
     "quit": "IssueRelay を終了"
   },
+  "menu": {
+    "about": "{{name}}について",
+    "services": "サービス",
+    "hide": "{{name}}を隠す",
+    "hide_others": "ほかを隠す",
+    "file": "ファイル",
+    "close_window": "ウインドウを閉じる",
+    "edit": "編集",
+    "undo": "取り消す",
+    "redo": "やり直す",
+    "cut": "カット",
+    "copy": "コピー",
+    "paste": "ペースト",
+    "select_all": "すべてを選択",
+    "view": "表示",
+    "fullscreen": "フルスクリーンにする",
+    "window": "ウインドウ",
+    "minimize": "しまう",
+    "zoom": "拡大/縮小",
+    "help": "ヘルプ"
+  },
   "notify": {
     "run_started": "実行を開始しました。",
     "awaiting_acceptance": "確認をお願いします。課題はテスト中になりました。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "実行中のタスクがあります",
-    "body": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
+    "body_one": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
+    "body_other": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
     "wait": "完了を待つ",
     "stop": "今すぐ停止",
     "cancel": "実行を続ける",
@@ -77,7 +99,8 @@
     "draining": "実行の完了を待っています",
     "problem": "対応が必要です",
     "connecting": "Linear に接続中…",
-    "version": "バージョン {{version}}"
+    "version": "バージョン {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "たった今",

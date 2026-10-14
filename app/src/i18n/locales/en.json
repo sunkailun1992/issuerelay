@@ -45,6 +45,27 @@
     "open_panel": "Open panel",
     "quit": "Quit IssueRelay"
   },
+  "menu": {
+    "about": "About {{name}}",
+    "services": "Services",
+    "hide": "Hide {{name}}",
+    "hide_others": "Hide Others",
+    "file": "File",
+    "close_window": "Close Window",
+    "edit": "Edit",
+    "undo": "Undo",
+    "redo": "Redo",
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "select_all": "Select All",
+    "view": "View",
+    "fullscreen": "Enter Full Screen",
+    "window": "Window",
+    "minimize": "Minimize",
+    "zoom": "Zoom",
+    "help": "Help"
+  },
   "notify": {
     "run_started": "The run has started.",
     "awaiting_acceptance": "Ready for you to accept: it is in testing now.",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "Runs are still in progress",
-    "body": "{{count}} run(s) are in progress. Wait for them to finish, or stop them now?",
+    "body_one": "{{count}} run is in progress. Wait for it to finish, or stop it now?",
+    "body_other": "{{count}} runs are in progress. Wait for them to finish, or stop them now?",
     "wait": "Wait for completion",
     "stop": "Stop now",
     "cancel": "Keep running",
@@ -77,7 +99,8 @@
     "draining": "Waiting for runs to finish",
     "problem": "Needs attention",
     "connecting": "Connecting to Linear…",
-    "version": "Version {{version}}"
+    "version": "Version {{version}}",
+    "notifications": "Notifications"
   },
   "format": {
     "just_now": "Just now",

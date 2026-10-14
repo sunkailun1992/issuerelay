@@ -26,7 +26,7 @@ use issuerelay_core::host::StopMode;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 
-use crate::{events, logging, state::AppState, window};
+use crate::{events, i18n::Translator, logging, state::AppState, window};
 
 /// The id of the Quit items: the tray menu's and, on macOS, the application menu's. The tray's
 /// menu handler gets the events of every menu (`TrayIconBuilder::on_menu_event`), so both go to
@@ -302,16 +302,67 @@ fn wait_bounded(task: impl Future<Output = ()> + Send + 'static, limit: Duration
     wait.recv_timeout(limit).is_ok()
 }
 
-/// The application menu's Quit item (macOS), kept so that `tray::refresh` can give it the
-/// language the settings ask for, as it does the tray's items.
-#[cfg(target_os = "macos")]
-pub struct AppMenuQuit(pub tauri::menu::MenuItem<tauri::Wry>);
+/// The texts of macOS's application menu, by translation key, in the order of the menu; Quit is
+/// the tray's `tray.quit`. They are in the system language until the host has started, then in the
+/// language the settings ask for (`tray::refresh`), like the tray's items.
+pub const APP_MENU_KEYS: [&str; 20] = [
+    "menu.about",
+    "menu.services",
+    "menu.hide",
+    "menu.hide_others",
+    "tray.quit",
+    "menu.file",
+    "menu.close_window",
+    "menu.edit",
+    "menu.undo",
+    "menu.redo",
+    "menu.cut",
+    "menu.copy",
+    "menu.paste",
+    "menu.select_all",
+    "menu.view",
+    "menu.fullscreen",
+    "menu.window",
+    "menu.minimize",
+    "menu.zoom",
+    "menu.help",
+];
 
-/// macOS's application menu: Tauri's default one (`Menu::default` in tauri 2.12.3) except for
-/// Quit, which is an item of IssueRelay's own with Cmd+Q instead of the system's `terminate:`, so
-/// that quitting asks while runs are in progress (see the module comment). Its label is in the
-/// system language until the host has started (`AppMenuQuit`). Windows has no application menu:
-/// there the tray's Quit is the way to quit.
+/// The text of the application menu's item `key` in `t`'s language, with the app's `name` for
+/// `{{name}}` ("About IssueRelay").
+pub fn app_menu_text(t: &Translator, key: &str, name: &str) -> String {
+    t.t_with(key, &[("name", name)])
+}
+
+/// One item of the application menu (macOS) whose text follows the interface language.
+#[cfg(target_os = "macos")]
+pub enum AppMenuItem {
+    Submenu(tauri::menu::Submenu<tauri::Wry>),
+    Predefined(tauri::menu::PredefinedMenuItem<tauri::Wry>),
+    Item(tauri::menu::MenuItem<tauri::Wry>),
+}
+
+#[cfg(target_os = "macos")]
+impl AppMenuItem {
+    pub fn set_text(&self, text: &str) -> tauri::Result<()> {
+        match self {
+            AppMenuItem::Submenu(item) => item.set_text(text),
+            AppMenuItem::Predefined(item) => item.set_text(text),
+            AppMenuItem::Item(item) => item.set_text(text),
+        }
+    }
+}
+
+/// The application menu's items (macOS) with the key of each one's text, kept so that
+/// `tray::refresh` can give them the language the settings ask for, as it does the tray's items.
+#[cfg(target_os = "macos")]
+pub struct AppMenu(pub Vec<(&'static str, AppMenuItem)>);
+
+/// macOS's application menu: Tauri's default one (`Menu::default` in tauri 2.12.3) with every text
+/// from the panel's translation files (`APP_MENU_KEYS`) instead of AppKit's English, and with a
+/// Quit of IssueRelay's own with Cmd+Q instead of the system's `terminate:`, so that quitting asks
+/// while runs are in progress (see the module comment). The texts start in the system language
+/// (`AppMenu`). Windows has no application menu: there the tray's Quit is the way to quit.
 #[cfg(target_os = "macos")]
 pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
@@ -319,11 +370,13 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
         WINDOW_SUBMENU_ID,
     };
 
-    use crate::i18n::{Translator, resolve_language};
+    use AppMenuItem::{Item, Predefined, Submenu as Sub};
+
+    use crate::i18n::resolve_language;
 
     let package = app.package_info();
     let config = app.config();
-    let about = AboutMetadata {
+    let metadata = AboutMetadata {
         name: Some(package.name.clone()),
         version: Some(package.version.to_string()),
         copyright: config.bundle.copyright.clone(),
@@ -338,73 +391,96 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
         "system",
         sys_locale::get_locale().as_deref(),
     ));
+    let text = |key: &str| app_menu_text(&t, key, &package.name);
+    let separator = || PredefinedMenuItem::separator(app);
+
+    let about = PredefinedMenuItem::about(app, Some(&text("menu.about")), Some(metadata))?;
+    let services = PredefinedMenuItem::services(app, Some(&text("menu.services")))?;
+    let hide = PredefinedMenuItem::hide(app, Some(&text("menu.hide")))?;
+    let hide_others = PredefinedMenuItem::hide_others(app, Some(&text("menu.hide_others")))?;
     let quit = MenuItem::with_id(
         app,
         QUIT_MENU_ID,
-        t.t("tray.quit"),
+        text("tray.quit"),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
-    app.manage(AppMenuQuit(quit.clone()));
-    Menu::with_items(
+    let close_file = PredefinedMenuItem::close_window(app, Some(&text("menu.close_window")))?;
+    let undo = PredefinedMenuItem::undo(app, Some(&text("menu.undo")))?;
+    let redo = PredefinedMenuItem::redo(app, Some(&text("menu.redo")))?;
+    let cut = PredefinedMenuItem::cut(app, Some(&text("menu.cut")))?;
+    let copy = PredefinedMenuItem::copy(app, Some(&text("menu.copy")))?;
+    let paste = PredefinedMenuItem::paste(app, Some(&text("menu.paste")))?;
+    let select_all = PredefinedMenuItem::select_all(app, Some(&text("menu.select_all")))?;
+    let fullscreen = PredefinedMenuItem::fullscreen(app, Some(&text("menu.fullscreen")))?;
+    let minimize = PredefinedMenuItem::minimize(app, Some(&text("menu.minimize")))?;
+    let zoom = PredefinedMenuItem::maximize(app, Some(&text("menu.zoom")))?;
+    let close_window = PredefinedMenuItem::close_window(app, Some(&text("menu.close_window")))?;
+
+    let app_submenu = Submenu::with_items(
         app,
+        &package.name,
+        true,
         &[
-            &Submenu::with_items(
-                app,
-                &package.name,
-                true,
-                &[
-                    &PredefinedMenuItem::about(app, None, Some(about))?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &quit,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "File",
-                true,
-                &[&PredefinedMenuItem::close_window(app, None)?],
-            )?,
-            &Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "View",
-                true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
-            )?,
-            &Submenu::with_id_and_items(
-                app,
-                WINDOW_SUBMENU_ID,
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(app, None)?,
-                    &PredefinedMenuItem::maximize(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::close_window(app, None)?,
-                ],
-            )?,
-            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+            &about,
+            &separator()?,
+            &services,
+            &separator()?,
+            &hide,
+            &hide_others,
+            &separator()?,
+            &quit,
         ],
-    )
+    )?;
+    let file = Submenu::with_items(app, text("menu.file"), true, &[&close_file])?;
+    let edit = Submenu::with_items(
+        app,
+        text("menu.edit"),
+        true,
+        &[
+            &undo,
+            &redo,
+            &separator()?,
+            &cut,
+            &copy,
+            &paste,
+            &select_all,
+        ],
+    )?;
+    let view = Submenu::with_items(app, text("menu.view"), true, &[&fullscreen])?;
+    let window = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        text("menu.window"),
+        true,
+        &[&minimize, &zoom, &separator()?, &close_window],
+    )?;
+    let help = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, text("menu.help"), true, &[])?;
+    let menu = Menu::with_items(app, &[&app_submenu, &file, &edit, &view, &window, &help])?;
+    app.manage(AppMenu(vec![
+        ("menu.about", Predefined(about)),
+        ("menu.services", Predefined(services)),
+        ("menu.hide", Predefined(hide)),
+        ("menu.hide_others", Predefined(hide_others)),
+        ("tray.quit", Item(quit)),
+        ("menu.file", Sub(file)),
+        ("menu.close_window", Predefined(close_file)),
+        ("menu.edit", Sub(edit)),
+        ("menu.undo", Predefined(undo)),
+        ("menu.redo", Predefined(redo)),
+        ("menu.cut", Predefined(cut)),
+        ("menu.copy", Predefined(copy)),
+        ("menu.paste", Predefined(paste)),
+        ("menu.select_all", Predefined(select_all)),
+        ("menu.view", Sub(view)),
+        ("menu.fullscreen", Predefined(fullscreen)),
+        ("menu.window", Sub(window)),
+        ("menu.minimize", Predefined(minimize)),
+        ("menu.zoom", Predefined(zoom)),
+        ("menu.close_window", Predefined(close_window)),
+        ("menu.help", Sub(help)),
+    ]));
+    Ok(menu)
 }
 
 #[cfg(test)]
@@ -711,6 +787,30 @@ mod tests {
             QuitState::Idle,
             "nothing to wait for"
         );
+    }
+
+    #[test]
+    fn the_application_menu_is_in_the_interface_language() {
+        // Every key is one Rust looks up, so every language is checked to have it (i18n.rs).
+        for key in APP_MENU_KEYS {
+            assert!(
+                crate::i18n::USED_KEYS.contains(&key),
+                "{key} is missing from USED_KEYS"
+            );
+        }
+        let text = |lang: &str, key: &str| app_menu_text(&Translator::new(lang), key, "IssueRelay");
+        assert_eq!(text("en", "menu.about"), "About IssueRelay");
+        assert_eq!(text("en", "menu.select_all"), "Select All");
+        assert_eq!(text("zh-CN", "menu.about"), "关于 IssueRelay");
+        assert_eq!(text("zh-CN", "menu.edit"), "编辑");
+        assert_eq!(text("ja", "menu.hide"), "IssueRelayを隠す");
+        assert_eq!(text("ko", "tray.quit"), "IssueRelay 종료");
+        // No item is left in English in another language: the menu bar reads in one language.
+        for lang in ["zh-CN", "zh-TW", "ja", "ko"] {
+            for key in APP_MENU_KEYS {
+                assert_ne!(text(lang, key), text("en", key), "{lang}: {key}");
+            }
+        }
     }
 
     #[test]

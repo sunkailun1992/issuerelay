@@ -47,6 +47,12 @@ function LanguageSync() {
   return null;
 }
 
+/** The toasts, whose region a screen reader announces by a name in the interface language. */
+function Toasts() {
+  const { t } = useTranslation();
+  return <Toaster containerAriaLabel={t("shell.notifications")} />;
+}
+
 /**
  * The boundary around the pages, inside the router: a page that fails is replaced by the crash
  * page, and going to another address clears it (the hash route is the reset key).
@@ -102,7 +108,7 @@ export default function App({ backend }: { backend: Backend }) {
             <QuitDialog />
           </ErrorBoundary>
           <ErrorBoundary fallback="nothing">
-            <Toaster />
+            <Toasts />
           </ErrorBoundary>
         </QueryClientProvider>
       </BackendProvider>

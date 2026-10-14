@@ -68,7 +68,7 @@ test("the quit prompt works while the panel is replaced by the start failure", a
   render(<App backend={backend} />);
   expect(await screen.findByText("Something stopped IssueRelay from starting")).toBeInTheDocument();
   await act(async () => ask({ running: 1, waiting: false }));
-  expect(screen.getByText(/1 run\(s\) are in progress/)).toBeInTheDocument();
+  expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
 });
 
 test("every page is reachable from the sidebar and has its header", async () => {
@@ -166,7 +166,7 @@ test("a page that cannot read what the backend gave shows the error page, not a 
   expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
   // The quit prompt is outside what failed, and still asks.
   await act(async () => ask({ running: 2, waiting: false }));
-  expect(screen.getByText(/2 run\(s\) are in progress/)).toBeInTheDocument();
+  expect(screen.getByText(/2 runs are in progress/)).toBeInTheDocument();
 });
 
 /**
@@ -199,7 +199,7 @@ test("a page that fails leaves the quit prompt and the toasts working", async ()
   expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
   // The tray's Quit with a run in progress: the prompt opens over the error page and answers.
   await ask({ running: 1, waiting: false });
-  expect(screen.getByText(/1 run\(s\) are in progress/)).toBeInTheDocument();
+  expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
   // The answer the app refused is told in a toast, which still has a place to appear.
   expect(await screen.findByText("the host is shutting down")).toBeInTheDocument();
@@ -230,4 +230,15 @@ test("Reload on the error page goes back to the overview, where the page that fa
   render(<App backend={backend} />);
   await userEvent.click(await screen.findByRole("button", { name: en.crash.reload }));
   expect(window.location.hash).toBe("#/");
+});
+
+test("the region of the toasts is named in the interface language", async () => {
+  await initI18nOnce("en");
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.settings.bind(backend);
+  backend.settings = async () => ({ ...(await read()), language: "ja" });
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("link", { name: ja.nav.runs })).toBeInTheDocument();
+  // The library adds its keyboard shortcut to the name.
+  expect(screen.getByRole("region", { name: new RegExp(`^${ja.shell.notifications} `) })).toBeInTheDocument();
 });

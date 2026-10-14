@@ -39,6 +39,22 @@ test("the interface uses the system fonts, which cover Chinese, Japanese and Kor
   expect(css).not.toContain("fontsource");
 });
 
+// On Windows (WebView2) the Apple and Segoe UI families have no CJK glyphs and PingFang and
+// Hiragino are missing: the first CJK font of the stack draws Japanese and Traditional Chinese too.
+test("Japanese, Traditional Chinese and Korean get Windows fonts of their own", () => {
+  const families = (selector: string) => {
+    const match = /--font-sans: ([^;]*);/.exec(block(selector));
+    expect(match, `${selector} --font-sans`).not.toBeNull();
+    return match![1].split(",").map((family) => family.trim().replaceAll('"', ""));
+  };
+  const cjkOf = (list: string[]) => list.filter((family) => /YaHei|JhengHei|Yu Gothic|Meiryo|Malgun|PingFang|Hiragino|Apple SD/.test(family));
+  expect(cjkOf(families(":root:lang(ja)"))).toEqual(["Hiragino Sans", "Yu Gothic UI", "Meiryo UI"]);
+  expect(cjkOf(families(":root:lang(zh-TW)"))).toEqual(["PingFang TC", "Microsoft JhengHei UI"]);
+  expect(cjkOf(families(":root:lang(ko)"))).toEqual(["Apple SD Gothic Neo", "Malgun Gothic"]);
+  // The page's font is the variable, which those rules set for the language of <html>.
+  expect(block("@layer base")).toMatch(/html \{[^}]*font-family: var\(--font-sans\);/);
+});
+
 /** The colour a theme gives to `--name`, as `oklch(...)` text. */
 function token(theme: ":root" | ".dark", name: string): string {
   const match = new RegExp(`^\\s*--${name}: (oklch\\([^)]*\\));`, "m").exec(block(theme));

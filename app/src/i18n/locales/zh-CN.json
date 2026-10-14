@@ -45,6 +45,27 @@
     "open_panel": "打开面板",
     "quit": "退出 IssueRelay"
   },
+  "menu": {
+    "about": "关于 {{name}}",
+    "services": "服务",
+    "hide": "隐藏 {{name}}",
+    "hide_others": "隐藏其他",
+    "file": "文件",
+    "close_window": "关闭窗口",
+    "edit": "编辑",
+    "undo": "撤销",
+    "redo": "重做",
+    "cut": "剪切",
+    "copy": "拷贝",
+    "paste": "粘贴",
+    "select_all": "全选",
+    "view": "显示",
+    "fullscreen": "进入全屏幕",
+    "window": "窗口",
+    "minimize": "最小化",
+    "zoom": "缩放",
+    "help": "帮助"
+  },
   "notify": {
     "run_started": "已开始运行。",
     "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "仍有任务在运行",
-    "body": "有 {{count}} 个任务正在运行。要等它们运行完毕，还是现在停止？",
+    "body_one": "有 {{count}} 个任务正在运行。要等它运行完毕，还是现在停止？",
+    "body_other": "有 {{count}} 个任务正在运行。要等它们运行完毕，还是现在停止？",
     "wait": "等待完成",
     "stop": "立即停止",
     "cancel": "继续运行",
@@ -77,7 +99,8 @@
     "draining": "等待运行完毕",
     "problem": "需要处理",
     "connecting": "正在连接 Linear…",
-    "version": "版本 {{version}}"
+    "version": "版本 {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "刚刚",

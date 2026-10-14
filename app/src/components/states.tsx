@@ -1,4 +1,4 @@
-import { CircleAlert, type LucideIcon } from "lucide-react";
+import { CircleAlert, LoaderCircle, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -38,6 +38,21 @@ export function LoadingState({ rows = 3 }: { rows?: number }) {
         <Skeleton key={row} className="h-10 w-full" />
       ))}
     </div>
+  );
+}
+
+/**
+ * The first connection to Linear is still under way (`LinearSetup::Connecting`): what needs Linear
+ * waits for it. Until then a call that asks Linear is refused ("still connecting"), which is no
+ * failure to report; the panel reads it again once the connection changes.
+ */
+export function LinearConnecting() {
+  const { t } = useTranslation();
+  return (
+    <p role="status" className="flex items-center gap-2 text-muted-foreground">
+      <LoaderCircle aria-hidden className="size-4 shrink-0 animate-spin" />
+      {t("linear.connecting")}
+    </p>
   );
 }
 

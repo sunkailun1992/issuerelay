@@ -36,6 +36,17 @@ pub fn debug_failed<T, E: Display>(result: Result<T, E>, what: &str) {
     }
 }
 
+/// Logs every panic through tracing, so that it reaches the log file scrubbed like any other line
+/// (a release build on Windows has no console, and a panicking task would otherwise end without a
+/// trace), then hands it to the hook that was there before, which prints it as before.
+pub fn install_panic_hook() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "IssueRelay panicked");
+        before(info);
+    }));
+}
+
 /// Starts logging; keep the returned guard alive for as long as the app runs and drop it before
 /// the process ends, or the last lines are lost. Without a log directory only stderr is used.
 pub fn init(logs_dir: Option<&Path>) -> Option<WorkerGuard> {
@@ -104,7 +115,13 @@ fn subscriber(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use chrono::Utc;
 
@@ -165,6 +182,41 @@ mod tests {
         assert!(text.contains("poll failed") && text.contains("boom [2J INFO forged"));
         assert!(text.contains("checked Linear"));
         assert!(!text.contains("authorization code"), "{text:?}");
+    }
+
+    #[test]
+    fn a_panic_is_logged_scrubbed_and_still_handed_to_the_hook_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (subscriber, guard) = subscriber(Some(dir.path()), EnvFilter::new("info"), false);
+        let before = std::panic::take_hook();
+        // Stands in for the default hook (which prints the panic): the new hook must hand it on.
+        let handed_on = Arc::new(AtomicBool::new(false));
+        let flag = handed_on.clone();
+        std::panic::set_hook(Box::new(move |_| flag.store(true, Ordering::SeqCst)));
+        install_panic_hook();
+        // A thread whose default subscriber is the log file's, as the app's are once logging is up.
+        let outcome = std::thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || {
+                panic!("the forwarder broke\u{1b}[2J\nINFO forged: x=1")
+            })
+        })
+        .join();
+        std::panic::set_hook(before);
+        assert!(outcome.is_err(), "the thread panicked");
+        assert!(
+            handed_on.load(Ordering::SeqCst),
+            "the hook before still saw it"
+        );
+        drop(guard);
+        let file = names(dir.path()).pop().expect("a log file");
+        let text = fs::read_to_string(dir.path().join(file)).unwrap();
+        assert!(text.contains("IssueRelay panicked"), "{text:?}");
+        assert!(
+            text.contains("the forwarder broke [2J INFO forged: x=1"),
+            "{text:?}"
+        );
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert_eq!(text.lines().count(), 1, "one scrubbed line: {text:?}");
     }
 
     #[test]

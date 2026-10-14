@@ -1,6 +1,6 @@
-//! The interface languages, read from the panel's translation files so that the tray menu and
-//! the notifications say the same as the panel. (The quit prompt and the startup error page are
-//! the panel's own text.)
+//! The interface languages, read from the panel's translation files so that the tray menu,
+//! macOS's application menu and the notifications say the same as the panel. (The quit prompt and
+//! the startup error page are the panel's own text.)
 use std::sync::LazyLock;
 
 use issuerelay_core::config::Settings;
@@ -29,6 +29,25 @@ pub const USED_KEYS: &[&str] = &[
     "tray.poll_now",
     "tray.open_panel",
     "tray.quit",
+    "menu.about",
+    "menu.services",
+    "menu.hide",
+    "menu.hide_others",
+    "menu.file",
+    "menu.close_window",
+    "menu.edit",
+    "menu.undo",
+    "menu.redo",
+    "menu.cut",
+    "menu.copy",
+    "menu.paste",
+    "menu.select_all",
+    "menu.view",
+    "menu.fullscreen",
+    "menu.window",
+    "menu.minimize",
+    "menu.zoom",
+    "menu.help",
     "notify.run_started",
     "notify.awaiting_acceptance",
     "notify.needs_info",

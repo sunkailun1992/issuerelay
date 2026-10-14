@@ -3,7 +3,7 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, 
 import { useTranslation } from "react-i18next";
 import { Field, Hint } from "@/components/FormField";
 import { FullAccessWarning } from "@/components/FullAccessWarning";
-import { ErrorState, LoadingState } from "@/components/states";
+import { ErrorState, LinearConnecting, LoadingState } from "@/components/states";
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { useBindings, useProjects, useSaveBinding, useSaveSettings, useSettings } from "@/hooks/queries";
+import { useBindings, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
 import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useBackend } from "@/lib/backend-context";
 import { bindingLabels } from "@/lib/binding-labels";
@@ -47,6 +47,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const creating = initial === undefined;
   // Only a new binding picks its project; Linear is not asked for the projects otherwise.
   const projects = useProjects(creating);
+  const connecting = useStatus().data?.linear.kind === "connecting";
   const bindings = useBindings();
   // The form shows a failed save itself, so the hook does not also toast it.
   const save = useSaveBinding({ quiet: true });
@@ -103,8 +104,9 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
 
   /**
    * What stands for the project: its name when a binding is edited (the project of a binding does
-   * not change), else the list of Linear's projects, or why there is none yet. `control` is
-   * whether it is something the label can name.
+   * not change), else the list of Linear's projects, or why there is none yet (the first connection
+   * to Linear still under way is a wait, not a failure). `control` is whether it is something the
+   * label can name.
    */
   const projectField = (): { control: boolean; node: ReactNode } => {
     if (initial !== undefined) {
@@ -114,6 +116,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
         node: <Input id={id("project")} readOnly value={initial.project_name} className="bg-muted! text-muted-foreground" />,
       };
     }
+    if (connecting) return { control: false, node: <LinearConnecting /> };
     if (projects.isError && !projects.isFetching) {
       return {
         control: false,

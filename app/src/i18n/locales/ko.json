@@ -45,6 +45,27 @@
     "open_panel": "패널 열기",
     "quit": "IssueRelay 종료"
   },
+  "menu": {
+    "about": "{{name}}에 관하여",
+    "services": "서비스",
+    "hide": "{{name}} 가리기",
+    "hide_others": "기타 가리기",
+    "file": "파일",
+    "close_window": "윈도우 닫기",
+    "edit": "편집",
+    "undo": "실행 취소",
+    "redo": "실행 복귀",
+    "cut": "오려두기",
+    "copy": "복사하기",
+    "paste": "붙여넣기",
+    "select_all": "전체 선택",
+    "view": "보기",
+    "fullscreen": "전체 화면 시작",
+    "window": "윈도우",
+    "minimize": "최소화",
+    "zoom": "확대/축소",
+    "help": "도움말"
+  },
   "notify": {
     "run_started": "실행을 시작했습니다.",
     "awaiting_acceptance": "검수할 준비가 되었습니다. 이슈가 테스트 중 상태입니다.",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "실행 중인 작업이 있습니다",
-    "body": "작업 {{count}}개가 실행 중입니다. 끝날 때까지 기다릴까요, 아니면 지금 중지할까요?",
+    "body_one": "작업 {{count}}개가 실행 중입니다. 끝날 때까지 기다릴까요, 아니면 지금 중지할까요?",
+    "body_other": "작업 {{count}}개가 실행 중입니다. 끝날 때까지 기다릴까요, 아니면 지금 중지할까요?",
     "wait": "끝날 때까지 기다리기",
     "stop": "지금 중지",
     "cancel": "계속 실행",
@@ -77,7 +99,8 @@
     "draining": "실행이 끝나기를 기다리는 중",
     "problem": "확인이 필요합니다",
     "connecting": "Linear에 연결하는 중…",
-    "version": "버전 {{version}}"
+    "version": "버전 {{version}}",
+    "notifications": "알림"
   },
   "format": {
     "just_now": "방금",

@@ -20,7 +20,7 @@ use issuerelay_core::{
     linear::{Project, Viewer},
     model::Job,
     setup::{self, SetupAction},
-    text::clean_text,
+    text::{clean_text, strip_control},
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -80,10 +80,28 @@ const MCP_GET_LIMIT: Duration = Duration::from_secs(60);
 /// The error code `open_linear` answers with for any other link; the panel translates it.
 const NOT_A_LINEAR_LINK: &str = "not_a_linear_link";
 
-/// An error as the panel shows it: the whole chain on one cleaned line (`clean_text`), since
-/// core's errors can carry text from Linear, the executors or the system.
+/// The most characters of an error the panel is given.
+const MAX_ERROR_CHARS: usize = 500;
+/// How many of them a longer error keeps from its start; the rest come from its end.
+const ERROR_HEAD_CHARS: usize = 200;
+
+/// An error as the panel shows it: the whole chain on one line, cleaned of control and invisible
+/// characters (`strip_control`), since core's errors can carry text from Linear, the executors or
+/// the system. anyhow writes the root cause last, so a chain longer than `MAX_ERROR_CHARS` keeps
+/// its start and its end, with `…` where the middle was.
 fn error(e: impl Into<anyhow::Error>) -> String {
-    clean_text(&format!("{:#}", e.into()))
+    let flat = strip_control(&format!("{:#}", e.into()));
+    let line = flat.trim();
+    let length = line.chars().count();
+    if length <= MAX_ERROR_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(ERROR_HEAD_CHARS).collect();
+    let tail: String = line
+        .chars()
+        .skip(length - (MAX_ERROR_CHARS - ERROR_HEAD_CHARS))
+        .collect();
+    format!("{}…{}", head.trim_end(), tail.trim_start())
 }
 
 fn clamp_limit(limit: usize, max: usize) -> usize {
@@ -705,6 +723,25 @@ mod tests {
         ] {
             assert_eq!(opened(text).as_deref(), Some(normalized), "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_long_error_keeps_its_start_and_its_root_cause() {
+        // anyhow writes the chain outermost first: the root cause is at the end of the line.
+        let chain = anyhow::anyhow!("root cause\u{1b}[2J")
+            .context("x".repeat(2000))
+            .context("outer\n");
+        let line = error(chain);
+        assert!(line.starts_with("outer : xxx"), "{line}");
+        assert!(line.ends_with("xxx: root cause [2J"), "{line}");
+        assert_eq!(line.matches('…').count(), 1, "{line}");
+        assert!(line.chars().count() <= MAX_ERROR_CHARS + 1, "{line}");
+        // A short one is the whole chain on one line: control characters become spaces,
+        // invisible ones go, and the ends are trimmed.
+        assert_eq!(
+            error(anyhow::anyhow!("cannot read\tstate.db\u{200b} ").context(" store")),
+            "store: cannot read state.db"
+        );
     }
 
     #[test]

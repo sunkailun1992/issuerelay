@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router";
 import { vi } from "vitest";
@@ -21,6 +21,23 @@ test("without a Linear connection the list explains what to do", async () => {
   expect(await screen.findByText("Could not read the issues from Linear")).toBeInTheDocument();
   expect(screen.getByText(/not connected to Linear/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Open the guide" })).toBeInTheDocument();
+});
+
+test("while the first connection to Linear is under way the page says so, not that it failed", async () => {
+  const backend = createMockBackend("connecting", { latencyMs: 0 });
+  const { client } = await renderWithProviders(<Issues />, { backend });
+  // Announced politely, as a state of things, not as an alert.
+  expect((await screen.findByText("Connecting to Linear…")).closest('[role="status"]')).not.toBeNull();
+  // The list was asked for and refused ("still connecting"): that is no failure to report.
+  await waitFor(() => expect(client.getQueryState(["issues"])?.status).toBe("error"));
+  expect(screen.queryByText("Could not read the issues from Linear")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open the guide" })).not.toBeInTheDocument();
+  // Connected: the list is read again (the app's connection refresh does that), and shows.
+  await backend.linearReconnect();
+  await client.invalidateQueries({ queryKey: ["status"] });
+  await client.invalidateQueries({ queryKey: ["issues"] });
+  expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
+  expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
 });
 
 /** Shows where the router is, so that a test can follow a button. */

@@ -45,6 +45,27 @@
     "open_panel": "開啟面板",
     "quit": "結束 IssueRelay"
   },
+  "menu": {
+    "about": "關於 {{name}}",
+    "services": "服務",
+    "hide": "隱藏 {{name}}",
+    "hide_others": "隱藏其他",
+    "file": "檔案",
+    "close_window": "關閉視窗",
+    "edit": "編輯",
+    "undo": "還原",
+    "redo": "重做",
+    "cut": "剪下",
+    "copy": "拷貝",
+    "paste": "貼上",
+    "select_all": "全選",
+    "view": "顯示方式",
+    "fullscreen": "進入全螢幕",
+    "window": "視窗",
+    "minimize": "縮到最小",
+    "zoom": "縮放",
+    "help": "輔助說明"
+  },
   "notify": {
     "run_started": "已開始執行。",
     "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "仍有任務正在執行",
-    "body": "有 {{count}} 項任務正在執行。要等它們執行完畢，還是現在停止？",
+    "body_one": "有 {{count}} 項任務正在執行。要等它執行完畢，還是現在停止？",
+    "body_other": "有 {{count}} 項任務正在執行。要等它們執行完畢，還是現在停止？",
     "wait": "等待完成",
     "stop": "立即停止",
     "cancel": "繼續執行",
@@ -77,7 +99,8 @@
     "draining": "等待執行完畢",
     "problem": "需要處理",
     "connecting": "正在連線至 Linear…",
-    "version": "版本 {{version}}"
+    "version": "版本 {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "剛剛",

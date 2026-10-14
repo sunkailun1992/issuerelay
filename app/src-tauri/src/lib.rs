@@ -28,6 +28,7 @@ pub fn run() {
         .ok()
         .map(|paths| paths.logs_dir());
     let mut log_guard = logging::init(logs_dir.as_deref());
+    logging::install_panic_hook();
     let builder = tauri::Builder::default()
         // Must come first: a second launch only brings the running instance's panel forward.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

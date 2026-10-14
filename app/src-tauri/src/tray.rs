@@ -269,11 +269,14 @@ struct Labels {
     poll: String,
     open: String,
     quit: String,
+    /// The application menu's texts by key (`quit::APP_MENU_KEYS`); only macOS has that menu.
+    #[cfg(target_os = "macos")]
+    app_menu: Vec<(&'static str, String)>,
 }
 
 /// Brings the tray in line with the engine, in the language the settings ask for: the tray's
-/// menu and icon, and on macOS the application menu's Quit. Works out what to show here and
-/// leaves the showing to the main thread (`on_main_thread`).
+/// menu and icon, and on macOS the application menu. Works out what to show here and leaves the
+/// showing to the main thread (`on_main_thread`).
 pub fn refresh(app: &AppHandle, host: &Host) {
     let t = Translator::for_settings(&host.engine().settings());
     let view = tray_view(&host.engine().status(), &host.linear_setup(), &t);
@@ -281,6 +284,11 @@ pub fn refresh(app: &AppHandle, host: &Host) {
         poll: t.t("tray.poll_now"),
         open: t.t("tray.open_panel"),
         quit: t.t("tray.quit"),
+        #[cfg(target_os = "macos")]
+        app_menu: quit::APP_MENU_KEYS
+            .iter()
+            .map(|key| (*key, quit::app_menu_text(&t, key, &app.package_info().name)))
+            .collect(),
     };
     on_main_thread(app, move |app| show_view(app, &view, &labels));
 }
@@ -307,12 +315,15 @@ fn show_view(app: &AppHandle, view: &TrayView, labels: &Labels) {
     }
     // Only macOS has an application menu (`quit::app_menu`).
     #[cfg(target_os = "macos")]
-    match app.try_state::<quit::AppMenuQuit>() {
-        Some(item) => logging::warn_failed(
-            item.0.set_text(&labels.quit),
-            "updating the application menu",
-        ),
-        None => tracing::warn!("the application menu's Quit is missing"),
+    match app.try_state::<quit::AppMenu>() {
+        Some(menu) => {
+            for (key, item) in &menu.0 {
+                if let Some((_, text)) = labels.app_menu.iter().find(|(wanted, _)| wanted == key) {
+                    logging::warn_failed(item.set_text(text), "updating the application menu");
+                }
+            }
+        }
+        None => tracing::warn!("the application menu is missing"),
     }
     match app.tray_by_id(TRAY_ID) {
         Some(tray) => set_icon(&tray, view.state),

@@ -112,3 +112,14 @@ describe("the webview boundary", () => {
     ]);
   });
 });
+
+// AGENTS.md and SECURITY_CODING_SPEC.md section 3: text from outside reaches the page only as a React
+// text node. Held by this scan the way the Tauri boundary above is, not by review alone.
+test("no module of the panel writes HTML", () => {
+  const sinks = ["dangerouslySetInnerHTML", "innerHTML", "outerHTML", "insertAdjacentHTML"];
+  const writing = Object.entries(SOURCES).flatMap(([path, source]) =>
+    sinks.filter((sink) => source.includes(sink)).map((sink) => `${path}: ${sink}`),
+  );
+  expect(Object.keys(SOURCES).length, "the panel's modules were read").toBeGreaterThan(100);
+  expect(writing).toEqual([]);
+});
