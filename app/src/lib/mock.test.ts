@@ -23,6 +23,18 @@ describe("mock backend", () => {
     expect(events).toContainEqual({ kind: "job", job: expect.objectContaining({ id: waiting.id, state: "done" }) });
   });
 
+  test("only a run still in hand can be stopped, as the engine rules", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    await expect(backend.cancelJob(7)).rejects.toThrow("job 7 is done and cannot be stopped");
+    // Waiting for a binding, queued and running are in hand.
+    for (const id of [5, 11, 12]) await backend.cancelJob(id);
+    expect((await backend.listJobs(100)).filter((job) => [5, 11, 12].includes(job.id)).map((job) => job.state)).toEqual([
+      "canceled",
+      "canceled",
+      "canceled",
+    ]);
+  });
+
   test("marking a job that is not awaiting acceptance fails like the engine does", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const running = (await backend.listJobs(100)).find((job) => job.state === "running")!;

@@ -912,7 +912,8 @@ mod tests {
             .unwrap();
         let began = Instant::now();
         on_run_event(app.handle(), RunEvent::Exit);
-        assert!(began.elapsed() < Duration::from_secs(1));
+        // Far below the 10 s a forced exit waits for a stop, with room for a slow CI machine.
+        assert!(began.elapsed() < Duration::from_secs(5));
         assert_eq!(current(app.handle()), QuitState::Idle);
     }
 

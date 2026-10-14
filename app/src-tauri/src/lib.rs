@@ -342,6 +342,34 @@ mod tests {
         assert!(config["app"]["security"].get("capabilities").is_none());
     }
 
+    /// The webview's content security policy: local resources and the IPC only; no `<base>` that
+    /// would move where relative addresses point, no form that posts anywhere, no plugin objects.
+    #[test]
+    fn the_csp_allows_only_local_content_and_nothing_else() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let csp = config["app"]["security"]["csp"]
+            .as_str()
+            .expect("a CSP string");
+        let directives: BTreeMap<&str, &str> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .map(|directive| directive.split_once(' ').expect("a directive has a value"))
+            .collect();
+        assert_eq!(
+            directives,
+            BTreeMap::from([
+                ("default-src", "'self'"),
+                ("img-src", "'self' data:"),
+                ("style-src", "'self' 'unsafe-inline'"),
+                ("connect-src", "ipc: http://ipc.localhost"),
+                ("base-uri", "'none'"),
+                ("form-action", "'none'"),
+                ("object-src", "'none'"),
+            ])
+        );
+    }
+
     /// Nor can the app widen it while it runs, which the checks above would not see: Tauri's
     /// `Manager` call that adds a capability at run time (its name is put together below, so
     /// that this file does not contain it) appears in no source file of the crate.

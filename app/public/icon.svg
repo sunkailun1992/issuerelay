@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="824" height="824" viewBox="100 100 824 824">
-  <!-- Option A (relay). macOS grid: an 824 px rounded square centred on the 1024 px canvas. -->
+  <!-- Option A (relay): the app icon cropped to its 824 px rounded square, without the drop shadow, for the panel. Written by app/scripts/icons.mjs from icons-src/option-a/app.svg; do not edit. -->
   <defs>
     <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#666af9"/>

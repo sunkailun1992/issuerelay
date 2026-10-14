@@ -208,21 +208,26 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// A click in a menu: the tray's items, and the application menu's Quit on macOS.
+/// A click in a menu: the tray's items, and the application menu's Quit on macOS. It comes on the
+/// main thread, so pausing or resuming (which writes the settings file) is done on the async
+/// runtime, like the panel's own pause and resume commands; the tray follows once it is done.
 fn on_menu(app: &AppHandle, event: MenuEvent) {
     let host = app.state::<AppState>().try_host();
     match (event.id().as_ref(), host) {
         ("toggle", Some(host)) => {
-            let engine = host.engine();
-            let switched = if engine.status().paused {
-                engine.resume()
-            } else {
-                engine.pause()
-            };
-            if let Err(e) = switched {
-                tracing::warn!(error = %format!("{e:#}"), "could not switch monitoring");
-            }
-            refresh(app, &host);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let engine = host.engine();
+                let switched = if engine.status().paused {
+                    engine.resume()
+                } else {
+                    engine.pause()
+                };
+                if let Err(e) = switched {
+                    tracing::warn!(error = %format!("{e:#}"), "could not switch monitoring");
+                }
+                refresh(&app, &host);
+            });
         }
         ("poll", Some(host)) => host.engine().poll_now(),
         ("open", _) => window::show(app),
@@ -524,16 +529,19 @@ mod tests {
     fn only_the_macos_icons_are_templates_and_each_platform_shows_its_own_set() {
         assert!(IconSet::MacTemplate.is_template());
         assert!(!IconSet::WindowsColour.is_template());
-        let own = if cfg!(target_os = "macos") {
-            IconSet::MacTemplate
+        let (own, other, size) = if cfg!(target_os = "macos") {
+            (IconSet::MacTemplate, IconSet::WindowsColour, 44)
         } else {
-            IconSet::WindowsColour
+            (IconSet::WindowsColour, IconSet::MacTemplate, 32)
         };
         assert_eq!(IconSet::CURRENT, own);
+        // What the tray is given is this platform's image, at its size, and never the other's.
         for state in STATES {
+            let shown = icon(state);
+            assert_eq!((shown.width(), shown.height()), (size, size), "{state:?}");
             assert!(
-                icon(state).rgba() == icon_in(own, state).rgba(),
-                "{state:?} is not the image of this platform's set"
+                shown.rgba() != icon_in(other, state).rgba(),
+                "{state:?} shows the other platform's image"
             );
         }
     }

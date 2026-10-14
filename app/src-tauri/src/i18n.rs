@@ -190,6 +190,32 @@ mod tests {
     }
 
     #[test]
+    fn every_language_is_listed_alike_and_embeds_its_own_file() {
+        // The panel's list (app/src/i18n/language.ts), in the same order: a language added on one
+        // side only would leave the tray in another language than the panel.
+        let panel = include_str!("../../src/i18n/language.ts");
+        let line = panel
+            .lines()
+            .find(|line| line.starts_with("export const LANGUAGES"))
+            .expect("language.ts lists the languages");
+        let listed: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        assert_eq!(listed, LANGUAGES, "language.ts and LANGUAGES");
+        let embedded: Vec<&str> = SOURCES.iter().map(|(lang, _)| *lang).collect();
+        assert_eq!(embedded, LANGUAGES, "SOURCES and LANGUAGES");
+        // Each language embeds its own file, not another language's.
+        for (lang, text) in SOURCES {
+            let file = format!(
+                "{}/../src/i18n/locales/{lang}.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            assert!(
+                text == std::fs::read_to_string(&file).unwrap(),
+                "{lang} does not embed {file}"
+            );
+        }
+    }
+
+    #[test]
     fn every_key_rust_uses_exists_in_every_language() {
         for lang in LANGUAGES {
             for key in USED_KEYS {

@@ -674,9 +674,13 @@ mod tests {
         ] {
             assert_eq!(opened(link).as_deref(), Some(link));
         }
-        // Refused: another scheme or host, any user info, look-alike hosts, a trailing dot or an
-        // empty label, and text that is no link at all.
+        // Refused: another scheme or host, any user info, look-alike hosts (one with a Cyrillic
+        // "a", as typed and as the punycode `url` turns it into), a trailing dot or an empty
+        // label, and text that is no link at all.
         for refused in [
+            "https://line\u{0430}r.app/demo/issue/DEMO-1",
+            "https://xn--liner-7ve.app/demo/issue/DEMO-1",
+            "https://mcp.line\u{0430}r.app/authorize",
             "http://linear.app/",
             "http://linear.app/demo/issue/DEMO-1",
             "https://linear.app@evil.example/",

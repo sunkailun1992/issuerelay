@@ -164,9 +164,8 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     cancelJob: (id) =>
       reply(() => {
         const job = find(id);
-        if (!["queued", "waiting_binding", "running"].includes(job.state)) {
-          fail(`job ${id} is ${job.state} and cannot be stopped`);
-        }
+        // As `Engine::cancel_job`: only a run still in hand can be stopped.
+        if (!isActive(job)) fail(`job ${id} is ${job.state} and cannot be stopped`);
         // A running job's process tree ends and the run is recorded at once here.
         update(id, { state: "canceled", reason: "stopped by the user", finished_at: now().toISOString() });
       }),

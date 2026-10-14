@@ -43,10 +43,15 @@ afterEach(() => {
 });
 
 // Every test runs with i18next started once: a `t()` key that English lacks fails the test
-// instead of showing the key. (Missing in another language only is caught by i18n.test.ts.)
+// instead of showing the key, and so does one that names a group of texts (`t("nav")`), for which
+// i18next would show a sentence about the key. (Missing in another language only is caught by
+// i18n.test.ts.)
 await initI18n("en", {
   saveMissing: true,
   missingKeyHandler: (_languages, _namespace, key) => {
     throw new Error(`missing translation key: ${key}`);
+  },
+  returnedObjectHandler: (key) => {
+    throw new Error(`translation key names a group of texts, not a text: ${key}`);
   },
 });
