@@ -18,7 +18,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 前端依赖 | `pnpm --dir app install` |
 | 前端构建 | `pnpm --dir app build`（产物 `app/dist`；`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌它，调试构建、`cargo test` 与 `cargo clippy` 不内嵌；与 CI 一样排在 cargo 命令之前） |
 | 前端检查与测试 | `pnpm --dir app lint`（含 `tsc` 类型检查）；`pnpm --dir app test` |
-| 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对（容差见 `TESTING_SPEC.md`），再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图，换了机器或 Chrome 的大版本用 `pnpm --dir app exec playwright test --update-snapshots=all` 整套重拍。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
+| 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对（容差见 `TESTING_SPEC.md`），再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图，换了机器或 Chrome 的大版本用 `pnpm --dir app exec playwright test --update-snapshots=all` 整套重拍（它也重写 README 用的四张图，单独重拍那四张用 `pnpm --dir app readme-screenshots`）。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
 | 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束，加 `?lang=zh-CN`（或别的语言代码）让设置里的界面语言是它 |
 | 本机安装包（macOS） | `bash scripts/stage-cli.sh && pnpm --dir app build && node scripts/release-checks.mjs panel && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`：产物在 `target/release/bundle/`（git 忽略）；`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，免得弹出「控制访达」的授权框；打包配置去掉了 `beforeBuildCommand`，`tauri build` 不会再自己构建面板，所以面板要像命令里那样先构建并过 `panel` 门禁 |
 
@@ -174,7 +174,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 ### 12.6 页面状态
 
 - 每个读数据的页面都有加载（`LoadingState`）、空（`EmptyState`，写明下一步做什么）和错误（`ErrorState`，能重试）三种状态，并至少有一个用失败的假后端驱动的错误状态测试。概览、需求、运行记录、运行详情、项目绑定、环境检查、设置和首次引导都是这样（使用说明只是文字，没有数据要读）。
-- 渲染出错时换成翻译过的错误页（`ErrorBoundary`），不留空白窗口：页面出错只换掉页面那一层（`App.tsx` 的 `PageBoundary`，到别的地址就恢复），页面外的部分（事件桥、语言与主题、启动闸门）出错换掉整个面板。退出询问（`QuitDialog`）和提示（toast）不在这两层之内，各在一个出错时什么也不显示的边界里，所以任何一页出错时退出照样会问。错误页的「重新加载」先把地址改回 `#/` 再重载，不会重新打开出错的那一页。
+- 渲染出错时换成翻译过的错误页（`ErrorBoundary`），不留空白窗口：一页出错只换掉这一页，错误显示在外框里，侧栏还在，点别的页面就恢复（`AppShell` 里包住 `<Outlet/>` 的 `PageBoundary`，按地址复位）；外框或首次引导本身出错换掉所有页面（`App.tsx` 里包住 `<Routes>` 的 `PageBoundary`，到别的地址就恢复）；页面外的部分（事件桥、语言与主题、启动闸门）出错换掉整个面板。退出询问（`QuitDialog`）和提示（toast）不在这两层之内，各在一个出错时什么也不显示的边界里，所以任何一页出错时退出照样会问。错误页的「重新加载」先把地址改回 `#/` 再重载，不会重新打开出错的那一页。
 - 首次连接 Linear 还没结束（`status.linear.kind === "connecting"`）时，要 Linear 的数据被拒绝不算失败：需求页和绑定对话框的项目列表显示「正在连接 Linear…」（`LinearConnecting`），连接状态一变就重读。
 
 ### 12.7 窗口尺寸
@@ -189,7 +189,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - 可点击的东西用 `<button>` 或 Radix 组件，不给 `div`、`span` 加点击事件，键盘才能用（`IssueLink` 的测试按 Tab 和回车打开）。
 - 页面里的区块用 `<section aria-labelledby>`，标题就是区块名（测试按 `role="region"` 找）；加载中用 `role="status"` 加名字；提醒用 `role="status"`，问题用 `role="alert"`。
 - 确认操作用 `AlertDialog` 加 `AlertDialogTrigger`，关闭后 Radix 把焦点还给触发按钮；触发按钮随确认的操作一起消失时（移除绑定后卡片不在了），页面把焦点放到页头的按钮或标题上。有风险的确认把初始焦点放在安全的选项上（`FullAccessWarning` 的「取消」），回车不会误确认。
-- 由页面控制打开、没有 Radix 触发按钮的对话框（`BindingDialog`、`FullAccessWarning`、`QuitDialog`）用 `useFocusReturn`（`onCloseAutoFocus`）：关闭时焦点回到打开前拿着焦点的元素，那个元素不在了就回到调用方给的备选（页头的按钮、页面标题）。WebKit 里鼠标点击不会让按钮获得焦点，所以由按钮打开的对话框把被点的按钮记作打开者（`Bindings.tsx`），不依赖焦点。
+- 由页面控制打开、没有 Radix 触发按钮的对话框（`BindingDialog`、`FullAccessWarning`、`QuitDialog`）用 `useFocusReturn`（`onCloseAutoFocus`）：关闭时焦点回到打开前拿着焦点的元素，那个元素不在了就回到调用方给的备选（页头的按钮、页面标题；退出询问用当前页面的 h1，错误页与启动失败页的 h1 也能用脚本聚焦，`tabIndex={-1}`）。WebKit 里鼠标点击不会让按钮获得焦点，所以由按钮打开的对话框把被点的按钮记作打开者（`Bindings.tsx`），不依赖焦点。
 
 ### 12.9 与 core 共用的规则
 

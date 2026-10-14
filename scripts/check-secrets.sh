@@ -64,12 +64,15 @@ PATTERNS=(
   '[A-Za-z]:\\Users\\[A-Za-z0-9._-]+'
 )
 EXCLUDES=(':!scripts/check-secrets.sh' ':!Cargo.lock' ':!LICENSE')
-# Control characters other than tab, newline and carriage return, and the
-# characters text::is_invisible removes (zero-width, direction marks and
-# overrides, invisible operators, the byte order mark, the soft hyphen, Hangul
-# fillers, tag characters). Written as escapes, so this file has none itself and
-# is scanned like every other file.
-INVISIBLE='(*UTF)[\x{01}-\x{08}\x{0B}\x{0C}\x{0E}-\x{1F}\x{7F}-\x{9F}\x{AD}\x{61C}\x{115F}\x{1160}\x{200B}-\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FEFF}\x{FFA0}\x{E0000}-\x{E007F}]'
+# Control characters other than tab, newline and carriage return, and exactly
+# the characters core's text::is_invisible removes (the zero-width space,
+# direction marks and overrides, invisible operators, the byte order mark, the
+# soft hyphen, the Arabic letter mark, Hangul fillers, tag characters). Like
+# core, it lets the zero-width non-joiner and joiner (U+200C, U+200D) through:
+# emoji sequences and Indic scripts need them, and they cannot reorder text.
+# Written as escapes, so this file has none itself and is scanned like every
+# other file.
+INVISIBLE='(*UTF)[\x{01}-\x{08}\x{0B}\x{0C}\x{0E}-\x{1F}\x{7F}-\x{9F}\x{AD}\x{61C}\x{115F}\x{1160}\x{200B}\x{200E}\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FEFF}\x{FFA0}\x{E0000}-\x{E007F}]'
 
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT

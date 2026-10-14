@@ -18,7 +18,10 @@ export function StartupError({ code, detail }: { code: StartupCode; detail: stri
     <main className="flex min-h-screen items-center justify-center bg-background p-(--page-padding)">
       <Card className="w-full max-w-lg">
         <CardHeader>
-          <h1 className="font-heading text-base leading-normal font-medium">{t("startup.failed_title")}</h1>
+          {/* Takes the focus by script, like a page's heading: where it goes when the quit prompt closes. */}
+          <h1 tabIndex={-1} className="font-heading text-base leading-normal font-medium outline-none">
+            {t("startup.failed_title")}
+          </h1>
         </CardHeader>
         <CardContent>
           <p>{t(`startup.${code}`)}</p>

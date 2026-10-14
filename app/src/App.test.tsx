@@ -196,7 +196,7 @@ test("a page that fails leaves the quit prompt and the toasts working", async ()
   backend.quit = vi.fn().mockRejectedValueOnce(new BackendError("the host is shutting down")).mockResolvedValue(undefined);
   window.location.hash = "#/runs/12";
   render(<App backend={backend} />);
-  expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: en.crash.page_title })).toBeInTheDocument();
   // The tray's Quit with a run in progress: the prompt opens over the error page and answers.
   await ask({ running: 1, waiting: false, purpose: "quit" });
   expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
@@ -213,12 +213,60 @@ test("going to another page recovers from a page that failed", async () => {
   const { backend } = withFailingRunPage();
   window.location.hash = "#/runs/12";
   render(<App backend={backend} />);
-  expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: en.crash.page_title })).toBeInTheDocument();
   await act(async () => {
     window.location.hash = "#/";
   });
   expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: en.crash.title })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: en.crash.page_title })).not.toBeInTheDocument();
+});
+
+test("a page that fails shows the error inside the shell, and another page from the sidebar recovers", async () => {
+  await initI18nOnce("en");
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const { backend, ask } = withFailingRunPage();
+  window.location.hash = "#/runs/12";
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("heading", { name: en.crash.page_title })).toBeInTheDocument();
+  expect(screen.getByText(en.crash.page_hint)).toBeInTheDocument();
+  // The shell is still there, with its sidebar and the way to the other pages.
+  expect(screen.getByRole("link", { name: "Runs" })).toBeInTheDocument();
+  // The quit prompt still asks.
+  await ask({ running: 1, waiting: false });
+  expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
+  await userEvent.click(screen.getByRole("link", { name: "Overview" }));
+  expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: en.crash.page_title })).not.toBeInTheDocument();
+});
+
+test("closing the quit prompt over a page that failed puts the focus on the error's heading", async () => {
+  await initI18nOnce("en");
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const { backend, ask } = withFailingRunPage();
+  window.location.hash = "#/runs/12";
+  render(<App backend={backend} />);
+  const heading = await screen.findByRole("heading", { name: en.crash.page_title });
+  // The tray's Quit, with nothing in the window focused.
+  await ask({ running: 1, waiting: false });
+  await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
+  await waitFor(() => expect(heading).toHaveFocus());
+});
+
+test("closing the quit prompt over the start failure puts the focus on its heading", async () => {
+  await initI18nOnce("en");
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.startupState = async () => ({ kind: "failed", code: "other", detail: "boom" });
+  let ask: (prompt: QuitPrompt) => void = () => {};
+  backend.onQuitRequested = async (listener) => {
+    ask = listener;
+    return () => {};
+  };
+  render(<App backend={backend} />);
+  const heading = await screen.findByRole("heading", { name: "IssueRelay could not start" });
+  await act(async () => ask({ running: 1, waiting: false }));
+  await userEvent.click(screen.getByRole("button", { name: "Keep running" }));
+  await waitFor(() => expect(heading).toHaveFocus());
 });
 
 test("Reload on the error page goes back to the overview, where the page that failed is not", async () => {

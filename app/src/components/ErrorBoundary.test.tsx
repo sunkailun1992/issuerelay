@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { vi } from "vitest";
@@ -19,7 +19,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await setLanguage("en");
+  // The page is still on screen (the cleanup comes after this), so the change reaches it inside act.
+  await act(async () => {
+    await setLanguage("en");
+  });
   window.history.replaceState(null, "", "/");
 });
 
@@ -91,6 +94,34 @@ test("a quiet boundary shows nothing in place of what failed, and the rest of th
   // Still logged: nothing fails silently.
   const ours = log.mock.calls.find(([text]) => typeof text === "string" && text.includes("stopped on an error"));
   expect((ours?.[1] as Error | undefined)?.message).toBe("the toasts broke");
+});
+
+test("inside the shell the error takes the page's place only, and says so", () => {
+  render(
+    <ErrorBoundary fallback="content">
+      <Bomb message="cannot read the run" />
+    </ErrorBoundary>,
+  );
+  expect(screen.getByRole("heading", { name: en.crash.page_title })).toBeInTheDocument();
+  expect(screen.getByText(en.crash.page_hint)).toBeInTheDocument();
+  expect(screen.getByText("cannot read the run")).toBeInTheDocument();
+  // Not a page of its own: the shell's <main> holds it.
+  expect(screen.queryByRole("main")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: en.crash.reload })).toBeInTheDocument();
+});
+
+test("the error's heading can take the focus by script, as a page's heading can", () => {
+  for (const fallback of ["page", "content"] as const) {
+    const view = render(
+      <ErrorBoundary fallback={fallback}>
+        <Bomb message="boom" />
+      </ErrorBoundary>,
+    );
+    const heading = screen.getByRole("heading", { level: 1 });
+    heading.focus();
+    expect(heading).toHaveFocus();
+    view.unmount();
+  }
 });
 
 test("a change of the reset key clears the failure, and only a change does", () => {

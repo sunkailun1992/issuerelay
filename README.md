@@ -37,21 +37,21 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 界面预览 / Screenshots
 
-桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者与权限档位）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`），侧栏左上角的应用图标在截图里遮成了一块靛蓝；两种语言、浅色与深色共 48 张都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者与权限档位）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
 
-*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor and permission level of each Linear project). The screenshots show only the fictional data of the built-in mock backend, and the app icon is masked as an indigo square; all 48 (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor and permission level of each Linear project). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
 
 **中文界面**
 
-![需求：每条需求的 Linear 状态、本地状态、原因与操作](docs/gates/screenshots/m2/zh-CN-light-issues.png)
+![需求：每条需求的 Linear 状态、本地状态、原因与操作](docs/gates/screenshots/m2/readme/zh-CN-issues.png)
 
-![项目绑定：每个项目的目录、执行者、权限档位与检查](docs/gates/screenshots/m2/zh-CN-light-bindings.png)
+![项目绑定：每个项目的目录、执行者、权限档位与检查](docs/gates/screenshots/m2/readme/zh-CN-bindings.png)
 
 **English interface**
 
-![Issues: each issue's Linear status, local status, reason and action](docs/gates/screenshots/m2/en-light-issues.png)
+![Issues: each issue's Linear status, local status, reason and action](docs/gates/screenshots/m2/readme/en-issues.png)
 
-![Bindings: each project's folder, executor, permission level and check](docs/gates/screenshots/m2/en-light-bindings.png)
+![Bindings: each project's folder, executor, permission level and check](docs/gates/screenshots/m2/readme/en-bindings.png)
 
 ## 安全须知
 

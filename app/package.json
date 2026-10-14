@@ -16,6 +16,7 @@
     "tauri": "tauri",
     "icons": "node scripts/icons.mjs",
     "screenshots": "playwright test --update-snapshots",
+    "readme-screenshots": "playwright test --project light --grep README --update-snapshots=all",
     "test:screens": "playwright test"
   },
   "dependencies": {
