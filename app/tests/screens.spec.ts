@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 // Screenshots of the panel's key screens in two languages and both themes, compared with the
@@ -233,6 +235,30 @@ for (const language of SCREENSHOT_LANGUAGES) {
       });
     });
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pictures the README shows: two of the screens above, light, in both languages, with the app
+// icon as it is (the baselines mask it). They are written, not compared, and only when the
+// baselines are taken again in full (`--update-snapshots=all`) or on their own
+// (`pnpm --dir app readme-screenshots`): the icon comes out a little differently on every run, and
+// an ordinary run must not change files.
+
+const README_PICTURES = fileURLToPath(new URL("../../docs/gates/screenshots/m2/readme/", import.meta.url));
+
+for (const language of SCREENSHOT_LANGUAGES) {
+  for (const name of ["issues", "bindings"]) {
+    test(`README picture: ${name} in ${language}`, async ({ page }) => {
+      test.skip(test.info().project.name !== "light", "the README shows the light theme");
+      test.skip(test.info().config.updateSnapshots !== "all", "written with --update-snapshots=all, or by pnpm --dir app readme-screenshots");
+      const screen = SCREENS.find((entry) => entry.name === name)!;
+      await open(page, language, screen.route);
+      await screen.ready(page, words(language));
+      await settled(page);
+      await page.mouse.move(0, 0);
+      await page.screenshot({ path: path.join(README_PICTURES, `${language}-${name}.png`), animations: "disabled" });
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
