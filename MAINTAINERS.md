@@ -92,7 +92,7 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
    ```
 
 3. **等工作流全绿**：`verify`（门禁自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `test`（macOS、Windows 六条验证命令）→ `create-release`（建一个草稿）→ `bundle-release`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名、地址指向本 Release 的资产）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。这些门禁在每次试打包里已经对将要打的标签跑过。
-4. **检查草稿**：资产有 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`；有更新签名私钥时还有 `_universal.app.tar.gz` 与三个 `.sig`、`latest.json`。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
+4. **检查草稿**：资产恰好是 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`、`_universal.app.tar.gz`；有更新签名私钥时再加三个 `.sig`（每个包一个）与 `latest.json`。没有私钥时 `_universal.app.tar.gz` 是 tauri-action 自己把 `.app` 打成的压缩包，没有 `.sig`，不是更新包。`verify-release` 对这个集合是精确核对的，缺一个或多一个都算失败；`latest.json` 里的地址必须是本仓库本 Release 的资产，签名必须等于对应 `.sig` 的内容。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
 5. **公开**：在 GitHub 的草稿页点「Publish release」。这是对外动作，只由维护者亲手点，工作流和 AI 都不公开。公开后 `…/releases/latest/download/latest.json` 才指向新版本，已安装的程序在下次检查时看到更新。
 6. **失败或放弃**：没公开的草稿可以删掉（Releases 页面删除草稿，再 `git push origin --delete "v$version"` 删远端标签、`git tag -d "v$version"` 删本地标签），修好后重推同一个标签；已经公开的版本号永不重用，修复用下一个版本号。
 
@@ -105,7 +105,9 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
 | `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | 否（六个齐全才用） | Developer ID 签名与公证 | ad-hoc 签名、不公证：用户第一次打开要在「隐私与安全性」里放行一次 |
 | `WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD` | 否（两个齐全才用） | Windows 代码签名（PFX 文件的 base64 与密码） | 不签名：SmartScreen 提示一次 |
 
-secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤；拉取请求触发的试打包拿不到它们，试打包只有只读权限。
+secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤；拉取请求触发的试打包拿不到它们，试打包只有只读权限。手动运行（Actions 页面的 Run workflow）可以选任何分支，那个分支的工作流与脚本会带着这些 secrets 运行（令牌只读），所以只在自己写的或评审过的分支上手动运行。
+
+剩下的风险：打包时 `tauri build` 不再运行前端的 `beforeBuildCommand`（面板在不带 secrets 的上一步构建并过门禁），但 cargo 的构建脚本与过程宏仍在带着签名 secrets 的环境里运行，所以依赖与构建脚本的改动合入 `main` 前要按「能读到发布 secrets」来评审；把构建与签名彻底拆成两步（先无 secrets 构建，再单独签名）现在没有做。有了第二个协作者之后，建议给发布用的 secrets 建一个只允许 `v*` 标签使用的 Environment，这由所有者决定，目前没有改仓库设置。
 
 ## 离任
 
