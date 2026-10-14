@@ -7,6 +7,12 @@
 > **状态：开发中，尚未发布。** 当前在做 M0（实测验证）和 M1（引擎与命令行）；桌面面板与安装包在 M2、M3。
 > *Status: under development, not released yet.*
 
+## 安装 / Install
+
+从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次；经过公证、签名的版本通常没有这一步。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。
+
+Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
+
 ## 它怎么工作
 
 ```text

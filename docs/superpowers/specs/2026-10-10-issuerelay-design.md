@@ -325,7 +325,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 - 把命令行加入 PATH（设置里的开关）：macOS 在 `~/.local/bin/issuerelay` 建指向应用包内命令行程序的链接（不覆盖别人的文件，旧链接自动改指向；`~/.local/bin` 不在登录 shell 的 PATH 里时面板给出要加的一行，不改 shell 配置文件；从磁盘映像运行时不建）；Windows 把安装目录加进用户级 `Path`（保持原来的注册表类型，通常是 `REG_EXPAND_SZ`，不分大小写去重，广播 `WM_SETTINGCHANGE`，移除时只删这一项）。都不需要管理员。注册 MCP 控制服务用的是命令行程序的绝对路径，不依赖 PATH。
 - GitHub Actions（`release.yml`）：推送版本标签时先跑门禁（`scripts/release-checks.mjs`：标签与版本、标签提交在 `main` 上）并扫描密钥，在 macOS 和 Windows 上跑全部验证命令，建一个草稿 Release，逐个平台打包上传，最后核对资产与 `latest.json` 齐全；由维护者确认后公开。手动运行与改了打包配置的 PR 只试打包（只读，拉取请求拿不到 secrets），对将要打的标签与试打包产物跑同样的门禁。
 - 自动更新：使用 Tauri updater，更新包用单独的签名密钥签名（私钥只存在维护者本机和 GitHub Actions secrets 里），从 GitHub Releases 拉取；仓库已公开，M3 起即可启用。
-- 代码签名：见第 18 节。未签名时，README 写清 macOS「右键 → 打开」和 Windows「更多信息 → 仍要运行」的放行步骤。
+- 代码签名：见第 18 节。未公证 / 未签名时，`docs/install.md` 与 README 写清放行步骤：macOS 15 起在「系统设置 → 隐私与安全性」点「仍要打开」（14 及更早：Control 点按 → 打开），Windows SmartScreen「更多信息 → 仍要运行」。
 - 版本号：语义化版本，标签为 `vX.Y.Z`；只由维护者在发布时升，推送前按 `origin/main` 上的最新版本顺延；外部贡献者不改版本号。
 
 ## 13. 错误处理
