@@ -45,6 +45,27 @@
     "open_panel": "打开面板",
     "quit": "退出 IssueRelay"
   },
+  "menu": {
+    "about": "关于 {{name}}",
+    "services": "服务",
+    "hide": "隐藏 {{name}}",
+    "hide_others": "隐藏其他",
+    "file": "文件",
+    "close_window": "关闭窗口",
+    "edit": "编辑",
+    "undo": "撤销",
+    "redo": "重做",
+    "cut": "剪切",
+    "copy": "拷贝",
+    "paste": "粘贴",
+    "select_all": "全选",
+    "view": "显示",
+    "fullscreen": "进入全屏幕",
+    "window": "窗口",
+    "minimize": "最小化",
+    "zoom": "缩放",
+    "help": "帮助"
+  },
   "notify": {
     "run_started": "已开始运行。",
     "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "仍有任务在运行",
-    "body": "有 {{count}} 个任务正在运行。要等它们运行完毕，还是现在停止？",
+    "body_one": "有 {{count}} 个任务正在运行。要等它运行完毕，还是现在停止？",
+    "body_other": "有 {{count}} 个任务正在运行。要等它们运行完毕，还是现在停止？",
     "wait": "等待完成",
     "stop": "立即停止",
     "cancel": "继续运行",
@@ -77,7 +99,8 @@
     "draining": "等待运行完毕",
     "problem": "需要处理",
     "connecting": "正在连接 Linear…",
-    "version": "版本 {{version}}"
+    "version": "版本 {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "刚刚",
@@ -163,7 +186,10 @@
       "start_failed": "有任务无法开始运行"
     },
     "status_failed": "无法读取 IssueRelay 的状态",
-    "jobs_failed": "无法读取运行记录"
+    "jobs_failed": "无法读取运行记录",
+    "setup_title": "还不能运行任何任务：没有就绪的执行者，也没有绑定项目",
+    "setup_body": "先在环境检查里配好 Claude Code 或 Codex，再把一个 Linear 项目绑定到本地目录。",
+    "bind_project": "绑定项目"
   },
   "issues": {
     "description": "指派给你、带 {{label}} 标签的需求，最近更新的 50 条",
@@ -243,14 +269,23 @@
     "copy_all": "复制全部",
     "log_removed": "这次运行的日志已被日志清理删除",
     "log_failed": "无法读取日志",
-    "no_output": "暂时没有可显示的内容"
+    "no_output": "暂时没有可显示的内容",
+    "log_capped": "只显示日志的最后 {{lines}} 行，运行在这之前就已开始。",
+    "list_capped": "只显示最近的 {{runs}} 次运行，更早的没有列出。",
+    "no_output_ended": "这次运行没有留下可显示的内容"
   },
   "timeline": {
     "session_started": "会话开始",
     "note": "IssueRelay",
     "stderr": "stderr",
     "result": "结果",
-    "error": "错误"
+    "error": "错误",
+    "files": "改动的文件",
+    "change": {
+      "add": "新增",
+      "delete": "删除",
+      "update": "修改"
+    }
   },
   "bindings": {
     "description": "绑定把一个 Linear 项目和本机的一个目录连在一起，并决定 AI 在那里怎样运行。",
@@ -323,7 +358,7 @@
     "states_ok": "IssueRelay 用到的状态都存在",
     "states_missing": "缺少的状态：{{states}}",
     "teams_checked": "已检查的团队：{{teams}}",
-    "add_label_hint": "请在 Linear 里创建标签 {{label}}（设置 → 标签）。IssueRelay 不会替你创建。",
+    "add_label_hint": "请在 Linear 里创建标签 {{label}}（设置 → 工作区 → 标签，或某个团队自己的标签）。IssueRelay 不会替你创建。",
     "add_states_hint": "请在 Linear 的「设置 → 团队 → 工作流」里添加缺少的状态。IssueRelay 不会替你创建。",
     "open_linear": "打开 Linear",
     "executors_title": "执行者",
@@ -438,7 +473,9 @@
     "logs": "运行日志",
     "log_retention": "运行日志保留天数",
     "log_max_total": "运行日志总大小上限（MB）",
-    "unsaved": "有尚未保存的改动"
+    "unsaved": "有尚未保存的改动",
+    "reread_failed": "已保存，但无法重新读取设置",
+    "fix_to_save": "改正标出的字段后才能保存"
   },
   "help": {
     "description": "IssueRelay 什么时候接手需求、需求怎样流转、需求怎么写，以及出了问题怎么办。",

@@ -16,7 +16,8 @@ use crate::{logging, notify, tray};
 pub const ENGINE_EVENT: &str = "engine-event";
 /// Events were lost: the panel reads everything again.
 pub const RESYNC_EVENT: &str = "engine-resync";
-/// Quitting asks the panel "wait or stop now"; the payload is the number of runs in progress.
+/// Quitting asks the panel "wait or stop now"; the payload is a `quit::QuitPrompt`: how many runs
+/// are in progress, and whether quitting already waits for them.
 pub const QUIT_REQUESTED: &str = "quit-requested";
 /// The host could not start; the payload is the `StartupState::Failed`.
 pub const STARTUP_FAILED: &str = "startup-failed";

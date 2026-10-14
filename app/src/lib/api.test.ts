@@ -27,6 +27,20 @@ describe("backend selection", () => {
     expect(settings.onboarding_completed).toBe(false);
   });
 
+  test("inside Tauri the address picks nothing: ?mock= and ?lang= are for the browser preview only", async () => {
+    window.history.replaceState(null, "", "/?mock=fresh&lang=zh-CN");
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue({ language: "system" });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { loadBackend, tauriBackend } = await import("./api");
+    const backend = await loadBackend();
+    expect(backend).toBe(tauriBackend);
+    // The settings come from the app, not from a mock asked for by the address.
+    expect(await backend.settings()).toEqual({ language: "system" });
+    expect(invoke).toHaveBeenCalledWith("settings", undefined);
+  });
+
   test("without ?lang= the mock's settings follow the system", async () => {
     vi.resetModules();
     const { loadBackend } = await import("./api");
@@ -97,4 +111,15 @@ describe("the webview boundary", () => {
       "core:event:allow-unlisten",
     ]);
   });
+});
+
+// AGENTS.md and SECURITY_CODING_SPEC.md section 3: text from outside reaches the page only as a React
+// text node. Held by this scan the way the Tauri boundary above is, not by review alone.
+test("no module of the panel writes HTML", () => {
+  const sinks = ["dangerouslySetInnerHTML", "innerHTML", "outerHTML", "insertAdjacentHTML"];
+  const writing = Object.entries(SOURCES).flatMap(([path, source]) =>
+    sinks.filter((sink) => source.includes(sink)).map((sink) => `${path}: ${sink}`),
+  );
+  expect(Object.keys(SOURCES).length, "the panel's modules were read").toBeGreaterThan(100);
+  expect(writing).toEqual([]);
 });

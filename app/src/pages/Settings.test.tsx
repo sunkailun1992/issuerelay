@@ -154,13 +154,16 @@ test("the fields show what is saved", async () => {
 
 test("a page that was not touched has nothing to save but can still be saved", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
+  const unchanged = await backend.settings();
   const save = vi.spyOn(backend, "saveSettings");
   await renderWithProviders(<Settings />, { backend });
   await screen.findByRole("spinbutton", { name: "Check every (seconds)" });
   expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
-  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-  expect(lastSaved(save)).toEqual(await backend.settings());
+  // Over once the settings are read again and the save is told.
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(lastSaved(save)).toEqual(unchanged);
 });
 
 test("a change says it is not saved yet, and a save says it was", async () => {
@@ -175,6 +178,37 @@ test("a change says it is not saved yet, and a save says it was", async () => {
   expect(await screen.findByText("Saved")).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument());
   expect(screen.getByRole("switch", { name: "Run failed" })).not.toBeChecked();
+});
+
+test("a save whose settings cannot be read back says so instead of Saved, and keeps what was typed", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  await retype(await screen.findByRole("spinbutton", { name: "Check every (seconds)" }), "90");
+  // The save goes through; reading the settings back afterwards does not.
+  backend.settings = vi.fn().mockRejectedValue(new BackendError("config.toml is being written"));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Saved, but the settings could not be read back")).toBeInTheDocument();
+  expect(screen.getByText("config.toml is being written")).toBeInTheDocument();
+  expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  expect(save).toHaveBeenCalledTimes(1);
+  // The form does not go back to the settings from before the save.
+  expect(screen.getByRole("spinbutton", { name: "Check every (seconds)" })).toHaveValue(90);
+});
+
+test("when a value blocks saving, the bar says why the button is off", async () => {
+  await renderWithProviders(<Settings />);
+  const interval = await screen.findByRole("spinbutton", { name: "Check every (seconds)" });
+  await retype(interval, "2");
+  const button = screen.getByRole("button", { name: "Save" });
+  expect(button).toBeDisabled();
+  const bar = button.closest("[data-slot=save-bar]") as HTMLElement;
+  expect(within(bar).getByText("Correct the marked fields to save")).toBeInTheDocument();
+  expect(button).toHaveAccessibleDescription("Correct the marked fields to save");
+  await retype(interval, "60");
+  expect(within(bar).queryByText("Correct the marked fields to save")).not.toBeInTheDocument();
+  expect(within(bar).getByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
 });
 
 test("the Save button of the page stays in a bar of its own that sticks to the foot of the window", async () => {
@@ -271,8 +305,8 @@ test("saving another interface language switches the whole panel at once", async
   // The whole panel, not the page alone: the language is followed from the saved settings.
   await initI18nOnce("en");
   window.location.hash = "#/settings";
+  const view = render(<App backend={createMockBackend("demo", { latencyMs: 0 })} />);
   try {
-    render(<App backend={createMockBackend("demo", { latencyMs: 0 })} />);
     await pick("Interface language", "日本語");
     // Choosing is not saving: the panel is still in English.
     expect(screen.getByRole("link", { name: "Runs" })).toBeInTheDocument();
@@ -281,6 +315,9 @@ test("saving another interface language switches the whole panel at once", async
     expect(screen.getByRole("heading", { level: 1, name: ja.nav.settings })).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("ja");
   } finally {
+    // The panel goes first: on screen it would follow the saved Japanese again, and it would
+    // update after the test.
+    view.unmount();
     window.location.hash = "";
     await setLanguage("en");
   }

@@ -16,7 +16,7 @@
 
 ## 验证 / Verification
 
-<!-- 先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`（应用 crate 的发布构建内嵌 app/dist） -->
+<!-- 先 `pnpm --dir app install`，并在 cargo 命令之前 `pnpm --dir app build`（tauri build，即打开 custom-protocol 特性的构建，内嵌 app/dist） -->
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`

@@ -343,7 +343,7 @@ test("a first run can be left with 'Set up later', a re-run with 'Exit the guide
   expect(screen.queryByRole("button", { name: "Set up later" })).not.toBeInTheDocument();
 });
 
-test("the way out is in the header, outside the content that scrolls, on every step", async () => {
+test("the way out is in the header, outside the content that scrolls, on every step until the last, whose own button ends the guide", async () => {
   await guideOn(await loggedIn());
   const banner = pageHeader();
   expect(screen.getByRole("main").contains(banner)).toBe(false);
@@ -352,8 +352,24 @@ test("the way out is in the header, outside the content that scrolls, on every s
       await press(FORWARD);
       await stepHeading(TITLES[at]);
     }
-    expect(await within(banner).findByRole("button", { name: "Set up later" })).toBeEnabled();
+    if (at < TITLES.length - 1) {
+      expect(await within(banner).findByRole("button", { name: "Set up later" })).toBeEnabled();
+    } else {
+      // "Start using IssueRelay" saves the same as "Set up later": the header does not repeat it.
+      expect(screen.getByRole("button", { name: "Start using IssueRelay" })).toBeEnabled();
+      expect(within(banner).queryByRole("button", { name: "Set up later" })).not.toBeInTheDocument();
+    }
   }
+});
+
+test("a re-run keeps 'Exit the guide' on the last step: unlike 'Start using', it saves nothing", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveSettings = vi.spyOn(backend, "saveSettings");
+  await guideOn(backend);
+  await goTo(TITLES.length);
+  await press("Exit the guide");
+  expect(await screen.findByText("overview page")).toBeInTheDocument();
+  expect(saveSettings).not.toHaveBeenCalled();
 });
 
 test("a re-run that cannot go on because Linear is not connected can be left with 'Exit the guide', which saves nothing", async () => {
@@ -1008,9 +1024,9 @@ test("a second binding is made in the guide too, and listed with the first", asy
 });
 
 test.each([
-  ["the button of the last step", "Start using IssueRelay"],
-  ["the button in the header", "Set up later"],
-])("the settings that end the guide with %s still carry the full-access confirmation the binding step saved", async (_how, button) => {
+  ["the button of the last step", "Start using IssueRelay", true],
+  ["the button in the header, right after the binding", "Set up later", false],
+])("the settings that end the guide with %s still carry the full-access confirmation the binding step saved", async (_how, button, onLastStep) => {
   const backend = await loggedIn();
   const saveSettings = vi.spyOn(backend, "saveSettings");
   await guideOn(backend);
@@ -1020,8 +1036,10 @@ test.each([
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "I understand" }));
   await screen.findByText("The binding is saved");
-  await press("Next");
-  await stepHeading(TITLES[5]);
+  if (onLastStep) {
+    await press("Next");
+    await stepHeading(TITLES[5]);
+  }
   await userEvent.click(screen.getByRole("button", { name: button }));
   expect(await screen.findByText("overview page")).toBeInTheDocument();
   // The guide's own copy of the settings is the one with the confirmation, not the one it read first.

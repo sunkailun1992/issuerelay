@@ -8,7 +8,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { DetailLine, EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useJobs, useStatus } from "@/hooks/queries";
+import { RUN_LIST_LIMIT, useJobs, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
@@ -116,12 +116,12 @@ function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
         <TableRow>
           {COLUMNS.map((facts) => (
             <TableHead key={facts[0]}>
-              {/* A header that has to wrap breaks between the names, not inside one. */}
+              {/* A header that has to wrap breaks between the names, never inside one. */}
               <span className="whitespace-normal">
                 {facts.map((fact, index) => (
                   <Fragment key={fact}>
                     {index > 0 && " / "}
-                    <span className="inline-block">{t(`runs.field.${fact}`)}</span>
+                    <span className="inline-block whitespace-nowrap">{t(`runs.field.${fact}`)}</span>
                   </Fragment>
                 ))}
               </span>
@@ -141,10 +141,12 @@ function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
 /**
  * The runs (design 9.2), newest first, filtered by state with tabs whose choice is kept in the
  * address (`?state=`, so the overview's "View" for failed runs lands on the right tab). A row opens
- * the run's page.
+ * the run's page. The list is the latest `RUN_LIST_LIMIT` runs: when it is that long, it says that
+ * older ones are left out.
  */
 export default function Runs() {
   const { t } = useTranslation();
+  const lang = useLang();
   const [params, setParams] = useSearchParams();
   const filter: RunFilter = parseRunFilter(params.get("state"));
   const jobs = useJobs();
@@ -185,7 +187,10 @@ export default function Runs() {
             </TabsTrigger>
           ))}
         </TabsList>
-        <TabsContent value={filter} className="pt-2">
+        <TabsContent value={filter} className="flex flex-col gap-3 pt-2">
+          {jobs.data !== undefined && jobs.data.length >= RUN_LIST_LIMIT && (
+            <p className="text-sm text-muted-foreground">{t("runs.list_capped", { runs: new Intl.NumberFormat(lang).format(RUN_LIST_LIMIT) })}</p>
+          )}
           {content}
         </TabsContent>
       </Tabs>

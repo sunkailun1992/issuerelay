@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import css from "./styles.css?raw";
+import buttonSource from "@/components/ui/button.tsx?raw";
 import { JOB_STATES } from "@/lib/types";
 import { STATE_STYLE } from "@/components/StatusBadge";
 import { blend, bytes, contrast, inGamut, oklch } from "@/test/colour";
@@ -36,6 +37,22 @@ test("the interface uses the system fonts, which cover Chinese, Japanese and Kor
   expect(theme).toMatch(/--font-sans: -apple-system, .*"PingFang SC".*"Hiragino Sans".*"Microsoft YaHei UI".*"Malgun Gothic"/);
   expect(theme).toMatch(/--font-mono: .*"SF Mono".*Consolas/);
   expect(css).not.toContain("fontsource");
+});
+
+// On Windows (WebView2) the Apple and Segoe UI families have no CJK glyphs and PingFang and
+// Hiragino are missing: the first CJK font of the stack draws Japanese and Traditional Chinese too.
+test("Japanese, Traditional Chinese and Korean get Windows fonts of their own", () => {
+  const families = (selector: string) => {
+    const match = /--font-sans: ([^;]*);/.exec(block(selector));
+    expect(match, `${selector} --font-sans`).not.toBeNull();
+    return match![1].split(",").map((family) => family.trim().replaceAll('"', ""));
+  };
+  const cjkOf = (list: string[]) => list.filter((family) => /YaHei|JhengHei|Yu Gothic|Meiryo|Malgun|PingFang|Hiragino|Apple SD/.test(family));
+  expect(cjkOf(families(":root:lang(ja)"))).toEqual(["Hiragino Sans", "Yu Gothic UI", "Meiryo UI"]);
+  expect(cjkOf(families(":root:lang(zh-TW)"))).toEqual(["PingFang TC", "Microsoft JhengHei UI"]);
+  expect(cjkOf(families(":root:lang(ko)"))).toEqual(["Apple SD Gothic Neo", "Malgun Gothic"]);
+  // The page's font is the variable, which those rules set for the language of <html>.
+  expect(block("@layer base")).toMatch(/html \{[^}]*font-family: var\(--font-sans\);/);
 });
 
 /** The colour a theme gives to `--name`, as `oklch(...)` text. */
@@ -103,6 +120,34 @@ describe("the state colours", () => {
         const ratio = contrast(text, blend(text, under, TINT, "linear"));
         expect(ratio, `${selector} --state-${name} on ${surface}`).toBeGreaterThanOrEqual(4.5);
       }
+    }
+  });
+});
+
+describe("muted text and the primary button", () => {
+  /** What muted text sits on: the page, a card, the sidebar, and a muted fill (a log label, a read-only field). */
+  const UNDER_MUTED_TEXT = ["background", "card", "sidebar", "muted"] as const;
+
+  test.each(THEMES)("%s: muted text reaches 4.5:1 on everything it sits on", (_theme, selector) => {
+    const text = oklch(token(selector, "muted-foreground"));
+    for (const surface of UNDER_MUTED_TEXT) {
+      expect(contrast(text, oklch(token(selector, surface))), `${selector} muted text on ${surface}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /** How opaque the default button's fill is while hovered: the `hover:bg-primary/NN` of components/ui/button.tsx. */
+  function hoverAlpha(): number {
+    const match = /default: "[^"]*\bhover:bg-primary\/(\d+)/.exec(buttonSource);
+    expect(match, "the default button's hover fill").not.toBeNull();
+    return Number(match![1]) / 100;
+  }
+
+  test.each(THEMES)("%s: the label of a hovered primary button reaches 4.5:1 on the page and on a card", (_theme, selector) => {
+    const label = oklch(token(selector, "primary-foreground"));
+    const alpha = hoverAlpha();
+    for (const surface of ["background", "card"] as const) {
+      const fill = blend(oklch(token(selector, "primary")), oklch(token(selector, surface)), alpha);
+      expect(contrast(label, fill), `${selector} primary/${alpha * 100} over ${surface}`).toBeGreaterThanOrEqual(4.5);
     }
   });
 });

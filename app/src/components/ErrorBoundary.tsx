@@ -35,34 +35,63 @@ function CrashPage({ error, onReload }: { error: unknown; onReload: () => void }
 
 interface Props {
   children: ReactNode;
-  /** What the Reload button does; it reloads the page by default. */
+  /**
+   * What stands in for what failed: the error page (by default), or nothing, for a part of the
+   * panel that must not take the rest with it (the quit prompt, the toasts).
+   */
+  fallback?: "page" | "nothing";
+  /**
+   * A change of it clears a failure and renders the children again: the boundary around the
+   * pages is given the address, so going to another page recovers from one that failed.
+   */
+  resetKey?: string;
+  /** How the Reload button reloads, once the address is back at the overview; the page's own reload by default. */
   onReload?: () => void;
 }
 
 /** `failure` holds what was thrown, wrapped: anything can be thrown, including `undefined`. */
 interface State {
   failure: { error: unknown } | null;
+  /** The reset key the failure belongs to. */
+  resetKey: string | undefined;
 }
 
 /**
  * A render error anywhere below shows the crash page instead of leaving the window blank (React
- * unmounts the whole tree of an error nothing catches), and is logged. Errors in event handlers
- * and in promises are not render errors; they are reported where they happen.
+ * unmounts the whole tree of an error nothing catches), or nothing (`fallback`), and is logged.
+ * Errors in event handlers and in promises are not render errors; they are reported where they
+ * happen. Reload first takes the address back to the overview: a page that fails on its data
+ * would fail again at its own address.
  */
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { failure: null };
+  state: State = { failure: null, resetKey: this.props.resetKey };
 
-  static getDerivedStateFromError(error: unknown): State {
+  static getDerivedStateFromError(error: unknown): Partial<State> {
     return { failure: { error } };
+  }
+
+  static getDerivedStateFromProps(props: Props, state: State): Partial<State> | null {
+    return props.resetKey === state.resetKey ? null : { failure: null, resetKey: props.resetKey };
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo): void {
     // The webview's console is the only log the panel has; the app's own log cannot be reached from here.
-    console.error("the panel stopped on an error", error, info.componentStack);
+    console.error(
+      this.props.fallback === "nothing" ? "a part of the panel stopped on an error" : "the panel stopped on an error",
+      error,
+      info.componentStack,
+    );
   }
+
+  private reload = (): void => {
+    // Only the address within the panel changes; the page's own address stays as it is.
+    window.history.replaceState(null, "", "#/");
+    (this.props.onReload ?? reloadPage)();
+  };
 
   render(): ReactNode {
     if (this.state.failure === null) return this.props.children;
-    return <CrashPage error={this.state.failure.error} onReload={this.props.onReload ?? reloadPage} />;
+    if (this.props.fallback === "nothing") return null;
+    return <CrashPage error={this.state.failure.error} onReload={this.reload} />;
   }
 }

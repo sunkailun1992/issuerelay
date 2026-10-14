@@ -1,4 +1,4 @@
-import { Activity, CircleX, ClipboardCheck, Hourglass, RefreshCw, TriangleAlert } from "lucide-react";
+import { Activity, CircleX, ClipboardCheck, Hourglass, RefreshCw, TriangleAlert, Wrench } from "lucide-react";
 import { type ReactNode, useId } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router";
@@ -11,15 +11,16 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { useJobs, usePause, usePollNow, useResume, useStatus } from "@/hooks/queries";
+import { DOCTOR_FRESH_MS, useBindings, useDoctor, useJobs, usePause, usePollNow, useResume, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatDuration, formatRelative, formatTime } from "@/lib/format";
 import { problemCause } from "@/lib/problem";
 import { newestRuns } from "@/lib/runs";
-import type { HeldJob, Job, JobState, StatusView } from "@/lib/types";
+import type { HeldJob, Job, JobState, LinearSetup, StatusView } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { executorReady } from "./onboarding/check";
 
 /** How many finished runs the overview lists. */
 const RECENT_COUNT = 8;
@@ -130,6 +131,33 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
         </Alert>
       )}
     </div>
+  );
+}
+
+/**
+ * The next step when the page has none to show (Linear connected, no executor ready, nothing bound,
+ * so nothing can run and nothing tells why): set up an executor, then bind a project. The
+ * environment check runs the executors, so it is asked for only then, and an answer younger than
+ * `DOCTOR_FRESH_MS` is taken as it is. A check that is still running or failed shows nothing.
+ */
+function SetupNote({ linear }: { linear: LinearSetup }) {
+  const { t } = useTranslation();
+  const bindings = useBindings();
+  const unbound = linear.kind === "connected" && bindings.data !== undefined && bindings.data.length === 0;
+  const doctor = useDoctor(unbound, { staleTime: DOCTOR_FRESH_MS });
+  if (!unbound || doctor.data === undefined || doctor.data.executors.some(executorReady)) return null;
+  return (
+    <Alert role="status">
+      <Wrench aria-hidden />
+      <AlertTitle>{t("overview.setup_title")}</AlertTitle>
+      <AlertDescription>
+        <p>{t("overview.setup_body")}</p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          <Link to="/doctor">{t("overview.open_doctor")}</Link>
+          <Link to="/bindings">{t("overview.bind_project")}</Link>
+        </div>
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -334,6 +362,7 @@ export default function Overview() {
         ) : (
           <>
             <LinearStatus />
+            <SetupNote linear={status.data.linear} />
             <Reminders view={status.data} jobs={jobs.data} />
           </>
         )}

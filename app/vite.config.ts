@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 // Port 1420 is what tauri.conf.json's devUrl points at; Tauri needs it fixed.
-export default defineConfig(({ mode }) => ({
+export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
   clearScreen: false,
@@ -14,9 +14,10 @@ export default defineConfig(({ mode }) => ({
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
     // Vite refuses to load a file outside this folder. The timeline tests read the executor streams
-    // that core tests itself against (crates/core/tests/fixtures), so a test run may read the
-    // repository; the dev server keeps Vite's default and serves only this folder.
-    ...(mode === "test" ? { fs: { allow: [path.resolve(import.meta.dirname, "..")] } } : {}),
+    // that core tests itself against (crates/core/tests/fixtures), so a Vitest run (which sets
+    // VITEST, whatever mode it is given) may read the repository; the dev server keeps Vite's
+    // default and serves only this folder.
+    ...(process.env.VITEST ? { fs: { allow: [path.resolve(import.meta.dirname, "..")] } } : {}),
   },
   build: { target: "es2022", sourcemap: false },
   test: {
@@ -30,4 +31,4 @@ export default defineConfig(({ mode }) => ({
     // Vitest turns every CSS file into an empty string; styles.test.ts reads the design tokens as text.
     css: { include: [/styles\.css\?raw/] },
   },
-}));
+});

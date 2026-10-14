@@ -1,6 +1,6 @@
-//! The interface languages, read from the panel's translation files so that the tray menu and
-//! the notifications say the same as the panel. (The quit prompt and the startup error page are
-//! the panel's own text.)
+//! The interface languages, read from the panel's translation files so that the tray menu,
+//! macOS's application menu and the notifications say the same as the panel. (The quit prompt and
+//! the startup error page are the panel's own text.)
 use std::sync::LazyLock;
 
 use issuerelay_core::config::Settings;
@@ -29,6 +29,25 @@ pub const USED_KEYS: &[&str] = &[
     "tray.poll_now",
     "tray.open_panel",
     "tray.quit",
+    "menu.about",
+    "menu.services",
+    "menu.hide",
+    "menu.hide_others",
+    "menu.file",
+    "menu.close_window",
+    "menu.edit",
+    "menu.undo",
+    "menu.redo",
+    "menu.cut",
+    "menu.copy",
+    "menu.paste",
+    "menu.select_all",
+    "menu.view",
+    "menu.fullscreen",
+    "menu.window",
+    "menu.minimize",
+    "menu.zoom",
+    "menu.help",
     "notify.run_started",
     "notify.awaiting_acceptance",
     "notify.needs_info",
@@ -166,6 +185,32 @@ mod tests {
                 "{} / {:?}",
                 case.setting,
                 case.system
+            );
+        }
+    }
+
+    #[test]
+    fn every_language_is_listed_alike_and_embeds_its_own_file() {
+        // The panel's list (app/src/i18n/language.ts), in the same order: a language added on one
+        // side only would leave the tray in another language than the panel.
+        let panel = include_str!("../../src/i18n/language.ts");
+        let line = panel
+            .lines()
+            .find(|line| line.starts_with("export const LANGUAGES"))
+            .expect("language.ts lists the languages");
+        let listed: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        assert_eq!(listed, LANGUAGES, "language.ts and LANGUAGES");
+        let embedded: Vec<&str> = SOURCES.iter().map(|(lang, _)| *lang).collect();
+        assert_eq!(embedded, LANGUAGES, "SOURCES and LANGUAGES");
+        // Each language embeds its own file, not another language's.
+        for (lang, text) in SOURCES {
+            let file = format!(
+                "{}/../src/i18n/locales/{lang}.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            assert!(
+                text == std::fs::read_to_string(&file).unwrap(),
+                "{lang} does not embed {file}"
             );
         }
     }

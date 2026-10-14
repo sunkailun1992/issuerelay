@@ -45,6 +45,27 @@
     "open_panel": "パネルを開く",
     "quit": "IssueRelay を終了"
   },
+  "menu": {
+    "about": "{{name}}について",
+    "services": "サービス",
+    "hide": "{{name}}を隠す",
+    "hide_others": "ほかを隠す",
+    "file": "ファイル",
+    "close_window": "ウインドウを閉じる",
+    "edit": "編集",
+    "undo": "取り消す",
+    "redo": "やり直す",
+    "cut": "カット",
+    "copy": "コピー",
+    "paste": "ペースト",
+    "select_all": "すべてを選択",
+    "view": "表示",
+    "fullscreen": "フルスクリーンにする",
+    "window": "ウインドウ",
+    "minimize": "しまう",
+    "zoom": "拡大/縮小",
+    "help": "ヘルプ"
+  },
   "notify": {
     "run_started": "実行を開始しました。",
     "awaiting_acceptance": "確認をお願いします。課題はテスト中になりました。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "実行中のタスクがあります",
-    "body": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
+    "body_one": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
+    "body_other": "{{count}} 件のタスクが実行中です。完了するまで待ちますか？それとも今すぐ停止しますか？",
     "wait": "完了を待つ",
     "stop": "今すぐ停止",
     "cancel": "実行を続ける",
@@ -77,7 +99,8 @@
     "draining": "実行の完了を待っています",
     "problem": "対応が必要です",
     "connecting": "Linear に接続中…",
-    "version": "バージョン {{version}}"
+    "version": "バージョン {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "たった今",
@@ -163,7 +186,10 @@
       "start_failed": "実行を開始できなかったタスクがあります"
     },
     "status_failed": "IssueRelay の状態を読み込めませんでした",
-    "jobs_failed": "実行履歴を読み込めませんでした"
+    "jobs_failed": "実行履歴を読み込めませんでした",
+    "setup_title": "まだ何も実行できません：準備のできた実行ツールがなく、紐付けたプロジェクトもありません",
+    "setup_body": "環境チェックで Claude Code か Codex を準備してから、Linear のプロジェクトをフォルダーに紐付けてください。",
+    "bind_project": "プロジェクトを紐付ける"
   },
   "issues": {
     "description": "自分に割り当てられた {{label}} ラベル付きの課題（最近更新された 50 件）",
@@ -173,7 +199,7 @@
     "column": {
       "issue": "課題",
       "title": "タイトル",
-      "linear_state": "Linear のステータス",
+      "linear_state": "Linear の状態",
       "local_state": "ローカルの状態",
       "reason": "理由",
       "actions": "操作"
@@ -243,14 +269,23 @@
     "copy_all": "すべてコピー",
     "log_removed": "この実行のログはログの整理で削除されました",
     "log_failed": "ログを読み込めませんでした",
-    "no_output": "表示できる内容はまだありません"
+    "no_output": "表示できる内容はまだありません",
+    "log_capped": "ログの最後の {{lines}} 行だけを表示しています。実行はそれより前に始まっています。",
+    "list_capped": "最新の {{runs}} 件の実行だけを表示しています。それより古いものは一覧にありません。",
+    "no_output_ended": "この実行には表示できる内容が残っていません"
   },
   "timeline": {
     "session_started": "セッション開始",
     "note": "IssueRelay",
     "stderr": "stderr",
     "result": "結果",
-    "error": "エラー"
+    "error": "エラー",
+    "files": "変更したファイル",
+    "change": {
+      "add": "追加",
+      "delete": "削除",
+      "update": "変更"
+    }
   },
   "bindings": {
     "description": "紐付けは、Linear のプロジェクトとこのコンピューター上のフォルダーを結び付け、AI がそこでどう動くかを決めます。",
@@ -323,7 +358,7 @@
     "states_ok": "IssueRelay が使うステータスはそろっています",
     "states_missing": "足りないステータス: {{states}}",
     "teams_checked": "チェックしたチーム: {{teams}}",
-    "add_label_hint": "Linear でラベル {{label}} を作成してください（設定 → ラベル）。IssueRelay は代わりに作成しません。",
+    "add_label_hint": "Linear でラベル {{label}} を作成してください（設定 → ワークスペース → ラベル、またはチームごとのラベル）。IssueRelay は代わりに作成しません。",
     "add_states_hint": "足りないステータスを Linear の「設定 → チーム → ワークフロー」で追加してください。IssueRelay は代わりに作成しません。",
     "open_linear": "Linear を開く",
     "executors_title": "実行ツール",
@@ -438,7 +473,9 @@
     "logs": "実行ログ",
     "log_retention": "実行ログの保存日数",
     "log_max_total": "実行ログの合計サイズの上限（MB）",
-    "unsaved": "保存されていない変更があります"
+    "unsaved": "保存されていない変更があります",
+    "reread_failed": "保存しましたが、設定を読み直せませんでした",
+    "fix_to_save": "印の付いた項目を直すと保存できます"
   },
   "help": {
     "description": "IssueRelay がいつ課題を引き受けるか、課題がどう進むか、課題の書き方、うまくいかないときの対処をまとめています。",

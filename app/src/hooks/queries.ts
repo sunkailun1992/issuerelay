@@ -28,8 +28,14 @@ export const queryKeys = {
   appInfo: ["appInfo"] as const,
 };
 
-/** The most log lines one read returns (`MAX_LOG_LINES` in the app's commands): the tail of the log. */
-const LOG_LINES = 5000;
+/**
+ * How many lines of a log are read (`MAX_LOG_LINES` in the app's commands): its tail. A log that
+ * comes back this long may have begun earlier, which the run's page says.
+ */
+export const LOG_LINES = 5000;
+
+/** How many runs the list of runs reads, newest first; a list this long may leave older ones out. */
+export const RUN_LIST_LIMIT = 200;
 
 /** How often a running job's log is read again. */
 const LOG_REFRESH_MS = 1500;
@@ -57,7 +63,7 @@ export function useStatus() {
 }
 
 /** The most recent runs, newest first. */
-export function useJobs(limit = 200) {
+export function useJobs(limit = RUN_LIST_LIMIT) {
   const backend = useBackend();
   return useQuery({ queryKey: [...queryKeys.jobs, limit], queryFn: () => backend.listJobs(limit) });
 }
@@ -99,6 +105,13 @@ export function useSettings() {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.settings, queryFn: () => backend.settings() });
 }
+
+/**
+ * How long an environment check counts as current where a page asks for it again soon (the guide,
+ * the overview's note): five minutes, the time the engine keeps a confirmed result for (design 6.4).
+ * A report that a change has outdated is checked again whatever its age.
+ */
+export const DOCTOR_FRESH_MS = 5 * 60_000;
 
 /**
  * The environment check. It runs the executors and asks Linear, so only when `enabled`. A page that

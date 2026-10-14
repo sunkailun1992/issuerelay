@@ -88,7 +88,7 @@ function job(fields: Pick<Job, "id" | "issue_identifier" | "title" | "state"> & 
 export const DEMO_JOBS: Job[] = [
   job({ id: 12, issue_identifier: "DEMO-12", title: "Add a health check endpoint", state: "running", started_at: "2026-10-12T08:57:37Z", log_path: "logs/12.jsonl" }),
   job({ id: 11, issue_identifier: "DEMO-11", title: "Translate the settings page", state: "queued", binding_id: "proj-2", directory: "~/code/demo-mobile", executor: "codex" }),
-  job({ id: 10, issue_identifier: "DEMO-10", title: "Add hello.txt", state: "awaiting_acceptance", started_at: ago(50), finished_at: ago(20), verified_updated_at: ago(20), log_path: "logs/10.jsonl", summary: "新增 hello.txt，已推送到 test 分支并读回部署" }),
+  job({ id: 10, issue_identifier: "DEMO-10", title: "Add hello.txt", state: "awaiting_acceptance", started_at: ago(50), finished_at: ago(20), verified_updated_at: ago(20), log_path: "logs/10.jsonl", summary: "Added hello.txt, pushed it to the test branch and read the deployment back" }),
   job({ id: 9, issue_identifier: "DEMO-9", title: "Clarify the export format", state: "needs_info", started_at: ago(70), finished_at: ago(60), summary: "Asked on the issue which date format the export should use" }),
   job({ id: 8, issue_identifier: "DEMO-8", title: "Speed up the search index", state: "failed", reason: "run exceeded the time limit", started_at: ago(130), finished_at: ago(70) }),
   job({ id: 7, issue_identifier: "DEMO-7", title: "Fix the login redirect", state: "done", started_at: ago(240), finished_at: ago(200), summary: "Fixed the redirect after login and added a test" }),

@@ -5,8 +5,9 @@ import { vi } from "vitest";
 import { initI18nOnce, setLanguage } from "@/i18n";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
+import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import type { StartupState, StatusView } from "@/lib/types";
+import type { JobState, QuitPrompt, StartupState, StatusView } from "@/lib/types";
 import App from "./App";
 
 afterEach(async () => {
@@ -59,15 +60,15 @@ test("the quit prompt works while the panel is replaced by the start failure", a
   await initI18nOnce("en");
   const backend = createMockBackend("demo", { latencyMs: 0 });
   backend.startupState = async () => ({ kind: "failed", code: "other", detail: "boom" });
-  let ask: (running: number) => void = () => {};
+  let ask: (prompt: QuitPrompt) => void = () => {};
   backend.onQuitRequested = async (listener) => {
     ask = listener;
     return () => {};
   };
   render(<App backend={backend} />);
   expect(await screen.findByText("Something stopped IssueRelay from starting")).toBeInTheDocument();
-  await act(async () => ask(1));
-  expect(screen.getByText(/1 run\(s\) are in progress/)).toBeInTheDocument();
+  await act(async () => ask({ running: 1, waiting: false }));
+  expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
 });
 
 test("every page is reachable from the sidebar and has its header", async () => {
@@ -151,10 +152,93 @@ test("a page that cannot read what the backend gave shows the error page, not a 
   // React reports an error it hands to a boundary; keep the output of the test run readable.
   vi.spyOn(console, "error").mockImplementation(() => {});
   const backend = createMockBackend("demo", { latencyMs: 0 });
-  // A reply the panel cannot make sense of: the sidebar fails while it renders.
+  let ask: (prompt: QuitPrompt) => void = () => {};
+  backend.onQuitRequested = async (listener) => {
+    ask = listener;
+    return () => {};
+  };
+  // A reply the panel cannot make sense of: what reads the status around the pages (the refresh
+  // of the Linear data in the event bridge) fails while it renders, before any page does.
   backend.status = async () => ({}) as StatusView;
   render(<App backend={backend} />);
   expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: en.crash.reload })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
+  // The quit prompt is outside what failed, and still asks.
+  await act(async () => ask({ running: 2, waiting: false }));
+  expect(screen.getByText(/2 runs are in progress/)).toBeInTheDocument();
+});
+
+/**
+ * The demo backend, with run 12 in a state the panel does not know: its page fails while it
+ * renders, as a page does on a reply it cannot read. The quit prompt is the backend's to open.
+ */
+function withFailingRunPage() {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.job.bind(backend);
+  backend.job = async (id) => {
+    const job = await read(id);
+    return job === null ? null : { ...job, state: "unheard_of" as JobState };
+  };
+  let ask: (prompt: QuitPrompt) => void = () => {};
+  backend.onQuitRequested = async (listener) => {
+    ask = listener;
+    return () => {};
+  };
+  return { backend, ask: (prompt: QuitPrompt) => act(async () => ask(prompt)) };
+}
+
+test("a page that fails leaves the quit prompt and the toasts working", async () => {
+  await initI18nOnce("en");
+  // React reports an error it hands to a boundary; keep the output of the test run readable.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const { backend, ask } = withFailingRunPage();
+  backend.quit = vi.fn().mockRejectedValueOnce(new BackendError("the host is shutting down")).mockResolvedValue(undefined);
+  window.location.hash = "#/runs/12";
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  // The tray's Quit with a run in progress: the prompt opens over the error page and answers.
+  await ask({ running: 1, waiting: false });
+  expect(screen.getByText(/1 run is in progress/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Wait for completion" }));
+  // The answer the app refused is told in a toast, which still has a place to appear.
+  expect(await screen.findByText("the host is shutting down")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Stop now" }));
+  expect(backend.quit).toHaveBeenLastCalledWith("stop");
+});
+
+test("going to another page recovers from a page that failed", async () => {
+  await initI18nOnce("en");
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const { backend } = withFailingRunPage();
+  window.location.hash = "#/runs/12";
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  await act(async () => {
+    window.location.hash = "#/";
+  });
+  expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: en.crash.title })).not.toBeInTheDocument();
+});
+
+test("Reload on the error page goes back to the overview, where the page that failed is not", async () => {
+  await initI18nOnce("en");
+  // Also keeps out jsdom's note that it cannot really reload.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const { backend } = withFailingRunPage();
+  window.location.hash = "#/runs/12";
+  render(<App backend={backend} />);
+  await userEvent.click(await screen.findByRole("button", { name: en.crash.reload }));
+  expect(window.location.hash).toBe("#/");
+});
+
+test("the region of the toasts is named in the interface language", async () => {
+  await initI18nOnce("en");
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.settings.bind(backend);
+  backend.settings = async () => ({ ...(await read()), language: "ja" });
+  render(<App backend={backend} />);
+  expect(await screen.findByRole("link", { name: ja.nav.runs })).toBeInTheDocument();
+  // The library adds its keyboard shortcut to the name.
+  expect(screen.getByRole("region", { name: new RegExp(`^${ja.shell.notifications} `) })).toBeInTheDocument();
 });

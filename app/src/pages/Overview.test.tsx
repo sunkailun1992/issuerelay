@@ -7,6 +7,7 @@ import { type Backend, BackendError } from "@/lib/backend";
 import { MOCK_NOW, setFixedClock } from "@/lib/clock";
 import { formatTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
+import { DEMO_DOCTOR } from "@/lib/mock-fixtures";
 import type { Job, LinearSetup, StatusSnapshot, StatusView } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Overview from "./Overview";
@@ -516,4 +517,56 @@ test("the overview reads in the interface language", async () => {
   expect(screen.getByRole("region", { name: "运行中" })).toHaveTextContent("2 分 23 秒");
   expect(screen.getByRole("region", { name: "排队中" })).toHaveTextContent(`将于 ${formatTime("2026-10-12T09:02:00Z", "zh-CN")} 重试`);
   expect(screen.getByRole("region", { name: "最近结果" })).toHaveTextContent("20 分钟前");
+});
+
+/**
+ * The demo backend with nothing bound and with an environment check in which no executor is ready
+ * (`ready`: Claude Code is), whose `doctor` calls are counted.
+ */
+async function setupState({ bound, ready, linear = "connected" }: { bound: boolean; ready: boolean; linear?: "connected" | "fresh" }) {
+  const backend = createMockBackend(linear === "connected" ? "demo" : "fresh", { latencyMs: 0 });
+  if (!bound) for (const binding of await backend.bindings()) await backend.removeBinding(binding.id);
+  const doctor = vi.fn(async () => ({
+    ...DEMO_DOCTOR,
+    executors: DEMO_DOCTOR.executors.map((report) => (report.kind === "claude" && ready ? report : { ...report, logged_in: false })),
+    bindings: [],
+  }));
+  backend.doctor = doctor;
+  return { backend, doctor };
+}
+
+test("connected to Linear with no executor ready and nothing bound, the overview says what to do next", async () => {
+  const { backend } = await setupState({ bound: false, ready: false });
+  await renderWithProviders(<Overview />, { backend });
+  const nudge = (await screen.findByText("Nothing can run yet: no executor is ready and no project is bound")).closest('[role="status"]') as HTMLElement;
+  expect(nudge).not.toBeNull();
+  expect(within(nudge).getByText(/Set up Claude Code or Codex in the environment check/)).toBeInTheDocument();
+  expect(within(nudge).getByRole("link", { name: "Open the environment check" })).toHaveAttribute("href", "/doctor");
+  expect(within(nudge).getByRole("link", { name: "Bind a project" })).toHaveAttribute("href", "/bindings");
+});
+
+test.each([
+  ["an executor is ready", { bound: false, ready: true }],
+  ["a project is bound", { bound: true, ready: false }],
+])("when %s the overview has no such note", async (_case, state) => {
+  const { backend } = await setupState(state);
+  const { client } = await renderWithProviders(<Overview />, { backend });
+  await screen.findByRole("heading", { name: "Running" });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.queryByText(/Nothing can run yet/)).not.toBeInTheDocument();
+});
+
+test("the environment check runs for the note only when nothing is bound and Linear is connected", async () => {
+  const bound = await setupState({ bound: true, ready: false });
+  const first = await renderWithProviders(<Overview />, { backend: bound.backend });
+  await screen.findByRole("heading", { name: "Running" });
+  await waitFor(() => expect(first.client.isFetching()).toBe(0));
+  expect(bound.doctor).not.toHaveBeenCalled();
+  first.unmount();
+  const notConnected = await setupState({ bound: false, ready: false, linear: "fresh" });
+  const second = await renderWithProviders(<Overview />, { backend: notConnected.backend });
+  await screen.findByRole("heading", { name: "Running" });
+  await waitFor(() => expect(second.client.isFetching()).toBe(0));
+  expect(notConnected.doctor).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Nothing can run yet/)).not.toBeInTheDocument();
 });

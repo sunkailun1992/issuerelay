@@ -28,7 +28,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 ## 前端测试规则
 
 - Vitest 只收 `app/src/**/*.test.{ts,tsx}`，测试文件与被测文件放在一起。`vite.config.ts` 开了 `globals: true`（`test`、`expect`、`vi`、`afterEach` 全局可用，Testing Library 也靠它在每个测试后自动清理）和 `restoreMocks: true`；从 `vitest` 显式导入也可以。
-- 公共设置 `app/src/test-setup.ts`：Radix 需要的 jsdom 桩和 `matchMedia` 桩；每个测试后复位固定时钟、收掉 sonner 的提示；用英文启动 i18next 并装上缺键守卫（`t()` 用到 `en.json` 没有的键就抛错）。
+- 公共设置 `app/src/test-setup.ts`：Radix 需要的 jsdom 桩和 `matchMedia` 桩；每个测试后复位固定时钟、收掉 sonner 的提示；用英文启动 i18next 并装上缺键守卫（`t()` 用到 `en.json` 没有的键，或用到指向一组文案的键，就抛错）；React 报「not wrapped in act」时让那个测试失败（在测试文件自己的 `afterEach` 与清理之后才检查，清理期间的更新也算）。所以测试要等它引起的读取与更新做完（`findBy…`、`waitFor`、等查询缓存不再读取），再断言或结束。
 - 要后端、查询缓存、路由或翻译的组件用 `app/src/test/render.tsx` 的 `renderWithProviders`：它用应用自己的 `createQueryClient()` 和不带延迟的假后端（`createMockBackend("demo", { latencyMs: 0 })`），可以指定 `backend`、`route`（起始地址）和 `lang`。只做展示的组件可以直接 `render`。
 - 假后端就是测试替身：场景用 `demo`、`fresh`、`connecting`；要某个调用失败，就把这一个方法换成 `vi.fn().mockRejectedValue(new BackendError("…"))`，要看调用就用 `vi.spyOn`。测试依赖的确切字符串都定义在 `mock-fixtures.ts`。除了检查边界的 `api.test.ts`，测试不 mock `@tauri-apps/api`。
 - 等条件，不等固定时间：用 `findBy…`、`waitFor`，或等查询缓存的状态（`client.getQueryState(…)`）；要推进时间就开假定时器，用 `app/src/test/time.ts` 的 `advanceUntil` 推到条件成立为止。不写固定时长的等待。和「几分钟前」、时长有关的断言依赖固定时钟（`MOCK_NOW`，假后端创建时设好，每个测试后复位）。
@@ -39,12 +39,12 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 
 ## 截图比对与版面检查（只在本机）
 
-- 跑法：`pnpm --dir app test:screens`。Playwright 自己执行 `pnpm build && pnpm preview --port 4173` 起面板、跑完自己停掉（不借用已在跑的服务）；浏览器是本机装的 Google Chrome（`channel: "chrome"`），不下载浏览器。每屏在 1100×720 下拍浅色与深色各一张，语言用 `zh-CN` 与 `en`（地址的 `?lang=`），数据来自假后端（`?mock=` 选场景），时区固定为 UTC，所以截图里的时间不随机器变。
+- 跑法：`pnpm --dir app test:screens`。Playwright 自己执行 `pnpm build && pnpm preview --port 4173 --strictPort` 起面板、跑完自己停掉（不借用已在跑的服务；4173 被占用时直接失败，不会让 vite 悄悄换到别的端口、Playwright 却去测 4173 上别处的页面）；浏览器是本机装的 Google Chrome（`channel: "chrome"`），不下载浏览器。每屏在 1100×720 下拍浅色与深色各一张，语言用 `zh-CN` 与 `en`（地址的 `?lang=`），数据来自假后端（`?mock=` 选场景），时区固定为 UTC，所以截图里的时间不随机器变。
 - 基准图在 `docs/gates/screenshots/m2/`，名字是 `<语言>-<主题>-<屏>.png`：八个页面加首次引导的第 1、2、4、6 步，共 48 张。基准图里只有假后端的虚构数据；换了文案或假后端的数据，基准图要重拍。
-- 重拍：`pnpm --dir app screenshots`（即 `playwright test --update-snapshots`，不带模式的写法在 Playwright 1.64.0 里等于 `changed`，2026-10-14 核对）只重写与现有基准图不再相符的图，所以改完要看 `git diff --stat` 与新图；改动小于下面说的容差时它不会重写，要整套重拍就用 `pnpm --dir app exec playwright test --update-snapshots=all`。
-- 容差：`maxDiffPixelRatio: 0.01`（一屏 1% 的像素，约 7900 个），加 Playwright 默认的逐像素颜色容差。所以它拦得住版面位移、大块的颜色和内容变化，拦不住很小的改动（一个状态色、一个徽章、几个字）；小改动靠组件测试，窗口尺寸靠同一个文件里的版面检查。
+- 重拍：`pnpm --dir app screenshots`（即 `playwright test --update-snapshots`，不带模式的写法在 Playwright 1.64.0 里等于 `changed`，2026-10-14 核对）只重写与现有基准图不再相符的图，所以改完要看 `git diff --stat` 与新图；它也跑下面的版面检查，版面检查不过它也不过。改动小于下面说的容差时它不会重写，要整套重拍就用 `pnpm --dir app exec playwright test --update-snapshots=all`。
+- 容差：一屏最多 30 个像素的颜色差超过 0.05（`maxDiffPixels: 30`、`threshold: 0.05`，Playwright 的颜色距离，0 到 1）。同一台机器上同一页的渲染几乎完全一样：2026-10-14 在零容差下连跑两次，只有 zh-CN 的环境检查页差了 8 到 9 个像素。应用图标（侧栏与首次引导页眉的 `/icon.svg`）遮住不比，Chrome 每次画它的渐变与阴影都差几十个像素；遮罩用图标自己的靛蓝 `#4e4edc`，不用 Playwright 默认的品红，README 引用的截图里才不会有一块品红。当天的证明（改一个设计变量、跑、改回、跑）：浅色 `--primary` 色相 275→250，36 个截图测试里 12 个失败；`--state-running` 色相 255→200（亮度不变），8 个失败；浅色 `--sidebar` 0.985→0.9，18 个失败；`--page-padding` 1.5rem→1.25rem，36 个失败；改回后都是 84 个全过，不改连跑三次也全过。阈值用 0.1 时，上面那个状态色的改动一个也拦不住。拦不住的是几个 RGB 单位的颜色微调，那要靠组件测试和 `styles.test.ts`；窗口尺寸靠同一个文件里的版面检查。
 - 只在本机跑，不进 CI：面板用系统字体，同一页在不同机器上像素不同，CI 的机器上比对不稳定；它能防的是同一台机器上页面的意外变化。换了机器或升了 Chrome 的大版本，先整套重拍再比对。
-- 版面检查（同一个文件，不拍图）：最小窗口 900×600 与带 Windows 滚动条的 885×600 下，需求与运行记录两页没有横向溢出、每个按钮都在容器的右边界之内；绑定对话框（添加与编辑）装得进窗口、「取消」「保存」看得见；首次引导每一步的出口与「上一步 / 下一步」看得见；设置里「把命令行加入 PATH」打开之后，开关、shell 那一行与「复制」按钮都在窗口里，「系统」卡片没有横向溢出。
+- 版面检查（同一个文件，不拍图）：最小窗口 900×600 与带 Windows 滚动条的 885×600 下，需求与运行记录两页先确认有演示的 9 行数据，再查没有横向溢出、每个按钮都在容器的右边界之内、列名不在一个词中间断行（中文的列名一行放下）；绑定对话框（添加与编辑）装得进窗口、「取消」「保存」看得见；首次引导每一步的「上一步 / 下一步」看得见，前五步顶栏的出口也看得见（首次运行的最后一步，「开始使用」就是出口，顶栏不重复它）；设置里「把命令行加入 PATH」打开之后，开关、shell 那一行与「复制」按钮都在窗口里，「系统」卡片没有横向溢出。
 - `app/tests/*.spec.ts` 不是 Vitest 的测试：Vitest 只收 `app/src/**/*.test.{ts,tsx}`；`app/test-results/` 与 `app/playwright-report/` 是输出，git 忽略。
 
 ## 面板与 core 共用的用例表

@@ -20,6 +20,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await setLanguage("en");
+  window.history.replaceState(null, "", "/");
 });
 
 test("what renders is shown as it is", () => {
@@ -54,6 +55,70 @@ test("the reload button reloads through the handler it was given", async () => {
   );
   await userEvent.click(screen.getByRole("button", { name: en.crash.reload }));
   expect(onReload).toHaveBeenCalledTimes(1);
+});
+
+test("Reload goes back to the overview first: a page that fails on its data would fail again at its own address", async () => {
+  window.history.replaceState(null, "", "/?mock=demo#/runs/42");
+  let hashWhenReloaded: string | null = null;
+  const onReload = vi.fn(() => {
+    hashWhenReloaded = window.location.hash;
+  });
+  render(
+    <ErrorBoundary onReload={onReload}>
+      <Bomb message="boom" />
+    </ErrorBoundary>,
+  );
+  await userEvent.click(screen.getByRole("button", { name: en.crash.reload }));
+  expect(onReload).toHaveBeenCalledTimes(1);
+  expect(hashWhenReloaded).toBe("#/");
+  // Only the address within the panel changes; the rest of it stays as it was.
+  expect(window.location.search).toBe("?mock=demo");
+});
+
+test("a quiet boundary shows nothing in place of what failed, and the rest of the page stays", () => {
+  const log = vi.mocked(console.error);
+  render(
+    <>
+      <p>the rest of the page</p>
+      <ErrorBoundary fallback="nothing">
+        <Bomb message="the toasts broke" />
+      </ErrorBoundary>
+    </>,
+  );
+  expect(screen.getByText("the rest of the page")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: en.crash.title })).not.toBeInTheDocument();
+  expect(screen.queryByText("the toasts broke")).not.toBeInTheDocument();
+  // Still logged: nothing fails silently.
+  const ours = log.mock.calls.find(([text]) => typeof text === "string" && text.includes("stopped on an error"));
+  expect((ours?.[1] as Error | undefined)?.message).toBe("the toasts broke");
+});
+
+test("a change of the reset key clears the failure, and only a change does", () => {
+  function Page({ broken }: { broken: boolean }) {
+    if (broken) throw new Error("cannot read the run");
+    return <p>another page</p>;
+  }
+  const view = render(
+    <ErrorBoundary resetKey="/runs/42">
+      <Page broken />
+    </ErrorBoundary>,
+  );
+  expect(screen.getByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  // The same address: the failure stands, even though the page would render now.
+  view.rerender(
+    <ErrorBoundary resetKey="/runs/42">
+      <Page broken={false} />
+    </ErrorBoundary>,
+  );
+  expect(screen.getByRole("heading", { name: en.crash.title })).toBeInTheDocument();
+  // Another address: what is there renders again.
+  view.rerender(
+    <ErrorBoundary resetKey="/">
+      <Page broken={false} />
+    </ErrorBoundary>,
+  );
+  expect(screen.getByText("another page")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: en.crash.title })).not.toBeInTheDocument();
 });
 
 test("the error is logged, with where it happened", () => {

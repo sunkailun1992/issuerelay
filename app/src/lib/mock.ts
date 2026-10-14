@@ -7,7 +7,7 @@ import {
 import { isActive } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup,
-  Settings, StartupState, StatusView, Viewer,
+  QuitPrompt, Settings, StartupState, StatusView, Viewer,
 } from "./types";
 
 export interface MockOptions {
@@ -20,7 +20,10 @@ export interface MockOptions {
 const NOT_CONNECTED = "not connected to Linear: log in first";
 const CONNECTING = "still connecting to Linear";
 
-/** `https` on linear.app or one of its subdomains: the rule of `is_linear_url` in commands.rs. */
+/**
+ * `https` on linear.app or one of its subdomains: close to `linear_url` in commands.rs, for the
+ * browser preview only (the app's own check is that one; SECURITY_CODING_SPEC.md section 5).
+ */
 function isLinearUrl(text: string): boolean {
   try {
     const url = new URL(text);
@@ -77,7 +80,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const listeners = {
     event: new Set<(event: EngineEvent) => void>(),
     resync: new Set<() => void>(),
-    quit: new Set<(running: number) => void>(),
+    quit: new Set<(prompt: QuitPrompt) => void>(),
     startup: new Set<(state: StartupState) => void>(),
   };
 
@@ -165,9 +168,8 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     cancelJob: (id) =>
       reply(() => {
         const job = find(id);
-        if (!["queued", "waiting_binding", "running"].includes(job.state)) {
-          fail(`job ${id} is ${job.state} and cannot be stopped`);
-        }
+        // As `Engine::cancel_job`: only a run still in hand can be stopped.
+        if (!isActive(job)) fail(`job ${id} is ${job.state} and cannot be stopped`);
         // A running job's process tree ends and the run is recorded at once here.
         update(id, { state: "canceled", reason: "stopped by the user", finished_at: now().toISOString() });
       }),

@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
-import { useDoctor, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
+import { DOCTOR_FRESH_MS, useDoctor, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
 import { BindingStep } from "./BindingStep";
 import { ExecutorsStep } from "./ExecutorsStep";
 import { FinishStep } from "./FinishStep";
@@ -14,20 +14,13 @@ import { STEPS, type StepNav } from "./steps";
 import { WorkspaceStep } from "./WorkspaceStep";
 
 /**
- * How long the environment check counts as current in the guide. Going back and forth between the
- * steps must not run it again each time (it takes up to a minute); a report older than this, or one
- * that a change has outdated, is checked again when the workspace or the executors are entered. Five
- * minutes is the time the engine keeps a confirmed result for (design 6.4).
- */
-const CHECK_FRESH_MS = 5 * 60_000;
-
-/**
  * The first-run guide (design 8), outside the shell: the steps down the left, the step with its
  * Back and forward buttons on the right, and in the header the way out, which a step that holds
  * the guide back (Linear not connected, no executor ready, a check that keeps failing) would
  * otherwise leave without: no sidebar to leave by. A first run leaves with "Set up later", which
- * saves `onboarding_completed` like the last step does and goes to the overview; a re-run (the
- * guide is completed already) leaves with "Exit the guide", which goes there and saves nothing.
+ * saves `onboarding_completed` like the last step does and goes to the overview (on the last step
+ * its own button is that way out); a re-run (the guide is completed already) leaves with "Exit the
+ * guide", which goes there and saves nothing.
  * The first-run gate sends a first run here, and the environment check leads back here at any
  * time; it always starts at the first step and each step shows how things stand now. The saves are
  * read again before they are over, so the gate does not send the user back.
@@ -44,9 +37,9 @@ export default function Onboarding() {
   const settings = useSettings();
   // One environment check serves the workspace and the executors, which follow each other: it
   // runs when the first of them is entered, is not repeated between the two (nor when they are
-  // entered again soon after), and is made again when a fix, a binding or the connection makes it
-  // outdated.
-  const doctor = useDoctor(step === "workspace" || step === "executors", { staleTime: CHECK_FRESH_MS });
+  // entered again soon after: going back and forth must not run it each time, it takes up to a
+  // minute), and is made again when a fix, a binding or the connection makes it outdated.
+  const doctor = useDoctor(step === "workspace" || step === "executors", { staleTime: DOCTOR_FRESH_MS });
   const save = useSaveSettings();
 
   /** Ends the guide: the settings are saved with it completed, and the overview follows. */
@@ -67,15 +60,18 @@ export default function Onboarding() {
 
   // Which way out depends on whether the guide has been completed before: until that is known
   // there is none to offer, and when it cannot be read the way to the overview is the one left
-  // (its gate says why the settings are not there).
+  // (its gate says why the settings are not there). On a first run's last step "Start using"
+  // saves what "Set up later" would, so the header does not offer it twice.
   let leave: ReactNode = null;
   if (settings.data !== undefined && !settings.data.onboarding_completed) {
-    leave = (
-      <Button variant="ghost" size="sm" disabled={save.isPending} onClick={finish}>
-        <X aria-hidden />
-        {t("onboarding.set_up_later")}
-      </Button>
-    );
+    if (step !== "finish") {
+      leave = (
+        <Button variant="ghost" size="sm" disabled={save.isPending} onClick={finish}>
+          <X aria-hidden />
+          {t("onboarding.set_up_later")}
+        </Button>
+      );
+    }
   } else if (settings.data !== undefined || settings.isError) {
     leave = (
       <Button variant="ghost" size="sm" disabled={save.isPending} onClick={() => navigate("/", { replace: true })}>

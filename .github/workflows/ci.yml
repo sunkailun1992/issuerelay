@@ -38,7 +38,7 @@ jobs:
       - run: pnpm --dir app install --frozen-lockfile
       - run: pnpm --dir app lint
       - run: pnpm --dir app test
-      # Before cargo, as AGENTS.md prescribes: the app crate's release build embeds app/dist.
+      # Before cargo, as AGENTS.md prescribes: a tauri build (custom-protocol) embeds app/dist.
       - run: pnpm --dir app build
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

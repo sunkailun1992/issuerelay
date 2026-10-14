@@ -195,3 +195,5 @@ export type StartupState =
   | { kind: "failed"; code: StartupCode; detail: string };
 export type EngineEvent = { kind: "status" } | { kind: "job"; job: Job } | { kind: "config" };
 export type QuitMode = "wait" | "stop";
+/** The question quitting asks (`quit-requested`): the runs in progress, and whether quitting already waits for them. */
+export interface QuitPrompt { running: number; waiting: boolean }

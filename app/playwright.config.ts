@@ -35,7 +35,9 @@ export default defineConfig({
     { name: "dark", use: { colorScheme: "dark" } },
   ],
   webServer: {
-    command: "pnpm build && pnpm preview --port 4173",
+    // `--strictPort`: with 4173 taken, vite would move to another port while Playwright went on
+    // testing whatever answers on 4173 (another checkout's build, say); it fails instead.
+    command: "pnpm build && pnpm preview --port 4173 --strictPort",
     url: `http://localhost:${PORT}`,
     // Always the build this run makes, never a server that was left running.
     reuseExistingServer: false,

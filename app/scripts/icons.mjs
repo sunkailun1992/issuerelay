@@ -140,9 +140,10 @@ const trayImage = (option, kind, state, size, ink) =>
 /**
  * The app icon without its margin, for the panel (the sidebar and the first-run header). The
  * margin is where the plate's drop shadow (the filter `lift`) falls; cropped to the plate it would
- * only smudge the corners, so the shadow goes with the margin.
+ * only smudge the corners, so the shadow goes with the margin. The source's note on the 1024
+ * canvas gives way to one on what this file is.
  */
-function panelIconSvg(appSvg) {
+function panelIconSvg(appSvg, letter) {
   const plate = APP_SIZE - 2 * PLATE_MARGIN;
   const rootTag = /<svg\b[^>]*>/.exec(appSvg)?.[0];
   if (rootTag === undefined) throw new CheckError("app.svg has no root element");
@@ -150,8 +151,13 @@ function panelIconSvg(appSvg) {
     .replace(/\bwidth="[^"]*"/, `width="${plate}"`)
     .replace(/\bheight="[^"]*"/, `height="${plate}"`)
     .replace(/\bviewBox="[^"]*"/, `viewBox="${PLATE_MARGIN} ${PLATE_MARGIN} ${plate} ${plate}"`);
+  const note =
+    `<!-- Option ${letter.toUpperCase()} (${OPTIONS[letter].name.toLowerCase()}): the app icon cropped to its ${plate} px ` +
+    `rounded square, without the drop shadow, for the panel. Written by app/scripts/icons.mjs from ` +
+    `icons-src/option-${letter}/app.svg; do not edit. -->`;
   const flat = appSvg
-    .replace(rootTag, cropped)
+    .replace(/\n? *<!--[^]*?1024 px canvas[^]*?-->/, "")
+    .replace(rootTag, `${cropped}\n  ${note}`)
     .replace(/ filter="url\(#lift\)"/, "")
     .replace(/\n? *<filter id="lift"[\s\S]*?<\/filter>/, "");
   if (/#lift|id="lift"/.test(flat)) {
@@ -199,7 +205,7 @@ function checkImages(letter, images) {
   }
 }
 
-/** `--option`: every file of one option. */
+/** `--option`: every file of one option. Everything is made and checked before anything is written. */
 function buildOption(letter, outRoot) {
   const option = loadOption(letter);
   const images = {
@@ -208,12 +214,13 @@ function buildOption(letter, outRoot) {
     win: Object.fromEntries(STATES.map((state) => [state, trayImage(option, "colour", state, WIN_TRAY)])),
   };
   checkImages(letter, images);
+  const panelIcon = panelIconSvg(option.app, letter);
   writeOutput(outRoot, "app/icons-src/build/app-1024.png", images.app.png);
   for (const state of STATES) {
     writeOutput(outRoot, `app/src-tauri/icons/tray/macos/${state}.png`, images.mac[state].png);
     writeOutput(outRoot, `app/src-tauri/icons/tray/${state}.png`, images.win[state].png);
   }
-  writeOutput(outRoot, "app/public/icon.svg", panelIconSvg(option.app));
+  writeOutput(outRoot, "app/public/icon.svg", panelIcon);
   console.log("next: pnpm --dir app tauri icon icons-src/build/app-1024.png");
 }
 
@@ -399,7 +406,8 @@ function main() {
     return 2;
   }
   const letter = args.option?.toLowerCase();
-  if (letter !== undefined && !(letter in OPTIONS)) {
+  // Own keys only: `in` would also take the names an object inherits ("constructor", "toString").
+  if (letter !== undefined && !Object.hasOwn(OPTIONS, letter)) {
     console.error(`icons: unknown option "${args.option}" (expected a, b or c)\n${USAGE}`);
     return 2;
   }

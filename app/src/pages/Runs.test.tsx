@@ -124,7 +124,7 @@ test("a row says the state, the issue and who ran it, the title, when and for ho
     ["DEMO-10", "Claude Code"],
     ["Add hello.txt"],
     ["50 minutes ago", "30 min 0 s"],
-    ["新增 hello.txt，已推送到 test 分支并读回部署"],
+    ["Added hello.txt, pushed it to the test branch and read the deployment back"],
   ]);
   expect(cellsOf(rowOfRun(8))).toEqual([
     ["Failed"],
@@ -429,4 +429,18 @@ test("how long ago a run started is worked out again as time passes", async () =
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("a list as long as the panel reads says that only the latest runs are shown", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const [newest] = await backend.listJobs(1);
+  backend.listJobs = vi.fn(async (limit: number) => Array.from({ length: limit }, (_, n) => ({ ...newest, id: 1000 - n })));
+  await renderWithProviders(<Runs />, { backend });
+  expect(await screen.findByText("Showing the latest 200 runs; older ones are not listed.")).toBeInTheDocument();
+});
+
+test("a list shorter than that says nothing about its length", async () => {
+  await renderWithProviders(<Runs />);
+  await screen.findByText("DEMO-7");
+  expect(screen.queryByText(/Showing the latest/)).not.toBeInTheDocument();
 });

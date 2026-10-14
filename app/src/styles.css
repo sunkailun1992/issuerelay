@@ -71,7 +71,8 @@
     --secondary: oklch(0.97 0 0);
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
+    /* Darker than shadcn's 0.556: muted text keeps 4.5:1 on the muted fill too (styles.test.ts). */
+    --muted-foreground: oklch(0.54 0 0);
     --accent: oklch(0.97 0 0);
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
@@ -156,6 +157,22 @@
     --state-canceled: oklch(0.74 0.01 260);
 }
 
+/* Windows has neither PingFang nor Hiragino, and its Segoe UI has no Chinese, Japanese or Korean
+   glyphs: with the stack above, Microsoft YaHei UI would draw Japanese and Traditional Chinese in
+   the shapes of Simplified Chinese. <html lang> is the interface language (i18n/index.ts), so each
+   of these languages gets the macOS font first and then a Windows font of its own. */
+:root:lang(ja) {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo UI", sans-serif;
+}
+
+:root:lang(zh-TW) {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang TC", "Microsoft JhengHei UI", sans-serif;
+}
+
+:root:lang(ko) {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -168,6 +185,8 @@
     line-height: 1.5;
     }
   html {
-    @apply font-sans;
+    /* The variable, not the utility (which Tailwind writes out as the list itself), so that the
+       stacks by language above apply. */
+    font-family: var(--font-sans);
     }
 }

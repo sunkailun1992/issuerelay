@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createMockBackend, pickedUp } from "./mock";
+import * as fixtures from "./mock-fixtures";
 import { DEMO_ISSUES, DEMO_JOBS } from "./mock-fixtures";
 import type { EngineEvent } from "./types";
 
@@ -20,6 +21,18 @@ describe("mock backend", () => {
     await backend.markDone(waiting.id);
     expect((await backend.job(waiting.id))?.state).toBe("done");
     expect(events).toContainEqual({ kind: "job", job: expect.objectContaining({ id: waiting.id, state: "done" }) });
+  });
+
+  test("only a run still in hand can be stopped, as the engine rules", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    await expect(backend.cancelJob(7)).rejects.toThrow("job 7 is done and cannot be stopped");
+    // Waiting for a binding, queued and running are in hand.
+    for (const id of [5, 11, 12]) await backend.cancelJob(id);
+    expect((await backend.listJobs(100)).filter((job) => [5, 11, 12].includes(job.id)).map((job) => job.state)).toEqual([
+      "canceled",
+      "canceled",
+      "canceled",
+    ]);
   });
 
   test("marking a job that is not awaiting acceptance fails like the engine does", async () => {
@@ -197,4 +210,13 @@ describe("mock backend", () => {
     await backend.setupAction({ kind: "register_control_server", executor: "claude" });
     expect((await backend.controlServers()).claude).toBe("registered");
   });
+});
+
+test("the demo's fictional data is in English, so a screenshot in English shows no other script", () => {
+  // Chinese, Japanese and Korean characters (the panel's own words come from the translations).
+  const otherScript = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/u;
+  for (const [name, value] of Object.entries(fixtures)) {
+    if (typeof value === "function") continue;
+    expect(JSON.stringify(value), name).not.toMatch(otherScript);
+  }
 });

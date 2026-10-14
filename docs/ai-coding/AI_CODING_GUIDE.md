@@ -16,13 +16,13 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 开发宿主 | `cargo run -p issuerelay-devhost -- login`（或 `api-key`、`logout`、`projects`、`run`） |
 | 命令行 | `cargo run -p issuerelay-cli -- status`（宿主运行时才有响应） |
 | 前端依赖 | `pnpm --dir app install` |
-| 前端构建 | `pnpm --dir app build`（产物 `app/dist`；应用 crate 的发布构建内嵌它，所以排在 cargo 命令之前） |
+| 前端构建 | `pnpm --dir app build`（产物 `app/dist`；`tauri build`（打开 `custom-protocol` 特性）构建的应用内嵌它，调试构建、`cargo test` 与 `cargo clippy` 不内嵌；与 CI 一样排在 cargo 命令之前） |
 | 前端检查与测试 | `pnpm --dir app lint`（含 `tsc` 类型检查）；`pnpm --dir app test` |
-| 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对，再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
+| 面板截图与版面检查 | `pnpm --dir app test:screens`：把面板的关键屏拍下来，与 `docs/gates/screenshots/m2/` 的基准图比对（容差见 `TESTING_SPEC.md`），再量最小窗口下的版面；界面有意改动之后，用 `pnpm --dir app screenshots` 重写不再相符的基准图，换了机器或 Chrome 的大版本用 `pnpm --dir app exec playwright test --update-snapshots=all` 整套重拍。只在本机跑，不进 CI（字体随系统不同，换一台机器、CI 的机器上比对不稳定）；用本机装的 Google Chrome，不下载浏览器 |
 | 桌面应用开发版 | `pnpm --dir app tauri dev`；只在浏览器里看面板（假数据）：`pnpm --dir app dev`，地址加 `?mock=fresh` 是首次运行，加 `?mock=connecting` 是首次连接 Linear 还没结束，加 `?lang=zh-CN`（或别的语言代码）让设置里的界面语言是它 |
 | 本机安装包（macOS） | `bash scripts/stage-cli.sh && pnpm --dir app build && node scripts/release-checks.mjs panel && CI=true pnpm --dir app tauri build --bundles app,dmg --config src-tauri/tauri.bundle.conf.json`：产物在 `target/release/bundle/`（git 忽略）；`CI=true` 让打包器跳过给 dmg 窗口排版的访达脚本，免得弹出「控制访达」的授权框；打包配置去掉了 `beforeBuildCommand`，`tauri build` 不会再自己构建面板，所以面板要像命令里那样先构建并过 `panel` 门禁 |
 
-工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22 以上，pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
+工具链由 `rust-toolchain.toml` 固定为 1.99.0；前端要 Node.js 22.22.2+、24.15+ 或 26 及以上（`app/package.json` 的 `engines`），pnpm 版本由 `app/package.json` 的 `packageManager` 固定。
 
 ## 3. 分层
 
@@ -103,7 +103,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`（`fields` 的取值同步 `REQUIRED_FIELDS`）、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试；面板的时间线读同样的输出和日志里 IssueRelay 自己的 `{"stream":…,"text":…}` 行（`app/src/lib/timeline.ts`，测试直接读 `crates/core/tests/fixtures/{claude-stream,codex-exec}.jsonl`，不复制），格式变了一并改。
 - **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「重试」「取消」不得加入。
-- **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
+- **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`，以及 `quit-requested` 的载荷 `quit::QuitPrompt { running, waiting }`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`）。
 - **面板命令**：增删命令要同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json`（`allow-<命令>`，下划线写成连字符）和前端的 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 与 `api.test.ts` 的测试拦住不一致。面板要用 Tauri 自带的其他接口（窗口、路径等）时，只在能力文件里加用到的那一条权限，并在提交说明里写明理由；插件权限不给，插件只在 Rust 侧用。
 - **开发者工具**：调试构建里 Cmd+Opt+I（macOS）/ Ctrl+Shift+I（Windows）什么也不做，因为能力文件没有给 `core:webview:allow-internal-toggle-devtools`；需要时只在本机临时加上（`lib.rs` 与 `api.test.ts` 的边界测试会因此失败），不要提交；发布构建没有开发者工具。
 
@@ -153,8 +153,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 ### 12.3 文案与语言
 
 - 用户看得到的每段文字都走翻译键（`t()`），包括 `aria-label`、`title` 和提示；组件里不写死任何语言的文字。
-- 五种语言（`zh-CN`、`zh-TW`、`en`、`ja`、`ko`）的文件在 `app/src/i18n/locales/`：键和 `{{占位符}}` 必须一一对应、不能留空（`i18n.test.ts`）；组件用到而 `en.json` 没有的键让测试失败（`test-setup.ts` 的缺键守卫）。新增文案时五个文件一起加。
-- 托盘菜单和通知在 Rust 侧读同一批文件（`app/src-tauri/src/i18n.rs` 编译时嵌入）；Rust 用到的键登记在 `USED_KEYS`，测试检查每种语言都有。
+- 五种语言（`zh-CN`、`zh-TW`、`en`、`ja`、`ko`）的文件在 `app/src/i18n/locales/`：键和 `{{占位符}}` 必须一一对应、不能留空（`i18n.test.ts`）；组件用到而 `en.json` 没有的键、或指向一组文案而不是一句文案的键（如 `t("nav")`），都让测试失败（`test-setup.ts` 的守卫）。新增文案时五个文件一起加；带数量的句子用 `_one` / `_other` 两种形式。
+- 托盘菜单、macOS 的应用菜单（`menu.*`，`quit::APP_MENU_KEYS`）和通知在 Rust 侧读同一批文件（`app/src-tauri/src/i18n.rs` 编译时嵌入），随设置里的语言更新（`tray::refresh`）；Rust 用到的键登记在 `USED_KEYS`，测试检查每种语言都有。
 - 系统语言一律取 Rust 侧 `sys_locale` 报告的值（面板经 `AppInfo.system_locale` 拿到），面板、托盘和通知因此总是同一种语言。语言解析两边各有一份实现，共读 `language-cases.json`；新增语言的步骤见设计 9.4。
 - 插值不转义（`escapeValue: false`），靠 React 转义文本节点，所以翻译出来的文字也只放进文本节点。
 
@@ -172,7 +172,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 ### 12.6 页面状态
 
 - 每个读数据的页面都有加载（`LoadingState`）、空（`EmptyState`，写明下一步做什么）和错误（`ErrorState`，能重试）三种状态，并至少有一个用失败的假后端驱动的错误状态测试。概览、需求、运行记录、运行详情、项目绑定、环境检查、设置和首次引导都是这样（使用说明只是文字，没有数据要读）。
-- 渲染出错时整个面板换成翻译过的错误页（`ErrorBoundary`），不留空白窗口。
+- 渲染出错时换成翻译过的错误页（`ErrorBoundary`），不留空白窗口：页面出错只换掉页面那一层（`App.tsx` 的 `PageBoundary`，到别的地址就恢复），页面外的部分（事件桥、语言与主题、启动闸门）出错换掉整个面板。退出询问（`QuitDialog`）和提示（toast）不在这两层之内，各在一个出错时什么也不显示的边界里，所以任何一页出错时退出照样会问。错误页的「重新加载」先把地址改回 `#/` 再重载，不会重新打开出错的那一页。
+- 首次连接 Linear 还没结束（`status.linear.kind === "connecting"`）时，要 Linear 的数据被拒绝不算失败：需求页和绑定对话框的项目列表显示「正在连接 Linear…」（`LinearConnecting`），连接状态一变就重读。
 
 ### 12.7 窗口尺寸
 
@@ -185,7 +186,8 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - 装饰性图标加 `aria-hidden`；每个控件都有可读的名字（可见文字，或 `aria-label`，例如 `IssueLink` 的名字说明点了会做什么）。
 - 可点击的东西用 `<button>` 或 Radix 组件，不给 `div`、`span` 加点击事件，键盘才能用（`IssueLink` 的测试按 Tab 和回车打开）。
 - 页面里的区块用 `<section aria-labelledby>`，标题就是区块名（测试按 `role="region"` 找）；加载中用 `role="status"` 加名字；提醒用 `role="status"`，问题用 `role="alert"`。
-- 确认操作用 `AlertDialog` 加 `AlertDialogTrigger`，关闭后 Radix 把焦点还给触发按钮；有风险的确认把初始焦点放在安全的选项上（`FullAccessWarning` 的「取消」），回车不会误确认。
+- 确认操作用 `AlertDialog` 加 `AlertDialogTrigger`，关闭后 Radix 把焦点还给触发按钮；触发按钮随确认的操作一起消失时（移除绑定后卡片不在了），页面把焦点放到页头的按钮或标题上。有风险的确认把初始焦点放在安全的选项上（`FullAccessWarning` 的「取消」），回车不会误确认。
+- 由页面控制打开、没有 Radix 触发按钮的对话框（`BindingDialog`、`FullAccessWarning`、`QuitDialog`）用 `useFocusReturn`（`onCloseAutoFocus`）：关闭时焦点回到打开前拿着焦点的元素，那个元素不在了就回到调用方给的备选（页头的按钮、页面标题）。WebKit 里鼠标点击不会让按钮获得焦点，所以由按钮打开的对话框把被点的按钮记作打开者（`Bindings.tsx`），不依赖焦点。
 
 ### 12.9 与 core 共用的规则
 
@@ -193,6 +195,6 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 
 ### 12.10 生成文件与依赖
 
-- `app/src/components/ui/` 是 shadcn/ui 生成的组件：照原样提交，不手改，ESLint 不检查；要别的样子就在外面包一层或传 `className`。
+- `app/src/components/ui/` 是 shadcn/ui 生成的组件：照原样提交，ESLint 不检查；要别的样子就在外面包一层或传 `className`。手改只有两处，重新生成时要带上：`dialog.tsx` 两处写死的英文「Close」换成了翻译键 `common.close`（`components/DialogLabels.test.tsx` 把关）；`button.tsx` 默认按钮的悬停底色是 `bg-primary/90`（生成的是 `/80`，悬停时按钮文字只有 3.9:1；`styles.test.ts` 从该文件读出这个值核对 4.5:1）。
 - `app/dist` 没构建时由 `build.rs` 放一个占位页；`app/src-tauri/gen/`、`app/src-tauri/permissions/autogenerated/` 每次构建由 `build.rs` 重新生成；三者都不进仓库。
 - 前端依赖用 `pnpm --dir app add` 引入并说明用途，`app/pnpm-lock.yaml` 随同提交（见 `SECURITY_CODING_SPEC.md` 第 8 节）。

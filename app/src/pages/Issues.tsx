@@ -6,10 +6,10 @@ import { IssueLink } from "@/components/IssueLink";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
-import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { EmptyState, ErrorState, LinearConnecting, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useIssues } from "@/hooks/queries";
+import { useIssues, useStatus } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
 import { isActive } from "@/lib/runs";
@@ -85,11 +85,13 @@ function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
  * The issues the engine would look at (design 9.2): assigned to the user, with the trigger label,
  * newest update first, each with its newest run and whether, and if not why, the next check picks
  * it up. The list is read from Linear, so it can fail on its own: then the page says what to do.
+ * While the first connection to Linear is under way it waits for it instead.
  */
 export default function Issues() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const issues = useIssues();
+  const status = useStatus();
   const names = useTriggerNames();
 
   const header = (
@@ -105,6 +107,14 @@ export default function Issues() {
     />
   );
 
+  if (status.data?.linear.kind === "connecting") {
+    return (
+      <>
+        {header}
+        <LinearConnecting />
+      </>
+    );
+  }
   if (issues.isError && !issues.isFetching) {
     return (
       <>
@@ -154,10 +164,9 @@ export default function Issues() {
       <Table>
         <TableHeader>
           <TableRow>
+            {/* A column's name keeps to one line (head cells do not wrap): a Chinese one would otherwise break between its characters. */}
             {COLUMNS.map((column) => (
-              <TableHead key={column}>
-                <span className="whitespace-normal">{t(`issues.column.${column}`)}</span>
-              </TableHead>
+              <TableHead key={column}>{t(`issues.column.${column}`)}</TableHead>
             ))}
           </TableRow>
         </TableHeader>

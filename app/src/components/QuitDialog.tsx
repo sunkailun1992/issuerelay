@@ -11,15 +11,23 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { subscription } from "@/hooks/subscription";
+import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
 import type { QuitMode } from "@/lib/types";
+
+/** Where the focus goes after the prompt when what had it is gone: the page's heading. */
+const pageHeading = () => document.querySelector<HTMLElement>("h1");
 
 /**
  * The question that quitting with runs in progress asks (design 4.1, 6.2): wait for them, stop
  * them now, or keep running. Waiting can still become stopping, so once chosen the prompt stays
  * up with "stop now" until the app exits. "Keep running" only closes the prompt: the app treats
- * a question nobody answers like no question at all and asks again the next time.
+ * a question nobody answers like no question at all and asks again the next time. When quitting
+ * already waits (`QuitPrompt.waiting`: a panel reloaded after "wait" has lost the prompt, and the
+ * app tells it again at the next Quit), the prompt opens on the waiting state with "stop now".
+ * The app opens it, not a button of the page: when it closes, the focus goes back to where it was
+ * (`useFocusReturn`), or to the page's heading.
  */
 export function QuitDialog() {
   const backend = useBackend();
@@ -29,13 +37,14 @@ export function QuitDialog() {
   const [running, setRunning] = useState(0);
   const [waiting, setWaiting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const returnFocus = useFocusReturn(open, pageHeading);
 
   useEffect(
     () =>
       subscription(
-        backend.onQuitRequested((count) => {
-          setRunning(count);
-          setWaiting(false);
+        backend.onQuitRequested((prompt) => {
+          setRunning(prompt.running);
+          setWaiting(prompt.waiting);
           setStopping(false);
           setOpen(true);
         }),
@@ -61,7 +70,7 @@ export function QuitDialog() {
         if (!next && !waiting && !stopping) setOpen(false);
       }}
     >
-      <AlertDialogContent>
+      <AlertDialogContent onCloseAutoFocus={returnFocus}>
         <AlertDialogHeader>
           <AlertDialogTitle>{t("quit.title")}</AlertDialogTitle>
           <AlertDialogDescription>{waiting ? t("quit.waiting") : t("quit.body", { count: running })}</AlertDialogDescription>

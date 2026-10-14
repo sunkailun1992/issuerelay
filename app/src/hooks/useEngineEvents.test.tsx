@@ -1,11 +1,20 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { act, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { vi } from "vitest";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
-import { useDoctor, useIssues, useJob, useJobs, useProjects, useStatus } from "@/hooks/queries";
+import { queryKeys, useDoctor, useIssues, useJob, useJobs, useProjects, useStatus } from "@/hooks/queries";
 import { createMockBackend } from "@/lib/mock";
 import type { EngineEvent } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
+
+/** Waits until the status has been read and nothing is being read any more. */
+async function settled(client: QueryClient): Promise<void> {
+  await waitFor(() => {
+    expect(client.getQueryState(queryKeys.status)?.status).toBe("success");
+    expect(client.isFetching()).toBe(0);
+  });
+}
 
 test("engine events refresh exactly the data they touch", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
@@ -20,12 +29,13 @@ test("engine events refresh exactly the data they touch", async () => {
     resync = listener;
     return () => {};
   };
+  const job = (await backend.listJobs(1))[0];
   const { client } = await renderWithProviders(<EngineEventsBridge />, { backend });
   const spy = vi.spyOn(client, "invalidateQueries");
   // Wait until the bridge has really subscribed (`emit` exists from the start, so waiting on it
-  // would prove nothing).
+  // would prove nothing), and has read the status it watches the Linear connection in.
   await waitFor(() => expect(listen).toHaveBeenCalledWith(expect.any(Function)));
-  const job = (await backend.listJobs(1))[0];
+  await settled(client);
   emit({ kind: "job", job });
   const keys = spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
   for (const key of [["status"], ["jobs"], ["job", job.id], ["issues"]]) {
@@ -44,6 +54,8 @@ test("engine events refresh exactly the data they touch", async () => {
   spy.mockClear();
   resync();
   expect(spy).toHaveBeenCalledWith();
+  // What the events asked for is read again before the test ends.
+  await settled(client);
 });
 
 test("a job event leaves what it does not touch alone", async () => {
@@ -54,10 +66,11 @@ test("a job event leaves what it does not touch alone", async () => {
     return () => {};
   });
   backend.onEngineEvent = listen;
+  const job = (await backend.listJobs(1))[0];
   const { client } = await renderWithProviders(<EngineEventsBridge />, { backend });
   const spy = vi.spyOn(client, "invalidateQueries");
   await waitFor(() => expect(listen).toHaveBeenCalled());
-  const job = (await backend.listJobs(1))[0];
+  await settled(client);
   emit({ kind: "job", job });
   const keys = spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey));
   for (const untouched of [["settings"], ["bindings"], ["doctor"], ["projects"], ["appInfo"]]) {
@@ -66,6 +79,7 @@ test("a job event leaves what it does not touch alone", async () => {
   spy.mockClear();
   emit({ kind: "status" });
   expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toEqual([JSON.stringify(["status"])]);
+  await settled(client);
 });
 
 test("a finished job's log is read once more, so its last lines are not lost", async () => {
@@ -76,12 +90,14 @@ test("a finished job's log is read once more, so its last lines are not lost", a
     return () => {};
   });
   backend.onEngineEvent = listen;
+  const job = (await backend.listJobs(1))[0];
   const { client } = await renderWithProviders(<EngineEventsBridge />, { backend });
   const spy = vi.spyOn(client, "invalidateQueries");
   await waitFor(() => expect(listen).toHaveBeenCalled());
-  const job = (await backend.listJobs(1))[0];
+  await settled(client);
   emit({ kind: "job", job });
   expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toContain(JSON.stringify(["log", job.id]));
+  await settled(client);
 });
 
 test("unmounting the bridge unsubscribes from both event sources", async () => {

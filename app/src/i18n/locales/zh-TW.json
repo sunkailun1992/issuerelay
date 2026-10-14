@@ -45,6 +45,27 @@
     "open_panel": "開啟面板",
     "quit": "結束 IssueRelay"
   },
+  "menu": {
+    "about": "關於 {{name}}",
+    "services": "服務",
+    "hide": "隱藏 {{name}}",
+    "hide_others": "隱藏其他",
+    "file": "檔案",
+    "close_window": "關閉視窗",
+    "edit": "編輯",
+    "undo": "還原",
+    "redo": "重做",
+    "cut": "剪下",
+    "copy": "拷貝",
+    "paste": "貼上",
+    "select_all": "全選",
+    "view": "顯示方式",
+    "fullscreen": "進入全螢幕",
+    "window": "視窗",
+    "minimize": "縮到最小",
+    "zoom": "縮放",
+    "help": "輔助說明"
+  },
   "notify": {
     "run_started": "已開始執行。",
     "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
@@ -53,7 +74,8 @@
   },
   "quit": {
     "title": "仍有任務正在執行",
-    "body": "有 {{count}} 項任務正在執行。要等它們執行完畢，還是現在停止？",
+    "body_one": "有 {{count}} 項任務正在執行。要等它執行完畢，還是現在停止？",
+    "body_other": "有 {{count}} 項任務正在執行。要等它們執行完畢，還是現在停止？",
     "wait": "等待完成",
     "stop": "立即停止",
     "cancel": "繼續執行",
@@ -77,7 +99,8 @@
     "draining": "等待執行完畢",
     "problem": "需要處理",
     "connecting": "正在連線至 Linear…",
-    "version": "版本 {{version}}"
+    "version": "版本 {{version}}",
+    "notifications": "通知"
   },
   "format": {
     "just_now": "剛剛",
@@ -163,7 +186,10 @@
       "start_failed": "有任務無法開始執行"
     },
     "status_failed": "無法讀取 IssueRelay 的狀態",
-    "jobs_failed": "無法讀取執行紀錄"
+    "jobs_failed": "無法讀取執行紀錄",
+    "setup_title": "還不能執行任何任務：沒有就緒的執行者，也沒有綁定專案",
+    "setup_body": "先在環境檢查裡設定好 Claude Code 或 Codex，再把一個 Linear 專案綁定到本機資料夾。",
+    "bind_project": "綁定專案"
   },
   "issues": {
     "description": "指派給你、帶有 {{label}} 標籤的需求，最近更新的 50 項",
@@ -243,14 +269,23 @@
     "copy_all": "複製全部",
     "log_removed": "這次執行的日誌已被日誌清理刪除",
     "log_failed": "無法讀取日誌",
-    "no_output": "暫時沒有可顯示的內容"
+    "no_output": "暫時沒有可顯示的內容",
+    "log_capped": "只顯示日誌的最後 {{lines}} 行，執行在這之前就已開始。",
+    "list_capped": "只顯示最近的 {{runs}} 次執行，更早的沒有列出。",
+    "no_output_ended": "這次執行沒有留下可顯示的內容"
   },
   "timeline": {
     "session_started": "工作階段開始",
     "note": "IssueRelay",
     "stderr": "stderr",
     "result": "結果",
-    "error": "錯誤"
+    "error": "錯誤",
+    "files": "變更的檔案",
+    "change": {
+      "add": "新增",
+      "delete": "刪除",
+      "update": "修改"
+    }
   },
   "bindings": {
     "description": "綁定會把一個 Linear 專案與本機的一個資料夾連在一起，並決定 AI 在那裡如何執行。",
@@ -323,7 +358,7 @@
     "states_ok": "IssueRelay 用到的狀態都存在",
     "states_missing": "缺少的狀態：{{states}}",
     "teams_checked": "已檢查的團隊：{{teams}}",
-    "add_label_hint": "請在 Linear 裡建立標籤 {{label}}（設定 → 標籤）。IssueRelay 不會替你建立。",
+    "add_label_hint": "請在 Linear 裡建立標籤 {{label}}（設定 → 工作區 → 標籤，或某個團隊自己的標籤）。IssueRelay 不會替你建立。",
     "add_states_hint": "請在 Linear 的「設定 → 團隊 → 工作流程」裡新增缺少的狀態。IssueRelay 不會替你建立。",
     "open_linear": "開啟 Linear",
     "executors_title": "執行者",
@@ -438,7 +473,9 @@
     "logs": "執行日誌",
     "log_retention": "執行日誌保留天數",
     "log_max_total": "執行日誌總大小上限（MB）",
-    "unsaved": "有尚未儲存的變更"
+    "unsaved": "有尚未儲存的變更",
+    "reread_failed": "已儲存，但無法重新讀取設定",
+    "fix_to_save": "修正標示的欄位後才能儲存"
   },
   "help": {
     "description": "IssueRelay 何時接手需求、需求如何流轉、需求怎麼寫，以及出問題時該怎麼辦。",

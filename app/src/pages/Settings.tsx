@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { LoaderCircle, Plus, Trash2 } from "lucide-react";
 import { type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -17,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { WithCommands } from "@/components/WithCommands";
 import {
+  queryKeys,
   useAppInfo,
   useAutostart,
   useCliPath,
@@ -31,6 +33,7 @@ import {
 import { useCopyText } from "@/hooks/useCopyText";
 import { LANGUAGES } from "@/i18n/language";
 import { cleanDisplayText } from "@/lib/clean";
+import { reportFailure } from "@/lib/errors";
 import {
   type CountField,
   type Draft,
@@ -466,11 +469,13 @@ const LOGS: { field: CountField; label: string }[] = [
  * The form of the settings. It edits a draft: what was changed is kept apart from the settings as
  * they are (so that what changes meanwhile, such as monitoring being paused, flows in and is never
  * written back over), and saving puts the changes into the settings as they are then. The
- * changes are checked as the engine checks them and saving waits for them to be right. Starting at
- * login and the control server act at once and are not part of the draft.
+ * changes are checked as the engine checks them and saving waits for them to be right; the bar
+ * says so while it waits. Starting at login and the control server act at once and are not part of
+ * the draft.
  */
 function SettingsForm({ settings }: { settings: SettingsData }) {
   const { t } = useTranslation();
+  const client = useQueryClient();
   const ids = useId();
   const id = (name: string) => `${ids}-${name}`;
   const base = draftOf(settings);
@@ -479,6 +484,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   const save = useSaveSettings();
   const draft: Draft = { ...base, ...edits };
   const problems = problemsOf(draft);
+  const blocked = Object.keys(problems).length > 0;
   const dirty = !sameDraft(draft, base);
 
   const edit = <K extends keyof Draft>(field: K, value: Draft[K]) => setEdits((current) => ({ ...current, [field]: value }));
@@ -500,6 +506,14 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
     const saved = draft;
     save.mutate(next, {
       onSuccess: () => {
+        // The save is over once the settings have been read again. When that read failed, the
+        // settings the form holds are the ones from before: what was typed stays (saving it again
+        // writes the same), and the failure is told instead of "Saved".
+        const reread = client.getQueryState(queryKeys.settings);
+        if (reread?.status === "error") {
+          reportFailure(reread.error, t, "settings.reread_failed");
+          return;
+        }
         toast.success(t("common.saved"));
         // What was typed while the save ran is still to be saved.
         setEdits((current) => unsaved(current, saved));
@@ -646,10 +660,10 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
         data-slot="save-bar"
         className="sticky bottom-0 z-10 -mx-(--page-padding) mt-6 flex items-center justify-end gap-3 border-t bg-background/95 px-(--page-padding) py-3 backdrop-blur"
       >
-        <p aria-live="polite" className="text-sm text-muted-foreground">
-          {dirty && t("settings.unsaved")}
+        <p id={id("save-state")} aria-live="polite" className="text-sm text-muted-foreground">
+          {blocked ? t("settings.fix_to_save") : dirty && t("settings.unsaved")}
         </p>
-        <Button disabled={save.isPending || Object.keys(problems).length > 0} onClick={submit}>
+        <Button disabled={save.isPending || blocked} aria-describedby={blocked ? id("save-state") : undefined} onClick={submit}>
           {save.isPending && <LoaderCircle aria-hidden className="animate-spin" />}
           {t("common.save")}
         </Button>

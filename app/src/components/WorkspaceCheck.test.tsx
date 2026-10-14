@@ -35,7 +35,8 @@ test("a missing label is named in the check and in how to add it", async () => {
   await renderWithProviders(<WorkspaceCheck report={{ ...COMPLETE, label_ok: false }} labelName="ai-ready" />);
   expect(screen.getByText("The label ai-ready is missing")).toBeInTheDocument();
   expect(screen.getAllByText(/ai-ready/)).toHaveLength(2);
-  expect(screen.getByText(/Create the label ai-ready in Linear \(Settings → Labels\)/)).toBeInTheDocument();
+  // Where Linear keeps labels: the workspace's, or a team's own.
+  expect(screen.getByText(/Create the label ai-ready in Linear \(Settings → Workspace → Labels, or a team's own labels\)/)).toBeInTheDocument();
 });
 
 test("missing statuses are listed, and where to add them is said", async () => {

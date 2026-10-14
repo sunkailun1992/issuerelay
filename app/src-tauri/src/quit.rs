@@ -23,9 +23,10 @@ use std::{
 };
 
 use issuerelay_core::host::StopMode;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime};
 
-use crate::{events, logging, state::AppState, window};
+use crate::{events, i18n::Translator, logging, state::AppState, window};
 
 /// The id of the Quit items: the tray menu's and, on macOS, the application menu's. The tray's
 /// menu handler gets the events of every menu (`TrayIconBuilder::on_menu_event`), so both go to
@@ -71,16 +72,26 @@ pub enum QuitEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitStep {
     Nothing,
-    /// Show the panel and ask (`quit-requested` with the number of runs in progress).
+    /// Show the panel and ask (`quit-requested` with the runs in progress, not waiting yet).
     Ask(usize),
-    /// Show the panel again: it still shows the waiting prompt with "stop now".
-    ShowPanel,
+    /// Show the panel again and tell it that quitting waits for the runs in progress
+    /// (`quit-requested` with `waiting`): a panel that was reloaded meanwhile has lost the waiting
+    /// prompt, and shows it again with "stop now".
+    ShowPanel(usize),
     /// Stop the host as the mode says, in the background; `Stopped` follows.
     Stop(StopMode),
     /// Hide the window instead of letting it close.
     HideWindow,
     /// Exit the process.
     Exit,
+}
+
+/// The panel's question (`quit-requested`): how many runs are in progress, and whether quitting
+/// already waits for them, in which case the panel offers only "stop now".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct QuitPrompt {
+    pub running: usize,
+    pub waiting: bool,
 }
 
 /// The next state and what to do, for `event` in `state`.
@@ -100,7 +111,7 @@ pub fn next(state: QuitState, event: QuitEvent) -> (QuitState, QuitStep) {
             (S::Stopping, QuitStep::Stop(StopMode::StopRuns))
         }
         (S::Idle | S::Asking, E::Requested { running, .. }) => (S::Asking, QuitStep::Ask(running)),
-        (S::Waiting, E::Requested { .. }) => (S::Waiting, QuitStep::ShowPanel),
+        (S::Waiting, E::Requested { running, .. }) => (S::Waiting, QuitStep::ShowPanel(running)),
         (S::Idle | S::Asking, E::Wait) => (S::Waiting, QuitStep::Stop(StopMode::WaitForRuns)),
         (S::Idle | S::Asking | S::Waiting, E::StopNow) => {
             (S::Stopping, QuitStep::Stop(StopMode::StopRuns))
@@ -128,14 +139,20 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
     };
     match step {
         QuitStep::Nothing | QuitStep::HideWindow => {}
-        QuitStep::Ask(running) => {
-            window::show(app);
-            logging::debug_failed(
-                app.emit(events::QUIT_REQUESTED, running),
-                "asking the panel about quitting",
-            );
-        }
-        QuitStep::ShowPanel => window::show(app),
+        QuitStep::Ask(running) => ask_panel(
+            app,
+            QuitPrompt {
+                running,
+                waiting: false,
+            },
+        ),
+        QuitStep::ShowPanel(running) => ask_panel(
+            app,
+            QuitPrompt {
+                running,
+                waiting: true,
+            },
+        ),
         QuitStep::Stop(mode) => match state.try_host() {
             Some(host) => {
                 let app = app.clone();
@@ -155,6 +172,15 @@ pub fn handle<R: Runtime>(app: &AppHandle<R>, event: QuitEvent) -> QuitStep {
         QuitStep::Exit => app.exit(0),
     }
     step
+}
+
+/// Shows the panel and puts `prompt` to it (`quit-requested`).
+fn ask_panel<R: Runtime>(app: &AppHandle<R>, prompt: QuitPrompt) {
+    window::show(app);
+    logging::debug_failed(
+        app.emit(events::QUIT_REQUESTED, prompt),
+        "asking the panel about quitting",
+    );
 }
 
 /// The tray's Quit, Cmd+Q and an exit request, with the host as it is now.
@@ -276,16 +302,67 @@ fn wait_bounded(task: impl Future<Output = ()> + Send + 'static, limit: Duration
     wait.recv_timeout(limit).is_ok()
 }
 
-/// The application menu's Quit item (macOS), kept so that `tray::refresh` can give it the
-/// language the settings ask for, as it does the tray's items.
-#[cfg(target_os = "macos")]
-pub struct AppMenuQuit(pub tauri::menu::MenuItem<tauri::Wry>);
+/// The texts of macOS's application menu, by translation key, in the order of the menu; Quit is
+/// the tray's `tray.quit`. They are in the system language until the host has started, then in the
+/// language the settings ask for (`tray::refresh`), like the tray's items.
+pub const APP_MENU_KEYS: [&str; 20] = [
+    "menu.about",
+    "menu.services",
+    "menu.hide",
+    "menu.hide_others",
+    "tray.quit",
+    "menu.file",
+    "menu.close_window",
+    "menu.edit",
+    "menu.undo",
+    "menu.redo",
+    "menu.cut",
+    "menu.copy",
+    "menu.paste",
+    "menu.select_all",
+    "menu.view",
+    "menu.fullscreen",
+    "menu.window",
+    "menu.minimize",
+    "menu.zoom",
+    "menu.help",
+];
 
-/// macOS's application menu: Tauri's default one (`Menu::default` in tauri 2.12.3) except for
-/// Quit, which is an item of IssueRelay's own with Cmd+Q instead of the system's `terminate:`, so
-/// that quitting asks while runs are in progress (see the module comment). Its label is in the
-/// system language until the host has started (`AppMenuQuit`). Windows has no application menu:
-/// there the tray's Quit is the way to quit.
+/// The text of the application menu's item `key` in `t`'s language, with the app's `name` for
+/// `{{name}}` ("About IssueRelay").
+pub fn app_menu_text(t: &Translator, key: &str, name: &str) -> String {
+    t.t_with(key, &[("name", name)])
+}
+
+/// One item of the application menu (macOS) whose text follows the interface language.
+#[cfg(target_os = "macos")]
+pub enum AppMenuItem {
+    Submenu(tauri::menu::Submenu<tauri::Wry>),
+    Predefined(tauri::menu::PredefinedMenuItem<tauri::Wry>),
+    Item(tauri::menu::MenuItem<tauri::Wry>),
+}
+
+#[cfg(target_os = "macos")]
+impl AppMenuItem {
+    pub fn set_text(&self, text: &str) -> tauri::Result<()> {
+        match self {
+            AppMenuItem::Submenu(item) => item.set_text(text),
+            AppMenuItem::Predefined(item) => item.set_text(text),
+            AppMenuItem::Item(item) => item.set_text(text),
+        }
+    }
+}
+
+/// The application menu's items (macOS) with the key of each one's text, kept so that
+/// `tray::refresh` can give them the language the settings ask for, as it does the tray's items.
+#[cfg(target_os = "macos")]
+pub struct AppMenu(pub Vec<(&'static str, AppMenuItem)>);
+
+/// macOS's application menu: Tauri's default one (`Menu::default` in tauri 2.12.3) with every text
+/// from the panel's translation files (`APP_MENU_KEYS`) instead of AppKit's English, and with a
+/// Quit of IssueRelay's own with Cmd+Q instead of the system's `terminate:`, so that quitting asks
+/// while runs are in progress (see the module comment). The texts start in the system language
+/// (`AppMenu`). Windows has no application menu: there the tray's Quit is the way to quit.
 #[cfg(target_os = "macos")]
 pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{
@@ -293,11 +370,13 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
         WINDOW_SUBMENU_ID,
     };
 
-    use crate::i18n::{Translator, resolve_language};
+    use AppMenuItem::{Item, Predefined, Submenu as Sub};
+
+    use crate::i18n::resolve_language;
 
     let package = app.package_info();
     let config = app.config();
-    let about = AboutMetadata {
+    let metadata = AboutMetadata {
         name: Some(package.name.clone()),
         version: Some(package.version.to_string()),
         copyright: config.bundle.copyright.clone(),
@@ -312,73 +391,96 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
         "system",
         sys_locale::get_locale().as_deref(),
     ));
+    let text = |key: &str| app_menu_text(&t, key, &package.name);
+    let separator = || PredefinedMenuItem::separator(app);
+
+    let about = PredefinedMenuItem::about(app, Some(&text("menu.about")), Some(metadata))?;
+    let services = PredefinedMenuItem::services(app, Some(&text("menu.services")))?;
+    let hide = PredefinedMenuItem::hide(app, Some(&text("menu.hide")))?;
+    let hide_others = PredefinedMenuItem::hide_others(app, Some(&text("menu.hide_others")))?;
     let quit = MenuItem::with_id(
         app,
         QUIT_MENU_ID,
-        t.t("tray.quit"),
+        text("tray.quit"),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
-    app.manage(AppMenuQuit(quit.clone()));
-    Menu::with_items(
+    let close_file = PredefinedMenuItem::close_window(app, Some(&text("menu.close_window")))?;
+    let undo = PredefinedMenuItem::undo(app, Some(&text("menu.undo")))?;
+    let redo = PredefinedMenuItem::redo(app, Some(&text("menu.redo")))?;
+    let cut = PredefinedMenuItem::cut(app, Some(&text("menu.cut")))?;
+    let copy = PredefinedMenuItem::copy(app, Some(&text("menu.copy")))?;
+    let paste = PredefinedMenuItem::paste(app, Some(&text("menu.paste")))?;
+    let select_all = PredefinedMenuItem::select_all(app, Some(&text("menu.select_all")))?;
+    let fullscreen = PredefinedMenuItem::fullscreen(app, Some(&text("menu.fullscreen")))?;
+    let minimize = PredefinedMenuItem::minimize(app, Some(&text("menu.minimize")))?;
+    let zoom = PredefinedMenuItem::maximize(app, Some(&text("menu.zoom")))?;
+    let close_window = PredefinedMenuItem::close_window(app, Some(&text("menu.close_window")))?;
+
+    let app_submenu = Submenu::with_items(
         app,
+        &package.name,
+        true,
         &[
-            &Submenu::with_items(
-                app,
-                &package.name,
-                true,
-                &[
-                    &PredefinedMenuItem::about(app, None, Some(about))?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &quit,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "File",
-                true,
-                &[&PredefinedMenuItem::close_window(app, None)?],
-            )?,
-            &Submenu::with_items(
-                app,
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
-                ],
-            )?,
-            &Submenu::with_items(
-                app,
-                "View",
-                true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
-            )?,
-            &Submenu::with_id_and_items(
-                app,
-                WINDOW_SUBMENU_ID,
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(app, None)?,
-                    &PredefinedMenuItem::maximize(app, None)?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::close_window(app, None)?,
-                ],
-            )?,
-            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+            &about,
+            &separator()?,
+            &services,
+            &separator()?,
+            &hide,
+            &hide_others,
+            &separator()?,
+            &quit,
         ],
-    )
+    )?;
+    let file = Submenu::with_items(app, text("menu.file"), true, &[&close_file])?;
+    let edit = Submenu::with_items(
+        app,
+        text("menu.edit"),
+        true,
+        &[
+            &undo,
+            &redo,
+            &separator()?,
+            &cut,
+            &copy,
+            &paste,
+            &select_all,
+        ],
+    )?;
+    let view = Submenu::with_items(app, text("menu.view"), true, &[&fullscreen])?;
+    let window = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        text("menu.window"),
+        true,
+        &[&minimize, &zoom, &separator()?, &close_window],
+    )?;
+    let help = Submenu::with_id_and_items(app, HELP_SUBMENU_ID, text("menu.help"), true, &[])?;
+    let menu = Menu::with_items(app, &[&app_submenu, &file, &edit, &view, &window, &help])?;
+    app.manage(AppMenu(vec![
+        ("menu.about", Predefined(about)),
+        ("menu.services", Predefined(services)),
+        ("menu.hide", Predefined(hide)),
+        ("menu.hide_others", Predefined(hide_others)),
+        ("tray.quit", Item(quit)),
+        ("menu.file", Sub(file)),
+        ("menu.close_window", Predefined(close_file)),
+        ("menu.edit", Sub(edit)),
+        ("menu.undo", Predefined(undo)),
+        ("menu.redo", Predefined(redo)),
+        ("menu.cut", Predefined(cut)),
+        ("menu.copy", Predefined(copy)),
+        ("menu.paste", Predefined(paste)),
+        ("menu.select_all", Predefined(select_all)),
+        ("menu.view", Sub(view)),
+        ("menu.fullscreen", Predefined(fullscreen)),
+        ("menu.window", Sub(window)),
+        ("menu.minimize", Predefined(minimize)),
+        ("menu.zoom", Predefined(zoom)),
+        ("menu.close_window", Predefined(close_window)),
+        ("menu.help", Sub(help)),
+    ]));
+    Ok(menu)
 }
 
 #[cfg(test)]
@@ -393,7 +495,7 @@ mod tests {
     };
 
     use tauri::{
-        WebviewUrl, WebviewWindowBuilder,
+        Listener, WebviewUrl, WebviewWindowBuilder,
         test::{mock_builder, mock_context, noop_assets},
     };
 
@@ -439,8 +541,8 @@ mod tests {
     #[test]
     fn a_request_with_runs_in_progress_asks_and_a_repeat_is_decided_afresh() {
         // The tray's Quit, Cmd+Q (IssueRelay's own menu item on macOS) and an exit request that
-        // reached `on_run_event`. Whether the system's own quit reaches the app at all is for
-        // Task 13 Step 4 to check by hand; what the hook does with a request is `may_exit`.
+        // reached `on_run_event`. Whether the system's own quit reaches the app at all is checked
+        // by hand in the live acceptance; what the hook does with a request is `may_exit`.
         let (state, step) = next(
             QuitState::Idle,
             Requested {
@@ -480,7 +582,8 @@ mod tests {
             (state, step),
             (QuitState::Waiting, QuitStep::Stop(StopMode::WaitForRuns))
         );
-        // Still waiting: Quit in the tray brings the panel back, which still shows "stop now".
+        // Still waiting: Quit in the tray brings the panel back and tells it again that quitting
+        // waits, so that it shows "stop now" also after a reload.
         assert_eq!(
             next(
                 state,
@@ -489,10 +592,11 @@ mod tests {
                     running: 1
                 }
             ),
-            (QuitState::Waiting, QuitStep::ShowPanel)
+            (QuitState::Waiting, QuitStep::ShowPanel(1))
         );
         // The user switches to "stop now" while `stop(WaitForRuns)` has not returned: a second
-        // stop with `StopRuns` starts, which ends the first; both return (core Task 9).
+        // stop with `StopRuns` starts, which ends the first; both return (core's host test
+        // `stopping_now_ends_a_stop_that_is_still_waiting_for_the_runs`).
         let (state, step) = next(state, StopNow);
         assert_eq!(
             (state, step),
@@ -687,6 +791,118 @@ mod tests {
     }
 
     #[test]
+    fn the_application_menu_is_in_the_interface_language() {
+        // Every key is one Rust looks up, so every language is checked to have it (i18n.rs).
+        for key in APP_MENU_KEYS {
+            assert!(
+                crate::i18n::USED_KEYS.contains(&key),
+                "{key} is missing from USED_KEYS"
+            );
+        }
+        let text = |lang: &str, key: &str| app_menu_text(&Translator::new(lang), key, "IssueRelay");
+        assert_eq!(text("en", "menu.about"), "About IssueRelay");
+        assert_eq!(text("en", "menu.select_all"), "Select All");
+        assert_eq!(text("zh-CN", "menu.about"), "关于 IssueRelay");
+        assert_eq!(text("zh-CN", "menu.edit"), "编辑");
+        assert_eq!(text("ja", "menu.hide"), "IssueRelayを隠す");
+        assert_eq!(text("ko", "tray.quit"), "IssueRelay 종료");
+        // No item is left in English in another language: the menu bar reads in one language.
+        for lang in ["zh-CN", "zh-TW", "ja", "ko"] {
+            for key in APP_MENU_KEYS {
+                assert_ne!(text(lang, key), text("en", key), "{lang}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_quit_prompt_has_the_shape_the_panel_reads() {
+        assert_eq!(
+            serde_json::to_value(QuitPrompt {
+                running: 2,
+                waiting: false
+            })
+            .unwrap(),
+            serde_json::json!({ "running": 2, "waiting": false })
+        );
+        assert_eq!(
+            serde_json::to_value(QuitPrompt {
+                running: 1,
+                waiting: true
+            })
+            .unwrap(),
+            serde_json::json!({ "running": 1, "waiting": true })
+        );
+    }
+
+    /// What `handle` tells the panel (`quit-requested`, each payload as JSON) for `event` with
+    /// quitting in `state`, on tauri's mock runtime, and where quitting stands afterwards. The
+    /// mock app has no window: showing the panel only logs that it is missing.
+    fn told_for(state: QuitState, event: QuitEvent) -> (Vec<serde_json::Value>, QuitState) {
+        let app = mock_builder()
+            .manage(AppState::new(false))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        *app.state::<AppState>().quit.lock().unwrap() = state;
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let log = told.clone();
+        app.listen(events::QUIT_REQUESTED, move |event| {
+            log.lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        handle(app.handle(), event);
+        let told = told.lock().unwrap().clone();
+        (told, current(app.handle()))
+    }
+
+    #[test]
+    fn asking_tells_the_panel_the_runs_and_that_nothing_waits_yet() {
+        let request = Requested {
+            host_ready: true,
+            running: 2,
+        };
+        for state in [QuitState::Idle, QuitState::Asking] {
+            assert_eq!(
+                told_for(state, request),
+                (
+                    vec![serde_json::json!({ "running": 2, "waiting": false })],
+                    QuitState::Asking
+                ),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_while_waiting_tells_the_panel_again_that_quitting_waits() {
+        // A panel reloaded meanwhile has lost the waiting prompt: told again, it shows "stop now".
+        assert_eq!(
+            told_for(
+                QuitState::Waiting,
+                Requested {
+                    host_ready: true,
+                    running: 1
+                }
+            ),
+            (
+                vec![serde_json::json!({ "running": 1, "waiting": true })],
+                QuitState::Waiting
+            )
+        );
+        // While stopping there is nothing left to ask.
+        assert_eq!(
+            told_for(
+                QuitState::Stopping,
+                Requested {
+                    host_ready: true,
+                    running: 1
+                }
+            ),
+            (vec![], QuitState::Stopping)
+        );
+    }
+
+    #[test]
     fn the_event_loop_hook_lets_a_forced_exit_without_a_host_end_at_once() {
         // The hook itself, on tauri's mock runtime: with no host there is nothing to stop and
         // nothing to wait for. (With a host it hands `forced_exit` the host's stop; making one
@@ -697,7 +913,8 @@ mod tests {
             .unwrap();
         let began = Instant::now();
         on_run_event(app.handle(), RunEvent::Exit);
-        assert!(began.elapsed() < Duration::from_secs(1));
+        // Far below the 10 s a forced exit waits for a stop, with room for a slow CI machine.
+        assert!(began.elapsed() < Duration::from_secs(5));
         assert_eq!(current(app.handle()), QuitState::Idle);
     }
 

@@ -245,7 +245,7 @@ test("a missing label and missing statuses are explained, with a button that ope
   expect(within(workspace).getByText("Missing statuses: In Progress, In Testing")).toBeInTheDocument();
   expect(within(workspace).getByText("Teams checked: Demo, Docs")).toBeInTheDocument();
   expect(within(workspace).getByText(/Settings → Teams → Workflow/)).toBeInTheDocument();
-  expect(within(workspace).getByText(/Settings → Labels/)).toBeInTheDocument();
+  expect(within(workspace).getByText(/Settings → Workspace → Labels/)).toBeInTheDocument();
   // The program does not create them: it only points the way.
   await userEvent.click(within(workspace).getByRole("button", { name: "Open Linear" }));
   expect(open).toHaveBeenCalledWith("https://linear.app/");
@@ -260,7 +260,7 @@ test("with only a status missing, only the statuses are explained", async () => 
   expect(await within(workspace).findByText("Missing statuses: In Testing")).toBeInTheDocument();
   expect(within(workspace).getByText("The label ai-ready exists")).toBeInTheDocument();
   expect(within(workspace).getByText(/Settings → Teams → Workflow/)).toBeInTheDocument();
-  expect(within(workspace).queryByText(/Settings → Labels/)).not.toBeInTheDocument();
+  expect(within(workspace).queryByText(/Settings → Workspace → Labels/)).not.toBeInTheDocument();
 });
 
 test("a workspace that could not be checked is an empty state, not a green check", async () => {

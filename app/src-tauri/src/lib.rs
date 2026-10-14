@@ -1,6 +1,6 @@
 //! IssueRelay's desktop app: the tray icon and the panel around the engine.
-// Every module is `pub`: only this crate's own executable uses the library, and what the panel's
-// commands (Task 4) use later, such as `AppState::host`, is then not dead code before that.
+// Every module is `pub`: only this crate's own executable uses the library, and an item that only
+// one platform uses (the macOS application menu's texts, say) is then not dead code on the other.
 pub mod commands;
 pub mod events;
 pub mod i18n;
@@ -28,6 +28,7 @@ pub fn run() {
         .ok()
         .map(|paths| paths.logs_dir());
     let mut log_guard = logging::init(logs_dir.as_deref());
+    logging::install_panic_hook();
     let builder = tauri::Builder::default()
         // Must come first: a second launch only brings the running instance's panel forward.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -39,7 +40,8 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         // By default the plugin adds a script to every page that opens clicked links itself; the
-        // panel opens only Linear's links, through IssueRelay's own command and check (Task 4).
+        // panel opens only Linear's links, through IssueRelay's own command and check
+        // (`commands::open_linear`).
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
@@ -342,6 +344,34 @@ mod tests {
         assert_eq!(files, ["default.json"]);
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert!(config["app"]["security"].get("capabilities").is_none());
+    }
+
+    /// The webview's content security policy: local resources and the IPC only; no `<base>` that
+    /// would move where relative addresses point, no form that posts anywhere, no plugin objects.
+    #[test]
+    fn the_csp_allows_only_local_content_and_nothing_else() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let csp = config["app"]["security"]["csp"]
+            .as_str()
+            .expect("a CSP string");
+        let directives: BTreeMap<&str, &str> = csp
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .map(|directive| directive.split_once(' ').expect("a directive has a value"))
+            .collect();
+        assert_eq!(
+            directives,
+            BTreeMap::from([
+                ("default-src", "'self'"),
+                ("img-src", "'self' data:"),
+                ("style-src", "'self' 'unsafe-inline'"),
+                ("connect-src", "ipc: http://ipc.localhost"),
+                ("base-uri", "'none'"),
+                ("form-action", "'none'"),
+                ("object-src", "'none'"),
+            ])
+        );
     }
 
     /// Nor can the app widen it while it runs, which the checks above would not see: Tauri's
