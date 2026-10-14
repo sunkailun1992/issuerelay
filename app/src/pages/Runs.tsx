@@ -116,12 +116,12 @@ function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
         <TableRow>
           {COLUMNS.map((facts) => (
             <TableHead key={facts[0]}>
-              {/* A header that has to wrap breaks between the names, not inside one. */}
+              {/* A header that has to wrap breaks between the names, never inside one. */}
               <span className="whitespace-normal">
                 {facts.map((fact, index) => (
                   <Fragment key={fact}>
                     {index > 0 && " / "}
-                    <span className="inline-block">{t(`runs.field.${fact}`)}</span>
+                    <span className="inline-block whitespace-nowrap">{t(`runs.field.${fact}`)}</span>
                   </Fragment>
                 ))}
               </span>

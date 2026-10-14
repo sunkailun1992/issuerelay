@@ -154,10 +154,9 @@ export default function Issues() {
       <Table>
         <TableHeader>
           <TableRow>
+            {/* A column's name keeps to one line (head cells do not wrap): a Chinese one would otherwise break between its characters. */}
             {COLUMNS.map((column) => (
-              <TableHead key={column}>
-                <span className="whitespace-normal">{t(`issues.column.${column}`)}</span>
-              </TableHead>
+              <TableHead key={column}>{t(`issues.column.${column}`)}</TableHead>
             ))}
           </TableRow>
         </TableHeader>

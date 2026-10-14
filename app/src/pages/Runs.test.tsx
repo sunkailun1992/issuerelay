@@ -124,7 +124,7 @@ test("a row says the state, the issue and who ran it, the title, when and for ho
     ["DEMO-10", "Claude Code"],
     ["Add hello.txt"],
     ["50 minutes ago", "30 min 0 s"],
-    ["新增 hello.txt，已推送到 test 分支并读回部署"],
+    ["Added hello.txt, pushed it to the test branch and read the deployment back"],
   ]);
   expect(cellsOf(rowOfRun(8))).toEqual([
     ["Failed"],

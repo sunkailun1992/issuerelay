@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import css from "./styles.css?raw";
+import buttonSource from "@/components/ui/button.tsx?raw";
 import { JOB_STATES } from "@/lib/types";
 import { STATE_STYLE } from "@/components/StatusBadge";
 import { blend, bytes, contrast, inGamut, oklch } from "@/test/colour";
@@ -103,6 +104,34 @@ describe("the state colours", () => {
         const ratio = contrast(text, blend(text, under, TINT, "linear"));
         expect(ratio, `${selector} --state-${name} on ${surface}`).toBeGreaterThanOrEqual(4.5);
       }
+    }
+  });
+});
+
+describe("muted text and the primary button", () => {
+  /** What muted text sits on: the page, a card, the sidebar, and a muted fill (a log label, a read-only field). */
+  const UNDER_MUTED_TEXT = ["background", "card", "sidebar", "muted"] as const;
+
+  test.each(THEMES)("%s: muted text reaches 4.5:1 on everything it sits on", (_theme, selector) => {
+    const text = oklch(token(selector, "muted-foreground"));
+    for (const surface of UNDER_MUTED_TEXT) {
+      expect(contrast(text, oklch(token(selector, surface))), `${selector} muted text on ${surface}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  /** How opaque the default button's fill is while hovered: the `hover:bg-primary/NN` of components/ui/button.tsx. */
+  function hoverAlpha(): number {
+    const match = /default: "[^"]*\bhover:bg-primary\/(\d+)/.exec(buttonSource);
+    expect(match, "the default button's hover fill").not.toBeNull();
+    return Number(match![1]) / 100;
+  }
+
+  test.each(THEMES)("%s: the label of a hovered primary button reaches 4.5:1 on the page and on a card", (_theme, selector) => {
+    const label = oklch(token(selector, "primary-foreground"));
+    const alpha = hoverAlpha();
+    for (const surface of ["background", "card"] as const) {
+      const fill = blend(oklch(token(selector, "primary")), oklch(token(selector, surface)), alpha);
+      expect(contrast(label, fill), `${selector} primary/${alpha * 100} over ${surface}`).toBeGreaterThanOrEqual(4.5);
     }
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { createMockBackend, pickedUp } from "./mock";
+import * as fixtures from "./mock-fixtures";
 import { DEMO_ISSUES, DEMO_JOBS } from "./mock-fixtures";
 import type { EngineEvent } from "./types";
 
@@ -197,4 +198,13 @@ describe("mock backend", () => {
     await backend.setupAction({ kind: "register_control_server", executor: "claude" });
     expect((await backend.controlServers()).claude).toBe("registered");
   });
+});
+
+test("the demo's fictional data is in English, so a screenshot in English shows no other script", () => {
+  // Chinese, Japanese and Korean characters (the panel's own words come from the translations).
+  const otherScript = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/u;
+  for (const [name, value] of Object.entries(fixtures)) {
+    if (typeof value === "function") continue;
+    expect(JSON.stringify(value), name).not.toMatch(otherScript);
+  }
 });

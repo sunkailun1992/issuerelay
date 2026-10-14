@@ -172,7 +172,7 @@
     "column": {
       "issue": "課題",
       "title": "タイトル",
-      "linear_state": "Linear のステータス",
+      "linear_state": "Linear の状態",
       "local_state": "ローカルの状態",
       "reason": "理由",
       "actions": "操作"

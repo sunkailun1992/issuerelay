@@ -10,8 +10,13 @@ type Language = "zh-CN" | "zh-TW" | "en" | "ja" | "ko";
 /** One of the panel's own texts, in one language, by its translation key. */
 type Words = (key: string) => string;
 
-/** The comparison allows 1% of a screen's pixels to differ (type rendering), and freezes animations. */
-const SHOT = { maxDiffPixelRatio: 0.01, animations: "disabled" } as const;
+/**
+ * The comparison. Renders on the same machine are near identical, so at most 30 pixels may differ,
+ * each by a colour distance of at most 0.1 (Playwright's scale, 0 to 1): a changed state colour,
+ * primary colour or sidebar tint, or a page moved by a few pixels, is well past that. Animations
+ * are frozen.
+ */
+const SHOT = { maxDiffPixels: 30, threshold: 0.1, animations: "disabled" } as const;
 
 const SCREENSHOT_LANGUAGES: Language[] = ["zh-CN", "en"];
 /** English has the widest table; Chinese and Japanese are another script, without spaces between words. */
@@ -91,7 +96,9 @@ async function shot(page: Page, language: Language, name: string): Promise<void>
   const theme = test.info().project.name;
   // A click leaves the pointer where it was: put it where it hovers over nothing.
   await page.mouse.move(0, 0);
-  await expect(page).toHaveScreenshot(`${language}-${theme}-${name}.png`, SHOT);
+  // The app icon (the sidebar's, the guide's header) is masked: Chrome draws its gradients and
+  // shadow a few dozen pixels differently from one run to the next.
+  await expect(page).toHaveScreenshot(`${language}-${theme}-${name}.png`, { ...SHOT, mask: [page.locator('img[src="/icon.svg"]')] });
 }
 
 /** The eight screens of the panel's pages. `ready` waits for what shows the page has its data (the same in every language). */
@@ -235,6 +242,51 @@ async function reachPastRightEdge(container: Locator): Promise<{ overflow: numbe
   });
 }
 
+/**
+ * The column names of the table that are broken: a word split across two lines (a Chinese or
+ * Japanese word included), or, with `oneLine`, a name on more than one line. A name may wrap
+ * between its words, and the names a cell joins with " / " may go on two lines between the names.
+ */
+async function brokenColumnNames(page: Page, oneLine: boolean): Promise<string[]> {
+  return page.locator('[data-slot="table-header"]').evaluate((header, oneLine) => {
+    /** How many lines a range covers: rects on one line overlap vertically (scripts in other fonts sit a little higher or lower). */
+    const lines = (range: Range): number => {
+      const rects = [...range.getClientRects()].filter((rect) => rect.width > 0).sort((a, b) => a.top - b.top);
+      let count = 0;
+      let bottom = -Infinity;
+      for (const rect of rects) {
+        if (rect.top >= bottom - 1) {
+          count += 1;
+          bottom = rect.bottom;
+        } else {
+          bottom = Math.max(bottom, rect.bottom);
+        }
+      }
+      return count;
+    };
+    const broken: string[] = [];
+    for (const cell of header.querySelectorAll("th")) {
+      const parts = [...cell.querySelectorAll<HTMLElement>("span.inline-block")];
+      for (const name of parts.length > 0 ? parts : [cell]) {
+        const whole = document.createRange();
+        whole.selectNodeContents(name);
+        let split = oneLine && lines(whole) > 1;
+        const texts = document.createTreeWalker(name, NodeFilter.SHOW_TEXT);
+        for (let node = texts.nextNode(); node !== null; node = texts.nextNode()) {
+          for (const word of (node.textContent ?? "").matchAll(/\S+/g)) {
+            const range = document.createRange();
+            range.setStart(node, word.index);
+            range.setEnd(node, word.index + word[0].length);
+            if (lines(range) > 1) split = true;
+          }
+        }
+        if (split) broken.push(name.textContent?.trim() ?? "");
+      }
+    }
+    return broken;
+  }, oneLine);
+}
+
 /** The element and everything in it is inside the window, not cut off by it or by a scrolling parent. */
 async function expectWithinWindow(...elements: Locator[]): Promise<void> {
   for (const element of elements) {
@@ -247,7 +299,8 @@ for (const { width, height } of SMALLEST) {
   test.describe(`at ${width}x${height}`, () => {
     test.use({ viewport: { width, height } });
 
-    // The tables of issues and runs, with the buttons of their rows and the filter tabs: they used to run past the container.
+    // The tables of issues and runs, with the buttons of their rows and the filter tabs: they used to run past the
+    // container. No column name breaks inside a word.
     for (const language of LAYOUT_LANGUAGES) {
       for (const route of ["/issues", "/runs"]) {
         test(`${route} in ${language} does not overflow and keeps every button inside`, async ({ page }) => {
@@ -255,8 +308,12 @@ for (const { width, height } of SMALLEST) {
           await open(page, language, route);
           await expect(title(page, t(route === "/issues" ? "nav.issues" : "nav.runs"))).toBeVisible();
           await expect(page.locator('[data-slot="table-container"]')).toBeVisible();
+          // The demo's rows are there: a table without rows measures nothing.
+          await expect(page.locator('[data-slot="table-body"] tr')).toHaveCount(9);
           await settled(page);
 
+          // Chinese column names are short: each keeps to one line.
+          expect(await brokenColumnNames(page, language === "zh-CN"), "column names broken across lines").toEqual([]);
           expect(await reachPastRightEdge(page.locator('[data-slot="table-container"]')), "the table").toEqual({ overflow: 0, past: [] });
           expect(await reachPastRightEdge(page.locator("main")), "the page").toEqual({ overflow: 0, past: [] });
           const pastWindow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
