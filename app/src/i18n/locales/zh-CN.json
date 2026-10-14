@@ -455,6 +455,8 @@
     "autostart": "开机自启",
     "applies_at_once": "立即生效，不经「保存」。",
     "autostart_failed": "无法读取是否开机自启",
+    "show_in_dock": "在程序坞显示图标",
+    "show_in_dock_note": "关闭后，只有面板打开时才显示图标；菜单栏图标始终保留。",
     "cli": {
       "title": "把命令行加入 PATH",
       "description": "之后在终端里可以直接输入 {{command}}，不需要管理员权限。",

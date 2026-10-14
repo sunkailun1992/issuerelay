@@ -531,6 +531,10 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   const [edits, setEdits] = useState<Partial<Draft>>({});
   const [asking, setAsking] = useState(false);
   const save = useSaveSettings();
+  const info = useAppInfo();
+  // The Dock is macOS's: Windows has no such icon (the taskbar button follows the window), so the
+  // switch is not offered there. Until the platform is known it is not shown either.
+  const hasDock = info.data?.platform === "macos";
   const draft: Draft = { ...base, ...edits };
   const problems = problemsOf(draft);
   const blocked = Object.keys(problems).length > 0;
@@ -667,6 +671,15 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
 
         <Group title={t("settings.group.system")}>
           <Autostart />
+          {hasDock && (
+            <SwitchRow
+              id={id("show-in-dock")}
+              label={t("settings.show_in_dock")}
+              note={t("settings.show_in_dock_note")}
+              checked={draft.show_in_dock}
+              onChange={(on) => edit("show_in_dock", on)}
+            />
+          )}
           <CliOnPath />
           <SwitchRow
             id={id("auto-update")}

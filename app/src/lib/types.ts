@@ -123,6 +123,8 @@ export interface Settings {
   auto_update: boolean;
   onboarding_completed: boolean;
   full_access_acknowledged: boolean;
+  /** Keep the app's icon in the macOS Dock while it runs; off, it shows only while the panel is open. Windows has no Dock. */
+  show_in_dock: boolean;
 }
 
 export interface Binding {

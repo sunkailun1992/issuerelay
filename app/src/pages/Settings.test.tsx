@@ -133,6 +133,7 @@ test("the fields show what is saved", async () => {
     default_permission: "personal",
     prompt_template: "Push to the test branch.",
     auto_update: false,
+    show_in_dock: false,
     notifications: { run_started: false, awaiting_acceptance: true, needs_info: true, failed: true },
   });
   await renderWithProviders(<Settings />, { backend });
@@ -146,6 +147,8 @@ test("the fields show what is saved", async () => {
   expect(screen.getByRole("combobox", { name: "Default permission level" })).toHaveTextContent("Personal settings");
   expect(screen.getByRole("textbox", { name: "Default prompt template" })).toHaveValue("Push to the test branch.");
   expect(screen.getByRole("switch", { name: "Check for updates automatically" })).not.toBeChecked();
+  // Offered once the platform is known, which is a read of its own.
+  expect(await screen.findByRole("switch", { name: "Show in Dock" })).not.toBeChecked();
   expect(screen.getByRole("switch", { name: "Run started" })).not.toBeChecked();
   expect(screen.getByRole("switch", { name: "Ready for acceptance" })).toBeChecked();
   expect(screen.getByRole("textbox", { name: "Trigger label" })).toHaveValue("ai-ready");
@@ -659,6 +662,77 @@ test("when it cannot be read whether it starts at login the row says so, with a 
   const system = screen.getByRole("region", { name: "System" });
   await userEvent.click(within(system).getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(backend.autostartEnabled).toHaveBeenCalledTimes(2));
+});
+
+// ---- the Dock icon ----------------------------------------------------------------------------
+
+test("the Dock icon is a switch in the System group, right after starting at login, and is on in a new install", async () => {
+  await renderWithProviders(<Settings />);
+  const system = await screen.findByRole("region", { name: "System" });
+  const login = await within(system).findByRole("switch", { name: "Start at login" });
+  const dock = await within(system).findByRole("switch", { name: "Show in Dock" });
+  const path = await within(system).findByRole("switch", { name: "Command line on PATH" });
+  expect(dock).toBeChecked();
+  expect(dock).toHaveAccessibleDescription("Off: the icon shows only while the panel is open. The menu bar icon always stays.");
+  expect(login.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(dock.compareDocumentPosition(path) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("the Dock icon is saved with the page, like the notifications, not at once like starting at login", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("switch", { name: "Show in Dock" }));
+  // A change of the page, waiting for Save.
+  expect(screen.getByText("You have unsaved changes")).toBeInTheDocument();
+  expect(save).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).show_in_dock).toBe(false);
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument());
+  expect(screen.getByRole("switch", { name: "Show in Dock" })).not.toBeChecked();
+  // And switched on again.
+  await userEvent.click(screen.getByRole("switch", { name: "Show in Dock" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(lastSaved(save).show_in_dock).toBe(true);
+});
+
+test("a save of something else keeps the Dock icon as it is saved", async () => {
+  const backend = await backendWith({ show_in_dock: false });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  await userEvent.click(await screen.findByRole("switch", { name: "Run failed" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save)).toMatchObject({ show_in_dock: false });
+});
+
+test("Windows has no Dock: the switch is not offered, and a save leaves the saved value as it is", async () => {
+  const backend = await backendWith({ show_in_dock: false });
+  const info: AppInfo = await backend.appInfo();
+  backend.appInfo = vi.fn().mockResolvedValue({ ...info, platform: "windows" });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  // The platform is known once the version row, which comes from the same answer, shows it.
+  expect(await screen.findByText("Version 0.1.0")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Start at login" })).toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Show in Dock" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).show_in_dock).toBe(false);
+});
+
+test.each([
+  ["en", "Show in Dock", "Off: the icon shows only while the panel is open. The menu bar icon always stays."],
+  ["zh-CN", "在程序坞显示图标", "关闭后，只有面板打开时才显示图标；菜单栏图标始终保留。"],
+  ["zh-TW", "在程式塢顯示圖示", "關閉後，只有面板開啟時才顯示圖示；選單列圖示一律保留。"],
+  ["ja", "Dock にアイコンを表示", "オフにすると、アイコンはパネルを開いている間だけ表示されます。メニューバーのアイコンは常に残ります。"],
+  ["ko", "Dock에 아이콘 표시", "끄면 패널이 열려 있는 동안에만 아이콘이 표시됩니다. 메뉴 막대 아이콘은 항상 남아 있습니다."],
+] as const)("the Dock switch and its note read in %s", async (lang, name, note) => {
+  await renderWithProviders(<Settings />, { lang });
+  expect(await screen.findByRole("switch", { name })).toHaveAccessibleDescription(note);
 });
 
 // ---- the command line on PATH ----------------------------------------------------------------

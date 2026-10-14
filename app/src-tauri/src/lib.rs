@@ -116,6 +116,8 @@ pub fn run() {
             if app.state::<state::AppState>().autostarted {
                 // A login start stays in the tray: through the same `hide` as closing the panel,
                 // so macOS shows no Dock icon either.
+                // That holds until the settings are read: `startup::start` brings the icon back
+                // when "Show in Dock" is on, which it is unless the user switched it off.
                 window::hide(app.handle());
             }
             tauri::async_runtime::spawn(startup::start(app.handle().clone()));
