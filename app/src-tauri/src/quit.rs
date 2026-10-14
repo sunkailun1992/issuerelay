@@ -22,7 +22,9 @@
 //! would exit, a verified update waiting in `update` is installed instead (`installing_instead`):
 //! quitting stays `Installing`, so a closed window only hides and an exit request is held, until
 //! the install has returned (`Installed`) and IssueRelay restarts. A plain quit (`request`) drops
-//! a downloaded update first, so quitting never installs it.
+//! a downloaded update first, so quitting never installs it; one that comes while the update is
+//! still downloading is counted, and the download is discarded when it ends (`update::install`
+//! then does not ask to install).
 use std::{
     sync::{Mutex, PoisonError},
     time::Duration,
@@ -303,7 +305,7 @@ fn no_host_to_stop<R: Runtime>(app: &AppHandle<R>, what: &str) {
 }
 
 /// Where quitting stands now.
-fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
+pub fn current<R: Runtime>(app: &AppHandle<R>) -> QuitState {
     *app.state::<AppState>()
         .quit
         .lock()

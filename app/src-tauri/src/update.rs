@@ -10,11 +10,17 @@
 //! signature or a version that is not newer is shown and logged and changes nothing else:
 //! monitoring goes on. An install that fails after the host stopped restarts the app as it is and
 //! is shown by the panel after the restart (`record_install_failure`), never as a notification.
+//! A quit never turns into an install: a quit request drops the download that waits, and one that
+//! comes while the download is still under way is counted, so that the download is discarded when
+//! it ends (`Updates::prepare`) and the quit flow is not asked to install it.
 //! Everything that takes the app is generic over the runtime, like quit.rs.
 use std::{
     future::Future,
     path::Path,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -31,7 +37,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
     events, logging, notify,
-    quit::{self, QuitEvent},
+    quit::{self, QuitEvent, QuitState},
     state::AppState,
 };
 
@@ -161,6 +167,9 @@ pub struct PendingInstall(Arc<Waiting>);
 #[derive(Default)]
 struct Waiting {
     install: Mutex<Option<Box<dyn Install>>>,
+    /// How many quit requests there have been (`PendingInstall::clear`): a download that began
+    /// before one must not be kept after it (`keep_unless_quit`).
+    quit_requests: AtomicU64,
 }
 
 impl PendingInstall {
@@ -181,9 +190,60 @@ impl PendingInstall {
         lock(&self.0.install).take()
     }
 
-    /// Drops the download: the user quit instead of installing.
+    /// A quit request: drops the download, so that quitting never installs it, and counts the
+    /// request, so that a download that is still under way is discarded when it ends. Counted under
+    /// the lock that `keep_unless_quit` takes, so that a download is either dropped here or
+    /// refused there.
     pub fn clear(&self) {
-        lock(&self.0.install).take();
+        let mut install = lock(&self.0.install);
+        self.0.quit_requests.fetch_add(1, Ordering::SeqCst);
+        install.take();
+    }
+
+    /// How many quit requests there have been so far.
+    fn quit_requests(&self) -> u64 {
+        self.0.quit_requests.load(Ordering::SeqCst)
+    }
+
+    /// Keeps `install` unless a quit was requested since `quit_requests` was read; whether it did.
+    fn keep_unless_quit(&self, quit_requests: u64, install: Box<dyn Install>) -> bool {
+        let mut waiting = lock(&self.0.install);
+        if self.0.quit_requests.load(Ordering::SeqCst) != quit_requests {
+            return false;
+        }
+        *waiting = Some(install);
+        true
+    }
+}
+
+/// What `Updates::prepare` came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prepared {
+    /// The offered version is downloaded and verified, and waits for the quit flow: its version.
+    Ready(String),
+    /// A quit was requested while it downloaded, so it was discarded: nothing waits, quitting goes
+    /// on as the quit it is, and the offer stays on show (the banner offers it again). No failure.
+    CancelledByQuit,
+    /// Another call is downloading it just now, and that one carries on.
+    Busy,
+}
+
+/// The one download at a time: taken by `Updates::prepare`, given back when it ends, however it
+/// ends (the future may be dropped half-way).
+struct Download<'a>(&'a AtomicBool);
+
+impl<'a> Download<'a> {
+    fn begin(running: &'a AtomicBool) -> Option<Self> {
+        running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(running))
+    }
+}
+
+impl Drop for Download<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -195,6 +255,8 @@ pub struct Updates<S: UpdateSource> {
     status: Mutex<UpdateStatus>,
     offer: Mutex<Option<Arc<S::Offer>>>,
     waiting: PendingInstall,
+    /// Whether a download is under way (`Download`).
+    downloading: AtomicBool,
     notified: Mutex<Option<String>>,
 }
 
@@ -222,6 +284,7 @@ impl<S: UpdateSource> Updates<S> {
             status: Mutex::new(UpdateStatus::Unchecked),
             offer: Mutex::new(None),
             waiting: PendingInstall::default(),
+            downloading: AtomicBool::new(false),
             notified: Mutex::new(None),
         }
     }
@@ -276,9 +339,13 @@ impl<S: UpdateSource> Updates<S> {
         outcome
     }
 
-    /// Downloads and verifies the offered version for "install and restart" and returns it.
-    /// Nothing is kept unless the payload verified; a download already waiting is reused.
-    pub async fn prepare(&self) -> Result<String, Failure> {
+    /// Downloads and verifies the offered version for "install and restart". Nothing is kept
+    /// unless the payload verified; a download already waiting is reused; a call that comes while
+    /// another downloads is `Busy`. The quit requests are counted before the download and again
+    /// when it ends: if there was one meanwhile, the download is discarded (`CancelledByQuit`),
+    /// because what a quit request finds when it clears the update that waits is nothing yet,
+    /// and what the download then kept would be installed in place of the quit.
+    pub async fn prepare(&self) -> Result<Prepared, Failure> {
         let offer = lock(&self.offer).clone().ok_or_else(|| {
             Failure::new(
                 FailureCode::Other,
@@ -287,12 +354,22 @@ impl<S: UpdateSource> Updates<S> {
         })?;
         let version = S::version(&offer).to_string();
         if self.waiting.version().as_deref() == Some(version.as_str()) {
-            return Ok(version);
+            return Ok(Prepared::Ready(version));
         }
+        let Some(_download) = Download::begin(&self.downloading) else {
+            return Ok(Prepared::Busy);
+        };
+        let quit_requests = self.waiting.quit_requests();
         let bytes = self.source.download(&offer).await?;
         tracing::info!(%version, bytes = bytes.len(), "the update was downloaded and verified");
-        self.waiting.keep(self.source.installer(&offer, bytes));
-        Ok(version)
+        if !self
+            .waiting
+            .keep_unless_quit(quit_requests, self.source.installer(&offer, bytes))
+        {
+            tracing::info!(%version, "a quit was requested while the update downloaded; it is discarded");
+            return Ok(Prepared::CancelledByQuit);
+        }
+        Ok(Prepared::Ready(version))
     }
 
     pub fn pending_version(&self) -> Option<String> {
@@ -435,7 +512,30 @@ pub async fn check<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
 /// offered version, then hands over to the quit flow, which asks about runs in progress exactly
 /// as quitting does and installs once the host has stopped.
 pub async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), Failure> {
-    match running_app_location() {
+    let updates = app.state::<AppUpdates<R>>();
+    install_with(running_app_location(), quit::current(app), &updates, || {
+        quit::request_update(app)
+    })
+    .await
+}
+
+/// `install` for any source, with where the app runs, where quitting stands and the call to the
+/// quit flow handed in.
+///
+/// A click while quitting already installs has nothing to add, and one while another download
+/// runs leaves it to that one (`Busy`), which asks when it is done. A download that a quit request
+/// overtook (`CancelledByQuit`) is no failure and asks nothing: the user is quitting, and the quit
+/// goes on as one; the offer stays, to be installed from the banner if the app keeps running.
+async fn install_with<S: UpdateSource>(
+    location: AppLocation,
+    quitting: QuitState,
+    updates: &Updates<S>,
+    ask_to_quit: impl FnOnce(),
+) -> Result<(), Failure> {
+    if quitting == QuitState::Installing {
+        return Ok(());
+    }
+    match location {
         AppLocation::Installed => {}
         AppLocation::NotInstalled => {
             return Err(Failure::new(
@@ -450,8 +550,9 @@ pub async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), Failure> {
             ));
         }
     }
-    app.state::<AppUpdates<R>>().prepare().await?;
-    quit::request_update(app);
+    if let Prepared::Ready(_) = updates.prepare().await? {
+        ask_to_quit();
+    }
     Ok(())
 }
 
@@ -548,6 +649,7 @@ mod tests {
     use std::sync::Mutex;
 
     use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::test_support::{FakeInstall, InstallLog, fake_install};
@@ -562,6 +664,8 @@ mod tests {
         check: Mutex<Result<Option<String>, Failure>>,
         download: Mutex<Result<Vec<u8>, Failure>>,
         downloads: Mutex<usize>,
+        /// A download waits for this to be opened (`notify_one`) before it answers, when set.
+        gate: Mutex<Option<Arc<Notify>>>,
         installed: InstallLog,
     }
 
@@ -571,6 +675,7 @@ mod tests {
                 check: Mutex::new(check.map(|offered| offered.map(str::to_string))),
                 download: Mutex::new(download.map(<[u8]>::to_vec)),
                 downloads: Mutex::new(0),
+                gate: Mutex::new(None),
                 installed: InstallLog::default(),
             }
         }
@@ -593,6 +698,10 @@ mod tests {
 
         async fn download(&self, _offer: &FakeOffer) -> Result<Vec<u8>, Failure> {
             *self.downloads.lock().unwrap() += 1;
+            let gate = self.gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             self.download.lock().unwrap().clone()
         }
 
@@ -607,6 +716,10 @@ mod tests {
 
     fn failure(code: FailureCode) -> Failure {
         Failure::new(code, "boom")
+    }
+
+    fn ready(version: &str) -> Prepared {
+        Prepared::Ready(version.to_string())
     }
 
     fn fake_updates(
@@ -677,10 +790,10 @@ mod tests {
     async fn a_verified_download_waits_for_the_quit_flow_and_is_reused() {
         let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
         updates.check().await;
-        assert_eq!(updates.prepare().await.unwrap(), "0.2.0");
+        assert_eq!(updates.prepare().await.unwrap(), ready("0.2.0"));
         assert_eq!(updates.pending_version().as_deref(), Some("0.2.0"));
         // "Keep running" in the prompt, then "install and restart" again: no second download.
-        assert_eq!(updates.prepare().await.unwrap(), "0.2.0");
+        assert_eq!(updates.prepare().await.unwrap(), ready("0.2.0"));
         assert_eq!(*updates.source.downloads.lock().unwrap(), 1);
         // A plain quit drops it (quit::request), so quitting never installs.
         updates.clear_pending();
@@ -696,6 +809,182 @@ mod tests {
         assert!(updates.take_pending().is_none(), "installed once");
     }
 
+    /// A source whose download waits at the gate, with its offer already found.
+    async fn updates_with_a_download_at_the_gate() -> (Updates<FakeSource>, Arc<Notify>) {
+        let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
+        updates.check().await;
+        let gate = Arc::new(Notify::new());
+        *updates.source.gate.lock().unwrap() = Some(gate.clone());
+        (updates, gate)
+    }
+
+    /// Futures that wait at the gate finish within this, or the test fails: a regression that
+    /// starts a second download behind a gate which opens once would otherwise wait for ever.
+    async fn within<T>(futures: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), futures)
+            .await
+            .expect("the futures finished; a download is waiting at a gate nobody opens")
+    }
+
+    #[tokio::test]
+    async fn a_quit_request_during_the_download_discards_it_and_nothing_is_installed() {
+        let (updates, gate) = updates_with_a_download_at_the_gate().await;
+        let (prepared, ()) = within(async {
+            tokio::join!(updates.prepare(), async {
+                // The tray's Quit while the download is under way: nothing is kept yet to drop, but
+                // the request is counted.
+                updates.clear_pending();
+                gate.notify_one();
+            })
+        })
+        .await;
+        assert_eq!(prepared.unwrap(), Prepared::CancelledByQuit);
+        assert_eq!(
+            updates.pending_version(),
+            None,
+            "a quit never turns into an install"
+        );
+        assert!(updates.take_pending().is_none());
+        assert!(updates.source.installed.lock().unwrap().is_empty());
+        // Nothing else changed: the offer is still on show, and asking again (the quit was
+        // answered with "Keep running") downloads it afresh and keeps it.
+        assert!(matches!(updates.status(), UpdateStatus::Available { .. }));
+        *updates.source.gate.lock().unwrap() = None;
+        assert_eq!(updates.prepare().await.unwrap(), ready("0.2.0"));
+        assert_eq!(*updates.source.downloads.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_quit_request_before_the_download_began_leaves_it_alone() {
+        let (updates, gate) = updates_with_a_download_at_the_gate().await;
+        // An earlier Quit, answered with "Keep running": it is no news to a download that begins now.
+        updates.clear_pending();
+        let (prepared, ()) =
+            within(async { tokio::join!(updates.prepare(), async { gate.notify_one() }) }).await;
+        assert_eq!(prepared.unwrap(), ready("0.2.0"));
+        assert_eq!(updates.pending_version().as_deref(), Some("0.2.0"));
+    }
+
+    #[tokio::test]
+    async fn a_second_call_while_the_download_runs_downloads_nothing() {
+        let (updates, gate) = updates_with_a_download_at_the_gate().await;
+        let (first, second, ()) = within(async {
+            tokio::join!(updates.prepare(), updates.prepare(), async {
+                gate.notify_one()
+            })
+        })
+        .await;
+        assert_eq!(first.unwrap(), ready("0.2.0"));
+        assert_eq!(second.unwrap(), Prepared::Busy);
+        assert_eq!(*updates.source.downloads.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_download_that_failed_leaves_the_way_free_for_the_next() {
+        let updates = fake_updates(Ok(Some("0.2.0")), Err(failure(FailureCode::Unreachable)));
+        updates.check().await;
+        assert!(updates.prepare().await.is_err());
+        *updates.source.download.lock().unwrap() = Ok(b"payload".to_vec());
+        // Not `Busy`: the failed call is over.
+        assert_eq!(updates.prepare().await.unwrap(), ready("0.2.0"));
+    }
+
+    /// `install_with` for a source, counting how often the quit flow is asked.
+    async fn installed_with(
+        updates: &Updates<FakeSource>,
+        location: AppLocation,
+        quitting: QuitState,
+    ) -> (Result<(), Failure>, usize) {
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let outcome = install_with(location, quitting, updates, || {
+            asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        (outcome, asked.into_inner())
+    }
+
+    #[tokio::test]
+    async fn install_and_restart_downloads_then_asks_the_quit_flow_once() {
+        let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
+        updates.check().await;
+        let (outcome, asked) =
+            installed_with(&updates, AppLocation::Installed, QuitState::Idle).await;
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(asked, 1);
+        assert_eq!(updates.pending_version().as_deref(), Some("0.2.0"));
+    }
+
+    #[tokio::test]
+    async fn a_quit_during_the_download_means_the_quit_flow_is_not_asked_to_install() {
+        let (updates, gate) = updates_with_a_download_at_the_gate().await;
+        let ((outcome, asked), ()) = within(async {
+            tokio::join!(
+                installed_with(&updates, AppLocation::Installed, QuitState::Idle),
+                async {
+                    updates.clear_pending();
+                    gate.notify_one();
+                }
+            )
+        })
+        .await;
+        // No failure to tell, nothing to ask: the user is quitting, and the quit goes on as one.
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(
+            asked, 0,
+            "no `request_update`: that would turn the quit into an install"
+        );
+        assert_eq!(updates.pending_version(), None);
+    }
+
+    #[tokio::test]
+    async fn repeated_clicks_start_no_second_download() {
+        // While quitting already installs, a click has nothing to add.
+        let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
+        updates.check().await;
+        let (outcome, asked) =
+            installed_with(&updates, AppLocation::Installed, QuitState::Installing).await;
+        assert_eq!((outcome, asked), (Ok(()), 0));
+        assert_eq!(*updates.source.downloads.lock().unwrap(), 0);
+        // While another click's download runs, the second returns at once, and only the first asks.
+        let (updates, gate) = updates_with_a_download_at_the_gate().await;
+        let (first, second, ()) = within(async {
+            tokio::join!(
+                installed_with(&updates, AppLocation::Installed, QuitState::Idle),
+                installed_with(&updates, AppLocation::Installed, QuitState::Idle),
+                async { gate.notify_one() }
+            )
+        })
+        .await;
+        assert_eq!((first, second), ((Ok(()), 1), (Ok(()), 0)));
+        assert_eq!(*updates.source.downloads.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn where_the_app_cannot_replace_itself_nothing_is_downloaded() {
+        let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"payload"));
+        updates.check().await;
+        for location in [AppLocation::NotInstalled, AppLocation::Development] {
+            let (outcome, asked) = installed_with(&updates, location, QuitState::Idle).await;
+            assert_eq!(
+                outcome.unwrap_err().code,
+                FailureCode::Unavailable,
+                "{location:?}"
+            );
+            assert_eq!(asked, 0);
+        }
+        assert_eq!(*updates.source.downloads.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_download_that_does_not_verify_is_a_failure_and_asks_nothing() {
+        let updates = fake_updates(Ok(Some("0.2.0")), Err(failure(FailureCode::BadSignature)));
+        updates.check().await;
+        let (outcome, asked) =
+            installed_with(&updates, AppLocation::Installed, QuitState::Idle).await;
+        assert_eq!(outcome.unwrap_err().code, FailureCode::BadSignature);
+        assert_eq!(asked, 0);
+    }
+
     #[tokio::test]
     async fn a_newer_version_found_later_is_downloaded_instead_of_the_one_that_waits() {
         let updates = fake_updates(Ok(Some("0.2.0")), Ok(b"old"));
@@ -705,7 +994,7 @@ mod tests {
         *updates.source.download.lock().unwrap() = Ok(b"new".to_vec());
         updates.check().await;
         // "Install and restart" now means the newest one, not the download that was waiting.
-        assert_eq!(updates.prepare().await.unwrap(), "0.3.0");
+        assert_eq!(updates.prepare().await.unwrap(), ready("0.3.0"));
         assert_eq!(updates.pending_version().as_deref(), Some("0.3.0"));
         updates
             .take_pending()
