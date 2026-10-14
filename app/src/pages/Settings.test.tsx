@@ -785,7 +785,7 @@ test.each([
   ["en", "Show in Dock", "Off: the icon shows only while the panel is open. The menu bar icon always stays."],
   ["zh-CN", "在程序坞显示图标", "关闭后，只有面板打开时才显示图标；菜单栏图标始终保留。"],
   ["zh-TW", "在程式塢顯示圖示", "關閉後，只有面板開啟時才顯示圖示；選單列圖示一律保留。"],
-  ["ja", "Dock にアイコンを表示", "オフにすると、アイコンはパネルを開いている間だけ表示されます。メニューバーのアイコンは常に残ります。"],
+  ["ja", "Dock にアイコンを表示", "オフ：アイコンはパネルを開いている間だけ表示されます。メニューバーのアイコンは常に残ります。"],
   ["ko", "Dock에 아이콘 표시", "끄면 패널이 열려 있는 동안에만 아이콘이 표시됩니다. 메뉴 막대 아이콘은 항상 남아 있습니다."],
 ] as const)("the Dock switch and its note read in %s", async (lang, name, note) => {
   await renderWithProviders(<Settings />, { lang });
