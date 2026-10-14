@@ -8,10 +8,12 @@
 #   --target <triple>   one triple
 #   --universal         aarch64-apple-darwin and x86_64-apple-darwin, plus the lipo-merged
 #                       issuerelay-universal-apple-darwin that `tauri build --target
-#                       universal-apple-darwin` copies as it is: the build script needs all three
+#                       universal-apple-darwin` copies as it is: the build script needs all three.
+#                       Needs lipo and both Rust targets installed; checked before anything builds.
 #
 # Usage: bash scripts/stage-cli.sh [--target <triple> | --universal]
-# Exit codes: 0 = staged, 2 = bad arguments, anything else = a failed build or copy.
+# Exit codes: 0 = staged, 2 = bad arguments, anything else = a missing tool or Rust target for
+# --universal, or a failed build or copy.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -48,9 +50,33 @@ stage() {
 }
 
 case $mode in
-  host) stage "$(rustc --print host-tuple)" ;;
+  host)
+    # Its own statement: inside `stage "$(...)"` a failing rustc would not stop the script.
+    triple=$(rustc --print host-tuple)
+    [[ -n $triple ]] || {
+      echo "stage-cli: rustc printed no host triple" >&2
+      exit 1
+    }
+    stage "$triple"
+    ;;
   target) stage "$target" ;;
   universal)
+    # Before anything is compiled: both builds take minutes, and these would fail only after them.
+    command -v lipo > /dev/null || {
+      echo "stage-cli: --universal needs lipo, which comes with macOS (the Xcode command line tools)" >&2
+      exit 1
+    }
+    command -v rustup > /dev/null || {
+      echo "stage-cli: --universal needs rustup, to see which Rust targets are installed" >&2
+      exit 1
+    }
+    installed=$(rustup target list --installed)
+    for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+      grep -qx "$triple" <<< "$installed" || {
+        echo "stage-cli: the Rust target $triple is not installed: run 'rustup target add $triple'" >&2
+        exit 1
+      }
+    done
     stage aarch64-apple-darwin
     stage x86_64-apple-darwin
     lipo -create -output "$out/issuerelay-universal-apple-darwin" \
