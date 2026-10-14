@@ -9,7 +9,7 @@
 - `main` is protected by a ruleset: PRs only, one approval, resolved conversations, squash merge only, and the checks `test (macos-latest)`, `test (windows-latest)` and `secrets` must pass.
 - The admin can bypass the ruleset in two cases only: the founder's direct commits during M0–M1 (stopped when M1 closed; since then every change reaches `main` through a PR), and merging the admin's own PRs after CI is green while there is a single maintainer (see "分支保护"). An AI tool working in the admin's own session acts with the admin's rights: it may merge the admin's own PRs in that way, but it never approves anyone else's PR and never merges one that a maintainer has not reviewed and approved. Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
 - To become a maintainer: contribute steadily, get nominated by a maintainer and accepted by the admin, then be invited as a collaborator with write access. Maintainers inactive for 6 months become emeritus.
-- Releases start at M3: a maintainer bumps the version in a PR, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets.
+- Releases start at M3: a maintainer bumps the version in a PR, runs the release workflow by hand on `main` (a dry run that can use the signing key, which a pull request cannot) and waits for it to pass, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets. Anyone with write access can read those secrets through a workflow they changed (a manual run, or a pull request from a branch of this repository), so changes to the workflows and to the scripts they run are reviewed as if they could.
 
 ## 当前维护者
 
@@ -82,7 +82,8 @@
 M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.github/workflows/release.yml`（打包在 `bundle.yml`），门禁 `scripts/release-checks.mjs`，安装说明 `docs/install.md`，更新签名密钥 `docs/release/updater-key.md`。
 
 1. **升版本号**：开一个普通的 PR，把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本，再运行 `cargo update -w`（只更新本仓库 crate 在 `Cargo.lock` 里的版本），两个文件一起提交；0.x 阶段升次版本号时，`crates/cli`、`crates/devhost`、`app/src-tauri` 对 `issuerelay-core` 的版本要求一起改（`AI_CODING_GUIDE.md` 第 10 节）。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；CI 全绿后合入 `main`。不在本地临时改版本号再改回。
-2. **推标签**（本地会话）：
+2. **在 `main` 上手动试打包**（推标签之前）：在 GitHub 的 Actions 页面选 release 工作流，点「Run workflow」并选 `main`（或运行 `gh workflow run release.yml --ref main`），等所有任务全绿：`verify` 输出 `updater=true`（更新签名私钥可用），两个打包任务的「Check the update signatures against the committed public key」步骤各打出 `verified …`，`verify-dry-run` 通过（建草稿的 `create-release`、`bundle-release`、`verify-release` 在手动运行里跳过，不会产生 Release）。拉取请求的试打包拿不到私钥，所以 `tauri.updater.conf.json`、更新包的签名、签名核对脚本和由产物得出的 `latest.json`，只有这一步能在打标签之前跑一遍；跳过它，这些检查第一次运行就在正式标签上，一旦失败就得删草稿、删标签、重推。
+3. **推标签**（本地会话）：
 
    ```bash
    git fetch origin
@@ -91,10 +92,10 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
    git push origin "v$version"
    ```
 
-3. **等工作流全绿**：`verify`（门禁自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `release-test (macos-latest)` 与 `release-test (windows-latest)`（六条验证命令；不叫 `test (…)`，那是 `ci.yml` 里必需检查的名字）→ `create-release`（建一个草稿）→ `bundle-release`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名、地址指向本 Release 的资产）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。这些门禁在每次试打包里已经对将要打的标签跑过。
-4. **检查草稿**：资产恰好是 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`、`_universal.app.tar.gz`；有更新签名私钥时再加三个 `.sig`（每个包一个）与 `latest.json`。没有私钥时 `_universal.app.tar.gz` 是 tauri-action 自己把 `.app` 打成的压缩包，没有 `.sig`，不是更新包。`verify-release` 对这个集合是精确核对的，缺一个或多一个都算失败；`latest.json` 里的地址必须是本仓库本 Release 的资产，签名必须等于对应 `.sig` 的内容。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
-5. **公开**：在 GitHub 的草稿页点「Publish release」。这是对外动作，只由维护者亲手点，工作流和 AI 都不公开。公开后 `…/releases/latest/download/latest.json` 才指向新版本，已安装的程序在下次检查时看到更新。
-6. **失败或放弃**：没公开的草稿可以删掉（Releases 页面删除草稿，再 `git push origin --delete "v$version"` 删远端标签、`git tag -d "v$version"` 删本地标签），修好后重推同一个标签；已经公开的版本号永不重用，修复用下一个版本号。
+4. **等工作流全绿**：`verify`（门禁自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描）→ `release-test (macos-latest)` 与 `release-test (windows-latest)`（六条验证命令；不叫 `test (…)`，那是 `ci.yml` 里必需检查的名字）→ `create-release`（建一个草稿）→ `bundle-release`（先 macOS 通用包，后 Windows）→ `verify-release`（资产齐全、`latest.json` 每个平台都有签名、地址指向本 Release 的资产）。`verify-release` 失败时，草稿标题会被改成「incomplete: do not publish」。第 2 步的手动试打包已经把前面的门禁对将要打的标签跑过一遍（自测、标签 = 版本、标签提交在 `origin/main` 上、密钥扫描、六条验证命令、面板与包内容检查、更新签名核对），也核对过试打包产物的资产集合和由产物得出的 `latest.json`。标签上的这次运行才第一次跑到的是和草稿有关的几项：这个标签已有 Release 的检查、上传前复查它仍是草稿、tauri-action 实际上传的资产名（`release` 模式的资产核对）、真实 `latest.json` 的地址与 `.sig` 内容，以及把不合格的草稿标记为 incomplete。打包任务没有成功，或这几项里有一项不过，草稿都会被标记；标记之后不能靠重跑修好（见「失败或放弃」）。
+5. **检查草稿**：资产恰好是 `IssueRelay_<版本>_universal.dmg`、`_x64-setup.exe`、`_x64_en-US.msi`、`_universal.app.tar.gz`；有更新签名私钥时再加三个 `.sig`（每个包一个）与 `latest.json`。没有私钥时 `_universal.app.tar.gz` 是 tauri-action 自己把 `.app` 打成的压缩包，没有 `.sig`，不是更新包。`verify-release` 对这个集合是精确核对的，缺一个或多一个都算失败；`latest.json` 里的地址必须是本仓库本 Release 的资产，签名必须等于对应 `.sig` 的内容。发布说明里关于签名与自动更新的说明符合实际。至少在一台 Mac 上从草稿下载 dmg 装一遍。
+6. **公开**：在 GitHub 的草稿页点「Publish release」。这是对外动作，只由维护者亲手点，工作流和 AI 都不公开。公开后 `…/releases/latest/download/latest.json` 才指向新版本，已安装的程序在下次检查时看到更新。
+7. **失败或放弃**：没公开的草稿可以删掉（Releases 页面删除草稿，再 `git push origin --delete "v$version"` 删远端标签、`git tag -d "v$version"` 删本地标签），修好后重推同一个标签（改动了发布相关的文件的话，先重做第 2 步）；已经公开的版本号永不重用，修复用下一个版本号。不要用 Actions 的「Re-run failed jobs」去修补一个出了问题的草稿：重跑成功也不会把已标记为「incomplete: do not publish」的草稿改回来，重跑 `create-release` 又会因为这个标签已有 Release 而失败。出了问题就按本条删掉草稿和标签，再重来。
 
 ### 发布用的 secrets
 
@@ -105,7 +106,7 @@ M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.g
 | `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` | 否（六个齐全才用） | Developer ID 签名与公证 | ad-hoc 签名、不公证：用户第一次打开要在「隐私与安全性」里放行一次 |
 | `WINDOWS_CERTIFICATE`、`WINDOWS_CERTIFICATE_PASSWORD` | 否（两个齐全才用） | Windows 代码签名（PFX 文件的 base64 与密码） | 不签名：SmartScreen 提示一次 |
 
-secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤；拉取请求触发的试打包拿不到它们，试打包只有只读权限。手动运行（Actions 页面的 Run workflow）可以选任何分支，那个分支的工作流与脚本会带着这些 secrets 运行（令牌只读），所以只在自己写的或评审过的分支上手动运行。
+secrets 只由管理员在仓库设置里改，只经步骤级 `env:` 交给用到它们的步骤。来自 fork 的拉取请求，GitHub 不给任何 secrets；来自本仓库分支的拉取请求，GitHub 会给，不过这个工作流在拉取请求里一律传空值，试打包也只有只读权限。但改了工作流本身的同仓库拉取请求，跑的是它自己改过的那份工作流，可以把 secrets 传给自己想传的步骤。手动运行（Actions 页面的 Run workflow）可以选任何分支，那个分支的工作流与脚本会带着这些 secrets 运行（令牌只读）。所以有写权限的人，都能经自己改过的工作流（手动运行，或同仓库的拉取请求）读到发布 secrets：只在自己写的或评审过的分支上手动运行；改了 `.github/workflows/` 或 `scripts/` 的同仓库拉取请求，按「能读到发布 secrets」来评审。
 
 剩下的风险：打包时 `tauri build` 不再运行前端的 `beforeBuildCommand`（面板在不带 secrets 的上一步构建并过门禁），但 cargo 的构建脚本与过程宏仍在带着签名 secrets 的环境里运行；标签触发的发布里，tauri-action 步骤的环境里还有一个有写权限（`contents: write`）的 `GITHUB_TOKEN`（它要用来把资产上传进草稿），`tauri build` 期间同样读得到。所以依赖与构建脚本的改动合入 `main` 前要按「能读到发布 secrets 和一个可写的令牌」来评审；把构建与签名彻底拆成两步（先无 secrets 构建，再单独签名）现在没有做。有了第二个协作者之后，建议给发布用的 secrets 建一个只允许 `v*` 标签使用的 Environment，这由所有者决定，目前没有改仓库设置。
 

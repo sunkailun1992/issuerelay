@@ -91,7 +91,7 @@
 - `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门，通过与不通过的用例都有（用法见文件头）；导入它不会执行任何门：`panel` 打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；`tag` 标签等于 `v` 加工作区版本，版本只有 `X.Y.Z` 三段（`workspace-version` 只读出这个版本，不是门）；`on-main` 标签提交在 `origin/main` 上（git 答不出来时报错，不放行）；`assets` 资产集合恰好对得上，不缺、不多、不重名（没有更新签名私钥的正式发布里也有一个没有 `.sig` 的 `_universal.app.tar.gz`，是 tauri-action 自己打的包）；`latest-json` 核对真实的 `latest.json`：版本、每个平台键的地址必须是本仓库本 Release 某个资产的 API 地址、签名必须等于对应 `.sig` 资产的内容；`latest-json-dry-run` 核对试打包「将会写出的」那份（地址按文件名）。
 - `scripts/verify-update-signature.mjs`：用提交的公钥（`app/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`）核对更新包的签名，并核对签名里记的版本；`tauri build` 在私钥与公钥不匹配时只警告，所以发布工作流对每个更新包都跑它。
 - `.github/workflows/ci.yml`：在 macOS 与 Windows 上先装前端依赖、跑前端检查与测试并构建面板，再跑 Rust 的格式、静态检查、测试；另在 Ubuntu 上扫描密钥，并用 actionlint 检查全部工作流。
-- `.github/workflows/release.yml`：版本标签触发的打包与草稿 Release；手动运行与改了打包配置的 PR 只试打包。
+- `.github/workflows/release.yml`：版本标签触发的打包与草稿 Release；手动运行与改了打包配置、命令行、依赖与工具链的锁定文件或图标的 PR 只试打包（`on.pull_request.paths`）。`verify` 要求门禁自测打出 `ok command line`、工作区版本是 `X.Y.Z`：入口判断失灵、所有门都空跑时，这里先拦住。
 - `.github/workflows/bundle.yml`：两种打包共用的可复用工作流（权限由调用它的任务给）。
 - `.github/copilot-instructions.md`：只转发到 `AGENTS.md`。
 - `.github/CODEOWNERS`：自动请求评审的负责人；高风险路径逐条列出。
