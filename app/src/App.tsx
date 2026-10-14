@@ -1,9 +1,9 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router";
+import { HashRouter, Navigate, Route, Routes } from "react-router";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ErrorBoundary, PageBoundary } from "@/components/ErrorBoundary";
 import { FirstRunGate } from "@/components/FirstRunGate";
 import { AppShell } from "@/components/layout/AppShell";
 import { QuitDialog } from "@/components/QuitDialog";
@@ -54,22 +54,14 @@ function Toasts() {
 }
 
 /**
- * The boundary around the pages, inside the router: a page that fails is replaced by the crash
- * page, and going to another address clears it (the hash route is the reset key).
- */
-function PageBoundary({ children }: { children: ReactNode }) {
-  const location = useLocation();
-  return <ErrorBoundary resetKey={`${location.pathname}${location.search}`}>{children}</ErrorBoundary>;
-}
-
-/**
  * The panel: the backend it talks to, the data cache, the engine's events, the pages inside the
  * shell and, outside the shell, the first-run guide. The start-failure page replaces the pages
  * (not the quit prompt and the toasts, which also work then). A render error shows the crash page
- * instead of a blank window: for a page, in place of the pages (another address recovers); for
- * the parts around them, in place of the panel. The quit prompt and the toasts are outside both,
- * each in a boundary of its own that shows nothing if it fails: quitting must still ask while runs
- * are in progress, whatever page failed.
+ * instead of a blank window: for a page, inside the shell, whose sidebar leads elsewhere (the
+ * boundary around `AppShell`'s outlet; another address recovers); for the shell or the guide, in
+ * place of the pages (the boundary around the routes); for the parts around them, in place of the
+ * panel. The quit prompt and the toasts are outside all of these, each in a boundary of its own that
+ * shows nothing if it fails: quitting must still ask while runs are in progress, whatever failed.
  */
 export default function App({ backend }: { backend: Backend }) {
   const [client] = useState(createQueryClient);

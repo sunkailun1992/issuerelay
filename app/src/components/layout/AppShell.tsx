@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { NavLink, Outlet } from "react-router";
+import { PageBoundary } from "@/components/ErrorBoundary";
 import { useAppInfo, useStatus } from "@/hooks/queries";
 import { trayState } from "@/lib/problem";
 import type { StatusView } from "@/lib/types";
@@ -44,7 +45,11 @@ function monitoring({ status, linear }: StatusView): { key: string; failed: bool
   }
 }
 
-/** The frame of every page: the sidebar with the pages, the monitoring state and the version, and the page itself. */
+/**
+ * The frame of every page: the sidebar with the pages, the monitoring state and the version, and
+ * the page itself. A page that fails while it renders is replaced by the error in its place, and
+ * the sidebar stays to leave by (`PageBoundary`).
+ */
 export function AppShell() {
   const { t } = useTranslation();
   const status = useStatus();
@@ -87,7 +92,9 @@ export function AppShell() {
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-(--content-max-width) px-(--page-padding) py-6">
-          <Outlet />
+          <PageBoundary fallback="content">
+            <Outlet />
+          </PageBoundary>
         </div>
       </main>
     </div>

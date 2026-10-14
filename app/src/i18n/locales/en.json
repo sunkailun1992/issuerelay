@@ -91,7 +91,9 @@
   "crash": {
     "title": "The panel stopped because of an error",
     "hint": "Reload the panel to carry on. IssueRelay itself keeps running in the background.",
-    "reload": "Reload"
+    "reload": "Reload",
+    "page_title": "This page stopped because of an error",
+    "page_hint": "Open another page from the sidebar, or reload the panel. IssueRelay itself keeps running in the background."
   },
   "shell": {
     "monitoring": "Monitoring",

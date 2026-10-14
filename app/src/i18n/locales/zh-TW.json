@@ -91,7 +91,9 @@
   "crash": {
     "title": "面板因發生錯誤而停止",
     "hint": "重新載入面板即可繼續。IssueRelay 本身仍在背景執行。",
-    "reload": "重新載入"
+    "reload": "重新載入",
+    "page_title": "這個頁面因發生錯誤而停止",
+    "page_hint": "從側邊欄開啟其他頁面，或重新載入面板。IssueRelay 本身仍在背景執行。"
   },
   "shell": {
     "monitoring": "監控中",

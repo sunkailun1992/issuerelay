@@ -91,7 +91,9 @@
   "crash": {
     "title": "面板因出错而停止",
     "hint": "重新加载面板即可继续。IssueRelay 本身仍在后台运行。",
-    "reload": "重新加载"
+    "reload": "重新加载",
+    "page_title": "这个页面因出错而停止",
+    "page_hint": "从侧栏打开别的页面，或重新加载面板。IssueRelay 本身仍在后台运行。"
   },
   "shell": {
     "monitoring": "监控中",
