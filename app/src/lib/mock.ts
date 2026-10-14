@@ -20,7 +20,10 @@ export interface MockOptions {
 const NOT_CONNECTED = "not connected to Linear: log in first";
 const CONNECTING = "still connecting to Linear";
 
-/** `https` on linear.app or one of its subdomains: the rule of `is_linear_url` in commands.rs. */
+/**
+ * `https` on linear.app or one of its subdomains: close to `linear_url` in commands.rs, for the
+ * browser preview only (the app's own check is that one; SECURITY_CODING_SPEC.md section 5).
+ */
 function isLinearUrl(text: string): boolean {
   try {
     const url = new URL(text);

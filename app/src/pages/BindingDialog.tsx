@@ -391,8 +391,8 @@ export function BindingForm(props: Omit<FieldsProps, "settings">) {
 
 /**
  * A new binding, or `initial` edited, in a dialog. It is as high as the window allows and the
- * fields scroll inside it; the library's own close button has a fixed English label, so it is left
- * out: Cancel and Escape close it. It does not close while a save is on its way: a failure of the
+ * fields scroll inside it; the library's own close button is left out, since the form has Cancel,
+ * and Escape closes it too. It does not close while a save is on its way: a failure of the
  * save is shown in the form, and a closed form would lose it. When it closes the focus goes back
  * to what opened it (the page opens it, there is no trigger to do that), or to `fallbackFocus`
  * when that is gone.

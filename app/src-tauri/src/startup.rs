@@ -46,8 +46,8 @@ pub async fn start(app: AppHandle) {
             state.set_host(Ok(host.clone()));
             events::spawn_forwarder(app.clone(), host.clone());
             tray::refresh(&app, &host);
-            // A login start stays in the tray (lib.rs hid it already); the first run always shows
-            // the guide.
+            // A login start stays in the tray (lib.rs hid it already), unless the first-run guide
+            // has been neither finished nor set aside ("Set up later"): then the panel shows it.
             if !state.autostarted || !host.engine().settings().onboarding_completed {
                 window::show(&app);
             }

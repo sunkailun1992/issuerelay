@@ -1,6 +1,6 @@
 //! IssueRelay's desktop app: the tray icon and the panel around the engine.
-// Every module is `pub`: only this crate's own executable uses the library, and what the panel's
-// commands (Task 4) use later, such as `AppState::host`, is then not dead code before that.
+// Every module is `pub`: only this crate's own executable uses the library, and an item that only
+// one platform uses (the macOS application menu's texts, say) is then not dead code on the other.
 pub mod commands;
 pub mod events;
 pub mod i18n;
@@ -40,7 +40,8 @@ pub fn run() {
             Some(vec![AUTOSTART_ARG]),
         ))
         // By default the plugin adds a script to every page that opens clicked links itself; the
-        // panel opens only Linear's links, through IssueRelay's own command and check (Task 4).
+        // panel opens only Linear's links, through IssueRelay's own command and check
+        // (`commands::open_linear`).
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)

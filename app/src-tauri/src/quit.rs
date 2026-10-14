@@ -541,8 +541,8 @@ mod tests {
     #[test]
     fn a_request_with_runs_in_progress_asks_and_a_repeat_is_decided_afresh() {
         // The tray's Quit, Cmd+Q (IssueRelay's own menu item on macOS) and an exit request that
-        // reached `on_run_event`. Whether the system's own quit reaches the app at all is for
-        // Task 13 Step 4 to check by hand; what the hook does with a request is `may_exit`.
+        // reached `on_run_event`. Whether the system's own quit reaches the app at all is checked
+        // by hand in the live acceptance; what the hook does with a request is `may_exit`.
         let (state, step) = next(
             QuitState::Idle,
             Requested {
@@ -595,7 +595,8 @@ mod tests {
             (QuitState::Waiting, QuitStep::ShowPanel(1))
         );
         // The user switches to "stop now" while `stop(WaitForRuns)` has not returned: a second
-        // stop with `StopRuns` starts, which ends the first; both return (core Task 9).
+        // stop with `StopRuns` starts, which ends the first; both return (core's host test
+        // `stopping_now_ends_a_stop_that_is_still_waiting_for_the_runs`).
         let (state, step) = next(state, StopNow);
         assert_eq!(
             (state, step),

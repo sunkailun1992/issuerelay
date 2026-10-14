@@ -588,8 +588,8 @@ pub async fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<()> {
 }
 
 /// The quit prompt's answer: wait for the runs (still switchable to "stop now"), or stop them.
-/// The quit state machine (Task 3) decides what follows; what it returns only matters to the
-/// window hook.
+/// The quit state machine (`quit::next`) decides what follows; what it returns only matters to
+/// the window hook.
 #[tauri::command]
 pub fn quit(app: AppHandle, mode: QuitMode) {
     let event = match mode {
