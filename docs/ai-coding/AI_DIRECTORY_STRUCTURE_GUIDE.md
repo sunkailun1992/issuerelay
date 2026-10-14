@@ -44,7 +44,7 @@
 | `app/src/test-setup.ts`、`app/src/lib/clock.ts` | 测试公共设置（Radix 需要的 jsdom 桩、每个测试后复位固定时钟并收掉没消失的提示 toast、缺翻译键守卫）；假后端与测试共用的固定时钟 |
 | `app/src/components/ui/` | shadcn/ui 生成的组件（照原样提交，不手改；不按本仓库的 ESLint 规则检查）。唯一的改动：`dialog.tsx` 两处写死的英文「Close」换成了翻译键 `common.close`（重新生成时要带上，`components/DialogLabels.test.tsx` 把关） |
 | `app/src-tauri/Cargo.toml`、`build.rs`、`tauri.conf.json`、`capabilities/default.json` | Tauri crate 与配置（`build.rs` 在应用清单里登记面板的全部命令，Tauri 因此按能力文件检查本程序的命令；能力文件只给主窗口每条命令一个 `allow-<命令>`，加事件的 `listen`、`unlisten`，不给插件权限） |
-| `app/src-tauri/tauri.bundle.conf.json`、`app/src-tauri/binaries/`、`app/src-tauri/tests/`（M3） | 打包：`tauri.bundle.conf.json` 是打包时用 `--config` 合并的配置，只放 `externalBin`，所以 `tauri.conf.json` 在没有放好命令行程序时也能 `cargo build`、`clippy`、`test`；`binaries/` 是生成目录，git 忽略，放 `scripts/stage-cli.*` 编译好的命令行程序（`issuerelay-<三元组>[.exe]`，Tauri 装进包时去掉三元组）；`tests/` 放打包配置的守卫测试（`packaging.rs`） |
+| `app/src-tauri/tauri.bundle.conf.json`、`app/src-tauri/binaries/`、`app/src-tauri/tests/`（M3） | 打包：`tauri.bundle.conf.json` 是打包时用 `--config` 合并的配置，放 `externalBin`（所以 `tauri.conf.json` 在没有放好命令行程序时也能 `cargo build`、`clippy`、`test`），并用 `null` 去掉 `beforeBuildCommand`（`--config` 是 RFC 7396 合并补丁，`null` 删掉该键）：打包时 `tauri build` 不再自己构建面板，面板要先构建并过 `panel` 门禁，免得前端工具链在带签名 secrets 的环境里运行；`binaries/` 是生成目录，git 忽略，放 `scripts/stage-cli.*` 编译好的命令行程序（`issuerelay-<三元组>[.exe]`，Tauri 装进包时去掉三元组）；`tests/` 放打包配置的守卫测试（`packaging.rs`，含「打包配置都去掉了 `beforeBuildCommand`」） |
 | `app/src/i18n/`（含 `language-cases.json`）、`app/src-tauri/src/i18n.rs` | 五种语言的翻译文件与语言解析用例表；前端与 Rust 共用 |
 | `app/src-tauri/src/{lib,main,state,startup,window,quit,logging,events,notify,tray,test_support}.rs`、`app/src-tauri/icons/tray/` | 宿主接入、启动状态、窗口、退出状态机、日志、事件转发、通知、托盘、测试辅助 |
 | `app/src-tauri/src/commands.rs` | 面板调用的全部命令 |
@@ -84,7 +84,7 @@
 
 - `scripts/check-secrets.sh`：扫描密钥和本机信息。新脚本的文件头写清用途、用法、退出码。
 - `scripts/stage-cli.sh`、`scripts/stage-cli.ps1`：编译命令行程序，放到 Tauri 的 `externalBin` 找它的地方（`app/src-tauri/binaries/issuerelay-<三元组>[.exe]`）。
-- `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门，通过与不通过的用例都有（用法见文件头）：`panel` 打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；`tag` 标签等于 `v` 加工作区版本，版本只有 `X.Y.Z` 三段（`workspace-version` 只读出这个版本，不是门）；`on-main` 标签提交在 `origin/main` 上；`assets` 资产齐全；`latest-json`、`latest-json-dry-run` 核对 `latest.json` 的版本、每个平台键的签名与地址（试打包核对的是由产物得出的「将会写出的」那份）。
+- `scripts/release-checks.mjs`：发布门禁，每道门是带自测的纯函数，`self-test` 检查每道门，通过与不通过的用例都有（用法见文件头）；导入它不会执行任何门：`panel` 打包前确认内嵌的 `app/dist/index.html` 是真正的面板，不是 `build.rs` 的占位页；`tag` 标签等于 `v` 加工作区版本，版本只有 `X.Y.Z` 三段（`workspace-version` 只读出这个版本，不是门）；`on-main` 标签提交在 `origin/main` 上（git 答不出来时报错，不放行）；`assets` 资产集合恰好对得上，不缺、不多、不重名（没有更新签名私钥的正式发布里也有一个没有 `.sig` 的 `_universal.app.tar.gz`，是 tauri-action 自己打的包）；`latest-json` 核对真实的 `latest.json`：版本、每个平台键的地址必须是本仓库本 Release 某个资产的 API 地址、签名必须等于对应 `.sig` 资产的内容；`latest-json-dry-run` 核对试打包「将会写出的」那份（地址按文件名）。
 - `scripts/verify-update-signature.mjs`：用提交的公钥（`app/src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`）核对更新包的签名，并核对签名里记的版本；`tauri build` 在私钥与公钥不匹配时只警告，所以发布工作流对每个更新包都跑它。
 - `.github/workflows/ci.yml`：在 macOS 与 Windows 上先装前端依赖、跑前端检查与测试并构建面板，再跑 Rust 的格式、静态检查、测试；另在 Ubuntu 上扫描密钥，并用 actionlint 检查全部工作流。
 - `.github/workflows/release.yml`：版本标签触发的打包与草稿 Release；手动运行与改了打包配置的 PR 只试打包。

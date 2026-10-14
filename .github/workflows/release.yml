@@ -5,7 +5,9 @@ name: release
 # request that changes the packaging are dry runs: the same gates (scripts/release-checks.mjs, for
 # the tag that would be pushed and for the dry run's bundles), tests and bundles, kept as workflow
 # artifacts, and no release. Only the jobs of a tag push can write to the repository; optional
-# secrets are used only when they are set, and never in a pull request.
+# secrets are used only when they are set, and never in a pull request. A manual run can be
+# started on any branch: it runs that branch's workflow and scripts and does get the secrets (with
+# a read-only token), so start one only on a branch you wrote or reviewed.
 on:
   push:
     tags: ["v*"]
@@ -45,6 +47,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Nothing here pushes, and the public repository is fetched without credentials.
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -87,6 +91,8 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
 
   test:
+    # Not called "test (...)": those are the names of ci.yml's required checks.
+    name: release-test (${{ matrix.os }})
     needs: verify
     # The six checks, as ci.yml's test job: 45 minutes there for the first uncached compile of the
     # Tauri app (Windows slowest); the same here.
@@ -98,6 +104,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: app/package.json
@@ -203,8 +211,10 @@ jobs:
   bundle-dry-run:
     needs: [verify, test]
     if: github.event_name != 'push'
-    # Read-only: a pull request's own build scripts run here. A pull request gets no secret at all;
-    # a manual run (on the default branch) gets them, so the update signatures are checked too.
+    # Read-only: a pull request's own build scripts run here. A pull request gets no secret at all.
+    # A manual run can be started on any branch and then gets the secrets (that branch's scripts
+    # run with them, behind a read-only token), so the update signatures are checked too. (A job
+    # that calls a reusable workflow cannot set timeout-minutes; bundle.yml's job has the limit.)
     permissions:
       contents: read
     uses: ./.github/workflows/bundle.yml
@@ -227,28 +237,41 @@ jobs:
 
   verify-release:
     needs: [verify, create-release, bundle-release]
+    # Also when bundling failed: the draft must then be marked, whatever it holds.
     if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
-    # A few API calls, one small download (latest.json) and the gates: seconds. The limit only
-    # stops a hung call.
+    # A few API calls, small downloads (latest.json, the .sig files) and the gates: seconds. The
+    # limit only stops a hung call.
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
       RELEASE_ID: ${{ needs.create-release.outputs.id }}
       VERSION: ${{ needs.verify.outputs.version }}
       UPDATER: ${{ needs.verify.outputs.updater }}
+      BUNDLE_RESULT: ${{ needs.bundle-release.result }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - name: The draft has every asset and latest.json every platform
+      - name: The bundles passed their checks, the draft has every asset and latest.json every platform
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
+          failed=0
+          # The checks of the universal and signed app, of the installers and of the update
+          # signatures run in the bundle job after it has uploaded: when it did not succeed, the
+          # draft is no good whatever it holds.
+          if [[ "$BUNDLE_RESULT" != success ]]; then
+            echo "::error::the bundle job ended with '$BUNDLE_RESULT', not 'success'"
+            failed=1
+          fi
           draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft)
           if [[ "$draft" != true ]]; then
             echo "::error::release $RELEASE_ID is no longer a draft"
@@ -256,19 +279,38 @@ jobs:
           fi
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate --jq '.[] | "\(.id)\t\(.name)"' > "$work/assets.tsv"
           cut -f2 "$work/assets.tsv" | tee "$work/names.txt"
-          failed=0
           node scripts/release-checks.mjs assets --version "$VERSION" --updater "$UPDATER" --mode release --names "$work/names.txt" || failed=1
           if [[ "$UPDATER" == true ]]; then
+            # The .sig assets are small: latest.json's signatures are compared with their content.
+            mkdir "$work/sigs"
+            while IFS=$'\t' read -r id name; do
+              [[ "$name" == *.sig ]] || continue
+              if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                echo "::error::an asset has an odd name, not downloaded"
+                failed=1
+                continue
+              fi
+              gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" -H "Accept: application/octet-stream" > "$work/sigs/$name"
+            done < "$work/assets.tsv"
             id=$(awk -F '\t' '$2 == "latest.json" { print $1 }' "$work/assets.tsv")
             if [[ -n "$id" ]]; then
               gh api "repos/$GITHUB_REPOSITORY/releases/assets/$id" -H "Accept: application/octet-stream" > "$work/latest.json"
-              node scripts/release-checks.mjs latest-json --version "$VERSION" --latest "$work/latest.json" --assets "$work/assets.tsv" || failed=1
+              node scripts/release-checks.mjs latest-json --version "$VERSION" --latest "$work/latest.json" --assets "$work/assets.tsv" --repo "$GITHUB_REPOSITORY" --sigs "$work/sigs" || failed=1
             fi
           fi
           exit "$failed"
       - name: Mark an incomplete draft
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          # Only a draft is renamed: a release a maintainer has published since is left alone.
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft)
+          if [[ "$draft" != true ]]; then
+            echo "::error::release $RELEASE_ID is not a draft any more, so it was not renamed; if it is incomplete, unpublish it by hand"
+            exit 1
+          fi
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -f name="IssueRelay $GITHUB_REF_NAME (incomplete: do not publish)" > /dev/null
           echo "::error::the draft is incomplete and was renamed; see MAINTAINERS.md, 发布"
@@ -287,6 +329,8 @@ jobs:
       UPDATER: ${{ needs.verify.outputs.updater }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 24

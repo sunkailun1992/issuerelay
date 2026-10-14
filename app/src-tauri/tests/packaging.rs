@@ -28,6 +28,22 @@ fn the_version_comes_from_the_cargo_workspace() {
         config("tauri.conf.json").get("version").is_none(),
         "the workspace Cargo.toml is the only version"
     );
+    // Tauri then takes the crate's version, which must be the workspace's, not one of its own.
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("the app crate's Cargo.toml reads");
+    let inherits = manifest
+        .lines()
+        .skip_while(|line| line.trim() != "[package]")
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .map(|line| line.replace(' ', ""))
+        .any(|line| line == "version.workspace=true" || line == "version={workspace=true}");
+    assert!(
+        inherits,
+        "issuerelay-app must use `version.workspace = true`"
+    );
 }
 
 #[test]
@@ -60,4 +76,37 @@ fn bundling_adds_the_cli() {
         config("tauri.bundle.conf.json")["bundle"]["externalBin"],
         json!(["binaries/issuerelay"])
     );
+}
+
+/// The configs `--config` merges when bundling: the CLI always, the update payloads once the
+/// release workflow switches them on (`tauri.updater.conf.json`, which exists from the day the
+/// updater does).
+fn bundle_configs() -> Vec<&'static str> {
+    ["tauri.bundle.conf.json", "tauri.updater.conf.json"]
+        .into_iter()
+        .filter(|name| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(name)
+                .exists()
+        })
+        .collect()
+}
+
+#[test]
+fn bundling_embeds_the_panel_as_it_was_built_and_checked() {
+    // The release workflow builds the panel and gates it (scripts/release-checks.mjs panel) in a
+    // step without secrets. `tauri build` runs beforeBuildCommand (`pnpm build`) otherwise, with
+    // the signing secrets in its environment: a bundle config removes the hook. `--config` is an
+    // RFC 7396 merge patch, so a null deletes the key (a missing key would leave the hook).
+    assert!(
+        !bundle_configs().is_empty(),
+        "no bundle config found: the check below would pass for nothing"
+    );
+    for name in bundle_configs() {
+        assert_eq!(
+            config(name)["build"].get("beforeBuildCommand"),
+            Some(&Value::Null),
+            "{name} must set build.beforeBuildCommand to null"
+        );
+    }
 }
