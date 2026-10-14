@@ -595,6 +595,13 @@ pub fn request_quit(app: AppHandle) {
 /// shell's PATH the host resolved (only a PATH read from the login shell tells whether
 /// `~/.local/bin` is on it). The PATH is only read here: the commands answer with what follows
 /// from it (on PATH or not, and the fixed `SHELL_LINE`), never with the PATH itself.
+///
+/// That PATH is the host's merged one: the login shell's PATH followed by the entries of the
+/// host's own PATH that it lacks (`env::combine`). A host started from a terminal whose PATH has
+/// `~/.local/bin` can therefore be told "already on PATH" while a new login shell lacks it. A
+/// host started by Launch Services (Finder, the Dock, the login item, `open`, and so
+/// `issuerelay start`) has only launchd's minimal PATH of its own, so those starts are not
+/// affected.
 async fn cli_setup(state: &State<'_, AppState>) -> CmdResult<CliSetup> {
     let env = host(state).await?.env();
     let shell_path = (env.path_source == EnvSource::LoginShell)
@@ -603,23 +610,38 @@ async fn cli_setup(state: &State<'_, AppState>) -> CmdResult<CliSetup> {
     CliSetup::for_running_app(cli_path(), shell_path).map_err(error)
 }
 
+/// Runs one of core's `cli_path` calls on a blocking thread. On Windows the registry write and the
+/// `WM_SETTINGCHANGE` broadcast after it can take seconds (`SendMessageTimeoutW` waits up to five
+/// of them for each window that does not answer), and a command must not hold an async worker for
+/// that long. An error comes back as the cleaned line of its chain like every command's; a call
+/// that panicked is an error too, not a crash of the command.
+async fn cli_path_job<T: Send + 'static>(
+    setup: CliSetup,
+    job: impl FnOnce(&CliSetup) -> anyhow::Result<T> + Send + 'static,
+) -> CmdResult<T> {
+    tauri::async_runtime::spawn_blocking(move || job(&setup))
+        .await
+        .map_err(error)?
+        .map_err(error)
+}
+
 /// Whether the command line is on PATH through IssueRelay (design 12).
 #[tauri::command]
 pub async fn cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    issuerelay_core::cli_path::status(&cli_setup(&state).await?).map_err(error)
+    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::status).await
 }
 
 /// Puts the command line on PATH without administrator rights: `~/.local/bin` on macOS, the
 /// user's own `Path` on Windows.
 #[tauri::command]
 pub async fn install_cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    issuerelay_core::cli_path::install(&cli_setup(&state).await?).map_err(error)
+    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::install).await
 }
 
 /// Takes the command line off PATH; only what IssueRelay added is removed.
 #[tauri::command]
 pub async fn remove_cli_from_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    issuerelay_core::cli_path::remove(&cli_setup(&state).await?).map_err(error)
+    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::remove).await
 }
 
 #[cfg(test)]
@@ -969,6 +991,46 @@ mod tests {
                 .all(|case| case.input.contains(['\u{1b}', '\u{9b}'])),
             "only escape-sequence cases skip the core check"
         );
+    }
+
+    /// A `CliSetup` for the tests of `cli_path_job`: it is never read, only handed to the call.
+    fn demo_setup() -> CliSetup {
+        CliSetup {
+            cli: None,
+            location: issuerelay_core::cli_path::AppLocation::Development,
+            home: PathBuf::from("/tmp/demo-home"),
+            shell_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cli_path_calls_run_off_the_async_workers_and_fail_like_the_other_commands() {
+        // The Windows registry write and the broadcast after it can take seconds: the call runs
+        // on a blocking thread, not on the thread that polls the command.
+        let here = std::thread::current().id();
+        let elsewhere = cli_path_job(demo_setup(), move |_| {
+            Ok(std::thread::current().id() != here)
+        })
+        .await;
+        assert_eq!(elsewhere, Ok(true));
+        // It is given the setup it was asked about.
+        let home = cli_path_job(demo_setup(), |setup| Ok(setup.home.clone())).await;
+        assert_eq!(home, Ok(PathBuf::from("/tmp/demo-home")));
+        // An error comes back as the cleaned line of its whole chain, as every command's does.
+        let refused = cli_path_job(demo_setup(), |_| -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("cannot create the link\u{1b}[2J").context("outer"))
+        })
+        .await;
+        assert_eq!(
+            refused,
+            Err("outer: cannot create the link [2J".to_string())
+        );
+        // A call that panicked is an error too: it does not take the command down with it.
+        let panicked = cli_path_job(demo_setup(), |_| -> anyhow::Result<()> {
+            panic!("demo panic")
+        })
+        .await;
+        assert!(panicked.is_err(), "{panicked:?}");
     }
 
     #[test]

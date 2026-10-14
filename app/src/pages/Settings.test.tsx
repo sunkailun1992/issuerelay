@@ -620,6 +620,45 @@ test("the explanation sets the command it makes available as code", async () => 
   expect(screen.getByText(/in a terminal. No administrator rights needed./)).toBeInTheDocument();
 });
 
+test("while the PATH setting is read the row is a loading row, and the switch comes with the answer", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  let answer: ((status: CliPathStatus) => void) | undefined;
+  backend.cliOnPath = vi.fn(() => new Promise<CliPathStatus>((resolve) => (answer = resolve)));
+  await renderWithProviders(<Settings />, { backend });
+  // The row above it is there once it has been read; the PATH row is still waiting.
+  await screen.findByRole("switch", { name: "Start at login" });
+  const system = screen.getByRole("region", { name: "System" });
+  expect(within(system).getByRole("status", { name: "Loading…" })).toBeInTheDocument();
+  expect(within(system).queryByRole("switch", { name: "Command line on PATH" })).not.toBeInTheDocument();
+  answer?.({ kind: "off" });
+  expect(await within(system).findByRole("switch", { name: "Command line on PATH" })).toBeEnabled();
+  expect(within(system).queryByRole("status", { name: "Loading…" })).not.toBeInTheDocument();
+});
+
+test("the switch is described by what the row says about its state, so that the reason it is off limits is read with it", async () => {
+  const explanation = "Lets you type issuerelay in a terminal. No administrator rights needed.";
+  const cases: [CliPathStatus, RegExp | null][] = [
+    [{ kind: "off" }, null],
+    [{ kind: "on", shell_line: DEMO_SHELL_LINE }, /Add this line to your shell profile \(for zsh, ~\/\.zshrc\), then open a new terminal:$/],
+    [{ kind: "on", shell_line: null }, /On\. Open a new terminal to use it\.$/],
+    [{ kind: "stale", target: "/tmp/demo-home/Downloads/IssueRelay.app/Contents/MacOS/issuerelay" }, /points at another copy of IssueRelay/],
+    [{ kind: "blocked", path: "~/.local/bin/issuerelay" }, /already exists and was not made by IssueRelay/],
+    [{ kind: "unavailable", reason: "not_installed" }, /Move it to Applications first/],
+    [{ kind: "unavailable", reason: "development" }, /Not available in a development build/],
+    [{ kind: "unavailable", reason: "missing_cli" }, /command-line program is missing from this copy of IssueRelay/],
+  ];
+  for (const [status, words] of cases) {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    backend.cliOnPath = async () => status;
+    const { unmount } = await renderWithProviders(<Settings />, { backend });
+    const toggle = await screen.findByRole("switch", { name: "Command line on PATH" });
+    // The explanation of the switch itself is always part of it; the state's sentence follows it.
+    expect(toggle).toHaveAccessibleDescription(words === null ? explanation : new RegExp(`^${explanation.replace(/[.]/g, "\\.")} .*`));
+    if (words !== null) expect(toggle, status.kind).toHaveAccessibleDescription(words);
+    unmount();
+  }
+});
+
 test("the shell line is copied from its own button", async () => {
   const writeText = stubClipboard();
   await renderWithProviders(<Settings />);

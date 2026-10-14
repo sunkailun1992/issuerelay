@@ -10,7 +10,8 @@ import { QueryClient } from "@tanstack/react-query";
  *   change or a flaky Wi-Fi sends), and the panel would stop reading and acting;
  * - `refetchOnReconnect: false` and `refetchOnWindowFocus: false`: the engine's events keep the
  *   data current (useEngineEvents); reading everything again when the network comes back or the
- *   window gets focus would only re-run the environment check and the Linear calls;
+ *   window gets focus would only re-run the environment check and the Linear calls (one cheap
+ *   local read turns the focus read back on for itself: `useCliPath`);
  * - `retry: false`: a local call that failed fails the same way again, and retrying behind the
  *   user's back would only show the error state seconds later.
  */

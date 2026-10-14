@@ -277,16 +277,32 @@ pub fn windows_path_without(
     (kept.len() != entries.len()).then(|| kept.join(";"))
 }
 
-/// A registry string (UTF-16LE, usually NUL-terminated) as text; text that is not valid UTF-16
-/// is an error, so it is never rewritten lossily.
-pub fn decode_reg_string(bytes: &[u8]) -> Result<String, FromUtf16Error> {
-    let (pairs, _) = bytes.as_chunks::<2>();
+/// Why a registry string is not taken as text.
+#[derive(Debug, thiserror::Error)]
+pub enum RegStringError {
+    /// Not valid UTF-16 (a lone surrogate).
+    #[error("it is not valid UTF-16")]
+    NotUtf16(#[from] FromUtf16Error),
+    /// Something follows the text that is not part of it: data after the terminating NUL (a list
+    /// of strings, or what another program left there), or a stray byte at the end.
+    #[error("it holds data after the end of the text")]
+    TrailingData,
+}
+
+/// A registry string (UTF-16LE, usually NUL-terminated) as text. What is not plainly text is an
+/// error, so that the value is never written back changed: invalid UTF-16, a stray byte at the
+/// end, and anything but NULs after the first NUL (the text would be cut there and the rest lost).
+pub fn decode_reg_string(bytes: &[u8]) -> Result<String, RegStringError> {
+    let (pairs, stray) = bytes.as_chunks::<2>();
     let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
     let end = units
         .iter()
         .position(|&unit| unit == 0)
         .unwrap_or(units.len());
-    String::from_utf16(&units[..end])
+    if !stray.is_empty() || units[end..].iter().any(|&unit| unit != 0) {
+        return Err(RegStringError::TrailingData);
+    }
+    Ok(String::from_utf16(&units[..end])?)
 }
 
 /// `text` as a NUL-terminated UTF-16LE registry string.
@@ -434,7 +450,13 @@ mod platform {
                     .with_context(|| format!("cannot create {}", link.display()))?;
             }
             LinkState::Stale(_) => {
-                // In one step: a new link under a temporary name, renamed over the old one.
+                // In one step: a new link under a temporary name, renamed over the old one, so
+                // that there is no moment without a link. The slot was read above and is replaced
+                // here: if another program put its own file at this exact path in between, the
+                // rename would replace it. That check-then-act window is accepted: it is a race
+                // of microseconds against a program of the same user, and neither `rename` nor
+                // `unlink` can say "only if it is still this link". (A link where there was none
+                // cannot overwrite anything: `symlink` fails when the path exists.)
                 let temporary = bin.join(format!(".issuerelay-link-{}", std::process::id()));
                 let _ = std::fs::remove_file(&temporary);
                 std::os::unix::fs::symlink(cli, &temporary)
@@ -451,6 +473,9 @@ mod platform {
 
     pub fn remove(setup: &CliSetup) -> Result<()> {
         let link = link_path(&setup.home);
+        // The same accepted check-then-act window as in `install`: the link is read here and
+        // removed below, and `remove_file` takes away whatever sits at the path by then, so a
+        // file another program put there in between would go too.
         if let LinkSlot::Link(target) =
             read_slot(&link).with_context(|| format!("cannot read {}", link.display()))?
             && (setup.cli.as_deref() == Some(target.as_path()) || is_bundled_cli(&target))
@@ -819,6 +844,49 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_string_with_more_after_its_end_is_refused_not_cut() {
+        let units =
+            |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        // "A", the terminator, then "B": decoding would stop at the NUL, and writing the text back
+        // would lose the "B".
+        let mut more = units("A");
+        more.extend([0, 0]);
+        more.extend(units("B"));
+        assert!(matches!(
+            decode_reg_string(&more),
+            Err(RegStringError::TrailingData)
+        ));
+        // A list of strings ("a", NUL, "b", NUL, NUL) is such a value too.
+        let mut list = units("a");
+        list.extend([0, 0]);
+        list.extend(units("b"));
+        list.extend([0, 0, 0, 0]);
+        assert!(matches!(
+            decode_reg_string(&list),
+            Err(RegStringError::TrailingData)
+        ));
+        // A byte that makes no whole character is no text either.
+        let mut stray = units("A");
+        stray.push(0x42);
+        assert!(matches!(
+            decode_reg_string(&stray),
+            Err(RegStringError::TrailingData)
+        ));
+        // Padding is nothing: only NULs follow the terminator.
+        let mut padded = units("A");
+        padded.extend([0, 0, 0, 0, 0, 0]);
+        assert_eq!(decode_reg_string(&padded).unwrap(), "A");
+        // A lone surrogate keeps its own reason.
+        assert!(matches!(
+            decode_reg_string(&[0x00, 0xd8, 0x41, 0x00]),
+            Err(RegStringError::NotUtf16(_))
+        ));
+        // Both read as one sentence about the user Path in the panel.
+        let reason = decode_reg_string(&more).unwrap_err().to_string();
+        assert_eq!(reason, "it holds data after the end of the text");
+    }
+
+    #[test]
     fn the_status_reads_as_the_panel_expects() {
         let on = CliPathStatus::On {
             shell_line: Some(SHELL_LINE.into()),
@@ -836,16 +904,25 @@ mod tests {
         );
     }
 
+    // Unix only: on Windows `on_read_only_volume` is a constant `false`, nothing to test there.
     #[cfg(unix)]
     #[test]
-    fn a_writable_folder_is_not_on_a_read_only_volume() {
+    fn a_read_only_volume_is_told_from_a_writable_one() {
         let root = tempfile::tempdir().unwrap();
         assert!(!on_read_only_volume(root.path()));
         // Nothing is known about a path that is not there: it does not count as read-only.
         assert!(!on_read_only_volume(&root.path().join("missing")));
         assert!(!on_read_only_volume(Path::new("")));
+        // The sealed system volume of macOS is mounted read-only (probed on a mounted disk image
+        // as well, which this test cannot make).
+        #[cfg(target_os = "macos")]
+        assert!(on_read_only_volume(Path::new("/System")));
     }
 
+    // Unix only, with no Windows counterpart on purpose: these tests link in a temporary home,
+    // while the Windows reads and writes go to the real registry (`HKCU\Environment`), which no
+    // test touches. The pure functions above (the `Path` comparison, adding and removing the
+    // folder, the registry string codec) carry the Windows rules and run on every platform.
     #[cfg(unix)]
     mod link {
         use super::*;
@@ -957,6 +1034,13 @@ mod tests {
                 std::fs::read_link(&link).unwrap(),
                 setup.cli.clone().unwrap()
             );
+            // Only the link itself is left in the folder: the temporary one the swap is made with
+            // (`.issuerelay-link-*`) is gone.
+            let names: Vec<_> = std::fs::read_dir(link.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["issuerelay"], "a temporary link was left behind");
         }
 
         #[test]

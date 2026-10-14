@@ -15,8 +15,10 @@ import {
   useAutostart,
   useBindings,
   useCancelJob,
+  useCliPath,
   useControlServers,
   useDoctor,
+  useInstallCliOnPath,
   useIssues,
   useJob,
   useJobLog,
@@ -32,6 +34,7 @@ import {
   usePollNow,
   useProjects,
   useRemoveBinding,
+  useRemoveCliFromPath,
   useResume,
   useRetryJob,
   useSaveBinding,
@@ -60,6 +63,7 @@ describe("the query keys", () => {
     expect(queryKeys.issues).toEqual(["issues"]);
     expect(queryKeys.settings).toEqual(["settings"]);
     expect(queryKeys.bindings).toEqual(["bindings"]);
+    expect(queryKeys.cliPath).toEqual(["cliPath"]);
     expect(queryKeys.linearServerNamed("codex")).toEqual(["linearServerNamed", "codex"]);
   });
 
@@ -67,7 +71,8 @@ describe("the query keys", () => {
     const keys = [
       queryKeys.startup, queryKeys.status, queryKeys.jobs, queryKeys.job(1), queryKeys.log(1), queryKeys.issues,
       queryKeys.bindings, queryKeys.projects, queryKeys.settings, queryKeys.doctor, queryKeys.controlServers,
-      queryKeys.linearServerNamed("claude"), queryKeys.linearServerNamed("codex"), queryKeys.autostart, queryKeys.appInfo,
+      queryKeys.linearServerNamed("claude"), queryKeys.linearServerNamed("codex"), queryKeys.autostart, queryKeys.cliPath,
+      queryKeys.appInfo,
     ].map((key) => JSON.stringify(key));
     expect(new Set(keys).size).toBe(keys.length);
   });
@@ -222,6 +227,30 @@ describe("reading", () => {
     await waitFor(() => expect(doctor).toHaveBeenCalledTimes(2));
   });
 
+  test("whether the command line is on PATH is read again when the window comes back to the front, and nothing else is", async () => {
+    // Nothing the user does in a terminal is an engine event: they may delete the file that blocks the switch, or edit
+    // their shell profile, and expect the row to know when they return. The client turns this off for every read
+    // (query-client.ts), so the one read that wants it asks for it.
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const onPath = vi.spyOn(backend, "cliOnPath");
+    const settings = vi.spyOn(backend, "settings");
+    function Reader() {
+      const path = useCliPath();
+      useSettings();
+      return <p>{path.data?.kind ?? "reading"}</p>;
+    }
+    await renderWithProviders(<Reader />, { backend });
+    expect(await screen.findByText("off")).toBeInTheDocument();
+    await waitFor(() => expect(settings).toHaveBeenCalledTimes(1));
+    expect(onPath).toHaveBeenCalledTimes(1);
+    // The webview tells that it is shown again as a change of visibility.
+    await act(async () => {
+      window.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(onPath).toHaveBeenCalledTimes(2));
+    expect(settings).toHaveBeenCalledTimes(1);
+  });
+
   test("a job's log is read again every second and a half while it is live, and not otherwise", async () => {
     // Every timer is the test's: the mock answers from a timer and so does the library's redraw, so
     // time is advanced by hand and nothing is waited for.
@@ -291,6 +320,8 @@ describe("acting", () => {
       const reconnect = useLinearReconnect();
       const setup = useSetupAction();
       const autostart = useSetAutostart();
+      const installCli = useInstallCliOnPath();
+      const removeCli = useRemoveCliFromPath();
       return (
         <>
           <Act label="pause" run={() => pause.mutate()} />
@@ -310,6 +341,8 @@ describe("acting", () => {
           <Act label="reconnect" run={() => reconnect.mutate()} />
           <Act label="setup" run={() => setup.mutate({ kind: "add_linear_mcp", executor: "claude" })} />
           <Act label="autostart" run={() => autostart.mutate(true)} />
+          <Act label="put the CLI on PATH" run={() => installCli.mutate()} />
+          <Act label="take the CLI off PATH" run={() => removeCli.mutate()} />
         </>
       );
     }
@@ -330,6 +363,8 @@ describe("acting", () => {
       ["reconnect", [key("status"), key("issues"), key("projects"), key("doctor")]],
       ["setup", [key("doctor"), key("controlServers"), key("linearServerNamed")]],
       ["autostart", [key("autostart")]],
+      ["put the CLI on PATH", [key("cliPath")]],
+      ["take the CLI off PATH", [key("cliPath")]],
     ];
     for (const [label, expected] of expectations) {
       expect(await keysAfterClicking(label, spy), label).toEqual(expect.arrayContaining(expected));
@@ -525,7 +560,7 @@ describe("acting", () => {
     Object.assign(backend, {
       pause: refuse, resume: refuse, pollNow: refuse, cancelJob: refuse, retryJob: refuse, markDone: refuse,
       saveBinding: refuse, removeBinding: refuse, saveSettings: refuse, linearUseApiKey: refuse, linearLogout: refuse,
-      linearReconnect: refuse, setupAction: refuse, setAutostart: refuse,
+      linearReconnect: refuse, setupAction: refuse, setAutostart: refuse, installCliOnPath: refuse, removeCliFromPath: refuse,
     });
     function Everything() {
       const hooks = {
@@ -533,6 +568,7 @@ describe("acting", () => {
         "mark done": useMarkDone(), "save binding": useSaveBinding(), "remove binding": useRemoveBinding(),
         "save settings": useSaveSettings(), "api key": useLinearApiKey(), "log out": useLinearLogout(),
         reconnect: useLinearReconnect(), setup: useSetupAction(), autostart: useSetAutostart(),
+        "install cli": useInstallCliOnPath(), "remove cli": useRemoveCliFromPath(),
       };
       const run = (name: keyof typeof hooks) => (hooks[name].mutate as (variables?: unknown) => void)(undefined);
       return (
@@ -559,6 +595,8 @@ describe("acting", () => {
       ["reconnect", "Could not reconnect to Linear"],
       ["setup", "The setup command failed"],
       ["autostart", "Could not change start at login"],
+      ["install cli", "Could not change the command line on PATH"],
+      ["remove cli", "Could not change the command line on PATH"],
     ];
     const error = vi.spyOn(toast, "error");
     for (const [label, headline] of headlines) {

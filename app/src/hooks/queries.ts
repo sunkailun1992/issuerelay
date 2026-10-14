@@ -137,10 +137,16 @@ export function useAutostart() {
   return useQuery({ queryKey: queryKeys.autostart, queryFn: () => backend.autostartEnabled() });
 }
 
-/** Whether the command line is on PATH through IssueRelay, and what is still to do (design 12). */
+/**
+ * Whether the command line is on PATH through IssueRelay, and what is still to do (design 12).
+ * Read again when the window comes back to the front: nothing the user does in a terminal is an
+ * engine event, and they may have deleted the file that blocks the switch or edited their shell
+ * profile since. The client turns that off for every read (`createQueryClient`, which rules out
+ * re-running the environment check and the Linear calls); this one only looks at local files.
+ */
 export function useCliPath() {
   const backend = useBackend();
-  return useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath() });
+  return useQuery({ queryKey: queryKeys.cliPath, queryFn: () => backend.cliOnPath(), refetchOnWindowFocus: true });
 }
 
 /** Version, command line path, platform and system language; fixed while the app runs. */
