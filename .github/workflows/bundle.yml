@@ -66,10 +66,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The heaviest job of a release: on macOS the app and the CLI are compiled in release mode for
     # both architectures, from a cold cache at worst, then signed (and, with a certificate, sent to
-    # Apple for notarization). No release build has run in CI yet, so 90 minutes is a guess with
-    # plenty of room, far below GitHub's default of six hours; tighten it once real run times are
-    # known.
-    timeout-minutes: 90
+    # Apple for notarization). The first dry runs measured about 7 min 20 s (macOS universal) and
+    # 15 min 43 s (Windows x64) for the bundle step; 45 minutes leaves room for the rest of the
+    # job, a cold cache and a slow runner, and is far below GitHub's default of six hours. Those
+    # runs had no Apple certificate, so they did not wait for notarization: if the first notarized
+    # release comes near the limit, raise it.
+    timeout-minutes: 45
     env:
       VERSION: ${{ inputs.version }}
       UPDATER: ${{ inputs.updater }}
