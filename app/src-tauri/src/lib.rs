@@ -99,25 +99,19 @@ pub fn run() {
             commands::install_update,
         ])
         .setup(|app| {
-            let updates = update::AppUpdates::new(
-                update::PluginSource(app.handle().clone()),
-                env!("CARGO_PKG_VERSION"),
-            );
             // What the previous run's install left for this start, both once. The reason it could
             // not install (the banner says why), and the request that the panel shows: the restart
             // after an install keeps `--autostart`, which would hide the outcome.
             let data_dir = issuerelay_core::paths::AppPaths::system()
                 .ok()
                 .map(|paths| paths.data_dir);
-            if let Some(failure) = data_dir.as_deref().and_then(update::take_install_failure) {
-                updates.show_failure(failure);
-            }
+            let install_failure = data_dir.as_deref().and_then(update::take_install_failure);
             let panel_requested = data_dir
                 .as_deref()
                 .is_some_and(update::take_show_panel_marker);
-            // What the quit flow sees of an update: the verified download, not the plugin.
-            app.manage(updates.waiting());
-            app.manage(updates);
+            // The update state and, next to it, what the quit flow sees of an update (the verified
+            // download, not the plugin): one function, so that a test sees all of it is there.
+            update::manage(app.handle(), env!("CARGO_PKG_VERSION"), install_failure);
             tray::create(app.handle())?;
             if startup::starts_hidden(app.state::<state::AppState>().autostarted, panel_requested) {
                 // A login start stays in the tray: through the same `hide` as closing the panel,

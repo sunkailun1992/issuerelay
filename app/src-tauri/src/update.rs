@@ -490,6 +490,24 @@ pub fn failure_code(error: &tauri_plugin_updater::Error) -> FailureCode {
 /// The update state the app manages; `tauri::Wry` in the app, tauri's mock runtime in tests.
 pub type AppUpdates<R = tauri::Wry> = Updates<PluginSource<R>>;
 
+/// Puts the update state into the app's managed state, at the start: `AppUpdates` (the panel's
+/// commands, the background check and `install` read it) and, next to it, the handle of the verified
+/// download that the quit flow reads (`pending`, `take_pending`, `clear_pending`), which must be the
+/// one `Updates` fills. `previous_failure` is the install the previous run could not finish, which
+/// the panel shows once.
+///
+/// One function, called by the app's `setup` (lib.rs) and by a test, because leaving something out
+/// fails nowhere else: the quit flow asks for its handle with `try_state`, so without it an update
+/// is never installed and a quit never drops one, silently.
+pub fn manage<R: Runtime>(app: &AppHandle<R>, current: &str, previous_failure: Option<Failure>) {
+    let updates = AppUpdates::new(PluginSource(app.clone()), current);
+    if let Some(failure) = previous_failure {
+        updates.show_failure(failure);
+    }
+    app.manage(updates.waiting());
+    app.manage(updates);
+}
+
 /// Whether a verified update waits for the quit flow. These three read the `PendingInstall` the
 /// app manages, not the plugin's state: without it nothing waits.
 pub fn pending<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -1341,11 +1359,9 @@ mod tests {
         assert!(!pending(app.handle()));
         assert!(take_pending(app.handle()).is_none());
         clear_pending(app.handle());
-        // With the state the app manages (lib.rs manages the updates and, next to them, the
-        // handle the quit flow reads): still nothing until a verified download exists.
-        let updates = AppUpdates::new(PluginSource(app.handle().clone()), "0.1.0");
-        app.manage(updates.waiting());
-        app.manage(updates);
+        // With the state the app manages (`manage`, which lib.rs calls): still nothing until a
+        // verified download exists.
+        manage(app.handle(), "0.1.0", None);
         assert!(!pending(app.handle()));
         assert_eq!(
             app.state::<AppUpdates<tauri::test::MockRuntime>>().status(),
@@ -1368,6 +1384,57 @@ mod tests {
         assert!(
             installed.lock().unwrap().is_empty(),
             "dropped, not installed"
+        );
+    }
+
+    #[test]
+    fn the_app_manages_the_updates_and_the_download_the_quit_flow_reads() {
+        // `manage` is what lib.rs calls at the start. The quit flow asks for its handle with
+        // `try_state`, which answers "nothing" for a state that was never managed: leaving either
+        // one out, or managing a handle the updates do not fill, would turn the install and the
+        // dropping of a download on a quit into no-ops, without a single error.
+        let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+        assert!(
+            app.try_state::<AppUpdates<tauri::test::MockRuntime>>()
+                .is_none(),
+            "nothing is managed before `manage`"
+        );
+        manage(app.handle(), "0.1.0", None);
+        let updates = app
+            .try_state::<AppUpdates<tauri::test::MockRuntime>>()
+            .expect("the commands and the background check read the updates");
+        assert_eq!(updates.status(), UpdateStatus::Unchecked);
+        assert!(
+            app.try_state::<PendingInstall>().is_some(),
+            "the quit flow reads this handle"
+        );
+        // What the updates keep (`prepare` does it through `waiting`) is what the quit flow sees
+        // and installs ...
+        let (install, installed) = fake_install("0.2.0", b"payload");
+        updates.waiting().keep(install);
+        assert!(pending(app.handle()), "the quit flow sees the download");
+        take_pending(app.handle())
+            .expect("the quit flow takes the download")
+            .install()
+            .unwrap();
+        assert_eq!(*installed.lock().unwrap(), [b"payload".to_vec()]);
+        // ... and what a quit request drops, the updates no longer have.
+        let (install, installed) = fake_install("0.3.0", b"later");
+        updates.waiting().keep(install);
+        assert_eq!(updates.pending_version().as_deref(), Some("0.3.0"));
+        clear_pending(app.handle());
+        assert_eq!(updates.pending_version(), None, "dropped by the quit flow");
+        assert!(installed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_install_the_previous_run_could_not_finish_is_on_show_from_the_start() {
+        let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+        let failure = Failure::new(FailureCode::InstallFailed, "no space left");
+        manage(app.handle(), "0.1.0", Some(failure.clone()));
+        assert_eq!(
+            app.state::<AppUpdates<tauri::test::MockRuntime>>().status(),
+            UpdateStatus::Failed(failure)
         );
     }
 }
