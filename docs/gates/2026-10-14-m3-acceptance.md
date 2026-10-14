@@ -30,10 +30,10 @@
   - A：0.1.0。更新清单地址临时改成本机 `127.0.0.1:8765`，只用于更新测试，不提交。
   - B：0.1.1。在同一提交的一次性 worktree 里升了版本号，用真正的更新签名私钥签名：私钥只以路径交给构建，没有读出。B 的 `latest.json`、`.app.tar.gz` 与 `.sig` 由本机 `python3 -m http.server` 提供。
   - 发布配置的 dmg：`CI=true pnpm --dir app tauri build --bundles dmg --config src-tauri/tauri.bundle.conf.json`。这是本机 Apple 芯片的包，不是通用包；更新清单地址是 GitHub Releases。安装、Gatekeeper、PATH 与程序坞几项都用它测。
-  - CI 打出的通用 dmg 没有下载：本机两次从 GitHub 下载 Actions 产物都失败了（`gh run download` 420 秒超时；直接下载 zip，在 27 MB 的 11.6 MB 处断开）。
+  - 试打包的 Actions 产物没有下载成功：本机试了两次（`gh run download` 420 秒超时；直接下载 zip，在 27 MB 的 11.6 MB 处断开）。后来从草稿下载了发布运行打出的通用 dmg，只核对了内容，见「第一个草稿」。
 - 安装位置：个人「应用程序」（`~/Applications`）。
 - 沙箱：Demo Project 与 `~/issuerelay-sandbox/demo`，同 M2；绑定的执行者是 Claude Code。新建了三条测试需求 DEMO-27 至 DEMO-29。
-- 设置：检查间隔 30 秒，界面语言跟随系统（繁体中文）。本报告引用的界面原文是繁体中文；`docs/install.md` 按简体中文界面写，括号里注了简体的对应。
+- 设置：检查间隔 30 秒，界面语言跟随系统（繁体中文）。本报告照抄所见的界面原文，所以多为繁体；凡与 `docs/install.md`（按简体中文界面写）对照的按钮名，简体与繁体都写了。
 
 ## 步骤与结果
 
