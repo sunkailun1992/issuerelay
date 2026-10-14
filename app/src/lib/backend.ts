@@ -1,6 +1,6 @@
 import type {
-  AppInfo, Binding, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job, LinearSetup,
-  Project, QuitMode, Settings, SetupAction, StartupState, StatusView, Viewer,
+  AppInfo, Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job,
+  LinearSetup, Project, QuitMode, Settings, SetupAction, StartupState, StatusView, Viewer,
 } from "./types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
@@ -51,6 +51,9 @@ export interface Backend {
   chooseDirectory(): Promise<string | null>;
   autostartEnabled(): Promise<boolean>;
   setAutostart(enabled: boolean): Promise<void>;
+  cliOnPath(): Promise<CliPathStatus>;
+  installCliOnPath(): Promise<CliPathStatus>;
+  removeCliFromPath(): Promise<CliPathStatus>;
   quit(mode: QuitMode): Promise<void>;
   requestQuit(): Promise<void>;
   onEngineEvent(listener: (event: EngineEvent) => void): Promise<() => void>;

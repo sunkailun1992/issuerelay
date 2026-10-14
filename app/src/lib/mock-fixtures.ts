@@ -1,4 +1,5 @@
 import { MOCK_NOW } from "./clock";
+import shellLine from "./shell-line.json";
 import triggerDefaults from "./trigger-defaults.json";
 import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, Project, Settings, Viewer } from "./types";
 
@@ -15,6 +16,9 @@ export const DEMO_APP_INFO: AppInfo = {
   platform: "macos",
   system_locale: "en-US",
 };
+
+/** The line the panel shows when ~/.local/bin is not on the login shell's PATH: core's `cli_path::SHELL_LINE`. */
+export const DEMO_SHELL_LINE: string = shellLine.shell_line;
 
 export const DEMO_PROJECTS: Project[] = [
   { id: "proj-1", name: "Demo Project", team_ids: ["team-1"] },

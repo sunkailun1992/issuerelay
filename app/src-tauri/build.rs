@@ -45,6 +45,9 @@ const PANEL_COMMANDS: &[&str] = &[
     "set_autostart",
     "quit",
     "request_quit",
+    "cli_on_path",
+    "install_cli_on_path",
+    "remove_cli_from_path",
 ];
 
 /// What tauri-build embeds into the app by default: it asks Windows for Common Controls v6.

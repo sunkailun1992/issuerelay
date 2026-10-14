@@ -19,12 +19,16 @@ import { WithCommands } from "@/components/WithCommands";
 import {
   useAppInfo,
   useAutostart,
+  useCliPath,
   useControlServers,
+  useInstallCliOnPath,
+  useRemoveCliFromPath,
   useSaveSettings,
   useSetAutostart,
   useSetupAction,
   useSettings,
 } from "@/hooks/queries";
+import { useCopyText } from "@/hooks/useCopyText";
 import { LANGUAGES } from "@/i18n/language";
 import { cleanDisplayText } from "@/lib/clean";
 import {
@@ -38,11 +42,21 @@ import {
   settingsOf,
   unsaved,
 } from "@/lib/settings-form";
-import type { ControlServer, ExecutorKind, NotificationSettings, PermissionProfile, Settings as SettingsData, TriggerNames } from "@/lib/types";
+import type {
+  CliPathStatus,
+  ControlServer,
+  ExecutorKind,
+  NotificationSettings,
+  PermissionProfile,
+  Settings as SettingsData,
+  TriggerNames,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** The command that builds IssueRelay's command-line program, for a development build that has none yet. */
 const BUILD_CLI = "cargo build -p issuerelay-cli";
+/** The command the PATH switch makes available in a terminal. */
+const CLI_COMMAND = "issuerelay";
 
 /** A group of settings: a card named by its heading. */
 function Group({ title, children }: { title: string; children: ReactNode }) {
@@ -77,7 +91,7 @@ function SwitchRow({
 }: {
   id: string;
   label: string;
-  note?: string;
+  note?: ReactNode;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
@@ -217,6 +231,71 @@ function Autostart() {
       disabled={change.isPending}
       onChange={(enabled) => change.mutate(enabled)}
     />
+  );
+}
+
+/** What the PATH row says under its switch. The paths are the system's text: cleaned, and allowed to break anywhere. */
+function CliPathNote({ status }: { status: CliPathStatus }) {
+  const { t } = useTranslation();
+  const copy = useCopyText();
+  switch (status.kind) {
+    case "off":
+      return null;
+    case "on": {
+      const line = status.shell_line;
+      if (line === null) return <p className="text-xs text-muted-foreground">{t("settings.cli.on_new_terminal")}</p>;
+      return (
+        <div className="flex flex-col gap-1">
+          <p className="text-xs text-muted-foreground">{t("settings.cli.shell_line")}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="min-w-0 rounded bg-muted px-2 py-1 font-mono text-xs wrap-anywhere text-foreground select-text">{line}</code>
+            <Button size="sm" variant="outline" onClick={() => copy(line)}>
+              {t("common.copy")}
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    case "stale":
+      return <p className="text-xs text-muted-foreground wrap-anywhere">{t("settings.cli.stale", { target: cleanDisplayText(status.target) })}</p>;
+    case "blocked":
+      return <p className="text-xs text-destructive wrap-anywhere">{t("settings.cli.blocked", { path: cleanDisplayText(status.path) })}</p>;
+    case "unavailable":
+      return <p className="text-xs text-muted-foreground">{t(`settings.cli.unavailable.${status.reason}`)}</p>;
+  }
+}
+
+/**
+ * Putting the command line on PATH (design 12). It acts at once and is not saved with the page,
+ * like starting at login; the switch shows only once the state is read, so it is never shown in a
+ * state it is not in, and it cannot be used while a file IssueRelay did not make is in the way or
+ * where the app runs from does not allow it.
+ */
+function CliOnPath() {
+  const { t } = useTranslation();
+  const id = useId();
+  const status = useCliPath();
+  const install = useInstallCliOnPath();
+  const remove = useRemoveCliFromPath();
+  if (status.isError && !status.isFetching) {
+    return <ErrorState error={status.error} headline="settings.cli.load_failed" onRetry={() => void status.refetch()} />;
+  }
+  if (status.data === undefined) return <LoadingState rows={1} />;
+  const current = status.data;
+  return (
+    <div className="flex flex-col gap-1">
+      <SwitchRow
+        id={id}
+        label={t("settings.cli.title")}
+        note={<WithCommands text={t("settings.cli.description", { command: CLI_COMMAND })} commands={[CLI_COMMAND]} />}
+        checked={current.kind === "on"}
+        disabled={
+          install.isPending || remove.isPending || status.isFetching || current.kind === "blocked" || current.kind === "unavailable"
+        }
+        onChange={(on) => (on ? install.mutate() : remove.mutate())}
+      />
+      <CliPathNote status={current} />
+    </div>
   );
 }
 
@@ -494,6 +573,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
 
         <Group title={t("settings.group.system")}>
           <Autostart />
+          <CliOnPath />
           <SwitchRow
             id={id("auto-update")}
             label={t("settings.auto_update")}

@@ -2,12 +2,12 @@ import { type Backend, BackendError } from "./backend";
 import { MOCK_NOW, now, setFixedClock } from "./clock";
 import {
   DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LOGS,
-  DEMO_PROJECTS, DEMO_VIEWER, FRESH_DOCTOR, ago,
+  DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
 import { isActive } from "./runs";
 import type {
-  Binding, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup, Settings,
-  StartupState, StatusView, Viewer,
+  Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup,
+  Settings, StartupState, StatusView, Viewer,
 } from "./types";
 
 export interface MockOptions {
@@ -73,6 +73,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   );
   const controlServers: ControlServers = { claude: "not_registered", codex: "not_registered" };
   let autostart = false;
+  let cliPath: CliPathStatus = { kind: "off" };
   const listeners = {
     event: new Set<(event: EngineEvent) => void>(),
     resync: new Set<() => void>(),
@@ -263,6 +264,18 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     setAutostart: (enabled) =>
       reply(() => {
         autostart = enabled;
+      }),
+    cliOnPath: () => reply(() => cliPath),
+    installCliOnPath: () =>
+      reply(() => {
+        // The demo user's login shell does not have ~/.local/bin yet, so the line is shown.
+        cliPath = { kind: "on", shell_line: DEMO_SHELL_LINE };
+        return cliPath;
+      }),
+    removeCliFromPath: () =>
+      reply(() => {
+        cliPath = { kind: "off" };
+        return cliPath;
       }),
     quit: () => reply(() => undefined),
     requestQuit: () => reply(() => undefined),

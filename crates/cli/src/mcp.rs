@@ -2,11 +2,19 @@
 //! and pauses / resumes monitoring; it can never mark an issue Done or retry a run.
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use issuerelay_core::{ipc::client, paths::IpcEndpoint};
+use issuerelay_core::{
+    ipc::client::{self, NotRunning},
+    paths::IpcEndpoint,
+};
 use rmcp::{ServiceExt, handler::server::wrapper::Parameters, transport::stdio};
 use serde_json::{Value, json};
 
 use crate::format;
+
+/// Added to a tool's "not running" error. The MCP server does not start the app, and the AI is
+/// asked to leave that to the user rather than to start a program with full access itself.
+pub const MCP_NOT_RUNNING_HINT: &str =
+    "ask the user to open the IssueRelay app; this server does not start it";
 
 type CallFuture = Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>;
 
@@ -52,7 +60,7 @@ impl ControlServer {
     /// The engine's result as JSON text. A failure (host not running, no answer in time, or an
     /// error the engine reported) is `error: <cause chain>` as the tool's error, which sets
     /// `isError` for the client; the cause stays in the text so the AI can tell a stopped app
-    /// from a failed request.
+    /// from a failed request. A stopped app gets `MCP_NOT_RUNNING_HINT`; the server never starts it.
     ///
     /// Both texts go through [`format::clean`] before they leave, as the CLI's output does:
     /// control characters become spaces, zero-width and direction-changing characters are
@@ -64,6 +72,9 @@ impl ControlServer {
     async fn forward(&self, method: &str, params: Value) -> Result<String, String> {
         match (self.transport)(method.to_string(), params).await {
             Ok(value) => Ok(format::clean(&value.to_string())),
+            Err(e) if e.downcast_ref::<NotRunning>().is_some() => Err(format::clean(&format!(
+                "error: {e:#}; {MCP_NOT_RUNNING_HINT}"
+            ))),
             Err(e) => Err(format::clean(&format!("error: {e:#}"))),
         }
     }

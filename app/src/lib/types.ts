@@ -178,6 +178,15 @@ export type SetupAction =
 /** One executor's control-server registration; `unknown` when the check itself failed. */
 export type ControlServer = "registered" | "not_registered" | "not_installed" | "unknown";
 export interface ControlServers { claude: ControlServer; codex: ControlServer }
+/** Why the command line cannot be put on PATH from where the app runs. */
+export type CliUnavailable = "missing_cli" | "not_installed" | "development";
+/** What the settings show for "Command line on PATH" (core's `CliPathStatus`). */
+export type CliPathStatus =
+  | { kind: "off" }
+  | { kind: "on"; shell_line: string | null }
+  | { kind: "stale"; target: string }
+  | { kind: "blocked"; path: string }
+  | { kind: "unavailable"; reason: CliUnavailable };
 export interface AppInfo { version: string; cli_path: string | null; platform: string; system_locale: string | null }
 export type StartupCode = "already_running" | "store_unavailable" | "other";
 export type StartupState =

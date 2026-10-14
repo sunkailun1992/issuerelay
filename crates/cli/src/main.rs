@@ -5,6 +5,7 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Component, Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -12,7 +13,7 @@ use clap::{Parser, Subcommand};
 use issuerelay_cli::{format, mcp};
 use issuerelay_core::{
     config::{Binding, ExecutorKind, PermissionProfile},
-    ipc::client,
+    ipc::client::{self, NotRunning},
     paths::AppPaths,
 };
 use serde_json::{Value, json};
@@ -60,6 +61,8 @@ enum Command {
     /// Manage Linear project bindings.
     #[command(subcommand)]
     Bind(BindCommand),
+    /// Start the IssueRelay tray app if it is not running, and wait until it answers.
+    Start,
     /// Run the MCP control server on stdio (for Claude Code / Codex).
     Mcp,
 }
@@ -156,7 +159,7 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
             };
             ("bindings.add", json!({"binding": binding}))
         }
-        Command::Mcp => unreachable!("handled before sending a request"),
+        Command::Mcp | Command::Start => unreachable!("handled before sending a request"),
     })
 }
 
@@ -181,10 +184,14 @@ where
 }
 
 /// Tells the user why the command failed and returns the exit code for it. The line is cleaned
-/// like all other output. If `err` is gone too there is nobody to tell; the exit code still says
-/// the command failed.
+/// like all other output; a stopped app gets `NOT_RUNNING_HINT` after the reason. If `err` is gone
+/// too there is nobody to tell; the exit code still says the command failed.
 fn fail(error: &anyhow::Error, err: &mut impl Write) -> ExitCode {
-    let _ = writeln!(err, "{}", format::error_line(error));
+    let mut line = format::error_line(error);
+    if error.downcast_ref::<NotRunning>().is_some() {
+        line = format!("{line}; {NOT_RUNNING_HINT}");
+    }
+    let _ = writeln!(err, "{line}");
     ExitCode::FAILURE
 }
 
@@ -200,11 +207,114 @@ fn announce_wait(command: &Command, to: &mut impl Write, is_terminal: bool) {
     }
 }
 
+/// Printed after "IssueRelay is not running" in the CLI's own failure line.
+const NOT_RUNNING_HINT: &str = "start it with `issuerelay start`";
+/// How long `issuerelay start` waits for the started app to answer: 40 tries, 0.5 s apart.
+const START_ATTEMPTS: u32 = 40;
+const START_POLL: Duration = Duration::from_millis(500);
+
+/// `issuerelay start`: launches the tray app unless it already answers, then waits until it
+/// does. `ask` asks the host for its status and `launch` starts the app; both are passed in so
+/// the tests run neither. Only "not running" leads to a launch: any other failure (no
+/// permission, another user's pipe) is reported instead of starting a second copy.
+async fn start<A, Fut>(
+    ask: A,
+    launch: impl FnOnce() -> Result<()>,
+    attempts: u32,
+    every: Duration,
+) -> Result<String>
+where
+    A: Fn() -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    match ask().await {
+        Ok(_) => return Ok("IssueRelay is already running.".into()),
+        Err(e) if e.downcast_ref::<NotRunning>().is_none() => return Err(e),
+        Err(_) => {}
+    }
+    launch()?;
+    for _ in 0..attempts {
+        tokio::time::sleep(every).await;
+        match ask().await {
+            Ok(_) => return Ok("IssueRelay started.".into()),
+            Err(e) if e.downcast_ref::<NotRunning>().is_none() => return Err(e),
+            Err(_) => {}
+        }
+    }
+    anyhow::bail!(
+        "IssueRelay was started but did not answer within {} seconds; open it from the menu bar or the notification area to see why",
+        (every * attempts).as_secs()
+    )
+}
+
+/// Starts the tray app through Launch Services, which finds the installed app by its bundle
+/// identifier. Fixed arguments, no shell.
+#[cfg(target_os = "macos")]
+fn launch_app() -> Result<()> {
+    use anyhow::Context as _;
+    let status = std::process::Command::new("/usr/bin/open")
+        .args(["-b", issuerelay_core::paths::APP_ID])
+        .status()
+        .context("could not run /usr/bin/open")?;
+    anyhow::ensure!(
+        status.success(),
+        "macOS could not find the IssueRelay app; open it once from Applications"
+    );
+    Ok(())
+}
+
+/// Starts `issuerelay-app.exe` from this program's own folder, detached from this console so
+/// that closing the terminal or Ctrl+C leaves the tray app running. Fixed arguments, no shell.
+#[cfg(windows)]
+fn launch_app() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    use anyhow::Context as _;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let app = std::env::current_exe()?
+        .with_file_name(format!("{}.exe", issuerelay_core::paths::APP_EXECUTABLE));
+    anyhow::ensure!(
+        app.is_file(),
+        "{} is missing; start IssueRelay from the Start menu",
+        app.display()
+    );
+    std::process::Command::new(&app)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .with_context(|| format!("could not start {}", app.display()))?;
+    Ok(())
+}
+
+/// Linux is not packaged (design 2.2): the user starts the tray app.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn launch_app() -> Result<()> {
+    anyhow::bail!(
+        "`issuerelay start` works on macOS and Windows; start the IssueRelay app yourself"
+    )
+}
+
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     let endpoint = AppPaths::system()?.ipc_endpoint();
+    // The MCP server never starts the tray app: an AI must not start a program with full access
+    // by itself; a stopped app is an error the AI passes on to the user.
     if matches!(cli.command, Command::Mcp) {
         return mcp::serve(endpoint).await;
+    }
+    if matches!(cli.command, Command::Start) {
+        let text = start(
+            || client::call(&endpoint, "status", json!({})),
+            launch_app,
+            START_ATTEMPTS,
+            START_POLL,
+        )
+        .await?;
+        write_line(&mut io::stdout().lock(), &text)?;
+        return Ok(());
     }
     let stderr_is_terminal = io::stderr().is_terminal();
     announce_wait(&cli.command, &mut io::stderr().lock(), stderr_is_terminal);
@@ -226,10 +336,11 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Mutex};
+    use std::{cell::Cell, collections::VecDeque, path::Path, sync::Mutex, time::Duration};
 
     use anyhow::anyhow;
     use clap::CommandFactory;
+    use issuerelay_core::ipc::client::NotRunning;
 
     use super::*;
 
@@ -485,6 +596,115 @@ mod tests {
     }
 
     #[test]
+    fn start_is_a_subcommand_of_its_own() {
+        assert!(matches!(parse(&["start"]).command, Command::Start));
+        // Listed with the others, so `no_subcommand_marks_done_retries_or_cancels` sees it too.
+        let mut names = Vec::new();
+        collect_names(&Cli::command(), &mut names);
+        assert!(names.iter().any(|n| n == "start"));
+    }
+
+    /// Answers `start`'s status questions from a script: `Err(NotRunning)` until the list says
+    /// otherwise.
+    fn answers(
+        script: Vec<anyhow::Result<Value>>,
+    ) -> (
+        impl Fn() -> std::future::Ready<anyhow::Result<Value>>,
+        std::rc::Rc<Cell<usize>>,
+    ) {
+        let script = std::rc::Rc::new(std::cell::RefCell::new(VecDeque::from(script)));
+        let asked = std::rc::Rc::new(Cell::new(0));
+        let count = asked.clone();
+        let ask = move || {
+            count.set(count.get() + 1);
+            std::future::ready(
+                script
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or_else(|| Err(NotRunning.into())),
+            )
+        };
+        (ask, asked)
+    }
+
+    #[tokio::test]
+    async fn start_launches_the_app_only_when_it_is_not_running() {
+        let launched = Cell::new(0);
+        let launch = || {
+            launched.set(launched.get() + 1);
+            Ok(())
+        };
+        let (ask, _) = answers(vec![Ok(json!({}))]);
+        assert_eq!(
+            start(ask, launch, 3, Duration::ZERO).await.unwrap(),
+            "IssueRelay is already running."
+        );
+        assert_eq!(launched.get(), 0);
+
+        let launch = || {
+            launched.set(launched.get() + 1);
+            Ok(())
+        };
+        let (ask, asked) = answers(vec![
+            Err(NotRunning.into()),
+            Err(NotRunning.into()),
+            Ok(json!({})),
+        ]);
+        assert_eq!(
+            start(ask, launch, 3, Duration::ZERO).await.unwrap(),
+            "IssueRelay started."
+        );
+        assert_eq!(launched.get(), 1);
+        assert_eq!(asked.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn start_reports_an_app_that_never_answers_and_other_failures() {
+        let (ask, _) = answers(vec![]);
+        let error = start(ask, || Ok(()), 2, Duration::ZERO).await.unwrap_err();
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        // A failure other than "not running" is no reason to start a second copy.
+        let (ask, _) = answers(vec![Err(anyhow!("permission denied"))]);
+        let launched = Cell::new(false);
+        let error = start(
+            ask,
+            || {
+                launched.set(true);
+                Ok(())
+            },
+            2,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "permission denied");
+        assert!(!launched.get());
+        // The launcher's own failure is the command's.
+        let (ask, _) = answers(vec![]);
+        let error = start(ask, || Err(anyhow!("no app")), 2, Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "no app");
+    }
+
+    #[test]
+    fn a_stopped_app_points_to_issuerelay_start() {
+        let mut shown = Vec::new();
+        fail(&anyhow::Error::new(NotRunning), &mut shown);
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "Error: IssueRelay is not running; start it with `issuerelay start`\n"
+        );
+        // Other failures get no hint.
+        let mut shown = Vec::new();
+        fail(&anyhow!("IssueRelay did not answer in time"), &mut shown);
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "Error: IssueRelay did not answer in time\n"
+        );
+    }
+
+    #[test]
     fn doctor_tells_a_terminal_it_is_waiting_and_nothing_else_does() {
         let said = |command: &Command, is_terminal: bool| {
             let mut shown = Vec::new();
@@ -509,6 +729,7 @@ mod tests {
                 lines: 5,
             },
             Command::Bind(BindCommand::List),
+            Command::Start,
             Command::Mcp,
         ];
         for command in &quick {
