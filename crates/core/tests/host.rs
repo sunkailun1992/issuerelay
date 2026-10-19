@@ -862,6 +862,8 @@ async fn run_a_job(host: &Host, root: &Path, linear: &FakeLinear) {
             permission: None,
             model: None,
             prompt_override: None,
+            lean: true,
+            effort: None,
         })
         .unwrap();
     linear.upsert(issue("1", "proj-1"));

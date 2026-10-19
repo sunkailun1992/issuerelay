@@ -156,6 +156,8 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
                 permission: *permission,
                 model: None,
                 prompt_override: None,
+                lean: true,
+                effort: None,
             };
             ("bindings.add", json!({"binding": binding}))
         }

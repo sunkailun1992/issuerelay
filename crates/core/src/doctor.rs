@@ -2020,6 +2020,8 @@ mod tests {
                 permission: None,
                 model: None,
                 prompt_override: None,
+                lean: true,
+                effort: None,
             });
         }
         let ready: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();

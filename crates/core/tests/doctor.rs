@@ -207,6 +207,8 @@ fn binding_to(project_id: &str) -> Binding {
         permission: None,
         model: None,
         prompt_override: None,
+        lean: true,
+        effort: None,
     }
 }
 

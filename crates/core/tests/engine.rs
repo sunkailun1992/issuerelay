@@ -526,6 +526,8 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
         permission: None,
         model: None,
         prompt_override: None,
+        lean: true,
+        effort: None,
     });
     cfg.save(&config_path).unwrap();
     {
@@ -866,6 +868,8 @@ fn demo_binding(project: &str, directory: &Path) -> Binding {
         permission: None,
         model: None,
         prompt_override: None,
+        lean: true,
+        effort: None,
     }
 }
 
