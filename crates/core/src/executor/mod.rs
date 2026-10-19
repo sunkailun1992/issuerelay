@@ -1,13 +1,16 @@
 //! Builds the command line for one executor run. The prompt always travels on stdin and the
-//! working directory is set on the process, so the only configurable argument is a validated
-//! model name (this keeps `claude.cmd` / `codex.cmd` safe on Windows).
+//! working directory is set on the process. The arguments are fixed strings except for a
+//! validated model name, a reasoning-effort level (a fixed set of words) and, in a lean Claude
+//! run, the path of the user-level `CLAUDE.md` that `lean::passable` checked (the third exception
+//! of the fixed-arguments rule); this keeps `claude.cmd` / `codex.cmd` safe on Windows.
+pub mod lean;
 pub mod outcome;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{ExecutorKind, PermissionProfile, is_valid_model_name};
+use crate::config::{Effort, ExecutorKind, PermissionProfile, is_valid_model_name};
 
 /// One executor process: the program, its fixed arguments, the working directory, and the
 /// prompt written to stdin.
@@ -18,6 +21,32 @@ pub struct CommandSpec {
     pub cwd: PathBuf,
     /// Written to the child's stdin, then stdin is closed.
     pub stdin: String,
+    /// Variables this run sets on top of the executor environment (`env::ExecEnv`).
+    pub env: Vec<(String, String)>,
+    /// A lean run: the runner checks its output for signs that lean did not take effect
+    /// (`lean::LeanCheck`).
+    pub lean: bool,
+    /// Lines the runner writes at the top of the run log, before the executor's output.
+    pub notes: Vec<String>,
+}
+
+/// How one run starts: the permission profile, and the binding's model, reasoning effort and
+/// lean configuration, when it has them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOptions<'a> {
+    pub profile: PermissionProfile,
+    pub model: Option<&'a str>,
+    pub effort: Option<Effort>,
+    /// `Some` for a lean run.
+    pub lean: Option<Lean<'a>>,
+}
+
+/// What a lean run needs besides the fixed arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lean<'a> {
+    /// The user-level `CLAUDE.md` a lean Claude run leaves out, already checked with
+    /// `lean::passable`; `None` keeps it. Codex has no such argument and ignores it.
+    pub user_instructions: Option<&'a Path>,
 }
 
 /// Resolves `claude` / `codex` on PATH, including `.cmd` shims on Windows.
@@ -47,18 +76,19 @@ pub fn is_git_repo(dir: &Path) -> bool {
 }
 
 /// Builds the command for one run. The arguments are fixed strings plus the model name (only
-/// when it passes `is_valid_model_name`); the prompt goes to stdin and `cwd` is set on the
-/// process, so neither ever appears in the arguments.
+/// when it passes `is_valid_model_name`), the effort level and, for a lean run, `lean`'s
+/// arguments; the prompt goes to stdin and `cwd` is set on the process, so neither ever appears
+/// in the arguments.
 pub fn build(
     kind: ExecutorKind,
     program: PathBuf,
-    profile: PermissionProfile,
-    model: Option<&str>,
+    options: &RunOptions<'_>,
     cwd: &Path,
     prompt: String,
 ) -> CommandSpec {
-    let model = model.filter(|m| is_valid_model_name(m));
+    let model = options.model.filter(|m| is_valid_model_name(m));
     let mut args: Vec<String> = Vec::new();
+    let mut env = Vec::new();
     match kind {
         ExecutorKind::Claude => {
             args.extend(
@@ -74,7 +104,7 @@ pub fn build(
                 .map(String::from),
             );
             args.push(
-                match profile {
+                match options.profile {
                     PermissionProfile::Full => "bypassPermissions",
                     PermissionProfile::Auto => "auto",
                     PermissionProfile::Personal => "dontAsk",
@@ -84,10 +114,18 @@ pub fn build(
             if let Some(m) = model {
                 args.extend(["--model".to_string(), m.to_string()]);
             }
+            if let Some(effort) = options.effort {
+                args.extend(["--effort".to_string(), effort.as_str().to_string()]);
+            }
+            if let Some(lean) = options.lean {
+                args.extend(lean::claude_args(lean.user_instructions));
+                let (name, value) = lean::DISABLE_AUTO_MEMORY;
+                env.push((name.to_string(), value.to_string()));
+            }
         }
         ExecutorKind::Codex => {
             args.extend(["exec", "--json"].map(String::from));
-            match profile {
+            match options.profile {
                 PermissionProfile::Full => {
                     args.push("--dangerously-bypass-approvals-and-sandbox".into())
                 }
@@ -97,8 +135,17 @@ pub fn build(
             if !is_git_repo(cwd) {
                 args.push("--skip-git-repo-check".into());
             }
+            if options.lean.is_some() {
+                args.extend(lean::codex_args());
+            }
             if let Some(m) = model {
                 args.extend(["-m".to_string(), m.to_string()]);
+            }
+            if let Some(effort) = options.effort {
+                args.extend([
+                    "-c".to_string(),
+                    format!("model_reasoning_effort={}", effort.as_str()),
+                ]);
             }
             args.push("-".into());
         }
@@ -108,6 +155,9 @@ pub fn build(
         args,
         cwd: cwd.to_path_buf(),
         stdin: prompt,
+        env,
+        lean: options.lean.is_some(),
+        notes: Vec::new(),
     }
 }
 
@@ -117,12 +167,21 @@ mod tests {
     use crate::config::{ExecutorKind, PermissionProfile};
     use std::path::PathBuf;
 
+    /// A run with only a profile and a model, as before lean runs and the effort existed.
+    fn opts(profile: PermissionProfile, model: Option<&str>) -> RunOptions<'_> {
+        RunOptions {
+            profile,
+            model,
+            effort: None,
+            lean: None,
+        }
+    }
+
     fn claude(profile: PermissionProfile, model: Option<&str>) -> CommandSpec {
         build(
             ExecutorKind::Claude,
             PathBuf::from("claude"),
-            profile,
-            model,
+            &opts(profile, model),
             Path::new("."),
             "p".into(),
         )
@@ -174,8 +233,7 @@ mod tests {
             build(
                 ExecutorKind::Codex,
                 PathBuf::from("codex"),
-                profile,
-                None,
+                &opts(profile, None),
                 dir,
                 "p".into(),
             )
@@ -220,8 +278,7 @@ mod tests {
             let spec = build(
                 kind,
                 PathBuf::from("x"),
-                PermissionProfile::Full,
-                None,
+                &opts(PermissionProfile::Full, None),
                 &tricky_dir,
                 prompt.clone(),
             );
@@ -270,8 +327,7 @@ mod tests {
         let args = build(
             ExecutorKind::Codex,
             PathBuf::from("codex"),
-            PermissionProfile::Personal,
-            None,
+            &opts(PermissionProfile::Personal, None),
             &nested,
             "p".into(),
         )
@@ -319,8 +375,7 @@ mod tests {
         let args = build(
             ExecutorKind::Codex,
             PathBuf::from("codex"),
-            PermissionProfile::Full,
-            Some("gpt-5.5"),
+            &opts(PermissionProfile::Full, Some("gpt-5.5")),
             repo.path(),
             "p".into(),
         )
@@ -382,8 +437,7 @@ mod tests {
         let spec = build(
             ExecutorKind::Claude,
             PathBuf::from("tools").join("claude"),
-            PermissionProfile::Full,
-            None,
+            &opts(PermissionProfile::Full, None),
             dir.path(),
             "p".into(),
         );
@@ -406,8 +460,7 @@ mod tests {
                 let args = build(
                     kind,
                     PathBuf::from("x"),
-                    PermissionProfile::Full,
-                    Some(model),
+                    &opts(PermissionProfile::Full, Some(model)),
                     repo.path(),
                     "p".into(),
                 )
@@ -427,6 +480,370 @@ mod tests {
             "a,b", "a=b", "a\\b", "a$b", "a\nb", "a b", "a/b", "a@b",
         ] {
             assert!(!is_valid_model_name(bad), "{bad:?}");
+        }
+    }
+
+    /// The user-level CLAUDE.md a lean Claude run leaves out in these tests.
+    const DEMO_INSTRUCTIONS: &str = "/srv/demo-home/.claude/CLAUDE.md";
+
+    /// The `--mcp-config` of a lean Claude run (lean-run design section 5.1), written out.
+    const LEAN_MCP_CONFIG: &str =
+        r#"{"mcpServers":{"linear-server":{"type":"http","url":"https://mcp.linear.app/mcp"}}}"#;
+
+    fn lean(user_instructions: Option<&Path>) -> Option<Lean<'_>> {
+        Some(Lean { user_instructions })
+    }
+
+    /// A folder with a `.git` directory, so Codex gets no `--skip-git-repo-check`.
+    fn git_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        repo
+    }
+
+    #[test]
+    fn claude_lean_arguments_follow_the_design() {
+        let options = RunOptions {
+            lean: lean(Some(Path::new(DEMO_INSTRUCTIONS))),
+            ..opts(PermissionProfile::Full, None)
+        };
+        let spec = build(
+            ExecutorKind::Claude,
+            PathBuf::from("claude"),
+            &options,
+            Path::new("."),
+            "p".into(),
+        );
+        assert_eq!(
+            spec.args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-prompts",
+                "none",
+                "--permission-mode",
+                "bypassPermissions",
+                "--strict-mcp-config",
+                "--mcp-config",
+                LEAN_MCP_CONFIG,
+                "--setting-sources",
+                "project,local",
+                "--settings",
+                r#"{"claudeMdExcludes":["/srv/demo-home/.claude/CLAUDE.md"]}"#,
+            ]
+        );
+        assert!(spec.lean);
+        assert!(spec.notes.is_empty());
+    }
+
+    #[test]
+    fn claude_lean_without_a_passable_path_has_no_settings_argument() {
+        let options = RunOptions {
+            lean: lean(None),
+            ..opts(PermissionProfile::Auto, None)
+        };
+        let args = build(
+            ExecutorKind::Claude,
+            PathBuf::from("claude"),
+            &options,
+            Path::new("."),
+            "p".into(),
+        )
+        .args;
+        assert_eq!(
+            &args[7..],
+            [
+                "auto",
+                "--strict-mcp-config",
+                "--mcp-config",
+                LEAN_MCP_CONFIG,
+                "--setting-sources",
+                "project,local",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lean_mcp_config_names_only_the_linear_server() {
+        let options = RunOptions {
+            lean: lean(None),
+            ..opts(PermissionProfile::Full, None)
+        };
+        let args = build(
+            ExecutorKind::Claude,
+            PathBuf::from("claude"),
+            &options,
+            Path::new("."),
+            "p".into(),
+        )
+        .args;
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let config: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({"mcpServers": {"linear-server": {
+                "type": "http",
+                "url": "https://mcp.linear.app/mcp"
+            }}})
+        );
+    }
+
+    #[test]
+    fn the_settings_argument_encodes_the_path_as_json() {
+        let tricky = Path::new(r"/srv/de mo/李四's\x/.claude/CLAUDE.md");
+        let options = RunOptions {
+            lean: lean(Some(tricky)),
+            ..opts(PermissionProfile::Full, None)
+        };
+        let args = build(
+            ExecutorKind::Claude,
+            PathBuf::from("claude"),
+            &options,
+            Path::new("."),
+            "p".into(),
+        )
+        .args;
+        let settings = args.last().unwrap();
+        assert_eq!(
+            settings,
+            r#"{"claudeMdExcludes":["/srv/de mo/李四's\\x/.claude/CLAUDE.md"]}"#
+        );
+        let parsed: serde_json::Value = serde_json::from_str(settings).unwrap();
+        assert_eq!(
+            parsed["claudeMdExcludes"][0],
+            r"/srv/de mo/李四's\x/.claude/CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn lean_claude_runs_turn_auto_memory_off_and_full_runs_set_nothing() {
+        let repo = git_repo();
+        let lean_options = RunOptions {
+            lean: lean(None),
+            ..opts(PermissionProfile::Full, None)
+        };
+        let spec = |kind, options: &RunOptions<'_>| {
+            build(kind, PathBuf::from("x"), options, repo.path(), "p".into())
+        };
+        let lean_claude = spec(ExecutorKind::Claude, &lean_options);
+        assert_eq!(
+            lean_claude.env,
+            [(
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(),
+                "1".to_string()
+            )]
+        );
+        let full_claude = spec(ExecutorKind::Claude, &opts(PermissionProfile::Full, None));
+        assert!(full_claude.env.is_empty());
+        assert!(!full_claude.lean);
+        let lean_codex = spec(ExecutorKind::Codex, &lean_options);
+        assert!(lean_codex.env.is_empty());
+        assert!(lean_codex.lean);
+    }
+
+    #[test]
+    fn codex_lean_arguments_follow_the_design_and_keep_the_stdin_marker_last() {
+        let repo = git_repo();
+        let options = RunOptions {
+            effort: Some(Effort::High),
+            lean: lean(Some(Path::new(DEMO_INSTRUCTIONS))),
+            ..opts(PermissionProfile::Full, Some("gpt-5.5"))
+        };
+        let args = build(
+            ExecutorKind::Codex,
+            PathBuf::from("codex"),
+            &options,
+            repo.path(),
+            "p".into(),
+        )
+        .args;
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ignore-user-config",
+                "--disable",
+                "hooks",
+                "--disable",
+                "plugins",
+                "--disable",
+                "apps",
+                "--disable",
+                "memories",
+                "--disable",
+                "skill_mcp_dependency_install",
+                "-c",
+                "mcp_servers.linear.url=https://mcp.linear.app/mcp",
+                "-c",
+                "mcp_servers.linear.required=true",
+                "-c",
+                "mcp_servers.linear.startup_timeout_sec=30",
+                "-c",
+                "skills.include_instructions=false",
+                "-m",
+                "gpt-5.5",
+                "-c",
+                "model_reasoning_effort=high",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn effort_reaches_both_executors_in_every_profile() {
+        let repo = git_repo();
+        let levels = [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+            (Effort::Max, "max"),
+        ];
+        let count = |args: &[String], pair: [&str; 2]| {
+            args.windows(2)
+                .filter(|w| w[0] == pair[0] && w[1] == pair[1])
+                .count()
+        };
+        for (effort, name) in levels {
+            for profile in [
+                PermissionProfile::Full,
+                PermissionProfile::Auto,
+                PermissionProfile::Personal,
+            ] {
+                for lean_run in [None, lean(None)] {
+                    let options = RunOptions {
+                        effort: Some(effort),
+                        lean: lean_run,
+                        ..opts(profile, Some("demo-model"))
+                    };
+                    let claude = build(
+                        ExecutorKind::Claude,
+                        PathBuf::from("claude"),
+                        &options,
+                        repo.path(),
+                        "p".into(),
+                    )
+                    .args;
+                    assert_eq!(count(&claude, ["--effort", name]), 1, "{claude:?}");
+                    let codex = build(
+                        ExecutorKind::Codex,
+                        PathBuf::from("codex"),
+                        &options,
+                        repo.path(),
+                        "p".into(),
+                    )
+                    .args;
+                    let setting = format!("model_reasoning_effort={name}");
+                    assert_eq!(count(&codex, ["-c", &setting]), 1, "{codex:?}");
+                    assert_eq!(codex.last().unwrap(), "-");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_effort_means_no_effort_argument() {
+        let repo = git_repo();
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let args = build(
+                kind,
+                PathBuf::from("x"),
+                &opts(PermissionProfile::Full, None),
+                repo.path(),
+                "p".into(),
+            )
+            .args;
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "--effort" || a.starts_with("model_reasoning_effort")),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lean_args_hold_the_instructions_path_only_in_the_settings_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let tricky_dir = dir.path().join("目录 with 'quotes' & spaces");
+        std::fs::create_dir(&tricky_dir).unwrap();
+        let instructions = tricky_dir.join(".claude").join("CLAUDE.md");
+        let prompt = "line1\n\"quoted\" & | ^ % 中文 'x'".to_string();
+        let options = RunOptions {
+            lean: lean(Some(&instructions)),
+            ..opts(PermissionProfile::Full, None)
+        };
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let spec = build(
+                kind,
+                PathBuf::from("x"),
+                &options,
+                &tricky_dir,
+                prompt.clone(),
+            );
+            assert_eq!(spec.stdin, prompt);
+            let settings = spec.args.iter().position(|a| a == "--settings");
+            assert_eq!(settings.is_some(), kind == ExecutorKind::Claude);
+            for (i, arg) in spec.args.iter().enumerate() {
+                if settings.is_some_and(|at| i == at + 1) {
+                    assert!(arg.contains("目录 with 'quotes' & spaces"), "{arg}");
+                    continue;
+                }
+                assert!(
+                    !arg.contains("中文") && !arg.contains("目录") && !arg.contains("quotes"),
+                    "{kind:?}: {arg}"
+                );
+            }
+        }
+    }
+
+    /// Runs the lean arguments through a batch file like the npm shims `claude.cmd` and
+    /// `codex.cmd`, which hand `%*` to Node: what Node sees must be what `build` produced
+    /// (lean-run design section 5.5). Needs Node on PATH, which the CI job installs.
+    #[cfg(windows)]
+    #[test]
+    fn json_arguments_survive_an_npm_style_cmd_shim() {
+        let Ok(node) = which::which("node") else {
+            eprintln!("skipped: node is not on PATH");
+            return;
+        };
+        let shim = tempfile::tempdir().unwrap();
+        std::fs::write(
+            shim.path().join("echo-args.js"),
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)))",
+        )
+        .unwrap();
+        std::fs::write(
+            shim.path().join("echo-args.cmd"),
+            format!("@\"{}\" \"%~dp0echo-args.js\" %*\r\n", node.display()),
+        )
+        .unwrap();
+        let instructions = PathBuf::from(r"D:\Profiles\Demo User\李\.claude\CLAUDE.md");
+        let repo = git_repo();
+        let options = RunOptions {
+            effort: Some(Effort::Max),
+            lean: lean(Some(&instructions)),
+            ..opts(PermissionProfile::Full, Some("demo-model"))
+        };
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let spec = build(
+                kind,
+                shim.path().join("echo-args.cmd"),
+                &options,
+                repo.path(),
+                "p".into(),
+            );
+            let output = std::process::Command::new(&spec.program)
+                .args(&spec.args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{kind:?}: {output:?}");
+            let echoed: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(echoed, spec.args, "{kind:?}");
         }
     }
 }

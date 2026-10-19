@@ -33,6 +33,9 @@ fn spec(program: PathBuf, cwd: &Path, script: &Path, stdin: &str) -> CommandSpec
         args: vec![script.to_string_lossy().into_owned()],
         cwd: cwd.to_path_buf(),
         stdin: stdin.into(),
+        env: Vec::new(),
+        lean: false,
+        notes: Vec::new(),
     }
 }
 

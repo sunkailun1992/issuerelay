@@ -1990,6 +1990,9 @@ async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
         args: vec![script.to_string_lossy().into_owned()],
         cwd: dir.path().to_path_buf(),
         stdin: "prompt".into(),
+        env: Vec::new(),
+        lean: false,
+        notes: Vec::new(),
     };
     let limits = RunLimits {
         total: Duration::from_secs(30),
@@ -2047,6 +2050,9 @@ async fn the_process_runner_gives_each_run_the_current_shared_environment() {
             args: vec![script.to_string_lossy().into_owned()],
             cwd: dir.path().to_path_buf(),
             stdin: String::new(),
+            env: Vec::new(),
+            lean: false,
+            notes: Vec::new(),
         };
         let log = dir.path().join(format!("{round}.jsonl"));
         let output = runner

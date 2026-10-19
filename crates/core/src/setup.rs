@@ -12,15 +12,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ExecutorKind;
 use crate::doctor::{CmdOutput, CommandRunner};
+// The names the official instructions give Linear's server (design section 8); lean runs use
+// the same names to reuse the sign-in.
+use crate::executor::lean::{
+    CLAUDE_LINEAR_SERVER as CLAUDE_LINEAR_NAME, CODEX_LINEAR_SERVER as CODEX_LINEAR_NAME,
+};
 use crate::linear::auth::LINEAR_MCP_URL;
 use crate::text::{clean_text, strip_ansi};
 
 /// The name IssueRelay's control server is registered under.
 pub const CONTROL_SERVER_NAME: &str = "issuerelay";
-
-/// The names the official instructions give Linear's server (design section 8).
-const CLAUDE_LINEAR_NAME: &str = "linear-server";
-const CODEX_LINEAR_NAME: &str = "linear";
 
 /// A setup step the user can start with one click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

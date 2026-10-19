@@ -1356,14 +1356,13 @@ impl Engine {
             comment_language: &language,
             template: &template,
         });
-        let spec = executor::build(
-            kind,
-            program,
-            cfg.permission_for(&binding),
-            binding.model.as_deref(),
-            &binding.directory,
-            prompt_text,
-        );
+        let options = executor::RunOptions {
+            profile: cfg.permission_for(&binding),
+            model: binding.model.as_deref(),
+            effort: None,
+            lean: None,
+        };
+        let spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
         // A manual retry reuses the row, so its log replaces the previous attempt's log.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
         // Right before the run is registered: a pause or a changed binding that came while the
