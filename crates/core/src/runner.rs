@@ -46,7 +46,8 @@ pub enum ExitKind {
     /// The log file could not be created or the executor could not be started.
     SpawnFailed(String),
     /// The output of a lean run showed that lean did not take effect (`lean::LeanCheck`), what
-    /// it showed being the text; the run was stopped as a cancelled one is.
+    /// it showed being the text; the run was stopped as a cancelled one is, unless the executor
+    /// had exited already.
     LeanNotApplied(String),
 }
 
@@ -82,18 +83,18 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Owns the spawned child and ends its whole process tree, however `run` ends.
 ///
 /// - `end`, the explicit cleanup, runs after every run. On Unix, while the executor still runs
-///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the executor's descendants by
-///   walking parent PIDs, each with its start time; sends SIGTERM to the process group and
-///   gives the executor up to `TERM_GRACE` to exit; records the descendants again (adding to the
-///   first record); then sends SIGKILL to the process group, and to every recorded descendant
-///   whose PID still has the recorded start time, or to its whole process group when it leads
-///   one (it may have started members after it was recorded). That reaches descendants that left
-///   the group with `setsid` or `setpgid`, as Claude Code's tool shells do on macOS. After a
-///   normal exit only the process group is killed: the executor is gone, so its descendants can
-///   no longer be found through it. On Windows `end` terminates the Job Object at once; the job
-///   does not allow breakaway, so it holds every descendant, and Windows has no SIGTERM to give
-///   the executor first. On both platforms `end` then waits, for at most ten seconds, until the
-///   tree is reaped.
+///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the
+///   executor's descendants by walking parent PIDs, each with its start time; sends SIGTERM to
+///   the process group and gives the executor up to `TERM_GRACE` to exit; records the
+///   descendants again (adding to the first record); then sends SIGKILL to the process group,
+///   and to every recorded descendant whose PID still has the recorded start time, or to its
+///   whole process group when it leads one (it may have started members after it was recorded).
+///   That reaches descendants that left the group with `setsid` or `setpgid`, as Claude Code's
+///   tool shells do on macOS. After a normal exit only the process group is killed: the executor
+///   is gone, so its descendants can no longer be found through it. On Windows `end` terminates
+///   the Job Object at once; the job does not allow breakaway, so it holds every descendant, and
+///   Windows has no SIGTERM to give the executor first. On both platforms `end` then waits, for
+///   at most ten seconds, until the tree is reaped.
 /// - `Drop` covers a `run` future dropped before `end` finished: the task was aborted, an outer
 ///   timeout fired, the runtime is shutting down, a panic unwound. Immediately and synchronously,
 ///   without a grace period, it does on Unix what `end` does after the grace: it records the
@@ -529,10 +530,13 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 
 /// Runs `spec` until it exits, a limit is hit, `cancel` fires or, in a lean run (`spec.lean`),
 /// an output line shows that lean did not take effect (`lean::LeanCheck`): that line is logged
-/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. The JSONL file
-/// at `log_path` is created (or truncated) and starts with `spec.notes`, each as a
-/// `{"stream":"stderr","text":"[IssueRelay] …"}` line; then it gets one line per output line:
-/// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. A run that cannot start gets one
+/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. Such a line
+/// among those still read after the executor exited on its own makes the run end that way too
+/// (after a stop for any other reason, the stop stands). The JSONL file at `log_path` is created
+/// (or truncated) and starts with `spec.notes`, each as one of IssueRelay's own lines,
+/// `{"stream":"runner","text":…}`; then it gets one line per output line: stdout verbatim,
+/// stderr as `{"stream":"stderr","text":…}`. After the line that shows lean did not take effect,
+/// a `runner` line says so. A run that cannot start gets one
 /// `{"stream":"runner","text":"spawn failed: …"}` line. Once the executor has started, its whole
 /// process tree is ended however the run ends (before this returns), and also if this future is
 /// dropped before it finishes (`TreeGuard` has the details): on Unix the process group and every
@@ -627,14 +631,14 @@ pub async fn run(
     let mut log_failures = LogFailures::new(log_path);
     // Before the loop reads the first line, so the notes open the log.
     for text in &spec.notes {
-        let entry = note("stderr", &format!("[IssueRelay] {text}"));
+        let entry = note("runner", text);
         log_failures.note(log.write_all(entry.as_bytes()).await);
     }
     let started = Instant::now();
     let deadline = checked_deadline(started, limits.total);
     let mut last_output = started;
     let mut pipes_open = true;
-    let exit = {
+    let mut exit = {
         // Wait on the executor process itself, not through the process-wrap wrapper. On Windows
         // the wrapper's wait() watches the job's completion port and may return on the first
         // message instead of reliably waiting for the whole job, so what it does while a
@@ -658,6 +662,11 @@ pub async fn run(
                         // The line goes into the log either way, so the log shows what was wrong.
                         log_failures.note(record(&mut log, &mut tracker, line).await);
                         if let Some(detail) = violation {
+                            let said = note(
+                                "runner",
+                                &format!("lean run did not take effect: {detail}; stopping the run"),
+                            );
+                            log_failures.note(log.write_all(said.as_bytes()).await);
                             break ExitKind::LeanNotApplied(detail);
                         }
                     }
@@ -672,10 +681,24 @@ pub async fn run(
 
     // Kill whatever is left of the tree (also after a normal exit), then reap.
     guard.end().await;
-    // Keep lines already buffered; the final result often arrives right before exit.
+    // Keep lines already buffered; the final result often arrives right before exit. A lean run
+    // whose executor exited on its own is still checked: a line that shows lean did not take
+    // effect decides how the run ended, as it would have a moment earlier.
     let drain_until = Instant::now() + Duration::from_secs(2);
     while let Ok(Some(line)) = tokio::time::timeout_at(drain_until, rx.recv()).await {
+        let violation = match (&mut lean_check, &line, &exit) {
+            (Some(check), Line::Out(text), ExitKind::Exited(_)) => check.observe(text),
+            _ => None,
+        };
         log_failures.note(record(&mut log, &mut tracker, line).await);
+        if let Some(detail) = violation {
+            let said = note(
+                "runner",
+                &format!("lean run did not take effect: {detail}; the executor had already exited"),
+            );
+            log_failures.note(log.write_all(said.as_bytes()).await);
+            exit = ExitKind::LeanNotApplied(detail);
+        }
     }
     // A tokio file reports a failed write with a later call, so the last one shows here.
     log_failures.note(log.flush().await);

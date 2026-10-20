@@ -20,11 +20,12 @@ use crate::linear::auth::LINEAR_MCP_URL;
 pub const CLAUDE_LINEAR_SERVER: &str = "linear-server";
 
 /// The same for Codex, which keys a stored sign-in by the server's name and URL (codex-cli
-/// 0.159.2: under another name the server reports `AuthRequired`).
+/// 0.159.2, measured 2026-10-19: under another name the server reports `AuthRequired`).
 pub const CODEX_LINEAR_SERVER: &str = "linear";
 
 /// Set in the environment of a lean Claude run: Claude Code then neither reads nor writes its
-/// auto memory.
+/// auto memory (its documentation says so; measured with Claude Code 2.1.285 on 2026-10-19, with
+/// the same effect as the setting `autoMemoryEnabled: false`).
 pub const DISABLE_AUTO_MEMORY: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
 
 /// What a lean Claude run adds after its other arguments: only Linear's server, no user settings
@@ -38,6 +39,9 @@ pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
     });
     let mut args = vec![
         "--strict-mcp-config".to_string(),
+        // `--mcp-config` takes any number of values (`--mcp-config <configs...>` in the help of
+        // Claude Code 2.1.285, read 2026-10-20), so an option has to follow its one value: any
+        // other argument there would be read as one more configuration.
         "--mcp-config".to_string(),
         servers.to_string(),
         "--setting-sources".to_string(),
@@ -56,7 +60,7 @@ pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
 /// What a lean Codex run adds before its model and the closing `-`: no user configuration, no
 /// hooks, plugins, ChatGPT connectors or memories, and Linear's server as the only (required)
 /// MCP server. The skill list is not shown to the model: user-level skills cannot be left out on
-/// their own in codex-cli 0.159.2.
+/// their own in codex-cli 0.159.2 (measured 2026-10-19).
 pub fn codex_args() -> Vec<String> {
     let server = CODEX_LINEAR_SERVER;
     let mut args: Vec<String> = [
@@ -101,9 +105,13 @@ pub fn user_instructions_path(
 }
 
 /// Whether `path` may go into the arguments: absolute, valid UTF-8, and free of control
-/// characters and of `"`, `%`, `!` and `^`, which a Windows batch file (the npm shims
-/// `claude.cmd` and `codex.cmd`) would interpret. A home folder almost never has them; when it
-/// does, the run keeps the user-level `CLAUDE.md` and its log says so.
+/// characters and of `"`, `%`, `!` and `^`. On Windows `claude` and `codex` are often the npm or
+/// pnpm shims `claude.cmd` and `codex.cmd`: Rust quotes an argument for a batch file so that cmd
+/// hands it on intact, `&`, `(` and `)` included, and the shims pass it to Node as it is
+/// (`json_arguments_survive_npm_and_pnpm_style_cmd_shims`). The four characters kept out are a
+/// margin on top of that: cmd can still act on them inside quotes, for example in a shim that
+/// parses its arguments again (`call`, delayed expansion). A home folder almost never has them;
+/// when it does, the run keeps the user-level `CLAUDE.md` and its log says so.
 pub fn passable(path: &Path) -> bool {
     path.is_absolute()
         && path.to_str().is_some_and(|text| {
@@ -116,11 +124,14 @@ pub fn passable(path: &Path) -> bool {
 /// Watches a lean run's output for signs that lean did not take effect (lean-run design section
 /// 8), so the run can be stopped instead of carrying on with the user's whole configuration.
 /// Claude Code names its MCP servers and its auto-memory folder in its `system/init` event, which
-/// comes before any work (only `system` events such as hook events may come first); Codex names
-/// nothing up front, so the server of each of its MCP calls is checked as it starts.
+/// comes before any work: only `system` events, such as a project's session-start hooks, may come
+/// first (Claude Code 2.1.285, measured 2026-10-19). Codex names nothing up front, so the server
+/// of each of its MCP calls is checked as it starts: every `mcp_tool_call` item names its `server`
+/// (codex-cli 0.159.2, from its source; seen in the sandbox acceptance on 2026-10-20).
 pub struct LeanCheck {
     kind: ExecutorKind,
-    /// Claude's init event was seen and passed: nothing after it is checked.
+    /// Set by Claude's init event, whatever it showed: the lines after it are not checked (an init
+    /// that did not pass has been reported already).
     done: bool,
 }
 
@@ -171,8 +182,9 @@ impl LeanCheck {
                 "the init event lists the MCP servers {listed} instead of only `{CLAUDE_LINEAR_SERVER}`"
             ));
         }
-        // Not a documented field (both versions measured send it): no field is fine, a field
-        // that names a folder is not.
+        // Not a documented field (Claude Code 2.1.285 and 2.1.299 sent it with auto memory on,
+        // measured 2026-10-19; the lean runs of the 2026-10-20 sandbox acceptance sent none): no
+        // field is fine, a field that names a folder is not.
         memory_is_on(&event["memory_paths"]).then(|| "auto memory is on".to_string())
     }
 }
@@ -235,6 +247,36 @@ mod tests {
         assert_eq!(user_instructions_path(None, None), None);
     }
 
+    // `claudeMdExcludes` holds glob patterns matched against absolute paths (Claude Code's
+    // documentation, lean-run design section 5.5), so the string matters, not only the path it
+    // names: one with a `/` where Windows puts `\` equals the expected `PathBuf` all the same.
+    #[test]
+    fn the_derived_path_goes_into_the_settings_json_with_the_platform_separator() {
+        let home = absolute("srv/demo-home");
+        let config_dir = absolute("opt/demo-claude");
+        let (from_home, from_config_dir) = if cfg!(windows) {
+            (
+                r#"{"claudeMdExcludes":["D:\\srv\\demo-home\\.claude\\CLAUDE.md"]}"#,
+                r#"{"claudeMdExcludes":["D:\\opt\\demo-claude\\CLAUDE.md"]}"#,
+            )
+        } else {
+            (
+                r#"{"claudeMdExcludes":["/srv/demo-home/.claude/CLAUDE.md"]}"#,
+                r#"{"claudeMdExcludes":["/opt/demo-claude/CLAUDE.md"]}"#,
+            )
+        };
+        for (path, settings) in [
+            (user_instructions_path(Some(&home), None), from_home),
+            (
+                user_instructions_path(Some(&home), Some(&config_dir)),
+                from_config_dir,
+            ),
+        ] {
+            let args = claude_args(path.as_deref());
+            assert_eq!(args[args.len() - 2..], ["--settings", settings]);
+        }
+    }
+
     #[test]
     fn passable_paths() {
         for rest in [
@@ -242,6 +284,9 @@ mod tests {
             "srv/李 四/.claude/CLAUDE.md",
             "srv/o'brien/.claude/CLAUDE.md",
             "srv/Demo User/.claude/CLAUDE.md",
+            // Punctuation that a Windows file name may hold and the shims pass on intact, as in
+            // `json_arguments_survive_npm_and_pnpm_style_cmd_shims`: `passable` must not stop it.
+            "srv/Demo & Co (x) #1 $a +b ,c ;d =e @f [g] {h} ~i `j/.claude/CLAUDE.md",
         ] {
             assert!(passable(&absolute(rest)), "{rest}");
         }
@@ -256,6 +301,36 @@ mod tests {
         ] {
             assert!(!passable(&absolute(bad)), "{bad:?}");
         }
+    }
+
+    /// An absolute path that is not valid Unicode: a byte that is not UTF-8 on Unix, an unpaired
+    /// surrogate on Windows.
+    #[cfg(unix)]
+    fn not_unicode() -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(
+            b"/srv/demo-\xff/.claude/CLAUDE.md",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn not_unicode() -> PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = r"D:\srv\demo-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(r"\.claude\CLAUDE.md".encode_utf16());
+        PathBuf::from(std::ffi::OsString::from_wide(&wide))
+    }
+
+    #[test]
+    fn a_path_that_is_not_unicode_never_goes_in() {
+        let path = not_unicode();
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(!passable(&path), "{path:?}");
+        assert!(
+            !claude_args(Some(&path)).contains(&"--settings".to_string()),
+            "{path:?}"
+        );
     }
 
     const LINEAR_ONLY_INIT: &str = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#;
@@ -341,6 +416,26 @@ mod tests {
     }
 
     #[test]
+    fn an_event_without_a_type_before_init_is_a_violation() {
+        let lines = [
+            r#"{"subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#,
+            LINEAR_ONLY_INIT,
+        ];
+        let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
+        assert!(detail.contains("`unknown`"), "{detail}");
+    }
+
+    #[test]
+    fn a_result_before_init_is_a_violation() {
+        let lines = [
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+            LINEAR_ONLY_INIT,
+        ];
+        let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
+        assert!(detail.contains("`result`"), "{detail}");
+    }
+
+    #[test]
     fn lines_after_init_are_not_checked() {
         let lines = [
             LINEAR_ONLY_INIT,
@@ -365,5 +460,12 @@ mod tests {
         assert!(first_violation(ExecutorKind::Codex, &[completed]).is_some());
         let linear = r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"linear","tool":"get_issue"}}"#;
         assert_eq!(first_violation(ExecutorKind::Codex, &[linear]), None);
+    }
+
+    #[test]
+    fn a_codex_call_that_names_no_server_is_a_violation() {
+        let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"get_issue"}}"#;
+        let detail = first_violation(ExecutorKind::Codex, &[started]).unwrap();
+        assert!(detail.contains("`unnamed`"), "{detail}");
     }
 }

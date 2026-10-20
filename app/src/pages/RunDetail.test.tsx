@@ -225,6 +225,19 @@ test("a reason with nothing in it to read is no reason: there is no headline ove
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
+test("a lean run that did not take effect fails like any other run, the engine's words under the headline", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const failed = (await backend.job(8))!;
+  // The reason as the engine writes it for a lean run whose init event named another server.
+  const reason =
+    "lean run did not take effect: the init event lists the MCP servers demo-tools, linear-server instead of only `linear-server`";
+  backend.job = vi.fn().mockResolvedValue({ ...failed, reason });
+  await openRun(8, backend);
+  const note = screen.getByText(reason).closest("[data-slot=alert]") as HTMLElement;
+  expect(within(note).getByText("The run failed")).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toBe(note);
+});
+
 test("the engine's reason is cleaned before it is shown", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const failed = (await backend.job(8))!;

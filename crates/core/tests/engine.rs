@@ -1920,6 +1920,49 @@ async fn a_lean_violation_keeps_its_reason_when_linear_cannot_be_read() {
         job.reason.as_deref(),
         Some("lean run did not take effect: auto memory is on")
     );
+    // The reason would read the same after a read that worked: this one did not.
+    assert_eq!(job.verified_updated_at, None);
+}
+
+// The reason of a lean violation keeps what the run showed, so the error that kept its result
+// from being read goes into the host's log instead of being lost.
+#[test]
+fn a_lean_violation_whose_result_cannot_be_read_logs_why() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let (job, warnings) = logged_warnings(|| {
+        runtime.block_on(async {
+            let h = Harness::new(2, true);
+            h.bind("proj-1", "a");
+            h.linear.upsert(issue("1", "proj-1"));
+            h.runner.script(
+                "DEMO-1",
+                Script {
+                    set_state: None,
+                    exit: ExitKind::LeanNotApplied("auto memory is on".into()),
+                    final_text: None,
+                    panic: false,
+                },
+            );
+            h.engine.tick().await.unwrap();
+            h.linear.fail_calls("Linear is down", 3);
+            h.runner.gate.add_permits(1);
+            h.settle().await;
+            h.latest("1")
+        })
+    });
+    assert_eq!(job.state, JobState::Failed);
+    // The warnings before the second and the third read say "trying again"; this one comes after
+    // the last read.
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("lean") && w.contains("Linear is down")),
+        "{warnings:?}"
+    );
 }
 
 // Paused time: the pauses between the reads that verify a result pass at once.
@@ -2803,6 +2846,12 @@ fn logged_warnings<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     }
 
     let events = Arc::new(Mutex::new(Vec::new()));
+    // tracing caches whether a log call is wanted when the call is first reached, and with a
+    // single registered subscriber it asks the default of the thread that reaches it first: a
+    // parallel test's thread, which has none, would switch the call off here too (a verification
+    // read fails in many tests). With a second, idle subscriber registered it asks every
+    // registered one instead, as in `tests/host.rs`.
+    let _idle = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let result = tracing::subscriber::with_default(Capture(events.clone()), f);
     let events = events.lock().unwrap().clone();
     (result, events)

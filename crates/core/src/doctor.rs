@@ -101,6 +101,8 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 /// under the same limit. Claude: `auth status` without the user settings, which lean runs leave
 /// out. Codex: `login status` from the credentials file (`auth.json`), the store a run that
 /// ignores the user configuration falls back to (`cli_auth_credentials_store` is a user setting).
+/// Both commands run that way and report the sign-in (measured 2026-10-19 with Claude Code
+/// 2.1.285 and codex-cli 0.159.2).
 const CLAUDE_LEAN_LOGIN: [&str; 4] = ["--setting-sources", "project,local", "auth", "status"];
 const CODEX_LEAN_LOGIN: [&str; 4] = ["-c", "cli_auth_credentials_store=file", "login", "status"];
 
@@ -108,16 +110,17 @@ const CODEX_LEAN_LOGIN: [&str; 4] = ["-c", "cli_auth_credentials_store=file", "l
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
 /// the limit from its caller instead, which the one-click setup commands do (a login waits up to
 /// five minutes for the browser). A command runs in the user's home directory (`run_in`: in the
-/// folder it is given), in a process group of its own (Windows: a Job Object, and without a console window, like the executors),
-/// with the shared environment (the PATH and proxy the executors will get). A check is done when
-/// the command's own process exits: whatever it left running in its group is ended then
-/// (`claude mcp list` starts stdio MCP servers of its own, which inherit its pipes), and the
-/// output is what the pipes delivered up to `PIPE_DRAIN` after that. A pipe that cannot be read
-/// fails the call: half of an `mcp list` must not pass for the whole answer. A command still
-/// running at its limit is killed together with everything it started and the call fails with
-/// `timed out after 20s` (the limit as `Duration` prints it). Every command also gets
-/// `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they print
-/// into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour codes too).
+/// folder it is given), in a process group of its own (Windows: a Job Object, and without a
+/// console window, like the executors), with the shared environment (the PATH and proxy the
+/// executors will get). A check is done when the command's own process exits: whatever it left
+/// running in its group is ended then (`claude mcp list` starts stdio MCP servers of its own,
+/// which inherit its pipes), and the output is what the pipes delivered up to `PIPE_DRAIN` after
+/// that. A pipe that cannot be read fails the call: half of an `mcp list` must not pass for the
+/// whole answer. A command still running at its limit is killed together with everything it
+/// started and the call fails with `timed out after 20s` (the limit as `Duration` prints it).
+/// Every command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not
+/// colour what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers
+/// strip colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -364,7 +367,8 @@ impl ExecutorReport {
 pub struct LeanCheckPaths {
     /// An empty folder of IssueRelay's own, made when missing, to run Claude's lean sign-in check
     /// in: in the home folder, the project settings it reads would be `~/.claude/settings.json`,
-    /// the very user settings lean runs leave out.
+    /// the very user settings lean runs leave out. The project settings of the folders above it
+    /// do not count (Claude Code 2.1.285, the sandbox acceptance of 2026-10-20).
     pub empty_dir: PathBuf,
     /// Codex's configuration file (`codex_config_path`), read for a model provider lean runs
     /// would not use; `None` when there is none to read.
@@ -559,9 +563,10 @@ async fn lean_login_check(
 /// check's output (which says logged in) and the lean one's; `Err` holds the lean problem.
 /// Claude: the lean `auth status` says logged in, with the same `authMethod` and `apiProvider`.
 /// Codex: the lean `login status` says logged in, the same way (the text after "Logged in
-/// using"). Both answers have to say how: two answers that do not cannot be compared, and a
-/// check that cannot be made rules lean runs out (an executor that changed what it prints must
-/// not let a lean run sign in some other way unnoticed).
+/// using", compared whole and shown without a key: `codex_shown`). Both answers have to say how:
+/// two answers that do not cannot be compared, and a check that cannot be made rules lean runs
+/// out (an executor that changed what it prints must not let a lean run sign in some other way
+/// unnoticed).
 fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Result<(), String> {
     let name = kind.program_name();
     let not_signed_in = || {
@@ -623,10 +628,16 @@ fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Resu
             ) else {
                 return Err(unchecked("login status"));
             };
+            let (lean_shown, usual_shown) = (codex_shown(&lean), codex_shown(&usual));
             if lean == usual {
                 Ok(())
+            } else if lean_shown == usual_shown {
+                Err(format!(
+                    "in lean runs {name} would sign in with {lean_shown}, but not the one usual \
+                     runs use; turn lean runs off for this binding"
+                ))
             } else {
-                Err(differently(lean, usual))
+                Err(differently(lean_shown, usual_shown))
             }
         }
     }
@@ -669,8 +680,8 @@ fn claude_sign_in(stdout: &str) -> Option<ClaudeSignIn> {
 }
 
 /// How `codex login status` says Codex is logged in: the text after "Logged in using" on its
-/// line, lower-cased, with its spaces evened out (`chatgpt`, `an api key`). Both streams are
-/// read, as `codex_login_answer` does. `None` when it does not say.
+/// line, lower-cased, with its spaces evened out (`chatgpt`, `an api key - <masked key>`). Both
+/// streams are read, as `codex_login_answer` does. `None` when it does not say.
 fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
     const LOGGED_IN_USING: &str = "logged in using";
     let text = format!("{}\n{}", strip_ansi(stdout), strip_ansi(stderr)).to_lowercase();
@@ -679,6 +690,24 @@ fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
     Some(clean(
         &method.split_whitespace().collect::<Vec<_>>().join(" "),
     ))
+}
+
+/// A Codex sign-in as a problem shows it: the words it starts with, up to the first character
+/// that is neither a letter nor a space (`an unknown method` when that leaves nothing). After an
+/// API key login codex-cli 0.159.2 prints ` - ` and the key there, masked to its first eight and
+/// last five characters (`codex-rs/cli/src/login.rs` at `rust-v0.159.2`, read 2026-10-20);
+/// cutting at any such character, not only at ` - `, keeps the key out of the problem also if a
+/// later version prints it some other way. Problems reach the panel, the CLI and MCP. The two
+/// sign-ins are still compared whole, so another key is another sign-in.
+fn codex_shown(method: &str) -> String {
+    let words: String = method
+        .chars()
+        .take_while(|c| c.is_alphabetic() || *c == ' ')
+        .collect();
+    match words.trim() {
+        "" => "an unknown method".to_string(),
+        words => words.to_string(),
+    }
 }
 
 /// Whether Codex's configuration file sets a model provider that lean runs, which ignore the
@@ -767,8 +796,8 @@ pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool 
 /// Whether `mcp list` output shows the Linear server lean runs load (`executor::lean`) usable:
 /// a line whose server name is exactly `CLAUDE_LINEAR_SERVER` / `CODEX_LINEAR_SERVER`, whose URL
 /// is exactly `LINEAR_MCP_URL`, and whose status is usable as `mcp_list_has_linear` reads it. A
-/// lean run reuses the sign-in stored under that name; another server, claude.ai's Linear
-/// connector among them, is not loaded.
+/// lean run reuses the sign-in stored under that name (measured: see the two constants); another
+/// server, claude.ai's Linear connector among them, is not loaded.
 pub fn mcp_list_has_lean_linear(kind: ExecutorKind, stdout: &str) -> bool {
     let stdout = strip_ansi(stdout);
     lean_linear_line(kind, &stdout)
@@ -793,7 +822,8 @@ fn lean_linear_line(kind: ExecutorKind, stdout: &str) -> Option<(&str, &str)> {
 
 /// The server name of an `mcp list` line and the first thing after it, its URL or command.
 /// Claude prints `<name>: <url> ...` (a name may hold colons, as `plugin:a:b` does), Codex
-/// `<name>  <url>  ...`.
+/// `<name>  <url>  ...`, as in the M0 samples of Claude Code 2.1.285 and codex-cli 0.159.2
+/// (docs/gates/samples/m0/executors/*-mcp-list.txt, 2026-10-10).
 fn server_and_target(kind: ExecutorKind, line: &str) -> Option<(&str, &str)> {
     let (server, rest) = match kind {
         ExecutorKind::Claude => line.split_once(": ")?,
@@ -2585,6 +2615,8 @@ mod tests {
             "claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected",
             "linear-server: https://mcp.linear.app/sse (HTTP) - ✔ Connected",
             "linear-server: https://mcp.linear.app/mcp?x=1 (HTTP) - ✔ Connected",
+            // A plugin's server of that name: lean runs load no plugin's servers.
+            "plugin:demo:linear-server: https://mcp.linear.app/mcp (HTTP) - ✔ Connected",
             CLAUDE_AUTH,
         ] {
             assert!(
@@ -2642,6 +2674,53 @@ mod tests {
                 .any(|p| p.contains("points to https://mcp.linear.app/sse")),
             "{report:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_mcp_list_adds_no_lean_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let crashed = CmdOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "demo crash".into(),
+        };
+        let mut replies = claude_replies(out(0, CLAUDE_USUAL), "");
+        replies[3] = ("mcp list", crashed);
+        let (report, complete) =
+            lean_detailed(ExecutorKind::Claude, &replies, &lean_paths(&dir)).await;
+        assert!(!complete && !report.ready_lean(), "{report:?}");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p == "`claude mcp list` failed (exit code 1): demo crash"),
+            "{report:?}"
+        );
+        // That problem says it all: a crash says nothing about the server lean runs load.
+        assert!(report.lean_problems.is_empty(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn a_usual_login_that_says_logged_out_is_not_compared_for_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let logged_out = r#"{"loggedIn":false}"#;
+        let (report, complete) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_signing_in(logged_out, out(0, logged_out)),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(complete, "{report:?}");
+        assert!(!report.logged_in && !report.lean_logged_in, "{report:?}");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p == "claude is not logged in"),
+            "{report:?}"
+        );
+        // "not logged in" says it all: the lean sign-in check adds nothing.
+        assert!(report.lean_problems.is_empty(), "{report:?}");
     }
 
     #[tokio::test]
@@ -2784,6 +2863,83 @@ mod tests {
             other.lean_problems.iter().any(|p| p.contains("an api key")),
             "{other:?}"
         );
+    }
+
+    /// `codex login status` after an API key login as codex-cli 0.159.2 prints it: on stderr, the
+    /// key masked to its first eight and last five characters.
+    fn codex_api_key(masked: &str) -> CmdOutput {
+        CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: format!("Logged in using an API key - {masked}\n"),
+        }
+    }
+
+    #[test]
+    fn a_codex_sign_in_is_shown_by_the_words_it_starts_with() {
+        for (method, shown) in [
+            ("chatgpt", "chatgpt"),
+            ("an api key", "an api key"),
+            ("an api key - demo-key***12345", "an api key"),
+            // Other ways a later codex-cli may print the key: none of it is shown either.
+            ("an api key: demo-key***12345", "an api key"),
+            ("an api key (demo-key***12345)", "an api key"),
+            ("", "an unknown method"),
+        ] {
+            assert_eq!(codex_shown(method), shown, "{method:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lean_problem_names_a_codex_api_key_login_without_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let usual = codex_api_key("demo-key***12345");
+        let api_key_runs = |lean: CmdOutput| {
+            let mut replies = codex_replies(lean);
+            replies[1] = ("login status", usual.clone());
+            replies
+        };
+        let (same, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &api_key_runs(usual.clone()),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(same.ready_lean(), "{same:?}");
+        // Another key is another sign-in all the same, and the problem shows neither key.
+        let (other_key, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &api_key_runs(codex_api_key("demo-key***67890")),
+            &lean_paths(&dir),
+        )
+        .await;
+        let (instead_of_chatgpt, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(usual),
+            &lean_paths(&dir),
+        )
+        .await;
+        for (report, says) in [
+            (
+                other_key,
+                "would sign in with an api key, but not the one usual runs use",
+            ),
+            (
+                instead_of_chatgpt,
+                "would sign in differently (an api key instead of chatgpt)",
+            ),
+        ] {
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report.lean_problems.iter().any(|p| p.contains(says)),
+                "{report:?}"
+            );
+            let shown = format!("{report:?}");
+            assert!(
+                !shown.contains("***") && !shown.contains("demo-key"),
+                "{shown}"
+            );
+        }
     }
 
     /// A Claude whose usual and lean `auth status` answer `usual` and `lean`.
@@ -2929,6 +3085,20 @@ mod tests {
             codex_custom_provider("model = \"gpt-5.5\"\n").unwrap(),
             None
         );
+        // Both set: the active profile's wins, also when it is the default; a profile that sets
+        // none leaves the top-level one.
+        let top_level = "model_provider = \"azure\"\nprofile = \"work\"\n[profiles.work]\n";
+        for (profile, provider) in [
+            ("model_provider = \"demo\"\n", Some("demo")),
+            ("model_provider = \"openai\"\n", None),
+            ("model = \"gpt-5.5\"\n", Some("azure")),
+        ] {
+            assert_eq!(
+                codex_custom_provider(&format!("{top_level}{profile}")).unwrap(),
+                provider.map(str::to_string),
+                "{profile}"
+            );
+        }
         assert_eq!(codex_custom_provider("").unwrap(), None);
         assert!(codex_custom_provider("model_provider = ").is_err());
     }

@@ -95,6 +95,13 @@ fn log_lines(log: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The text of one of IssueRelay's own lines in the log (`{"stream":"runner",…}`); `None` for
+/// any other line.
+fn runner_note(line: &str) -> Option<String> {
+    let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+    (entry["stream"] == "runner").then(|| entry["text"].as_str().unwrap_or_default().to_string())
+}
+
 #[tokio::test]
 async fn exits_zero_captures_final_text_and_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -969,7 +976,192 @@ async fn a_lean_violation_ends_the_run_like_a_stop() {
         "the run was stopped, not waited for: {:?}",
         started.elapsed()
     );
-    assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
+    // The line that showed it, then IssueRelay's own line saying what happens.
+    let lines = log_lines(&log);
+    let at = lines.iter().position(|l| l.contains("demo-tools"));
+    let said = at
+        .and_then(|at| runner_note(lines.get(at + 1)?))
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("lean run did not take effect: ")
+            && said.contains("demo-tools")
+            && said.ends_with("; stopping the run"),
+        "{lines:?}"
+    );
+}
+
+// A lean stop ends the tree as a cancel does, including a grandchild that left the run's process
+// group (Linux, not a target platform, skips it as above). The violation comes only once that
+// grandchild is running.
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"escaped_heartbeat": hb, "every_ms": 50},
+            {"wait_for": hb},
+            {"out": TWO_SERVER_INIT},
+            {"sleep_ms": 30_000}
+        ]),
+    );
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(out.exit, ExitKind::LeanNotApplied(_)),
+        "{:?}",
+        out.exit
+    );
+    assert!(file_len(&hb) > 0, "heartbeat child never ran");
+    assert_stops_growing(&hb, "the escaped grandchild survived the lean stop").await;
+}
+
+/// A Codex event of a call to an MCP server other than Linear's. Only the Unix test below uses it.
+#[cfg(unix)]
+const OTHER_SERVER_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
+
+// The executor exits first and its last line comes after that, from a process that left its
+// process group: the lines still read once the executor has exited are checked too. The line comes
+// about a second after the exit, a second before the drain ends. (Windows: right after the exit
+// the runner ends the Job Object and that process with it, so this case cannot be made there; a
+// line written before the exit and read after it is checked by the same code.)
+#[cfg(unix)]
+#[tokio::test]
+async fn a_violation_read_after_the_executor_exited_still_fails_a_lean_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"late_out": OTHER_SERVER_CALL, "after_ms": 1000}, {"exit": 0}]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Codex,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    match &out.exit {
+        ExitKind::LeanNotApplied(detail) => assert!(detail.contains("demo-tools"), "{detail}"),
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    let lines = log_lines(&log);
+    assert!(lines[0].contains("demo-tools"), "{lines:?}");
+    let said = lines
+        .get(1)
+        .and_then(|line| runner_note(line))
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("lean run did not take effect: ")
+            && said.contains("demo-tools")
+            && said.ends_with("; the executor had already exited"),
+        "{lines:?}"
+    );
+}
+
+// How a clean lean run often ends: the result comes once the executor has exited, so the drain
+// reads it. The drain goes on with the check that saw the init event, so the result is no
+// violation (a check of its own would take it for an event before the init event). The pause
+// lets the loop read the init event before the exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_clean_lean_run_whose_result_comes_after_the_exit_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#;
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"out": init},
+            {"sleep_ms": 200},
+            {"late_out": RESULT_LINE, "after_ms": 1000},
+            {"exit": 0}
+        ]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+    let lines = log_lines(&log);
+    assert_eq!(lines, [init, RESULT_LINE]);
+}
+
+// Once the check has stopped a run, the lines drained after that are logged, not checked: the run
+// keeps the reason of the violation that stopped it, and one note. Both calls come in one write,
+// so the second is in the pipe before the run is stopped.
+#[tokio::test]
+async fn the_violation_that_stopped_a_lean_run_is_the_one_it_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let call = |server: &str| {
+        format!(
+            r#"{{"type":"item.started","item":{{"id":"item_1","type":"mcp_tool_call","server":"{server}","tool":"search"}}}}"#
+        )
+    };
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"out": format!("{}\n{}", call("demo-a"), call("demo-b"))},
+            {"sleep_ms": 30_000}
+        ]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Codex,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    match &out.exit {
+        ExitKind::LeanNotApplied(detail) => {
+            assert!(
+                detail.contains("demo-a") && !detail.contains("demo-b"),
+                "{detail}"
+            )
+        }
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    let lines = log_lines(&log);
+    assert!(lines.iter().any(|l| l.contains("demo-b")), "{lines:?}");
+    let notes: Vec<String> = lines.iter().filter_map(|l| runner_note(l)).collect();
+    assert_eq!(notes.len(), 1, "{lines:?}");
+    assert!(notes[0].ends_with("; stopping the run"), "{notes:?}");
 }
 
 #[tokio::test]
@@ -1016,8 +1208,10 @@ async fn notes_come_first_in_the_log() {
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
     let lines = log_lines(&log);
-    assert!(
-        lines[0].contains("[IssueRelay] demo note") && lines[0].contains(r#""stream":"stderr""#),
+    // IssueRelay's own line, which the panel labels as such, not the executor's stderr.
+    assert_eq!(
+        runner_note(&lines[0]).as_deref(),
+        Some("demo note"),
         "{lines:?}"
     );
     assert_eq!(lines.len(), 2, "{lines:?}");
@@ -1054,5 +1248,49 @@ async fn the_runs_own_variables_reach_the_executor() {
         assert_eq!(out.exit, ExitKind::Exited(Some(0)));
         let lines = log_lines(&log);
         assert!(lines.iter().any(|l| l == expected), "{lines:?}");
+    }
+}
+
+// The run's own variables are set last: they win over a variable the executor environment sets
+// (a proxy here) and over one it removes (the nested-session marker).
+#[tokio::test]
+async fn the_runs_own_variables_win_over_the_executor_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"print_env": "ISSUERELAY_TEST_PROXY"},
+            {"print_env": "CLAUDECODE"},
+            {"exit": 0}
+        ]),
+    );
+    let log = dir.path().join("logs").join("1.jsonl");
+    let env = ExecEnv {
+        proxy: vec![("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:9".into())],
+        ..ExecEnv::inherit()
+    };
+    let out = runner::run(
+        CommandSpec {
+            env: vec![
+                ("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:8".into()),
+                ("CLAUDECODE".into(), "demo".into()),
+            ],
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &env,
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let lines = log_lines(&log);
+    for expected in [
+        "ISSUERELAY_TEST_PROXY=http://127.0.0.1:8",
+        "CLAUDECODE=demo",
+    ] {
+        assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
     }
 }

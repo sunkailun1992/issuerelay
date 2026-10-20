@@ -684,12 +684,16 @@ mod tests {
                 "1".to_string()
             )]
         );
+        assert!(lean_claude.lean);
         let full_claude = spec(ExecutorKind::Claude, &opts(PermissionProfile::Full, None));
         assert!(full_claude.env.is_empty());
         assert!(!full_claude.lean);
         let lean_codex = spec(ExecutorKind::Codex, &lean_options);
         assert!(lean_codex.env.is_empty());
         assert!(lean_codex.lean);
+        let full_codex = spec(ExecutorKind::Codex, &opts(PermissionProfile::Full, None));
+        assert!(full_codex.env.is_empty());
+        assert!(!full_codex.lean);
     }
 
     #[test]
@@ -960,6 +964,8 @@ mod tests {
             lean: lean(Some(&instructions)),
             ..opts(PermissionProfile::Full, None)
         };
+        // The folder that holds the tricky one must not show up anywhere else either.
+        let root = dir.path().to_str().unwrap();
         for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
             let spec = build(
                 kind,
@@ -977,7 +983,10 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    !arg.contains("中文") && !arg.contains("目录") && !arg.contains("quotes"),
+                    !arg.contains("中文")
+                        && !arg.contains("目录")
+                        && !arg.contains("quotes")
+                        && !arg.contains(root),
                     "{kind:?}: {arg}"
                 );
             }
@@ -993,23 +1002,31 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn json_arguments_survive_npm_and_pnpm_style_cmd_shims() {
-        let Ok(node) = which::which("node") else {
+        if which::which("node").is_err() {
             assert!(
                 std::env::var_os("CI").is_none(),
                 "node is not on PATH, so the shims cannot be checked"
             );
             eprintln!("skipped: node is not on PATH");
             return;
-        };
+        }
         let shim = tempfile::tempdir().unwrap();
         std::fs::write(
             shim.path().join("echo-args.js"),
             "process.stdout.write(JSON.stringify(process.argv.slice(2)))",
         )
         .unwrap();
+        // Node from PATH, as npm's shim runs it when no node.exe sits next to it (and pnpm's
+        // below): cmd reads a batch file in the console's code page, the OEM one by default, so an
+        // absolute path written into it as UTF-8 would fail the test wherever Node's folder name
+        // is not ASCII.
         std::fs::write(
             shim.path().join("npm-style.cmd"),
-            format!("@\"{}\" \"%~dp0echo-args.js\" %*\r\n", node.display()),
+            concat!(
+                "@SETLOCAL\r\n",
+                "@SET PATHEXT=%PATHEXT:;.JS;=;%\r\n",
+                "@\"node\" \"%~dp0echo-args.js\" %*\r\n",
+            ),
         )
         .unwrap();
         std::fs::write(
