@@ -60,8 +60,11 @@ Claude Code / Codex（无人值守运行，用你自己的登录；默认精简�
 - **默认是精简运行**：无人值守运行只带 Linear 的 MCP 服务和目标仓库自己的规则与设置（`CLAUDE.md` / `AGENTS.md`、`.claude/settings.json` 和项目钩子），不带你的其他 MCP 服务、插件、用户级技能与钩子、自动记忆和用户级 `CLAUDE.md`。它缩小的是这一面，不是沙箱：AI 仍以你的身份运行，能用你的 git、SSH 和各种命令行凭据。
   - Codex 仍读 `~/.codex/AGENTS.md`，仓库的 `.codex/` 配置也不生效。
   - 精简运行不读你的用户级设置，写在那里的拒绝规则（例如挡危险命令的规则）也不生效；靠它们的话，把规则放进项目的 `.claude/settings.json`，或关掉这个绑定的精简运行。推理力度同样不从那里读，在设置页或绑定里设。
+  - 用户设置的 `env` 把 Claude Code 接到网关或代理（`ANTHROPIC_BASE_URL`、`HTTPS_PROXY` 等）时，精简运行会绕过它们，所以环境检查判 Claude 的精简运行不可用，并写明是哪个变量；这时请关掉这个绑定的精简运行。
+  - 不精简的运行读你的用户设置：那里的 `env` 设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，以它为准，IssueRelay 设的推理力度不生效。
   - 管理员下发了 MCP 配置（`managed-mcp.json`）的电脑上，Claude 的精简运行会在启动时失败，运行记录里有 Claude 的原文；关掉精简运行即可。
   - 要用别的 MCP 服务、仓库的 `.codex/` 配置、用户设置里的拒绝规则或自定义模型服务的绑定，在面板里关掉精简运行。关掉精简运行才加载全部配置：你本机 Claude Code / Codex 的用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效；「按个人设置」档位和绑定到主目录的绑定也总是这样。
+- 无人值守运行里，需求要求「先等一会儿」的步骤可能失败：放到后台的命令会让运行提前结束，单独的长时间 `sleep` 会被 Claude Code 拦下。这类需求请写成可以直接检查的条件。
 - Linear 令牌只存在系统钥匙串（macOS 钥匙串、Windows 凭据管理器）。IssueRelay 不上传任何数据，也没有遥测。
 
 ## 开发
