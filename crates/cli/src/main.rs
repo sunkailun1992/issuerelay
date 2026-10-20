@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use issuerelay_cli::{format, mcp};
 use issuerelay_core::{
-    config::{Binding, ExecutorKind, PermissionProfile},
+    config::{Binding, Effort, ExecutorKind, PermissionProfile},
     ipc::client::{self, NotRunning},
     paths::AppPaths,
 };
@@ -88,6 +88,17 @@ enum BindCommand {
         /// `full`, `auto` or `personal`; omit it to use the default from the settings.
         #[arg(long, value_parser = parse_permission)]
         permission: Option<PermissionProfile>,
+        /// `on`: runs load only Linear and the repository's own rules and settings, not the
+        /// user's other MCP servers, plugins, hooks, auto memory or user-level instructions;
+        /// `off`: the user's whole configuration. Runs with `--permission personal`, and in the
+        /// home folder, always use the whole configuration.
+        // `Set`: a `bool` field is otherwise a flag that takes no value.
+        #[arg(long, value_parser = parse_lean, default_value = "on", action = clap::ArgAction::Set)]
+        lean: bool,
+        /// `low`, `medium`, `high`, `xhigh` or `max`; omit it to use the default from the
+        /// settings, or the executor's own when there is none.
+        #[arg(long, value_parser = parse_effort)]
+        effort: Option<Effort>,
     },
     /// Remove a binding by its id (the project id it was added with).
     Remove {
@@ -103,6 +114,20 @@ fn parse_executor(text: &str) -> Result<ExecutorKind, String> {
 fn parse_permission(text: &str) -> Result<PermissionProfile, String> {
     PermissionProfile::parse(text)
         .ok_or_else(|| format!("expected `full`, `auto` or `personal`, got `{text}`"))
+}
+
+fn parse_lean(text: &str) -> Result<bool, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("expected `on` or `off`, got `{text}`")),
+    }
+}
+
+fn parse_effort(text: &str) -> Result<Effort, String> {
+    Effort::parse(text).ok_or_else(|| {
+        format!("expected one of `low`, `medium`, `high`, `xhigh` or `max`, got `{text}`")
+    })
 }
 
 /// The folder to bind, absolute and without `.` or `..` segments, without resolving symlinks
@@ -143,6 +168,8 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
             dir,
             executor,
             permission,
+            lean,
+            effort,
         }) => {
             // `normalize_folder` also checks that the folder exists: the engine does not look at
             // it when saving, so a typo here would otherwise give a binding whose jobs wait
@@ -156,8 +183,8 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
                 permission: *permission,
                 model: None,
                 prompt_override: None,
-                lean: true,
-                effort: None,
+                lean: *lean,
+                effort: *effort,
             };
             ("bindings.add", json!({"binding": binding}))
         }
@@ -358,6 +385,8 @@ mod tests {
             dir: dir.to_path_buf(),
             executor: Some(ExecutorKind::Codex),
             permission: None,
+            lean: true,
+            effort: None,
         })
     }
 
@@ -493,6 +522,66 @@ mod tests {
         assert!(add("--permission", "everything").is_err());
         assert!(add("--executor", "claude").is_ok());
         assert!(add("--permission", "personal").is_ok());
+    }
+
+    #[test]
+    fn bind_add_sends_lean_and_effort_only_when_given() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_str().unwrap();
+        let sent = |extra: &[&str]| {
+            let args: Vec<&str> = [
+                "bind",
+                "add",
+                "--project-id",
+                "proj-1",
+                "--project-name",
+                "Demo Project",
+                "--dir",
+                dir,
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .collect();
+            request(&parse(&args).command).unwrap()
+        };
+        let plain = json!({"binding": {"id": "proj-1", "project_id": "proj-1",
+            "project_name": "Demo Project", "directory": root.path()}});
+        assert_eq!(sent(&[]), ("bindings.add", plain.clone()));
+        assert_eq!(sent(&["--lean", "on"]), ("bindings.add", plain));
+        assert_eq!(
+            sent(&["--lean", "off", "--effort", "max"]),
+            (
+                "bindings.add",
+                json!({"binding": {"id": "proj-1", "project_id": "proj-1",
+                    "project_name": "Demo Project", "directory": root.path(),
+                    "lean": false, "effort": "max"}})
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_lean_and_effort_values_are_refused() {
+        let add = |option: &str, value: &str| {
+            let argv = ["issuerelay", "bind", "add", "--project-id", "p"]
+                .into_iter()
+                .chain(["--project-name", "n", "--dir", ".", option, value]);
+            Cli::try_parse_from(argv)
+        };
+        let lean = add("--lean", "maybe").err().unwrap().to_string();
+        assert!(
+            lean.contains("expected `on` or `off`, got `maybe`"),
+            "{lean}"
+        );
+        let effort = add("--effort", "huge").err().unwrap().to_string();
+        assert!(
+            effort
+                .contains("expected one of `low`, `medium`, `high`, `xhigh` or `max`, got `huge`"),
+            "{effort}"
+        );
+        for value in ["low", "medium", "high", "xhigh", "max", "MAX"] {
+            assert!(add("--effort", value).is_ok(), "{value}");
+        }
+        assert!(add("--lean", "on").is_ok() && add("--lean", "OFF").is_ok());
     }
 
     #[test]
