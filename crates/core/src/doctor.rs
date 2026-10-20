@@ -559,7 +559,9 @@ async fn lean_login_check(
 /// check's output (which says logged in) and the lean one's; `Err` holds the lean problem.
 /// Claude: the lean `auth status` says logged in, with the same `authMethod` and `apiProvider`.
 /// Codex: the lean `login status` says logged in, the same way (the text after "Logged in
-/// using").
+/// using"). Both answers have to say how: two answers that do not cannot be compared, and a
+/// check that cannot be made rules lean runs out (an executor that changed what it prints must
+/// not let a lean run sign in some other way unnoticed).
 fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Result<(), String> {
     let name = kind.program_name();
     let not_signed_in = || {
@@ -572,6 +574,12 @@ fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Resu
         format!(
             "in lean runs {name} would sign in differently ({lean} instead of {usual}); turn lean \
              runs off for this binding"
+        )
+    };
+    let unchecked = |command: &str| {
+        format!(
+            "`{name} {command}` does not say how {name} signs in, so lean runs cannot be checked; \
+             update {name} or turn lean runs off for this binding"
         )
     };
     let no_answer = |args: &[&str]| {
@@ -593,6 +601,10 @@ fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Resu
                 return Err(not_signed_in());
             }
             let usual = claude_sign_in(&usual.stdout).unwrap_or_default();
+            let said = [&lean.method, &lean.provider, &usual.method, &usual.provider];
+            if said.iter().any(|value| value.is_none()) {
+                return Err(unchecked("auth status"));
+            }
             if (&lean.method, &lean.provider) == (&usual.method, &usual.provider) {
                 Ok(())
             } else {
@@ -605,13 +617,16 @@ fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Resu
                 Some(false) => return Err(not_signed_in()),
                 Some(true) => {}
             }
-            let lean = codex_sign_in_method(&lean.stdout, &lean.stderr);
-            let usual = codex_sign_in_method(&usual.stdout, &usual.stderr);
+            let (Some(lean), Some(usual)) = (
+                codex_sign_in_method(&lean.stdout, &lean.stderr),
+                codex_sign_in_method(&usual.stdout, &usual.stderr),
+            ) else {
+                return Err(unchecked("login status"));
+            };
             if lean == usual {
                 Ok(())
             } else {
-                let shown = |method: Option<String>| method.unwrap_or_else(|| "unknown".into());
-                Err(differently(shown(lean), shown(usual)))
+                Err(differently(lean, usual))
             }
         }
     }
@@ -685,16 +700,18 @@ async fn codex_default_provider(config: Option<&Path>) -> Result<(), String> {
              turn lean runs off for this binding",
             clean(&provider)
         )),
-        // The parser's message quotes the file, which can hold a token: it is left out.
         Err(_) => Err(format!("{UNREADABLE}: it is not valid TOML")),
     }
 }
 
 /// The model provider Codex's configuration text chooses when it is not the default
 /// (`openai`): the active profile's (`profile = "<name>"` with `[profiles.<name>]`) when that
-/// sets one, else the top-level `model_provider`. `Err` when the text is not TOML.
+/// sets one, else the top-level `model_provider`. `Err` when the text is not TOML, without the
+/// parser's message: that quotes the file, which can hold a token.
 pub fn codex_custom_provider(config_text: &str) -> Result<Option<String>> {
-    let config: toml::Table = config_text.parse()?;
+    let config: toml::Table = config_text
+        .parse()
+        .map_err(|_| anyhow::anyhow!("not valid TOML"))?;
     let provider_in = |table: &toml::Table| {
         table
             .get("model_provider")
@@ -2767,6 +2784,128 @@ mod tests {
             other.lean_problems.iter().any(|p| p.contains("an api key")),
             "{other:?}"
         );
+    }
+
+    /// A Claude whose usual and lean `auth status` answer `usual` and `lean`.
+    fn claude_signing_in(usual: &str, lean: CmdOutput) -> Vec<(&'static str, CmdOutput)> {
+        let mut replies = claude_replies(lean, CLAUDE_OK);
+        replies[1] = ("auth status", out(0, usual));
+        replies
+    }
+
+    #[tokio::test]
+    async fn claude_lean_login_compares_the_api_provider_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let usual = r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"bedrock"}"#;
+        let lean = r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#;
+        let (report, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_signing_in(usual, out(0, lean)),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("firstParty") && p.contains("bedrock")),
+            "{report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_that_does_not_say_how_cannot_be_checked_for_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = r#"{"loggedIn": true}"#;
+        let (claude, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_signing_in(bare, out(0, bare)),
+            &lean_paths(&dir),
+        )
+        .await;
+        let mut replies = codex_replies(out(0, "Logged in"));
+        replies[1] = ("login status", out(0, "Logged in"));
+        let (codex, _) = lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        for report in [claude, codex] {
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report
+                    .lean_problems
+                    .iter()
+                    .any(|p| p.contains("lean runs cannot be checked")),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lean_sign_in_check_that_cannot_be_read_is_not_lean_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let (claude, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, "Welcome to Claude Code"), CLAUDE_OK),
+            &lean_paths(&dir),
+        )
+        .await;
+        let (codex, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(out(0, "Something else entirely")),
+            &lean_paths(&dir),
+        )
+        .await;
+        for report in [claude, codex] {
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report
+                    .lean_problems
+                    .iter()
+                    .any(|p| p.contains("gave no usable answer")),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configuration_that_is_not_toml_is_refused_without_its_content() {
+        let error = codex_custom_provider("model_provider = \"demo-token-value\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("demo-token-value"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_codex_configuration_that_cannot_be_read_rules_out_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "model_provider = \"demo-token-value\n").unwrap();
+        // A folder where the file should be cannot be read either, on both platforms.
+        for (path, says) in [
+            (config, "it is not valid TOML"),
+            (
+                dir.path().to_path_buf(),
+                "could not read the codex configuration",
+            ),
+        ] {
+            let paths = LeanCheckPaths {
+                codex_config: Some(path),
+                ..lean_paths(&dir)
+            };
+            let replies = codex_replies(out(0, "Logged in using ChatGPT"));
+            let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &paths).await;
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report.lean_problems.iter().any(|p| p.contains(says)),
+                "{report:?}"
+            );
+            assert!(
+                !report
+                    .lean_problems
+                    .iter()
+                    .any(|p| p.contains("demo-token-value")),
+                "{report:?}"
+            );
+        }
     }
 
     #[test]
