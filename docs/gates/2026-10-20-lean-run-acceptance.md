@@ -1,4 +1,4 @@
-# 精简运行：沙箱实机验收与 v0.2.0 发布（2026-10-20）— macOS 通过，Windows 待实机
+# 精简运行：沙箱实机验收与 v0.2.0、v0.2.1 发布（2026-10-20）— macOS 通过，Windows 待实机
 
 ## 结论
 
@@ -77,6 +77,27 @@
 - 公开：维护者在会话里让 AI 直接发布（第 6 步写的是维护者亲手点，与 v0.1.0 一样由维护者当场授权）。2026-10-20 12:59:28 UTC 公开，并设为最新版本；`releases/latest` 跳转到 v0.2.0，`releases/latest/download/latest.json` 返回 200，版本 0.2.0。
 - Windows：所有者决定这次不做 Windows 实机验证（2026-10-20），发布说明里写明。
 
+## 发布 v0.2.1
+
+- 内容：PR #12（所有者让主智能体决定的六件事：精简的 Codex 运行正常结束时要认出一次 Linear 调用；用户设置的 `env` 里有网关或代理时 Claude 的精简判为不可用；其余四件写进文档），版本 `0.2.0` → `0.2.1`。2026-10-20 16:29:52 UTC 合并为 `15922ee`。
+- PR #12 的必需检查 `test (macos-latest)` 没有运行：GitHub 注明「The job was not acquired by Runner of type hosted even after multiple attempts」（macOS arm64 执行器容量不足），15 分钟后取消。所有者决定用同一个提交上已通过的 `release-test (macos-latest)`（同样的验证命令）作为 macOS 的结果，PR 里写明了。
+- 试打包：在 `main` 的 `15922ee` 上手动运行 release 工作流（运行 39457997798），全部通过：`updater=true`，两个打包任务的更新签名都核对通过，`verify-dry-run` 通过。
+- 标签：`v0.2.1` 打在 `15922ee`。标签上的运行（39462904857）第一次失败：`release-test (macos-latest)` 同样没分到执行器，被取消，`create-release` 跳过，没有建出 Release。这个标签还没有任何 Release，所以只重跑失败的任务（第 2 次）；`MAINTAINERS.md` 不让重跑的，是草稿已被标成「incomplete」的情形。第 2 次全部通过，包括 `bundle-release` 与 `verify-release`。
+- 草稿的资产（字节），与第 5 步要求的集合一致：
+
+  | 文件 | 大小 |
+  |---|---|
+  | `IssueRelay_0.2.1_universal.dmg` | 27654065 |
+  | `IssueRelay_0.2.1_universal.app.tar.gz` 与 `.sig` | 28331120 / 428 |
+  | `IssueRelay_0.2.1_x64-setup.exe` 与 `.sig` | 10012143 / 440 |
+  | `IssueRelay_0.2.1_x64_en-US.msi` 与 `.sig` | 14397440 / 440 |
+  | `latest.json` | 5354 |
+
+- 在本机核对草稿：`latest.json` 的版本是 `0.2.1`，9 个平台键，地址都指向本 Release 的资产，macOS 各键的签名等于 `.app.tar.gz.sig`。dmg 里的 `IssueRelay.app` 是 0.2.1，`codesign --verify --deep --strict` 通过（ad hoc 签名），主程序与命令行程序都是 x86_64 加 arm64，包里的 `issuerelay --version` 输出 `issuerelay 0.2.1`。
+- 发布说明：在工作流生成的说明后面补了「改动」与「升级须知」：用户设置的 `env` 设了网关或代理时，Claude 的精简绑定会停在「执行者未就绪」；已安装的程序会提示这个更新；Windows 只经 CI 测试。
+- 公开：维护者让 AI 一路做到公开。2026-10-20 18:00:35 UTC 公开并设为最新版本；`releases/latest` 跳转到 v0.2.1，`releases/latest/download/latest.json` 返回 200，版本 0.2.1。
+- 本机更新托盘程序：18:01 UTC，确认没有运行在进行，退出 0.1.0，把它移到废纸篓，从草稿下载的 dmg 拷入 0.2.1（没有下载标记）并打开。5 分钟后它仍是「connecting to Linear」，系统里有一个钥匙串授权进程（SecurityAgent）在等回应：新构建是 ad hoc 签名，要先在钥匙串里得到同意才读得到 Linear 凭据，这 5 分钟里没有人回应。按事先说好的做法，退出 0.2.1，换回备份的 0.1.0（同一个签名），18 秒后连上 Linear，监看恢复。本机仍是 0.1.0，等维护者在程序里点更新、在钥匙串对话框里同意后才是 0.2.1。
+
 ## 与设计不一致之处
 
 - 设计第 5.6 节的推理力度一句，见 N2。
@@ -85,6 +106,7 @@
 
 ## 未闭环
 
+- 本机的托盘程序仍是 0.1.0：更新到 0.2.1 要维护者在钥匙串对话框里同意（见「发布 v0.2.1」）。
 - Windows（第 7 项）全部待实机，清单见设计第 5.5 节与计划的遗留项。
 - N1 的重读在实机上没有走到：DEMO-40 没有遇到旧快照。
 - `~/.claude` 是符号链接时的排除：本机不是符号链接，没有测。
