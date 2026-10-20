@@ -72,8 +72,9 @@ const LINE_QUEUE: usize = 1024;
 /// dropped, and a note in the log says so.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// How long an executor that is being stopped (timeout, stall, cancel) may take to exit after
-/// SIGTERM before the rest of its tree is killed. It lets Claude Code / Codex end their own
+/// How long an executor that is being stopped (timeout, stall, cancel, a lean run whose output
+/// showed that lean did not take effect) may take to exit after SIGTERM before the rest of its
+/// tree is killed. It lets Claude Code / Codex end their own
 /// detached tool processes. Windows has no such step: see `TreeGuard`.
 #[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_secs(5);
@@ -81,7 +82,7 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Owns the spawned child and ends its whole process tree, however `run` ends.
 ///
 /// - `end`, the explicit cleanup, runs after every run. On Unix, while the executor still runs
-///   (the run was stopped by a limit or cancelled), it records the executor's descendants by
+///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the executor's descendants by
 ///   walking parent PIDs, each with its start time; sends SIGTERM to the process group and
 ///   gives the executor up to `TERM_GRACE` to exit; records the descendants again (adding to the
 ///   first record); then sends SIGKILL to the process group, and to every recorded descendant
@@ -526,15 +527,18 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
     failed(message)
 }
 
-/// Runs `spec` until it exits, a limit is hit or `cancel` fires. The JSONL file at `log_path` is
-/// created (or truncated) and gets one line per output line: stdout verbatim, stderr as
-/// `{"stream":"stderr","text":…}`; a run that cannot start gets one
+/// Runs `spec` until it exits, a limit is hit, `cancel` fires or, in a lean run (`spec.lean`),
+/// an output line shows that lean did not take effect (`lean::LeanCheck`): that line is logged
+/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. The JSONL file
+/// at `log_path` is created (or truncated) and starts with `spec.notes`, each as a
+/// `{"stream":"stderr","text":"[IssueRelay] …"}` line; then it gets one line per output line:
+/// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. A run that cannot start gets one
 /// `{"stream":"runner","text":"spawn failed: …"}` line. Once the executor has started, its whole
 /// process tree is ended however the run ends (before this returns), and also if this future is
 /// dropped before it finishes (`TreeGuard` has the details): on Unix the process group and every
 /// descendant, including ones that left the group (`setsid`, `setpgid`); on Windows the Job
-/// Object. On Unix an executor stopped by a limit or `cancel` gets SIGTERM and up to
-/// `TERM_GRACE` to exit before the rest is killed. Descendants are found through their parents,
+/// Object. On Unix an executor stopped by a limit, `cancel` or the lean check gets SIGTERM and up
+/// to `TERM_GRACE` to exit before the rest is killed. Descendants are found through their parents,
 /// so a process whose parent exited before the run ended is out of reach, and after a normal exit
 /// only the process group is left to end: the executor is gone, so its descendants that left the
 /// group can no longer be found through it.
@@ -546,7 +550,8 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// user (mode 0600) also when a retry reuses the previous attempt's file.
 ///
 /// `env` supplies PATH and proxy variables on top of the host's environment and removes the
-/// nested-session markers (`env::REMOVED_VARS`). On Windows the executor starts without a console
+/// nested-session markers (`env::REMOVED_VARS`); `spec.env`, the run's own variables, is set
+/// after that, so it wins over both. On Windows the executor starts without a console
 /// window and out of reach of a Ctrl+C in the host's console (`creation_flags`).
 ///
 /// `on_spawn` gets the executor's process (`process_tag`) right after it started, so that a host
