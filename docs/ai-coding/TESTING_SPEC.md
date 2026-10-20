@@ -97,6 +97,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 - 只在 Linear 沙箱项目和本机沙箱仓库（用本地裸仓库充当远端）上进行，不碰真实业务仓库。
 - 记录环境与版本、每一步的命令和结果、从建需求到被接走的耗时、Linear 状态与评论、推送结果、异常与未验证项。
 - 没做的项写「待实机」，不能用测试结果代替。
+- 用开发宿主做实机验收时，用 `env -i` 启动它（只留 `HOME`、`USER`、`LOGNAME`、`SHELL`、`TMPDIR`、系统默认的 `PATH` 这类），或者从不是 Claude Code / Codex 会话的终端启动：开发宿主会把启动它的会话的环境变量（例如 `CLAUDE_CODE_EFFORT_LEVEL`、`ANTHROPIC_BASE_URL`）传给执行者，`ExecEnv` 只去掉嵌套会话的标记。打包的托盘程序由 launchd 启动，不受影响（2026-10-20 精简运行验收 N3）。
 
 ## 验收报告模板
 
