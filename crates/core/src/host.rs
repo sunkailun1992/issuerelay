@@ -353,12 +353,28 @@ fn stop_runs(engine: &Engine) {
 }
 
 /// The readiness probe of a host that is not given one: the real checks, the lean ones with a
-/// folder in the data folder and Codex's own configuration file.
+/// folder in the data folder, Codex's own configuration file and Claude Code's user settings.
 fn system_readiness(paths: &AppPaths, env: SharedEnv) -> SystemReadiness {
+    system_readiness_with(
+        paths,
+        env,
+        doctor::codex_config_path(),
+        doctor::claude_settings_path(),
+    )
+}
+
+/// `system_readiness` with the executors' configuration files given, so that a test reads files
+/// of its own (or none) instead of the user's.
+fn system_readiness_with(
+    paths: &AppPaths,
+    env: SharedEnv,
+    codex_config: Option<std::path::PathBuf>,
+    claude_settings: Option<std::path::PathBuf>,
+) -> SystemReadiness {
     SystemReadiness::new(READINESS_TTL, env).with_lean_checks(LeanCheckPaths {
         empty_dir: paths.lean_check_dir(),
-        codex_config: doctor::codex_config_path(),
-        claude_settings: doctor::claude_settings_path(),
+        codex_config,
+        claude_settings,
     })
 }
 
@@ -813,9 +829,11 @@ mod tests {
         .shared();
         // Executing a script right after writing it can fail with `ETXTBSY` when another test
         // thread forks in between: try again, with a new probe since a probe keeps its result.
+        // No configuration files are read: the user's own (a gateway in Claude Code's user
+        // settings, say) must not decide the test.
         let mut reports = Vec::new();
         for _ in 0..5 {
-            reports = system_readiness(&paths, env.clone())
+            reports = system_readiness_with(&paths, env.clone(), None, None)
                 .executor_reports(false)
                 .await;
             if reports[0].version.is_some() {
