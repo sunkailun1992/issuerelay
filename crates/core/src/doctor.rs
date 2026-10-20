@@ -559,9 +559,10 @@ async fn lean_login_check(
 /// check's output (which says logged in) and the lean one's; `Err` holds the lean problem.
 /// Claude: the lean `auth status` says logged in, with the same `authMethod` and `apiProvider`.
 /// Codex: the lean `login status` says logged in, the same way (the text after "Logged in
-/// using"). Both answers have to say how: two answers that do not cannot be compared, and a
-/// check that cannot be made rules lean runs out (an executor that changed what it prints must
-/// not let a lean run sign in some other way unnoticed).
+/// using", compared whole and shown without a key: `codex_shown`). Both answers have to say how:
+/// two answers that do not cannot be compared, and a check that cannot be made rules lean runs
+/// out (an executor that changed what it prints must not let a lean run sign in some other way
+/// unnoticed).
 fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Result<(), String> {
     let name = kind.program_name();
     let not_signed_in = || {
@@ -623,10 +624,16 @@ fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Resu
             ) else {
                 return Err(unchecked("login status"));
             };
+            let (lean_shown, usual_shown) = (codex_shown(&lean), codex_shown(&usual));
             if lean == usual {
                 Ok(())
+            } else if lean_shown == usual_shown {
+                Err(format!(
+                    "in lean runs {name} would sign in with {lean_shown}, but not the one usual \
+                     runs use; turn lean runs off for this binding"
+                ))
             } else {
-                Err(differently(lean, usual))
+                Err(differently(lean_shown, usual_shown))
             }
         }
     }
@@ -669,8 +676,8 @@ fn claude_sign_in(stdout: &str) -> Option<ClaudeSignIn> {
 }
 
 /// How `codex login status` says Codex is logged in: the text after "Logged in using" on its
-/// line, lower-cased, with its spaces evened out (`chatgpt`, `an api key`). Both streams are
-/// read, as `codex_login_answer` does. `None` when it does not say.
+/// line, lower-cased, with its spaces evened out (`chatgpt`, `an api key - <masked key>`). Both
+/// streams are read, as `codex_login_answer` does. `None` when it does not say.
 fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
     const LOGGED_IN_USING: &str = "logged in using";
     let text = format!("{}\n{}", strip_ansi(stdout), strip_ansi(stderr)).to_lowercase();
@@ -679,6 +686,19 @@ fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
     Some(clean(
         &method.split_whitespace().collect::<Vec<_>>().join(" "),
     ))
+}
+
+/// A Codex sign-in as a problem shows it: the method without what follows ` - `. After an API key
+/// login codex-cli 0.159.2 prints the key there, masked to its first eight and last five
+/// characters (`codex-rs/cli/src/login.rs` at `rust-v0.159.2`, read 2026-10-20). Two sign-ins
+/// are still compared whole, so another key is another sign-in, but no part of a key goes into a
+/// problem, which the panel, the CLI and MCP show.
+fn codex_shown(method: &str) -> String {
+    method
+        .split_once(" - ")
+        .map_or(method, |(head, _)| head)
+        .trim()
+        .to_string()
 }
 
 /// Whether Codex's configuration file sets a model provider that lean runs, which ignore the
@@ -2784,6 +2804,68 @@ mod tests {
             other.lean_problems.iter().any(|p| p.contains("an api key")),
             "{other:?}"
         );
+    }
+
+    /// `codex login status` after an API key login as codex-cli 0.159.2 prints it: on stderr, the
+    /// key masked to its first eight and last five characters.
+    fn codex_api_key(masked: &str) -> CmdOutput {
+        CmdOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: format!("Logged in using an API key - {masked}\n"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lean_problem_names_a_codex_api_key_login_without_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let usual = codex_api_key("demo-key***12345");
+        let api_key_runs = |lean: CmdOutput| {
+            let mut replies = codex_replies(lean);
+            replies[1] = ("login status", usual.clone());
+            replies
+        };
+        let (same, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &api_key_runs(usual.clone()),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(same.ready_lean(), "{same:?}");
+        // Another key is another sign-in all the same, and the problem shows neither key.
+        let (other_key, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &api_key_runs(codex_api_key("demo-key***67890")),
+            &lean_paths(&dir),
+        )
+        .await;
+        let (instead_of_chatgpt, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(usual),
+            &lean_paths(&dir),
+        )
+        .await;
+        for (report, says) in [
+            (
+                other_key,
+                "would sign in with an api key, but not the one usual runs use",
+            ),
+            (
+                instead_of_chatgpt,
+                "would sign in differently (an api key instead of chatgpt)",
+            ),
+        ] {
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report.lean_problems.iter().any(|p| p.contains(says)),
+                "{report:?}"
+            );
+            let shown = format!("{report:?}");
+            assert!(
+                !shown.contains("***") && !shown.contains("demo-key"),
+                "{shown}"
+            );
+        }
     }
 
     /// A Claude whose usual and lean `auth status` answer `usual` and `lean`.
