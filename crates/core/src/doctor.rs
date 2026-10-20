@@ -25,12 +25,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
+use crate::config::{Binding, Config, ExecutorKind, LeanStatus, TriggerNames};
 use crate::env::{ExecEnv, SharedEnv, Sources};
 use crate::executor;
+use crate::executor::lean::{CLAUDE_LINEAR_SERVER, CODEX_LINEAR_SERVER};
 use crate::linear::{LinearApi, Viewer, auth::LINEAR_MCP_URL};
 use crate::text::{is_invisible, strip_ansi};
-use crate::trigger::same_name;
+use crate::trigger::{Readiness, same_name};
 
 /// What a finished check command printed and how it exited.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,13 @@ pub trait CommandRunner: Send + Sync {
         limit: Duration,
     ) -> Result<CmdOutput> {
         let _ = limit;
+        self.run(program, args).await
+    }
+
+    /// `run` in the folder `cwd` instead of the runner's own choice (the lean sign-in check runs
+    /// in an empty folder). The default ignores `cwd`; `SystemRunner` honours it.
+    async fn run_in(&self, program: &Path, args: &[&str], cwd: &Path) -> Result<CmdOutput> {
+        let _ = cwd;
         self.run(program, args).await
     }
 }
@@ -89,11 +97,18 @@ const MAX_PROBLEM_TEXT: usize = 200;
 /// describes Linear when it names exactly this host.
 const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 
+/// The lean sign-in checks (lean-run design, section 7), which run with the other checks and
+/// under the same limit. Claude: `auth status` without the user settings, which lean runs leave
+/// out. Codex: `login status` from the credentials file (`auth.json`), the store a run that
+/// ignores the user configuration falls back to (`cli_auth_credentials_store` is a user setting).
+const CLAUDE_LEAN_LOGIN: [&str; 4] = ["--setting-sources", "project,local", "auth", "status"];
+const CODEX_LEAN_LOGIN: [&str; 4] = ["-c", "cli_auth_credentials_store=file", "login", "status"];
+
 /// Runs the real check commands, each under its own time limit: by default 60 s for
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
 /// the limit from its caller instead, which the one-click setup commands do (a login waits up to
-/// five minutes for the browser). A command runs in the user's home directory, in a process
-/// group of its own (Windows: a Job Object, and without a console window, like the executors),
+/// five minutes for the browser). A command runs in the user's home directory (`run_in`: in the
+/// folder it is given), in a process group of its own (Windows: a Job Object, and without a console window, like the executors),
 /// with the shared environment (the PATH and proxy the executors will get). A check is done when
 /// the command's own process exits: whatever it left running in its group is ended then
 /// (`claude mcp list` starts stdio MCP servers of its own, which inherit its pipes), and the
@@ -143,19 +158,14 @@ impl SystemRunner {
             self.check_timeout
         }
     }
-}
 
-#[async_trait::async_trait]
-impl CommandRunner for SystemRunner {
-    async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput> {
-        self.run_limited(program, args, self.limit_for(args)).await
-    }
-
-    async fn run_limited(
+    /// Runs one check command in `cwd`, as the type's documentation describes.
+    async fn run_checked(
         &self,
         program: &Path,
         args: &[&str],
         limit: Duration,
+        cwd: Option<&Path>,
     ) -> Result<CmdOutput> {
         #[cfg(windows)]
         use process_wrap::tokio::JobObject;
@@ -173,10 +183,8 @@ impl CommandRunner for SystemRunner {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            // `claude mcp list` answers per directory, and a host started from Finder starts in
-            // `/`. The home directory matches the user-level registration (`--scope user`).
-            if let Some(home) = dirs::home_dir() {
-                c.current_dir(home);
+            if let Some(cwd) = cwd {
+                c.current_dir(cwd);
             }
             env.apply(c);
             c.env("NO_COLOR", "1");
@@ -228,6 +236,31 @@ impl CommandRunner for SystemRunner {
             stdout: stdout?,
             stderr: stderr?,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for SystemRunner {
+    async fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput> {
+        self.run_limited(program, args, self.limit_for(args)).await
+    }
+
+    async fn run_limited(
+        &self,
+        program: &Path,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<CmdOutput> {
+        // `claude mcp list` answers per directory, and a host started from Finder starts in
+        // `/`. The home directory matches the user-level registration (`--scope user`).
+        let home = dirs::home_dir();
+        self.run_checked(program, args, limit, home.as_deref())
+            .await
+    }
+
+    async fn run_in(&self, program: &Path, args: &[&str], cwd: &Path) -> Result<CmdOutput> {
+        self.run_checked(program, args, self.limit_for(args), Some(cwd))
+            .await
     }
 }
 
@@ -299,6 +332,18 @@ pub struct ExecutorReport {
     pub linear_mcp: bool,
     /// Human-readable reasons for the checks that failed or could not run.
     pub problems: Vec<String>,
+    /// The Linear server lean runs load (`executor::lean`) is configured under its exact name
+    /// and URL, authorized and connected.
+    #[serde(default)]
+    pub lean_linear_mcp: bool,
+    /// A lean run would be signed in, and the same way as a usual run (Codex: also to the same
+    /// model provider). Judged only when the usual login check says logged in.
+    #[serde(default)]
+    pub lean_logged_in: bool,
+    /// Why lean runs cannot use this executor, besides `problems`: what the two lean checks
+    /// found. A lean check that a failed usual check leaves unjudged adds nothing here.
+    #[serde(default)]
+    pub lean_problems: Vec<String>,
 }
 
 impl ExecutorReport {
@@ -307,31 +352,72 @@ impl ExecutorReport {
     pub fn ready(&self) -> bool {
         self.program.is_some() && self.logged_in && self.linear_mcp
     }
+
+    /// Installed, logged in, and both lean checks passed: the executor can take lean runs.
+    pub fn ready_lean(&self) -> bool {
+        self.program.is_some() && self.logged_in && self.lean_linear_mcp && self.lean_logged_in
+    }
+}
+
+/// What the lean sign-in checks need from the host (lean-run design, section 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeanCheckPaths {
+    /// An empty folder of IssueRelay's own, made when missing, to run Claude's lean sign-in check
+    /// in: in the home folder, the project settings it reads would be `~/.claude/settings.json`,
+    /// the very user settings lean runs leave out.
+    pub empty_dir: PathBuf,
+    /// Codex's configuration file (`codex_config_path`), read for a model provider lean runs
+    /// would not use; `None` when there is none to read.
+    pub codex_config: Option<PathBuf>,
+}
+
+/// Where Codex keeps its configuration: `config.toml` in `CODEX_HOME`, else in `.codex` in the
+/// home folder. Executors inherit the host's `CODEX_HOME` (`ExecEnv` changes only the PATH and
+/// the proxy). `None` without either.
+pub fn codex_config_path() -> Option<PathBuf> {
+    codex_config_path_from(std::env::var_os("CODEX_HOME"), dirs::home_dir())
+}
+
+fn codex_config_path_from(
+    codex_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    codex_home
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".codex")))
+        .map(|dir| dir.join("config.toml"))
 }
 
 /// Checks that one executor is installed, logged in and connected to Linear's MCP server.
 /// `program` is where the executable was found, `None` when it was not found. The three
 /// commands (`--version`, the login check, `mcp list`) run together, since `claude mcp list`
 /// alone can take over ten seconds. A check that cannot run adds a problem saying so and leaves
-/// the executor not ready, without also reporting the setup as missing.
+/// the executor not ready, without also reporting the setup as missing. The lean sign-in check
+/// does not run here (`SystemReadiness` runs it), so lean runs come out not ready.
 pub async fn check_executor(
     kind: ExecutorKind,
     program: Option<PathBuf>,
     runner: &dyn CommandRunner,
 ) -> ExecutorReport {
-    check_executor_detailed(kind, program, runner).await.0
+    check_executor_detailed(kind, program, runner, None).await.0
 }
 
-/// `check_executor`, plus whether every check gave a usable answer. A check gives none when its
-/// command could not run (it timed out or did not start, or what it printed could not be read),
-/// when the login check's output cannot be understood, or when `mcp list` exited non-zero
-/// without showing any Linear line (it crashed). A negative answer that can be read ("not
-/// logged in", no Linear server) is usable. `SystemReadiness` retries an incomplete result
-/// sooner.
+/// `check_executor`, plus whether every check gave a usable answer, and with the lean checks
+/// (lean-run design, section 7) when `lean` is given: the Linear server lean runs load is read
+/// from the same `mcp list`, and the lean sign-in check runs as a fourth command, together with
+/// the other three. A check gives no usable answer when its command could not run (it timed out
+/// or did not start, or what it printed could not be read), when the login check's output
+/// cannot be understood, or when `mcp list` exited non-zero without showing any Linear line (it
+/// crashed). A negative answer that can be read ("not logged in", no Linear server) is usable.
+/// `SystemReadiness` retries an incomplete result sooner. The lean sign-in check does not count
+/// here: what it could not do is a lean problem only, so the usual readiness and how long it is
+/// cached stay as they were.
 async fn check_executor_detailed(
     kind: ExecutorKind,
     program: Option<PathBuf>,
     runner: &dyn CommandRunner,
+    lean: Option<&LeanCheckPaths>,
 ) -> (ExecutorReport, bool) {
     let name = kind.program_name();
     let mut report = ExecutorReport {
@@ -341,6 +427,9 @@ async fn check_executor_detailed(
         logged_in: false,
         linear_mcp: false,
         problems: Vec::new(),
+        lean_linear_mcp: false,
+        lean_logged_in: false,
+        lean_problems: Vec::new(),
     };
     let Some(program) = program else {
         report
@@ -352,10 +441,11 @@ async fn check_executor_detailed(
         ExecutorKind::Claude => &["auth", "status"],
         ExecutorKind::Codex => &["login", "status"],
     };
-    let (version, login, mcp) = tokio::join!(
+    let (version, login, mcp, lean_login) = tokio::join!(
         runner.run(&program, &["--version"]),
         runner.run(&program, login_args),
         runner.run(&program, &["mcp", "list"]),
+        lean_login_check(kind, &program, runner, lean),
     );
     let mut complete = true;
     match version {
@@ -374,8 +464,8 @@ async fn check_executor_detailed(
             complete = false;
         }
     }
-    match login {
-        Ok(o) => match login_answer(kind, &o) {
+    match &login {
+        Ok(o) => match login_answer(kind, o) {
             Some(logged_in) => {
                 report.logged_in = logged_in;
                 if !logged_in {
@@ -407,6 +497,12 @@ async fn check_executor_detailed(
                 report.problems.push(problem);
                 complete &= usable;
             }
+            // An `mcp list` that crashed says nothing about the server lean runs load either;
+            // the problem above already says so.
+            report.lean_linear_mcp = mcp_list_has_lean_linear(kind, &o.stdout);
+            if !report.lean_linear_mcp && (o.code == Some(0) || has_linear_line(&o.stdout)) {
+                report.lean_problems.push(lean_linear_problem(kind, &o));
+            }
         }
         Err(e) => {
             report
@@ -415,7 +511,204 @@ async fn check_executor_detailed(
             complete = false;
         }
     }
+    // The lean sign-in is judged against the usual one, so only once that says logged in.
+    if let (true, Ok(usual)) = (report.logged_in, &login) {
+        let signed_in = lean_login.and_then(|lean_out| lean_sign_in(kind, usual, &lean_out));
+        let provider = match (kind, lean) {
+            (ExecutorKind::Codex, Some(lean)) => {
+                codex_default_provider(lean.codex_config.as_deref()).await
+            }
+            _ => Ok(()),
+        };
+        report.lean_logged_in = signed_in.is_ok() && provider.is_ok();
+        report
+            .lean_problems
+            .extend([signed_in.err(), provider.err()].into_iter().flatten());
+    }
     (report, complete)
+}
+
+/// Runs the lean sign-in check of `kind`: `CLAUDE_LEAN_LOGIN` in `lean.empty_dir` (made first
+/// when missing), `CODEX_LEAN_LOGIN`. `Err` holds the lean problem when it did not run.
+async fn lean_login_check(
+    kind: ExecutorKind,
+    program: &Path,
+    runner: &dyn CommandRunner,
+    lean: Option<&LeanCheckPaths>,
+) -> Result<CmdOutput, String> {
+    let Some(lean) = lean else {
+        return Err("the lean sign-in check did not run".into());
+    };
+    let ran = match kind {
+        ExecutorKind::Claude => {
+            if let Err(e) = tokio::fs::create_dir_all(&lean.empty_dir).await {
+                return Err(format!(
+                    "could not prepare the folder for the lean sign-in check: {e}"
+                ));
+            }
+            runner
+                .run_in(program, &CLAUDE_LEAN_LOGIN, &lean.empty_dir)
+                .await
+        }
+        ExecutorKind::Codex => runner.run(program, &CODEX_LEAN_LOGIN).await,
+    };
+    ran.map_err(|e| format!("lean sign-in check failed: {e}"))
+}
+
+/// Whether a lean run would be signed in the same way as a usual one, from the usual login
+/// check's output (which says logged in) and the lean one's; `Err` holds the lean problem.
+/// Claude: the lean `auth status` says logged in, with the same `authMethod` and `apiProvider`.
+/// Codex: the lean `login status` says logged in, the same way (the text after "Logged in
+/// using").
+fn lean_sign_in(kind: ExecutorKind, usual: &CmdOutput, lean: &CmdOutput) -> Result<(), String> {
+    let name = kind.program_name();
+    let not_signed_in = || {
+        format!(
+            "in lean runs {name} is not signed in (its sign-in comes from the user settings); \
+             turn lean runs off for this binding"
+        )
+    };
+    let differently = |lean: String, usual: String| {
+        format!(
+            "in lean runs {name} would sign in differently ({lean} instead of {usual}); turn lean \
+             runs off for this binding"
+        )
+    };
+    let no_answer = |args: &[&str]| {
+        with_detail(
+            format!(
+                "`{name} {}` gave no usable answer (exit code {})",
+                args.join(" "),
+                exit_code_text(lean.code)
+            ),
+            first_line(&lean.stderr),
+        )
+    };
+    match kind {
+        ExecutorKind::Claude => {
+            let Some(lean) = claude_sign_in(&lean.stdout) else {
+                return Err(no_answer(&CLAUDE_LEAN_LOGIN));
+            };
+            if !lean.logged_in {
+                return Err(not_signed_in());
+            }
+            let usual = claude_sign_in(&usual.stdout).unwrap_or_default();
+            if (&lean.method, &lean.provider) == (&usual.method, &usual.provider) {
+                Ok(())
+            } else {
+                Err(differently(lean.describe(&usual), usual.describe(&lean)))
+            }
+        }
+        ExecutorKind::Codex => {
+            match codex_login_answer(lean.code, &lean.stdout, &lean.stderr) {
+                None => return Err(no_answer(&CODEX_LEAN_LOGIN)),
+                Some(false) => return Err(not_signed_in()),
+                Some(true) => {}
+            }
+            let lean = codex_sign_in_method(&lean.stdout, &lean.stderr);
+            let usual = codex_sign_in_method(&usual.stdout, &usual.stderr);
+            if lean == usual {
+                Ok(())
+            } else {
+                let shown = |method: Option<String>| method.unwrap_or_else(|| "unknown".into());
+                Err(differently(shown(lean), shown(usual)))
+            }
+        }
+    }
+}
+
+/// What `claude auth status` says about a sign-in.
+#[derive(Debug, Default)]
+struct ClaudeSignIn {
+    logged_in: bool,
+    /// `authMethod`, such as `claude.ai` or `api_key`.
+    method: Option<String>,
+    /// `apiProvider`, such as `firstParty`.
+    provider: Option<String>,
+}
+
+impl ClaudeSignIn {
+    /// The sign-in as a problem names it next to `other`: its method, and its provider too when
+    /// the two differ there.
+    fn describe(&self, other: &ClaudeSignIn) -> String {
+        let shown = |value: &Option<String>| clean(value.as_deref().unwrap_or("unknown"));
+        if self.provider == other.provider {
+            shown(&self.method)
+        } else {
+            format!("{} with {}", shown(&self.method), shown(&self.provider))
+        }
+    }
+}
+
+/// Reads `claude auth status`: a JSON object with a boolean `loggedIn`, and `authMethod` and
+/// `apiProvider` when it says them. `None` when the output is not such an object.
+fn claude_sign_in(stdout: &str) -> Option<ClaudeSignIn> {
+    let stdout = strip_ansi(stdout);
+    let value = serde_json::from_str::<serde_json::Value>(stdout.trim()).ok()?;
+    let text = |key: &str| value[key].as_str().map(str::to_string);
+    Some(ClaudeSignIn {
+        logged_in: value["loggedIn"].as_bool()?,
+        method: text("authMethod"),
+        provider: text("apiProvider"),
+    })
+}
+
+/// How `codex login status` says Codex is logged in: the text after "Logged in using" on its
+/// line, lower-cased, with its spaces evened out (`chatgpt`, `an api key`). Both streams are
+/// read, as `codex_login_answer` does. `None` when it does not say.
+fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
+    const LOGGED_IN_USING: &str = "logged in using";
+    let text = format!("{}\n{}", strip_ansi(stdout), strip_ansi(stderr)).to_lowercase();
+    let (_, rest) = text.split_once(LOGGED_IN_USING)?;
+    let method = rest.lines().next().unwrap_or_default();
+    Some(clean(
+        &method.split_whitespace().collect::<Vec<_>>().join(" "),
+    ))
+}
+
+/// Whether Codex's configuration file sets a model provider that lean runs, which ignore the
+/// user configuration, would not use; `Err` holds the lean problem. No file sets none.
+async fn codex_default_provider(config: Option<&Path>) -> Result<(), String> {
+    const UNREADABLE: &str = "could not read the codex configuration to check its model provider";
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let text = match tokio::fs::read_to_string(config).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{UNREADABLE}: {e}")),
+    };
+    match codex_custom_provider(&text) {
+        Ok(None) => Ok(()),
+        Ok(Some(provider)) => Err(format!(
+            "codex uses the model provider `{}`; lean runs would use the default provider, so \
+             turn lean runs off for this binding",
+            clean(&provider)
+        )),
+        // The parser's message quotes the file, which can hold a token: it is left out.
+        Err(_) => Err(format!("{UNREADABLE}: it is not valid TOML")),
+    }
+}
+
+/// The model provider Codex's configuration text chooses when it is not the default
+/// (`openai`): the active profile's (`profile = "<name>"` with `[profiles.<name>]`) when that
+/// sets one, else the top-level `model_provider`. `Err` when the text is not TOML.
+pub fn codex_custom_provider(config_text: &str) -> Result<Option<String>> {
+    let config: toml::Table = config_text.parse()?;
+    let provider_in = |table: &toml::Table| {
+        table
+            .get("model_provider")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+    };
+    let profile = config
+        .get("profile")
+        .and_then(toml::Value::as_str)
+        .and_then(|name| config.get("profiles")?.get(name)?.as_table())
+        .and_then(provider_in);
+    Ok(profile
+        .or_else(|| provider_in(&config))
+        .filter(|provider| provider != "openai"))
 }
 
 /// What a finished login check says: `Some(true)` logged in, `Some(false)` logged out, `None`
@@ -452,6 +745,81 @@ pub fn parse_claude_auth(stdout: &str) -> bool {
 /// read because codex-cli 0.159.2 writes the status to stderr (M0 finding F4).
 pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool {
     codex_login_answer(code, stdout, stderr) == Some(true)
+}
+
+/// Whether `mcp list` output shows the Linear server lean runs load (`executor::lean`) usable:
+/// a line whose server name is exactly `CLAUDE_LINEAR_SERVER` / `CODEX_LINEAR_SERVER`, whose URL
+/// is exactly `LINEAR_MCP_URL`, and whose status is usable as `mcp_list_has_linear` reads it. A
+/// lean run reuses the sign-in stored under that name; another server, claude.ai's Linear
+/// connector among them, is not loaded.
+pub fn mcp_list_has_lean_linear(kind: ExecutorKind, stdout: &str) -> bool {
+    let stdout = strip_ansi(stdout);
+    lean_linear_line(kind, &stdout)
+        .is_some_and(|(url, line)| url == LINEAR_MCP_URL && line_usable(kind, line))
+}
+
+/// The server lean runs load in `kind`.
+fn lean_server_name(kind: ExecutorKind) -> &'static str {
+    match kind {
+        ExecutorKind::Claude => CLAUDE_LINEAR_SERVER,
+        ExecutorKind::Codex => CODEX_LINEAR_SERVER,
+    }
+}
+
+/// The first `mcp list` line of the server lean runs load, with the URL (or command) it shows.
+fn lean_linear_line(kind: ExecutorKind, stdout: &str) -> Option<(&str, &str)> {
+    stdout.lines().find_map(|line| {
+        let (server, target) = server_and_target(kind, line)?;
+        (server == lean_server_name(kind)).then_some((target, line))
+    })
+}
+
+/// The server name of an `mcp list` line and the first thing after it, its URL or command.
+/// Claude prints `<name>: <url> ...` (a name may hold colons, as `plugin:a:b` does), Codex
+/// `<name>  <url>  ...`.
+fn server_and_target(kind: ExecutorKind, line: &str) -> Option<(&str, &str)> {
+    let (server, rest) = match kind {
+        ExecutorKind::Claude => line.split_once(": ")?,
+        ExecutorKind::Codex => line.trim_start().split_once(char::is_whitespace)?,
+    };
+    Some((server.trim(), rest.split_whitespace().next()?))
+}
+
+/// The lean problem when `mcp list` ran without showing the Linear server lean runs load
+/// usable: it is missing, or its name points elsewhere (then adding it would fail, so only the
+/// reason is given), or what its line says.
+fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
+    let name = kind.program_name();
+    let server = lean_server_name(kind);
+    let stdout = strip_ansi(&output.stdout);
+    match lean_linear_line(kind, &stdout) {
+        None => {
+            let register = match kind {
+                ExecutorKind::Claude => "register it for all directories with",
+                ExecutorKind::Codex => "register it with",
+            };
+            format!(
+                "lean runs use the Linear MCP server named `{server}` in {name} ({register}: {})",
+                register_linear_command(kind)
+            )
+        }
+        Some((target, _)) if target != LINEAR_MCP_URL => format!(
+            "the Linear MCP server `{server}` in {name} points to {}, but lean runs need \
+             {LINEAR_MCP_URL}; change it yourself or turn lean runs off for this binding",
+            clean(target)
+        ),
+        Some((_, line)) => match clean(&line_status(kind, line)) {
+            status if status.is_empty() => {
+                format!("the Linear MCP server `{server}` in {name} is not connected")
+            }
+            status => format!("the Linear MCP server `{server}` in {name}: {status}"),
+        },
+    }
+}
+
+/// Whether `mcp list` output has any line that describes Linear's server.
+fn has_linear_line(stdout: &str) -> bool {
+    linear_lines(&strip_ansi(stdout)).next().is_some()
 }
 
 /// Whether `mcp list` output shows Linear's MCP server usable. A line describes Linear only
@@ -687,21 +1055,27 @@ pub struct BindingReport {
     pub directory_exists: bool,
     /// The executor the binding runs with (its own choice, else the default).
     pub executor: ExecutorKind,
+    /// Ready for the binding's runs: lean ones when `lean` applies, else usual ones.
     pub executor_ready: bool,
+    /// Whether the binding's runs are lean, or why not.
+    pub lean: LeanStatus,
 }
 
-/// One report per binding, in configuration order. `ready` is the set from `ready_set`.
-pub fn check_bindings(cfg: &Config, ready: &HashSet<ExecutorKind>) -> Vec<BindingReport> {
+/// One report per binding, in configuration order. `ready` is what `ready_set` gives; `home` is
+/// the user's home folder (a binding of that folder cannot be lean), `None` when not known.
+pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> Vec<BindingReport> {
     cfg.bindings
         .iter()
         .map(|b| {
             let executor = cfg.executor_for(b);
+            let lean = cfg.lean_for(b, home);
             BindingReport {
                 binding_id: b.id.clone(),
                 project_name: b.project_name.clone(),
                 directory_exists: b.directory.is_dir(),
                 executor,
-                executor_ready: ready.contains(&executor),
+                executor_ready: ready.ready(executor, lean),
+                lean,
             }
         })
         .collect()
@@ -763,13 +1137,15 @@ type RefreshEnv = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Sources> + Send>> 
 /// timed out, did not start, crashed or could not be read for at most `FAILED_CHECK_TTL`, so it is
 /// retried soon without re-running a slow `claude mcp list` on every poll. Only the executors
 /// whose entry expired are checked again, together. One lock covers the whole refresh, so a
-/// caller that arrives meanwhile waits and then uses what the refresh recorded.
+/// caller that arrives meanwhile waits and then uses what the refresh recorded. The lean checks
+/// run only when `with_lean_checks` gave what they need; without them lean runs are not ready.
 pub struct SystemReadiness {
     runner: Arc<dyn CommandRunner>,
     resolve: FindProgram,
     /// Shared with the job runner; executors are looked up on its PATH.
     env: SharedEnv,
     refresh_env: RefreshEnv,
+    lean: Option<LeanCheckPaths>,
     ttl: Duration,
     failed_ttl: Duration,
     /// How many refreshes have been recorded. A `fresh` caller reads it before it waits for the
@@ -824,11 +1200,19 @@ impl SystemReadiness {
             resolve,
             env,
             refresh_env,
+            lean: None,
             ttl,
             failed_ttl,
             refreshes: AtomicU64::new(0),
             cache: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Runs the lean checks too, with `paths` (the host's own folder and Codex's configuration
+    /// file).
+    pub fn with_lean_checks(mut self, paths: LeanCheckPaths) -> Self {
+        self.lean = Some(paths);
+        self
     }
 
     /// Whether `cached` may still be served to a caller that did not ask for `fresh`.
@@ -851,7 +1235,8 @@ impl SystemReadiness {
             return None;
         }
         let program = (self.resolve)(kind);
-        let (report, complete) = check_executor_detailed(kind, program, self.runner.as_ref()).await;
+        let (report, complete) =
+            check_executor_detailed(kind, program, self.runner.as_ref(), self.lean.as_ref()).await;
         Some((report, complete, Instant::now()))
     }
 }
@@ -921,13 +1306,19 @@ impl ReadinessProbe for SystemReadiness {
     }
 }
 
-/// The executors whose report says they are ready.
-pub fn ready_set(reports: &[ExecutorReport]) -> HashSet<ExecutorKind> {
-    reports
-        .iter()
-        .filter(|r| r.ready())
-        .map(|r| r.kind)
-        .collect()
+/// The executors whose report says they are ready, for usual runs and for lean ones.
+pub fn ready_set(reports: &[ExecutorReport]) -> Readiness {
+    let ready_by = |ready: fn(&ExecutorReport) -> bool| {
+        reports
+            .iter()
+            .filter(|r| ready(r))
+            .map(|r| r.kind)
+            .collect()
+    };
+    Readiness {
+        full: ready_by(ExecutorReport::ready),
+        lean: ready_by(ExecutorReport::ready_lean),
+    }
 }
 
 #[cfg(test)]
@@ -945,6 +1336,8 @@ mod tests {
     struct FakeRunner {
         replies: Mutex<HashMap<String, CmdOutput>>,
         calls: Mutex<Vec<String>>,
+        /// The folders `run_in` was asked to run in, in order.
+        dirs: Mutex<Vec<PathBuf>>,
         delay: Duration,
     }
 
@@ -986,6 +1379,11 @@ mod tests {
                 .or_else(|| replies.get(&args))
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("unexpected command {command:?}"))
+        }
+
+        async fn run_in(&self, program: &Path, args: &[&str], cwd: &Path) -> Result<CmdOutput> {
+            self.dirs.lock().unwrap().push(cwd.to_path_buf());
+            self.run(program, args).await
         }
     }
 
@@ -1030,6 +1428,7 @@ mod tests {
                     .collect(),
             ),
             calls: Mutex::new(Vec::new()),
+            dirs: Mutex::new(Vec::new()),
             delay: Duration::ZERO,
         }
     }
@@ -1065,7 +1464,7 @@ mod tests {
     /// `check_executor_detailed` on a program named like the executor.
     async fn detailed(kind: ExecutorKind, replies: &[(&str, CmdOutput)]) -> (ExecutorReport, bool) {
         let program = Some(PathBuf::from(kind.program_name()));
-        check_executor_detailed(kind, program, &runner(replies)).await
+        check_executor_detailed(kind, program, &runner(replies), None).await
     }
 
     #[tokio::test]
@@ -1821,7 +2220,7 @@ mod tests {
         assert!(!report.ready() && complete);
         // Not installed is a definite answer: no command was run that could have failed.
         let (report, complete) =
-            check_executor_detailed(ExecutorKind::Codex, None, &runner(&[])).await;
+            check_executor_detailed(ExecutorKind::Codex, None, &runner(&[]), None).await;
         assert!(!report.ready() && complete);
         // A `--version` that fails is an answer too; the version is only informational.
         let (report, complete) = detailed(
@@ -1989,14 +2388,56 @@ mod tests {
             logged_in,
             linear_mcp: true,
             problems: Vec::new(),
+            lean_linear_mcp: true,
+            lean_logged_in: true,
+            lean_problems: Vec::new(),
         };
         let reports = [
             report(ExecutorKind::Claude, false),
             report(ExecutorKind::Codex, true),
         ];
         let ready: HashSet<_> = [ExecutorKind::Codex].into_iter().collect();
-        assert_eq!(ready_set(&reports), ready);
-        assert!(ready_set(&[]).is_empty());
+        assert_eq!(ready_set(&reports).full, ready);
+        assert_eq!(ready_set(&[]), Readiness::default());
+    }
+
+    #[test]
+    fn ready_set_keeps_full_and_lean_apart() {
+        let report = |kind, lean_linear_mcp, lean_logged_in| ExecutorReport {
+            kind,
+            program: Some(PathBuf::from(kind.program_name())),
+            version: None,
+            logged_in: true,
+            linear_mcp: true,
+            problems: Vec::new(),
+            lean_linear_mcp,
+            lean_logged_in,
+            lean_problems: Vec::new(),
+        };
+        let both: HashSet<_> = [ExecutorKind::Claude, ExecutorKind::Codex]
+            .into_iter()
+            .collect();
+        let claude: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();
+        assert_eq!(
+            ready_set(&[
+                report(ExecutorKind::Claude, true, true),
+                report(ExecutorKind::Codex, true, false),
+            ]),
+            Readiness {
+                full: both.clone(),
+                lean: claude.clone(),
+            }
+        );
+        assert_eq!(
+            ready_set(&[
+                report(ExecutorKind::Claude, true, true),
+                report(ExecutorKind::Codex, false, true),
+            ]),
+            Readiness {
+                full: both,
+                lean: claude,
+            }
+        );
     }
 
     #[test]
@@ -2024,10 +2465,390 @@ mod tests {
                 effort: None,
             });
         }
-        let ready: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();
-        let reports = check_bindings(&cfg, &ready);
+        let claude: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();
+        let ready = Readiness {
+            full: claude.clone(),
+            lean: claude,
+        };
+        let reports = check_bindings(&cfg, &ready, None);
         assert!(reports[0].directory_exists && reports[0].executor_ready);
         assert!(!reports[1].directory_exists && !reports[1].executor_ready);
+    }
+
+    #[test]
+    fn binding_reports_say_whether_lean_runs_apply() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        for (project, dir, permission) in [
+            ("proj-1", elsewhere.path(), None),
+            (
+                "proj-2",
+                elsewhere.path(),
+                Some(crate::config::PermissionProfile::Personal),
+            ),
+            ("proj-3", home.path(), None),
+        ] {
+            cfg.bindings.push(crate::config::Binding {
+                id: project.into(),
+                project_id: project.into(),
+                project_name: "Demo Project".into(),
+                directory: dir.to_path_buf(),
+                executor: None,
+                permission,
+                model: None,
+                prompt_override: None,
+                lean: true,
+                effort: None,
+            });
+        }
+        let ready = Readiness {
+            full: [ExecutorKind::Claude].into_iter().collect(),
+            lean: HashSet::new(),
+        };
+        let reports = check_bindings(&cfg, &ready, Some(home.path()));
+        let seen: Vec<_> = reports.iter().map(|r| (r.lean, r.executor_ready)).collect();
+        assert_eq!(
+            seen,
+            [
+                (LeanStatus::On, false),
+                (LeanStatus::Personal, true),
+                (LeanStatus::HomeDirectory, true),
+            ]
+        );
+    }
+
+    /// The lean checks of the tests: a folder in `dir` (the check makes it; the fake runner never
+    /// enters it) and no Codex configuration file.
+    fn lean_paths(dir: &tempfile::TempDir) -> LeanCheckPaths {
+        LeanCheckPaths {
+            empty_dir: dir.path().join("lean-check"),
+            codex_config: None,
+        }
+    }
+
+    /// `check_executor_detailed` with the lean checks.
+    async fn lean_detailed(
+        kind: ExecutorKind,
+        replies: &[(&str, CmdOutput)],
+        lean: &LeanCheckPaths,
+    ) -> (ExecutorReport, bool) {
+        let program = Some(PathBuf::from(kind.program_name()));
+        check_executor_detailed(kind, program, &runner(replies), Some(lean)).await
+    }
+
+    const CLAUDE_USUAL: &str =
+        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#;
+
+    /// A Claude whose usual checks pass; `lean` answers the lean sign-in check.
+    fn claude_replies(lean: CmdOutput, mcp: &str) -> Vec<(&'static str, CmdOutput)> {
+        vec![
+            ("--version", out(0, "2.1.285 (Claude Code)")),
+            ("auth status", out(0, CLAUDE_USUAL)),
+            ("--setting-sources project,local auth status", lean),
+            ("mcp list", out(0, mcp)),
+        ]
+    }
+
+    /// A Codex whose usual checks pass; `lean` answers the lean sign-in check.
+    fn codex_replies(lean: CmdOutput) -> Vec<(&'static str, CmdOutput)> {
+        vec![
+            ("--version", out(0, "codex-cli 0.159.2")),
+            ("login status", out(0, "Logged in using ChatGPT")),
+            ("-c cli_auth_credentials_store=file login status", lean),
+            ("mcp list", out(0, CODEX_OK)),
+        ]
+    }
+
+    #[test]
+    fn lean_linear_needs_the_exact_name_and_url() {
+        assert!(mcp_list_has_lean_linear(ExecutorKind::Claude, CLAUDE_OK));
+        for line in [
+            "linear: https://mcp.linear.app/mcp (HTTP) - ✔ Connected",
+            "claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected",
+            "linear-server: https://mcp.linear.app/sse (HTTP) - ✔ Connected",
+            "linear-server: https://mcp.linear.app/mcp?x=1 (HTTP) - ✔ Connected",
+            CLAUDE_AUTH,
+        ] {
+            assert!(
+                !mcp_list_has_lean_linear(ExecutorKind::Claude, line),
+                "{line}"
+            );
+        }
+        let mixed =
+            format!("claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected\n{CLAUDE_OK}\n");
+        assert!(mcp_list_has_lean_linear(ExecutorKind::Claude, &mixed));
+        assert!(mcp_list_has_lean_linear(ExecutorKind::Codex, CODEX_OK));
+        for line in [
+            "linear-alt  https://mcp.linear.app/mcp  -  enabled  OAuth",
+            "linear  https://mcp.linear.app/mcp  -  enabled  Not logged in",
+            "linear  https://mcp.linear.app/sse  -  enabled  OAuth",
+        ] {
+            assert!(
+                !mcp_list_has_lean_linear(ExecutorKind::Codex, line),
+                "{line}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lean_problems_name_the_server_lean_runs_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let connector = "claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected";
+        let (report, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, CLAUDE_USUAL), connector),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("`linear-server`")
+                    && p.contains("claude mcp add --scope user --transport http linear-server")),
+            "{report:?}"
+        );
+        let elsewhere = "linear-server: https://mcp.linear.app/sse (HTTP) - ✔ Connected";
+        let (report, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, CLAUDE_USUAL), elsewhere),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(!report.ready_lean());
+        assert!(
+            report
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("points to https://mcp.linear.app/sse")),
+            "{report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_lean_login_must_match_the_usual_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (same, complete) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(complete);
+        assert!(same.ready_lean(), "{same:?}");
+        assert!(same.lean_problems.is_empty(), "{same:?}");
+        let api_key = r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#;
+        let (other, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, api_key), CLAUDE_OK),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(other.ready() && !other.ready_lean(), "{other:?}");
+        assert!(
+            other
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("api_key") && p.contains("claude.ai")),
+            "{other:?}"
+        );
+        let (signed_out, _) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_replies(out(0, r#"{"loggedIn":false}"#), CLAUDE_OK),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(!signed_out.ready_lean());
+        assert!(
+            signed_out
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("not signed in")),
+            "{signed_out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claude_lean_login_check_runs_in_the_empty_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = runner(&claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK));
+        let (report, _) = check_executor_detailed(
+            ExecutorKind::Claude,
+            Some(PathBuf::from("claude")),
+            &fake,
+            Some(&lean_paths(&dir)),
+        )
+        .await;
+        assert!(report.ready_lean(), "{report:?}");
+        let empty = dir.path().join("lean-check");
+        assert_eq!(*fake.dirs.lock().unwrap(), std::slice::from_ref(&empty));
+        assert!(empty.is_dir(), "the check makes the folder");
+    }
+
+    #[tokio::test]
+    async fn a_lean_check_folder_that_cannot_be_made_is_a_lean_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "").unwrap();
+        let blocked = LeanCheckPaths {
+            empty_dir: file.join("lean-check"),
+            codex_config: None,
+        };
+        let fake = runner(&claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK));
+        let (report, complete) = check_executor_detailed(
+            ExecutorKind::Claude,
+            Some(PathBuf::from("claude")),
+            &fake,
+            Some(&blocked),
+        )
+        .await;
+        assert!(
+            complete && report.ready() && !report.ready_lean(),
+            "{report:?}"
+        );
+        assert!(
+            report.lean_problems.iter().any(|p| p
+                .starts_with("could not prepare the folder for the lean sign-in check: ")),
+            "{report:?}"
+        );
+        assert!(
+            fake.dirs.lock().unwrap().is_empty(),
+            "the check did not run"
+        );
+    }
+
+    #[test]
+    fn codex_config_follows_codex_home() {
+        let home = PathBuf::from("demo-home");
+        assert_eq!(
+            codex_config_path_from(Some("demo-codex".into()), Some(home.clone())),
+            Some(PathBuf::from("demo-codex").join("config.toml"))
+        );
+        let usual = Some(home.join(".codex").join("config.toml"));
+        assert_eq!(codex_config_path_from(None, Some(home.clone())), usual);
+        assert_eq!(codex_config_path_from(Some("".into()), Some(home)), usual);
+        assert_eq!(codex_config_path_from(None, None), None);
+    }
+
+    #[tokio::test]
+    async fn codex_lean_login_reads_the_file_store_and_must_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let (same, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(out(0, "Logged in using ChatGPT")),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(same.ready_lean(), "{same:?}");
+        let (signed_out, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(out(1, "Not logged in")),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(signed_out.ready() && !signed_out.ready_lean());
+        assert!(
+            signed_out
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("not signed in")),
+            "{signed_out:?}"
+        );
+        let (other, _) = lean_detailed(
+            ExecutorKind::Codex,
+            &codex_replies(out(0, "Logged in using an API key")),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(!other.ready_lean());
+        assert!(
+            other.lean_problems.iter().any(|p| p.contains("an api key")),
+            "{other:?}"
+        );
+    }
+
+    #[test]
+    fn codex_custom_providers_are_found() {
+        assert_eq!(
+            codex_custom_provider("model_provider = \"azure\"\n").unwrap(),
+            Some("azure".into())
+        );
+        assert_eq!(
+            codex_custom_provider("model_provider = \"openai\"\n").unwrap(),
+            None
+        );
+        assert_eq!(
+            codex_custom_provider(
+                "profile = \"work\"\n[profiles.work]\nmodel_provider = \"demo\"\n"
+            )
+            .unwrap(),
+            Some("demo".into())
+        );
+        assert_eq!(
+            codex_custom_provider("model = \"gpt-5.5\"\n").unwrap(),
+            None
+        );
+        assert_eq!(codex_custom_provider("").unwrap(), None);
+        assert!(codex_custom_provider("model_provider = ").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_custom_codex_model_provider_rules_out_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "model_provider = \"azure\"\n").unwrap();
+        let custom = LeanCheckPaths {
+            codex_config: Some(config),
+            ..lean_paths(&dir)
+        };
+        let replies = codex_replies(out(0, "Logged in using ChatGPT"));
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &custom).await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report.lean_problems.iter().any(|p| p.contains("azure")),
+            "{report:?}"
+        );
+        // A missing file means the default provider.
+        let missing = LeanCheckPaths {
+            codex_config: Some(dir.path().join("missing.toml")),
+            ..lean_paths(&dir)
+        };
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &missing).await;
+        assert!(report.ready_lean(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn without_the_lean_checks_lean_runs_are_not_ready() {
+        let report = check_executor(
+            ExecutorKind::Claude,
+            Some(PathBuf::from("claude")),
+            &both_ready(),
+        )
+        .await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(!report.lean_problems.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lean_sign_in_check_runs_together_with_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        // Four parties: a check that ran the lean sign-in check after the others never ends.
+        let runner =
+            BarrierRunner::new(4, runner(&claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK)));
+        let checked = tokio::time::timeout(
+            Duration::from_secs(5),
+            check_executor_detailed(
+                ExecutorKind::Claude,
+                Some(PathBuf::from("claude")),
+                &runner,
+                Some(&lean_paths(&dir)),
+            ),
+        )
+        .await;
+        let (report, _) = checked.expect("the four commands must run at the same time");
+        assert!(report.ready_lean(), "{report:?}");
     }
 
     #[test]

@@ -660,6 +660,20 @@ async fn run_script(runner: &SystemRunner, script: &Path, args: &[&str]) -> Resu
     }
 }
 
+/// `run_script` through `run_in`, in `cwd`.
+async fn run_script_in(runner: &SystemRunner, script: &Path, cwd: &Path) -> Result<CmdOutput> {
+    let mut retries = 0;
+    loop {
+        match runner.run_in(script, &[], cwd).await {
+            Err(err) if retries < 5 && is_executable_file_busy(&err) => {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 fn is_executable_file_busy(err: &anyhow::Error) -> bool {
     err.downcast_ref::<std::io::Error>()
         .is_some_and(|e| e.kind() == std::io::ErrorKind::ExecutableFileBusy)
@@ -776,4 +790,41 @@ async fn a_check_runs_in_the_home_directory_with_the_shared_environment_windows(
     std::fs::write(&script, "@echo %ISSUERELAY_TEST_PROXY% %CD%\r\n").unwrap();
     let home = dirs::home_dir().expect("the test user has a home directory");
     assert_check_runs_in_the_home_directory_with_the_shared_environment(&script, &home).await;
+}
+
+/// `script` ignores its arguments and prints its working directory. `run_in` has to run the
+/// check there, not in the home directory: Claude's lean sign-in check runs in an empty folder.
+async fn assert_run_in_runs_in_the_folder(script: &Path) {
+    let folder = tempfile::tempdir().unwrap();
+    let output = run_script_in(&SystemRunner::default(), script, folder.path())
+        .await
+        .unwrap();
+    // Compared once resolved: the temporary folder may be reached through a link (macOS) or by
+    // its short name (Windows).
+    assert_eq!(
+        Path::new(output.stdout.trim_end()).canonicalize().unwrap(),
+        folder.path().canonicalize().unwrap(),
+        "{output:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_in_runs_the_check_in_the_folder_it_is_given_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.sh");
+    std::fs::write(&script, "#!/bin/sh\npwd -P\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_run_in_runs_in_the_folder(&script).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn run_in_runs_the_check_in_the_folder_it_is_given_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("check.cmd");
+    std::fs::write(&script, "@echo %CD%\r\n").unwrap();
+    assert_run_in_runs_in_the_folder(&script).await;
 }

@@ -52,7 +52,7 @@ use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
 use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
-use crate::trigger::{self, Eligibility, WaitReason, WaitReasonView, same_name};
+use crate::trigger::{self, Eligibility, Readiness, WaitReason, WaitReasonView, same_name};
 
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
@@ -838,7 +838,7 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                match trigger::evaluate(&issue, &cfg, &me.id, &ready) {
+                match trigger::evaluate(&issue, &cfg, &me.id, &ready, None) {
                     Eligibility::Eligible(_) => IssueStatus::Eligible {
                         // What the poll does with such an issue (`reconcile`): a run in hand stays
                         // as it is, anything else is recorded anew only when `should_enqueue` says
@@ -884,7 +884,7 @@ impl Engine {
         Ok(viewer)
     }
 
-    async fn readiness(&self) -> (HashSet<ExecutorKind>, Vec<ExecutorReport>) {
+    async fn readiness(&self) -> (Readiness, Vec<ExecutorReport>) {
         let reports = self.inner.readiness.executor_reports(false).await;
         (doctor::ready_set(&reports), reports)
     }
@@ -942,7 +942,7 @@ impl Engine {
         cfg: &Config,
         me: &Viewer,
         issues: &[Issue],
-        ready: &HashSet<ExecutorKind>,
+        ready: &Readiness,
         changed: &mut Vec<i64>,
     ) -> Result<()> {
         let names = &cfg.settings.trigger;
@@ -952,7 +952,7 @@ impl Engine {
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready);
+            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, None);
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
@@ -1273,7 +1273,7 @@ impl Engine {
         linear: &dyn LinearApi,
         cfg: &Config,
         me: &Viewer,
-        ready: &HashSet<ExecutorKind>,
+        ready: &Readiness,
         reports: &[ExecutorReport],
         job: Job,
     ) -> Result<bool> {
@@ -1296,7 +1296,7 @@ impl Engine {
             }
             return Ok(false);
         };
-        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready) {
+        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, None) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
                 let waiting = self.assign_if_queued(
@@ -1816,7 +1816,7 @@ impl Engine {
             linear_error,
             executors,
             workspace,
-            bindings: doctor::check_bindings(&cfg, &ready),
+            bindings: doctor::check_bindings(&cfg, &ready, None),
             env,
         }
     }

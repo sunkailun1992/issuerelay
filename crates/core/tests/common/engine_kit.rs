@@ -33,6 +33,9 @@ impl ReadinessProbe for FakeReadiness {
                 logged_in: true,
                 linear_mcp: true,
                 problems: Vec::new(),
+                lean_linear_mcp: true,
+                lean_logged_in: true,
+                lean_problems: Vec::new(),
             })
             .collect()
     }

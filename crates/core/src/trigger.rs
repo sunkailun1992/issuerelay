@@ -1,11 +1,11 @@
 //! Which issues IssueRelay should pick up, and when an issue it already handled comes back.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
+use crate::config::{Binding, Config, ExecutorKind, LeanStatus, TriggerNames};
 use crate::model::{Issue, Job};
 
 /// Why an issue that looks eligible has to wait.
@@ -56,6 +56,27 @@ impl WaitReason {
     }
 }
 
+/// Which executors can take runs (lean-run design, section 7): `full` with the user's whole
+/// configuration, `lean` also in lean runs, which need the Linear server and the sign-in that
+/// lean runs use. `doctor::ready_set` builds it from the executor reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Readiness {
+    pub full: HashSet<ExecutorKind>,
+    pub lean: HashSet<ExecutorKind>,
+}
+
+impl Readiness {
+    /// Whether `kind` can take the runs of a binding whose lean status is `lean`: a binding whose
+    /// runs are lean needs the lean checks, every other binding the usual ones.
+    pub fn ready(&self, kind: ExecutorKind, lean: LeanStatus) -> bool {
+        if lean.applies() {
+            self.lean.contains(&kind)
+        } else {
+            self.full.contains(&kind)
+        }
+    }
+}
+
 /// The outcome of `evaluate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Eligibility {
@@ -80,12 +101,15 @@ pub fn is_candidate(issue: &Issue, names: &TriggerNames, me: &str) -> bool {
 }
 
 /// Checks the binding, that its directory exists (the only filesystem access in this
-/// module) and that the executor is ready.
+/// module, besides comparing that directory with `home` for its lean status) and that the
+/// executor is ready for the binding's runs, lean or not. `home` is the user's home folder;
+/// `None` when it is not known.
 pub fn evaluate(
     issue: &Issue,
     cfg: &Config,
     me: &str,
-    ready: &HashSet<ExecutorKind>,
+    ready: &Readiness,
+    home: Option<&Path>,
 ) -> Eligibility {
     if !is_candidate(issue, &cfg.settings.trigger, me) {
         return Eligibility::NotCandidate;
@@ -101,7 +125,7 @@ pub fn evaluate(
         return Eligibility::Waiting(WaitReason::DirectoryMissing(binding.directory.clone()));
     }
     let kind = cfg.executor_for(binding);
-    if !ready.contains(&kind) {
+    if !ready.ready(kind, cfg.lean_for(binding, home)) {
         return Eligibility::Waiting(WaitReason::ExecutorNotReady(kind));
     }
     Eligibility::Eligible(binding.clone())
@@ -192,10 +216,22 @@ mod tests {
         }
     }
 
-    fn all_ready() -> HashSet<ExecutorKind> {
-        [ExecutorKind::Claude, ExecutorKind::Codex]
+    fn all_ready() -> Readiness {
+        let both: HashSet<_> = [ExecutorKind::Claude, ExecutorKind::Codex]
             .into_iter()
-            .collect()
+            .collect();
+        Readiness {
+            full: both.clone(),
+            lean: both,
+        }
+    }
+
+    /// `kind` is ready with the user's whole configuration only: its lean checks failed.
+    fn full_only(kind: ExecutorKind) -> Readiness {
+        Readiness {
+            full: [kind].into_iter().collect(),
+            lean: HashSet::new(),
+        }
     }
 
     #[test]
@@ -224,11 +260,11 @@ mod tests {
     fn unbound_project_waits() {
         let cfg = Config::default();
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready()),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
             Eligibility::Waiting(WaitReason::ProjectNotBound)
         );
         assert_eq!(
-            evaluate(&issue(None), &cfg, "me", &all_ready()),
+            evaluate(&issue(None), &cfg, "me", &all_ready(), None),
             Eligibility::Waiting(WaitReason::ProjectNotBound)
         );
     }
@@ -239,7 +275,7 @@ mod tests {
         let missing = root.path().join("missing");
         let cfg = config_with("proj-1", &missing, None);
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready()),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
             Eligibility::Waiting(WaitReason::DirectoryMissing(missing))
         );
     }
@@ -248,9 +284,12 @@ mod tests {
     fn executor_not_ready_waits() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with("proj-1", dir.path(), Some(ExecutorKind::Codex));
-        let only_claude: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();
+        let only_claude = Readiness {
+            full: [ExecutorKind::Claude].into_iter().collect(),
+            lean: [ExecutorKind::Claude].into_iter().collect(),
+        };
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &only_claude),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &only_claude, None),
             Eligibility::Waiting(WaitReason::ExecutorNotReady(ExecutorKind::Codex))
         );
     }
@@ -259,7 +298,7 @@ mod tests {
     fn bound_ready_issue_is_eligible() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with("proj-1", dir.path(), None);
-        match evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready()) {
+        match evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None) {
             Eligibility::Eligible(binding) => assert_eq!(binding.project_id, "proj-1"),
             other => panic!("expected eligible, got {other:?}"),
         }
@@ -269,7 +308,7 @@ mod tests {
     fn non_candidate_is_not_evaluated_further() {
         let cfg = Config::default();
         assert_eq!(
-            evaluate(&issue(None), &cfg, "other", &all_ready()),
+            evaluate(&issue(None), &cfg, "other", &all_ready(), None),
             Eligibility::NotCandidate
         );
     }
@@ -431,5 +470,46 @@ mod tests {
             WaitReason::ExecutorNotReady(ExecutorKind::Codex).describe(),
             "executor codex is not ready"
         );
+    }
+
+    #[test]
+    fn lean_bindings_wait_for_the_lean_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with("proj-1", dir.path(), None);
+        assert_eq!(
+            evaluate(
+                &issue(Some("proj-1")),
+                &cfg,
+                "me",
+                &full_only(ExecutorKind::Claude),
+                None
+            ),
+            Eligibility::Waiting(WaitReason::ExecutorNotReady(ExecutorKind::Claude))
+        );
+        assert!(matches!(
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
+            Eligibility::Eligible(_)
+        ));
+    }
+
+    #[test]
+    fn personal_home_and_lean_off_bindings_use_the_full_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = full_only(ExecutorKind::Claude);
+        let mut personal = config_with("proj-1", dir.path(), None);
+        personal.bindings[0].permission = Some(crate::config::PermissionProfile::Personal);
+        let mut off = config_with("proj-1", dir.path(), None);
+        off.bindings[0].lean = false;
+        let at_home = config_with("proj-1", dir.path(), None);
+        for (cfg, home) in [(personal, None), (off, None), (at_home, Some(dir.path()))] {
+            assert!(
+                matches!(
+                    evaluate(&issue(Some("proj-1")), &cfg, "me", &ready, home),
+                    Eligibility::Eligible(_)
+                ),
+                "{:?}",
+                cfg.bindings[0]
+            );
+        }
     }
 }
