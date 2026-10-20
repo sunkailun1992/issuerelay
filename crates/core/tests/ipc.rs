@@ -866,14 +866,22 @@ async fn an_over_long_line_gets_a_parse_error_and_the_connection_closes() {
 
 /// The next response while the clock is frozen. A frozen clock jumps to the next timer whenever
 /// the runtime goes idle, even with socket data on its way, so this waits by yielding: the
-/// runtime never goes idle, and the server's side of the exchange still gets to run.
+/// runtime never goes idle, and the server's side of the exchange still gets to run. The frozen
+/// clock stands still meanwhile and never reaches the 10 seconds `Wire::response` allows, so they
+/// are counted on the real clock: a server that never answers fails the test instead of keeping
+/// it spinning.
 async fn response_without_idling(wire: &mut Wire) -> Option<Response> {
+    let started = std::time::Instant::now();
     let mut response = Box::pin(wire.response());
     loop {
         tokio::select! {
             result = &mut response => return result,
             _ = tokio::task::yield_now() => {}
         }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no answer and no hang-up within 10 s"
+        );
     }
 }
 
@@ -897,9 +905,14 @@ async fn a_connection_is_closed_after_a_minute_without_a_request() {
     let early = tokio::time::timeout(Duration::from_millis(100), wire.response()).await;
     assert!(early.is_err(), "closed before a minute of silence");
     tokio::time::advance(Duration::from_secs(2)).await;
-    let late = tokio::time::timeout(Duration::from_secs(1), wire.response()).await;
+    // The minute is up and the server hangs up, but the hang-up still has to cross the real
+    // socket or pipe; a Windows pipe delivers it through the completion port, which can take
+    // longer than the runtime takes to go idle. A frozen clock would then jump to the next timer
+    // and end the wait at once, so the clock runs again for this last wait: real time, at most
+    // the 10 seconds `Wire::response` allows.
+    tokio::time::resume();
     assert!(
-        matches!(late, Ok(None)),
+        wire.response().await.is_none(),
         "still open after a minute of silence"
     );
     token.cancel();
@@ -941,7 +954,9 @@ async fn a_request_slower_than_the_idle_timeout_is_answered_not_cut_off() {
     let mut wire = Wire::connect(&endpoint).await;
     wire.send(&request_line(1, "doctor")).await.unwrap();
     // Real time until the server is inside the request; the clock is frozen only then.
-    asked.notified().await;
+    tokio::time::timeout(Duration::from_secs(10), asked.notified())
+        .await
+        .expect("the server never started on the request");
     tokio::time::pause();
     // Past the idle limit the request is still being handled: the connection stays open and
     // nothing is answered yet. (Handling is not reading, so no idle timer runs meanwhile.)
