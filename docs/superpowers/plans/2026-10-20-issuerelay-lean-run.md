@@ -380,7 +380,7 @@ git commit -m "feat(executor): add lean run and reasoning effort arguments"
 - `spec.lean` 为真时建 `LeanCheck`。
 - 每行标准输出先照常写进日志，再交给它。
 - 第一次违反就 `break ExitKind::LeanNotApplied(说明)`；之后的拆除与用户点「停止」相同（`guard.end()`）。循环结束后排空的那几行照常记日志，不再核对。
-- `notes` 每条按现有截断提示的写法记成 stderr 行，以 `[IssueRelay] ` 开头。
+- `notes` 每条按现有截断提示的写法记成 stderr 行，以 `[IssueRelay] ` 开头。（后来改为 `runner` 流、不带前缀，见末节「运行日志开头的说明」一行。）
 - `spec.env` 在 `env.apply(c)` 之后设置，所以 `REMOVED_VARS` 不会把它去掉。
 - `finish_job`：Linear 读不到时，结束方式为 `LeanNotApplied` 的运行仍记 `Failed`，原因保留精简那一句，不换成 `could not verify the result in Linear: …`。
 
@@ -405,7 +405,7 @@ git commit -m "feat(executor): add lean run and reasoning effort arguments"
 `tests/runner.rs`（假执行者）：
 - `a_lean_violation_ends_the_run_like_a_stop`：脚本先打一行带两个服务的 `init`，再 `sleep_ms` 30000；`spec.lean = true` → `exit` 匹配 `LeanNotApplied(_)`，10 秒内返回，日志里有那行 `init`。
 - `a_full_run_is_not_checked`：同样的 `init`，`sleep_ms` 50，`exit` 0；`spec.lean = false` → `Exited(Some(0))`。
-- `notes_come_first_in_the_log`：`notes = ["demo note"]` → 日志第一行含 `[IssueRelay] demo note`。
+- `notes_come_first_in_the_log`：`notes = ["demo note"]` → 日志第一行含 `[IssueRelay] demo note`。（后来改为 `runner` 流的 `demo note`，同上。）
 - `the_runs_own_variables_reach_the_executor`：`env = [("ISSUERELAY_DEMO_VAR", "1")]`，脚本用假执行者已有的 `{"print_env": "ISSUERELAY_DEMO_VAR"}` → 日志含 `ISSUERELAY_DEMO_VAR=1`；`env` 为空时是 `ISSUERELAY_DEMO_VAR=<unset>`。
 
 `engine.rs` 的单元测试：
@@ -914,7 +914,7 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 
 本计划执行中，Task 3–6 的逐任务评审与整条分支的最终评审接受、没有修复的项，留给所有者决定的事，以及还要在真实机器上确认的事。各评审的严重与应该修的问题都已修复并补了测试。SDD 工作区在合并后删除，这里是这些结论唯一的存放处；写后续计划或做验收时逐条认领，或写明不做及原因。
 
-2026-10-20 的小项清理（PR #8）认领了「最终评审」与「逐任务评审」两张表里属于测试、注释与小改动的各行；每行的「认领」一栏写明做了什么，没做的写明原因。「留给所有者决定」与实机验收那张表没有动。
+2026-10-20 的小项清理（PR #8）认领了「最终评审」与「逐任务评审」两张表里属于测试、注释与小改动的各行；每行的「认领」一栏写明做了什么，没做的写明原因；推送后做了一次独立评审，它找出的问题也在同一 PR 里修了。「留给所有者决定」与实机验收那张表没有动。
 
 **留给所有者决定**
 
@@ -955,11 +955,11 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 | 引擎测试 `a_lean_violation_keeps_its_reason_when_linear_cannot_be_read` 没有断言走的是读不到 Linear 的分支（`verified_updated_at == None`） | 已做（PR #8） |
 | 精简没有生效时，最后一次读 Linear 的错误既不在原因里，也没写进程序日志 | 已做（PR #8）：带任务与需求编号的警告；测试 `a_lean_violation_whose_result_cannot_be_read_logs_why` |
 | 测试没有钉住：精简停止时整棵进程树被结束（可比照 `an_escaped_grandchild_is_ended_on_cancel`）；`spec.env` 盖过 `ExecEnv::apply` 设的同名变量；`LeanCheck` 的缺 `type`、`result` 早于 `init`、Codex 缺 `server` 三种情形 | 已做（PR #8）：`an_escaped_grandchild_is_ended_when_lean_stops_the_run`（假执行者加了 `wait_for` 一步）、`the_runs_own_variables_win_over_the_executor_environment`、`an_event_without_a_type_before_init_is_a_violation`、`a_result_before_init_is_a_violation`、`a_codex_call_that_names_no_server_is_a_violation` |
-| 排空阶段不再核对（计划的决定）：执行者退出时还在队列里的违规行只写进日志，Codex 的运行这时按现有规则判定 | 已做（PR #8）：照这个改；因别的原因停下的运行保留原来的结束方式。测试 `a_violation_read_after_the_executor_exited_still_fails_a_lean_run`（Unix；假执行者加了 `late_out` 一步：Windows 上 Job Object 把晚到的那个进程一起结束，造不出这种情形） |
+| 排空阶段不再核对（计划的决定）：执行者退出时还在队列里的违规行只写进日志，Codex 的运行这时按现有规则判定 | 已做（PR #8）：照这个改；因别的原因停下的运行保留原来的结束方式。测试 `a_violation_read_after_the_executor_exited_still_fails_a_lean_run`（Unix；假执行者加了 `late_out` 一步：Windows 上运行器在退出后马上结束 Job Object，晚到的那个进程随之结束，造不出这种情形）；独立评审后另补两个分支：`a_clean_lean_run_whose_result_comes_after_the_exit_passes`（排空沿用主循环的核对，干净运行的结果在排空里不算违规）与 `the_violation_that_stopped_a_lean_run_is_the_one_it_keeps`（已被拦下的运行在排空里再读到违规，原因与说明都不变） |
 | 运行日志开头的说明用 `stream: "stderr"`，面板时间线把它显示成执行者的标准错误；拦下时也没有一行 IssueRelay 自己的说明 | 已做（PR #8）：开头的说明改用 `runner` 流，去掉 `[IssueRelay] ` 前缀；拦下时补一行 `lean run did not take effect: <细节>; stopping the run`，排空时才判定的写 `…; the executor had already exited`；`AI_CODING_GUIDE.md` 第 6 节的运行日志一行同步 |
 | `memory_paths` 里不是字符串的值（例如 `{"auto": true}`）会放行 | 若有执行者这样写再改。小项清理没做：这个条件还没出现 |
 | Codex 的 `mcp list` 一行 Auth 栏是 `Bearer token` 或 `Unsupported` 时，精简的 Linear 判定也算可用；精简运行丢掉用户配置，只有已存的 OAuth 能用，`required=true` 会让运行一开始就退出 | 沙箱核对 codex-cli 0.159.2 的 Auth 栏含义后，精简判定要求 `OAuth`；Claude 一侧可另要求 `(HTTP)`。小项清理没做：要先在沙箱上实测，再改判定，留给所有者 |
-| Codex 用 API key 登录时 `login status` 可能印出遮罩过的 key（`Logged in using an API key - <遮罩>`，仓库里没有样本），它会进精简问题的文字 | 已做（PR #8）：codex-cli 0.159.2 的源码印的是前 8 位与后 5 位；精简问题只写 ` - ` 之前的部分，两次登录仍整段比较，换了 key 的写 `would sign in with an api key, but not the one usual runs use`。测试 `a_lean_problem_names_a_codex_api_key_login_without_the_key` |
+| Codex 用 API key 登录时 `login status` 可能印出遮罩过的 key（`Logged in using an API key - <遮罩>`，仓库里没有样本），它会进精简问题的文字 | 已做（PR #8）：codex-cli 0.159.2 的源码印的是前 8 位与后 5 位；精简问题只写开头的词（到第一个既不是字母也不是空格的字符为止，所以 ` - ` 之后的遮罩 key 不写，以后换了印法也不写；什么都不剩时写 `an unknown method`），两次登录仍整段比较，换了 key 的写 `would sign in with an api key, but not the one usual runs use`。测试 `a_lean_problem_names_a_codex_api_key_login_without_the_key`、`a_codex_sign_in_is_shown_by_the_words_it_starts_with` |
 | 几条裁定没有测试钉住：`mcp list` 崩溃时不加精简问题；平常登录为否时不做精简登录比较；`lean_linear_needs_the_exact_name_and_url` 没有 `plugin:` 前缀的反例；`codex_custom_providers_are_found` 没有「顶层与档案都设了」的情形 | 已做（PR #8）：`a_crashed_mcp_list_adds_no_lean_problem`、`a_usual_login_that_says_logged_out_is_not_compared_for_lean_runs`，另两个测试各补了反例与情形 |
 | 面板的精简一节没有一键修复按钮：报告分不清「缺这个服务」与「这个名字指向别的网址」 | 要做时给 `ExecutorReport` 加一个结构化的精简 Linear 结论。小项清理没做：这是新功能，留给所有者 |
 
