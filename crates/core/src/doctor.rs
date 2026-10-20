@@ -2605,6 +2605,8 @@ mod tests {
             "claude.ai Linear: https://mcp.linear.app/mcp - ✔ Connected",
             "linear-server: https://mcp.linear.app/sse (HTTP) - ✔ Connected",
             "linear-server: https://mcp.linear.app/mcp?x=1 (HTTP) - ✔ Connected",
+            // A plugin's server of that name: lean runs load no plugin's servers.
+            "plugin:demo:linear-server: https://mcp.linear.app/mcp (HTTP) - ✔ Connected",
             CLAUDE_AUTH,
         ] {
             assert!(
@@ -2662,6 +2664,53 @@ mod tests {
                 .any(|p| p.contains("points to https://mcp.linear.app/sse")),
             "{report:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_crashed_mcp_list_adds_no_lean_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let crashed = CmdOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "demo crash".into(),
+        };
+        let mut replies = claude_replies(out(0, CLAUDE_USUAL), "");
+        replies[3] = ("mcp list", crashed);
+        let (report, complete) =
+            lean_detailed(ExecutorKind::Claude, &replies, &lean_paths(&dir)).await;
+        assert!(!complete && !report.ready_lean(), "{report:?}");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p == "`claude mcp list` failed (exit code 1): demo crash"),
+            "{report:?}"
+        );
+        // That problem says it all: a crash says nothing about the server lean runs load.
+        assert!(report.lean_problems.is_empty(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn a_usual_login_that_says_logged_out_is_not_compared_for_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let logged_out = r#"{"loggedIn":false}"#;
+        let (report, complete) = lean_detailed(
+            ExecutorKind::Claude,
+            &claude_signing_in(logged_out, out(0, logged_out)),
+            &lean_paths(&dir),
+        )
+        .await;
+        assert!(complete, "{report:?}");
+        assert!(!report.logged_in && !report.lean_logged_in, "{report:?}");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p == "claude is not logged in"),
+            "{report:?}"
+        );
+        // "not logged in" says it all: the lean sign-in check adds nothing.
+        assert!(report.lean_problems.is_empty(), "{report:?}");
     }
 
     #[tokio::test]
@@ -3011,6 +3060,20 @@ mod tests {
             codex_custom_provider("model = \"gpt-5.5\"\n").unwrap(),
             None
         );
+        // Both set: the active profile's wins, also when it is the default; a profile that sets
+        // none leaves the top-level one.
+        let top_level = "model_provider = \"azure\"\nprofile = \"work\"\n[profiles.work]\n";
+        for (profile, provider) in [
+            ("model_provider = \"demo\"\n", Some("demo")),
+            ("model_provider = \"openai\"\n", None),
+            ("model = \"gpt-5.5\"\n", Some("azure")),
+        ] {
+            assert_eq!(
+                codex_custom_provider(&format!("{top_level}{profile}")).unwrap(),
+                provider.map(str::to_string),
+                "{profile}"
+            );
+        }
         assert_eq!(codex_custom_provider("").unwrap(), None);
         assert!(codex_custom_provider("model_provider = ").is_err());
     }
