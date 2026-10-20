@@ -2131,7 +2131,8 @@ async fn a_question_for_the_reporter_is_recorded_without_reading_again() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
-    // A question leaves the status at Todo, so Linear may well show the issue unchanged.
+    // The read shows the issue unchanged (an older snapshot, say). A question leaves the status
+    // at Todo either way, so it is recorded as one at once.
     h.runner
         .script("DEMO-1", leaving_the_issue_alone(Script::needs_info()));
     h.engine.tick().await.unwrap();

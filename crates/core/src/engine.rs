@@ -1584,8 +1584,8 @@ impl Engine {
                     (state, reason, None)
                 }
             };
-            // Only a failure is doubted: a question for the reporter leaves the issue at Todo, and
-            // may leave it unchanged, without anything being wrong.
+            // Only a failure is doubted. A question for the reporter is recorded at once: its
+            // status is Todo, and an older snapshot shows Todo as well.
             let doubtful = unchanged
                 && output.exit == ExitKind::Exited(Some(0))
                 && result.0 == JobState::Failed;
