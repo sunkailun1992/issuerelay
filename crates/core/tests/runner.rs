@@ -1034,16 +1034,17 @@ async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
 const OTHER_SERVER_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
 
 // The executor exits first and its last line comes after that, from a process that left its
-// process group: the lines still read once the executor has exited are checked too. (Windows: the
-// Job Object ends that process with the executor, so no line can come late; the check is the
-// same code there.)
+// process group: the lines still read once the executor has exited are checked too. The line comes
+// about a second after the exit, a second before the drain ends. (Windows: right after the exit
+// the runner ends the Job Object and that process with it, so this case cannot be made there; a
+// line written before the exit and read after it is checked by the same code.)
 #[cfg(unix)]
 #[tokio::test]
 async fn a_violation_read_after_the_executor_exited_still_fails_a_lean_run() {
     let dir = tempfile::tempdir().unwrap();
     let s = script(
         dir.path(),
-        serde_json::json!([{"late_out": OTHER_SERVER_CALL, "after_ms": 300}, {"exit": 0}]),
+        serde_json::json!([{"late_out": OTHER_SERVER_CALL, "after_ms": 1000}, {"exit": 0}]),
     );
     let log = dir.path().join("l.jsonl");
     let out = runner::run(
@@ -1075,6 +1076,92 @@ async fn a_violation_read_after_the_executor_exited_still_fails_a_lean_run() {
             && said.ends_with("; the executor had already exited"),
         "{lines:?}"
     );
+}
+
+// How a clean lean run often ends: the result comes once the executor has exited, so the drain
+// reads it. The drain goes on with the check that saw the init event, so the result is no
+// violation (a check of its own would take it for an event before the init event). The pause
+// lets the loop read the init event before the exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_clean_lean_run_whose_result_comes_after_the_exit_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#;
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"out": init},
+            {"sleep_ms": 200},
+            {"late_out": RESULT_LINE, "after_ms": 1000},
+            {"exit": 0}
+        ]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(out.final_text.as_deref(), Some(RESULT_TEXT));
+    let lines = log_lines(&log);
+    assert_eq!(lines, [init, RESULT_LINE]);
+}
+
+// Once the check has stopped a run, the lines drained after that are logged, not checked: the run
+// keeps the reason of the violation that stopped it, and one note. Both calls come in one write,
+// so the second is in the pipe before the run is stopped.
+#[tokio::test]
+async fn the_violation_that_stopped_a_lean_run_is_the_one_it_keeps() {
+    let dir = tempfile::tempdir().unwrap();
+    let call = |server: &str| {
+        format!(
+            r#"{{"type":"item.started","item":{{"id":"item_1","type":"mcp_tool_call","server":"{server}","tool":"search"}}}}"#
+        )
+    };
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"out": format!("{}\n{}", call("demo-a"), call("demo-b"))},
+            {"sleep_ms": 30_000}
+        ]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Codex,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    match &out.exit {
+        ExitKind::LeanNotApplied(detail) => {
+            assert!(
+                detail.contains("demo-a") && !detail.contains("demo-b"),
+                "{detail}"
+            )
+        }
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    let lines = log_lines(&log);
+    assert!(lines.iter().any(|l| l.contains("demo-b")), "{lines:?}");
+    let notes: Vec<String> = lines.iter().filter_map(|l| runner_note(l)).collect();
+    assert_eq!(notes.len(), 1, "{lines:?}");
+    assert!(notes[0].ends_with("; stopping the run"), "{notes:?}");
 }
 
 #[tokio::test]
