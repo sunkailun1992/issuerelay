@@ -692,17 +692,22 @@ fn codex_sign_in_method(stdout: &str, stderr: &str) -> Option<String> {
     ))
 }
 
-/// A Codex sign-in as a problem shows it: the method without what follows ` - `. After an API key
-/// login codex-cli 0.159.2 prints the key there, masked to its first eight and last five
-/// characters (`codex-rs/cli/src/login.rs` at `rust-v0.159.2`, read 2026-10-20). Two sign-ins
-/// are still compared whole, so another key is another sign-in, but no part of a key goes into a
-/// problem, which the panel, the CLI and MCP show.
+/// A Codex sign-in as a problem shows it: the words it starts with, up to the first character
+/// that is neither a letter nor a space (`an unknown method` when that leaves nothing). After an
+/// API key login codex-cli 0.159.2 prints ` - ` and the key there, masked to its first eight and
+/// last five characters (`codex-rs/cli/src/login.rs` at `rust-v0.159.2`, read 2026-10-20);
+/// cutting at any such character, not only at ` - `, keeps the key out of the problem also if a
+/// later version prints it some other way. Problems reach the panel, the CLI and MCP. The two
+/// sign-ins are still compared whole, so another key is another sign-in.
 fn codex_shown(method: &str) -> String {
-    method
-        .split_once(" - ")
-        .map_or(method, |(head, _)| head)
-        .trim()
-        .to_string()
+    let words: String = method
+        .chars()
+        .take_while(|c| c.is_alphabetic() || *c == ' ')
+        .collect();
+    match words.trim() {
+        "" => "an unknown method".to_string(),
+        words => words.to_string(),
+    }
 }
 
 /// Whether Codex's configuration file sets a model provider that lean runs, which ignore the
@@ -2867,6 +2872,21 @@ mod tests {
             code: Some(0),
             stdout: String::new(),
             stderr: format!("Logged in using an API key - {masked}\n"),
+        }
+    }
+
+    #[test]
+    fn a_codex_sign_in_is_shown_by_the_words_it_starts_with() {
+        for (method, shown) in [
+            ("chatgpt", "chatgpt"),
+            ("an api key", "an api key"),
+            ("an api key - demo-key***12345", "an api key"),
+            // Other ways a later codex-cli may print the key: none of it is shown either.
+            ("an api key: demo-key***12345", "an api key"),
+            ("an api key (demo-key***12345)", "an api key"),
+            ("", "an unknown method"),
+        ] {
+            assert_eq!(codex_shown(method), shown, "{method:?}");
         }
     }
 
