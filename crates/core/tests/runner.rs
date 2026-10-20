@@ -1011,6 +1011,42 @@ async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
     assert_stops_growing(&hb, "the escaped grandchild survived the lean stop").await;
 }
 
+/// A Codex event of a call to an MCP server other than Linear's.
+const OTHER_SERVER_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
+
+// The executor exits first and its last line comes after that, from a process that left its
+// process group: the lines still read once the executor has exited are checked too. (Windows: the
+// Job Object ends that process with the executor, so no line can come late; the check is the
+// same code there.)
+#[cfg(unix)]
+#[tokio::test]
+async fn a_violation_read_after_the_executor_exited_still_fails_a_lean_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"late_out": OTHER_SERVER_CALL, "after_ms": 300}, {"exit": 0}]),
+    );
+    let log = dir.path().join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Codex,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    match &out.exit {
+        ExitKind::LeanNotApplied(detail) => assert!(detail.contains("demo-tools"), "{detail}"),
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
+}
+
 #[tokio::test]
 async fn a_full_run_is_not_checked() {
     let dir = tempfile::tempdir().unwrap();

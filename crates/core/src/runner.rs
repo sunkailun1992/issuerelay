@@ -46,7 +46,8 @@ pub enum ExitKind {
     /// The log file could not be created or the executor could not be started.
     SpawnFailed(String),
     /// The output of a lean run showed that lean did not take effect (`lean::LeanCheck`), what
-    /// it showed being the text; the run was stopped as a cancelled one is.
+    /// it showed being the text; the run was stopped as a cancelled one is, unless the executor
+    /// had exited already.
     LeanNotApplied(String),
 }
 
@@ -529,7 +530,9 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 
 /// Runs `spec` until it exits, a limit is hit, `cancel` fires or, in a lean run (`spec.lean`),
 /// an output line shows that lean did not take effect (`lean::LeanCheck`): that line is logged
-/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. The JSONL file
+/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. Such a line
+/// among those still read after the executor exited on its own makes the run end that way too
+/// (after a stop for any other reason, the stop stands). The JSONL file
 /// at `log_path` is created (or truncated) and starts with `spec.notes`, each as a
 /// `{"stream":"stderr","text":"[IssueRelay] …"}` line; then it gets one line per output line:
 /// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. A run that cannot start gets one
@@ -634,7 +637,7 @@ pub async fn run(
     let deadline = checked_deadline(started, limits.total);
     let mut last_output = started;
     let mut pipes_open = true;
-    let exit = {
+    let mut exit = {
         // Wait on the executor process itself, not through the process-wrap wrapper. On Windows
         // the wrapper's wait() watches the job's completion port and may return on the first
         // message instead of reliably waiting for the whole job, so what it does while a
@@ -672,10 +675,19 @@ pub async fn run(
 
     // Kill whatever is left of the tree (also after a normal exit), then reap.
     guard.end().await;
-    // Keep lines already buffered; the final result often arrives right before exit.
+    // Keep lines already buffered; the final result often arrives right before exit. A lean run
+    // whose executor exited on its own is still checked: a line that shows lean did not take
+    // effect decides how the run ended, as it would have a moment earlier.
     let drain_until = Instant::now() + Duration::from_secs(2);
     while let Ok(Some(line)) = tokio::time::timeout_at(drain_until, rx.recv()).await {
+        let violation = match (&mut lean_check, &line, &exit) {
+            (Some(check), Line::Out(text), ExitKind::Exited(_)) => check.observe(text),
+            _ => None,
+        };
         log_failures.note(record(&mut log, &mut tracker, line).await);
+        if let Some(detail) = violation {
+            exit = ExitKind::LeanNotApplied(detail);
+        }
     }
     // A tokio file reports a failed write with a later call, so the last one shows here.
     log_failures.note(log.flush().await);
