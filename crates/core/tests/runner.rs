@@ -972,6 +972,45 @@ async fn a_lean_violation_ends_the_run_like_a_stop() {
     assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
 }
 
+// A lean stop ends the tree as a cancel does, including a grandchild that left the run's process
+// group (Linux, not a target platform, skips it as above). The violation comes only once that
+// grandchild is running.
+#[cfg(any(target_os = "macos", windows))]
+#[tokio::test]
+async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let hb = dir.path().join("hb.txt");
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"escaped_heartbeat": hb, "every_ms": 50},
+            {"wait_for": hb},
+            {"out": TWO_SERVER_INIT},
+            {"sleep_ms": 30_000}
+        ]),
+    );
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &dir.path().join("l.jsonl"),
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(out.exit, ExitKind::LeanNotApplied(_)),
+        "{:?}",
+        out.exit
+    );
+    assert!(file_len(&hb) > 0, "heartbeat child never ran");
+    assert_stops_growing(&hb, "the escaped grandchild survived the lean stop").await;
+}
+
 #[tokio::test]
 async fn a_full_run_is_not_checked() {
     let dir = tempfile::tempdir().unwrap();
@@ -1054,5 +1093,49 @@ async fn the_runs_own_variables_reach_the_executor() {
         assert_eq!(out.exit, ExitKind::Exited(Some(0)));
         let lines = log_lines(&log);
         assert!(lines.iter().any(|l| l == expected), "{lines:?}");
+    }
+}
+
+// The run's own variables are set last: they win over a variable the executor environment sets
+// (a proxy here) and over one it removes (the nested-session marker).
+#[tokio::test]
+async fn the_runs_own_variables_win_over_the_executor_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([
+            {"print_env": "ISSUERELAY_TEST_PROXY"},
+            {"print_env": "CLAUDECODE"},
+            {"exit": 0}
+        ]),
+    );
+    let log = dir.path().join("logs").join("1.jsonl");
+    let env = ExecEnv {
+        proxy: vec![("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:9".into())],
+        ..ExecEnv::inherit()
+    };
+    let out = runner::run(
+        CommandSpec {
+            env: vec![
+                ("ISSUERELAY_TEST_PROXY".into(), "http://127.0.0.1:8".into()),
+                ("CLAUDECODE".into(), "demo".into()),
+            ],
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &env,
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let lines = log_lines(&log);
+    for expected in [
+        "ISSUERELAY_TEST_PROXY=http://127.0.0.1:8",
+        "CLAUDECODE=demo",
+    ] {
+        assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
     }
 }

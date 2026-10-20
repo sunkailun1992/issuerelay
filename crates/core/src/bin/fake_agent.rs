@@ -12,6 +12,8 @@
 //! - `{"escaped_heartbeat": path, "every_ms": n}`: the same, but the child leaves the run's
 //!   process group the way Claude Code's detached tool shells do (Unix: a process group of its
 //!   own; Windows: a detached process in a new process group, still inside the run's Job Object)
+//! - `{"wait_for": path}`: wait until the file has content, for at most 10 s (a heartbeat's file:
+//!   the next step then comes once its child is running)
 //! - `{"repeat_out": text, "every_ms": n}` / `{"repeat_err": text, "every_ms": n}`: print a line
 //!   to stdout / stderr every `n` ms, forever
 //! - `{"exit": code}`: exit at once
@@ -75,6 +77,12 @@ fn main() {
             // Deliberately left running, like the heartbeat above.
             #[allow(clippy::zombie_processes)]
             command.spawn().expect("spawn escaped heartbeat");
+        }
+        if let Some(path) = step.get("wait_for").and_then(Value::as_str) {
+            let give_up = Instant::now() + Duration::from_secs(10);
+            while std::fs::metadata(path).map_or(0, |m| m.len()) == 0 && Instant::now() < give_up {
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
         if let Some(line) = step.get("repeat_out").and_then(Value::as_str) {
             let every = step.get("every_ms").and_then(Value::as_u64).unwrap_or(100);
