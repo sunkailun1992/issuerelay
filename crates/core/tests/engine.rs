@@ -1880,6 +1880,33 @@ async fn the_stored_summary_is_one_clean_line() {
 
 // Paused time: the pauses between the reads that verify a result pass at once.
 #[tokio::test(start_paused = true)]
+async fn a_lean_violation_keeps_its_reason_when_linear_cannot_be_read() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            set_state: None,
+            exit: ExitKind::LeanNotApplied("auto memory is on".into()),
+            final_text: None,
+            panic: false,
+        },
+    );
+    h.engine.tick().await.unwrap();
+    h.linear.fail_calls("Linear is down", 3);
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("lean run did not take effect: auto memory is on")
+    );
+}
+
+// Paused time: the pauses between the reads that verify a result pass at once.
+#[tokio::test(start_paused = true)]
 async fn a_result_that_cannot_be_verified_fails_the_job() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");

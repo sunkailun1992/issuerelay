@@ -8,8 +8,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
+use crate::config::ExecutorKind;
 use crate::linear::auth::LINEAR_MCP_URL;
 
 /// The name of Linear's MCP server in Claude Code, as IssueRelay's one-click setup registers it
@@ -107,6 +108,96 @@ pub fn passable(path: &Path) -> bool {
         })
 }
 
+/// Watches a lean run's output for signs that lean did not take effect (lean-run design section
+/// 8), so the run can be stopped instead of carrying on with the user's whole configuration.
+/// Claude Code names its MCP servers and its auto-memory folder in its `system/init` event, which
+/// comes before any work (only `system` events such as hook events may come first); Codex names
+/// nothing up front, so the server of each of its MCP calls is checked as it starts.
+pub struct LeanCheck {
+    kind: ExecutorKind,
+    /// Claude's init event was seen and passed: nothing after it is checked.
+    done: bool,
+}
+
+impl LeanCheck {
+    pub fn new(kind: ExecutorKind) -> Self {
+        Self { kind, done: false }
+    }
+
+    /// What `line`, one line of the executor's stdout, shows to be wrong; `None` when nothing is.
+    /// A line that is not JSON is not looked at.
+    pub fn observe(&mut self, line: &str) -> Option<String> {
+        if self.done {
+            return None;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            return None;
+        };
+        match self.kind {
+            ExecutorKind::Claude => self.claude(&event),
+            ExecutorKind::Codex => codex_violation(&event),
+        }
+    }
+
+    fn claude(&mut self, event: &Value) -> Option<String> {
+        let kind = event["type"].as_str().unwrap_or("unknown");
+        if kind != "system" {
+            return Some(format!("a `{kind}` event came before the init event"));
+        }
+        if event["subtype"] != "init" {
+            return None;
+        }
+        self.done = true;
+        let Some(servers) = event["mcp_servers"].as_array() else {
+            return Some("the init event has no `mcp_servers` list".into());
+        };
+        let mut names: Vec<&str> = servers
+            .iter()
+            .map(|server| server["name"].as_str().unwrap_or("unnamed"))
+            .collect();
+        names.sort_unstable();
+        if names != [CLAUDE_LINEAR_SERVER] {
+            let listed = if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            };
+            return Some(format!(
+                "the init event lists the MCP servers {listed} instead of only `{CLAUDE_LINEAR_SERVER}`"
+            ));
+        }
+        // Not a documented field (both versions measured send it): no field is fine, a field
+        // that names a folder is not.
+        memory_is_on(&event["memory_paths"]).then(|| "auto memory is on".to_string())
+    }
+}
+
+/// A Codex event that starts or ends a call to an MCP server other than Linear's.
+fn codex_violation(event: &Value) -> Option<String> {
+    if !matches!(
+        event["type"].as_str(),
+        Some("item.started" | "item.completed")
+    ) {
+        return None;
+    }
+    let item = &event["item"];
+    if item["type"] != "mcp_tool_call" {
+        return None;
+    }
+    let server = item["server"].as_str().unwrap_or("unnamed");
+    (server != CODEX_LINEAR_SERVER).then(|| format!("a call to the MCP server `{server}`"))
+}
+
+/// Whether `paths` (Claude's `memory_paths`) names a folder: any non-empty string in it.
+fn memory_is_on(paths: &Value) -> bool {
+    match paths {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => items.iter().any(memory_is_on),
+        Value::Object(map) => map.values().any(memory_is_on),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +251,114 @@ mod tests {
         ] {
             assert!(!passable(&absolute(bad)), "{bad:?}");
         }
+    }
+
+    const LINEAR_ONLY_INIT: &str = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#;
+
+    fn first_violation(kind: ExecutorKind, lines: &[&str]) -> Option<String> {
+        let mut check = LeanCheck::new(kind);
+        lines.iter().find_map(|line| check.observe(line))
+    }
+
+    #[test]
+    fn the_recorded_claude_stream_passes() {
+        let lines: Vec<&str> = include_str!("../../tests/fixtures/claude-stream.jsonl")
+            .lines()
+            .collect();
+        assert_eq!(first_violation(ExecutorKind::Claude, &lines), None);
+    }
+
+    #[test]
+    fn the_recorded_codex_stream_passes() {
+        let lines: Vec<&str> = include_str!("../../tests/fixtures/codex-exec.jsonl")
+            .lines()
+            .collect();
+        assert_eq!(first_violation(ExecutorKind::Codex, &lines), None);
+    }
+
+    #[test]
+    fn another_mcp_server_in_init_is_a_violation() {
+        let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"},{"name":"demo-tools","status":"connected"}]}"#;
+        let detail = first_violation(ExecutorKind::Claude, &[init]).unwrap();
+        assert!(detail.contains("demo-tools"), "{detail}");
+    }
+
+    #[test]
+    fn an_init_without_mcp_servers_is_a_violation() {
+        let detail = first_violation(
+            ExecutorKind::Claude,
+            &[r#"{"type":"system","subtype":"init"}"#],
+        )
+        .unwrap();
+        assert!(detail.contains("mcp_servers"), "{detail}");
+        let empty = r#"{"type":"system","subtype":"init","mcp_servers":[]}"#;
+        assert!(first_violation(ExecutorKind::Claude, &[empty]).is_some());
+    }
+
+    #[test]
+    fn a_memory_path_with_a_value_is_a_violation() {
+        let init = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}],"memory_paths":{"auto":"/srv/demo-home/.claude/projects/x/memory/"}}"#;
+        assert_eq!(
+            first_violation(ExecutorKind::Claude, &[init]).as_deref(),
+            Some("auto memory is on")
+        );
+    }
+
+    #[test]
+    fn an_empty_memory_path_passes() {
+        for memory in [r#"{}"#, r#"{"auto":""}"#] {
+            let init = format!(
+                r#"{{"type":"system","subtype":"init","mcp_servers":[{{"name":"linear-server","status":"needs-auth"}}],"memory_paths":{memory}}}"#
+            );
+            assert_eq!(
+                first_violation(ExecutorKind::Claude, &[&init]),
+                None,
+                "{init}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_events_before_init_pass() {
+        let lines = [
+            r#"{"type":"system","subtype":"hook_started","hook_event":"SessionStart"}"#,
+            r#"{"type":"system","subtype":"hook_response","hook_event":"SessionStart"}"#,
+            LINEAR_ONLY_INIT,
+        ];
+        assert_eq!(first_violation(ExecutorKind::Claude, &lines), None);
+    }
+
+    #[test]
+    fn an_assistant_event_before_init_is_a_violation() {
+        let lines = [r#"{"type":"assistant","message":{}}"#, LINEAR_ONLY_INIT];
+        let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
+        assert!(detail.contains("assistant"), "{detail}");
+    }
+
+    #[test]
+    fn lines_after_init_are_not_checked() {
+        let lines = [
+            LINEAR_ONLY_INIT,
+            r#"{"type":"system","subtype":"init","mcp_servers":[]}"#,
+            r#"{"type":"assistant","message":{}}"#,
+        ];
+        assert_eq!(first_violation(ExecutorKind::Claude, &lines), None);
+    }
+
+    #[test]
+    fn non_json_lines_are_ignored() {
+        let lines = ["not json", "", LINEAR_ONLY_INIT];
+        assert_eq!(first_violation(ExecutorKind::Claude, &lines), None);
+    }
+
+    #[test]
+    fn a_codex_call_to_another_server_is_a_violation() {
+        let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
+        let detail = first_violation(ExecutorKind::Codex, &[started]).unwrap();
+        assert!(detail.contains("demo-tools"), "{detail}");
+        let completed = r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search","status":"completed"}}"#;
+        assert!(first_violation(ExecutorKind::Codex, &[completed]).is_some());
+        let linear = r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"linear","tool":"get_issue"}}"#;
+        assert_eq!(first_violation(ExecutorKind::Codex, &[linear]), None);
     }
 }

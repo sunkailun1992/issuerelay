@@ -415,6 +415,10 @@ pub fn decide(
             JobState::Failed,
             Some(format!("could not start the executor: {e}")),
         ),
+        ExitKind::LeanNotApplied(detail) => (
+            JobState::Failed,
+            Some(format!("lean run did not take effect: {detail}")),
+        ),
         ExitKind::Exited(code) if *code != Some(0) => {
             let code = code.map_or_else(|| "unknown".to_string(), |c| c.to_string());
             (
@@ -1510,11 +1514,12 @@ impl Engine {
                 } else {
                     JobState::Failed
                 };
-                (
-                    state,
-                    Some(format!("could not verify the result in Linear: {e:#}")),
-                    None,
-                )
+                let reason = match &output.exit {
+                    // What the run itself showed says more than the failed look at its result.
+                    ExitKind::LeanNotApplied(_) => decide(&output.exit, None, None, &names).1,
+                    _ => Some(format!("could not verify the result in Linear: {e:#}")),
+                };
+                (state, reason, None)
             }
         };
         // These texts come from outside (the AI, Linear, the operating system) and reach the
@@ -1976,6 +1981,22 @@ mod tests {
         assert_eq!(
             decide(&ExitKind::SpawnFailed("x".into()), None, None, &names()).0,
             JobState::Failed
+        );
+    }
+
+    #[test]
+    fn a_lean_violation_is_a_failure_with_its_reason() {
+        assert_eq!(
+            decide(
+                &ExitKind::LeanNotApplied("auto memory is on".into()),
+                Some("In Testing"),
+                None,
+                &names()
+            ),
+            (
+                JobState::Failed,
+                Some("lean run did not take effect: auto memory is on".into())
+            )
         );
     }
 }

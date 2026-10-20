@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ExecutorKind;
 use crate::env::ExecEnv;
-use crate::executor::{CommandSpec, outcome::FinalTextTracker};
+use crate::executor::{CommandSpec, lean::LeanCheck, outcome::FinalTextTracker};
 use crate::model::ProcessTag;
 
 /// The time limits of one run.
@@ -45,6 +45,9 @@ pub enum ExitKind {
     Canceled,
     /// The log file could not be created or the executor could not be started.
     SpawnFailed(String),
+    /// The output of a lean run showed that lean did not take effect (`lean::LeanCheck`), what
+    /// it showed being the text; the run was stopped as a cancelled one is.
+    LeanNotApplied(String),
 }
 
 /// What one run produced.
@@ -576,6 +579,8 @@ pub async fn run(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         env.apply(c);
+        // After `apply`, so that a variable of the run's own is never removed again.
+        c.envs(spec.env.iter().map(|(name, value)| (name, value)));
     });
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());
@@ -613,7 +618,13 @@ pub async fn run(
     drop(tx);
 
     let mut tracker = FinalTextTracker::new(kind);
+    let mut lean_check = spec.lean.then(|| LeanCheck::new(kind));
     let mut log_failures = LogFailures::new(log_path);
+    // Before the loop reads the first line, so the notes open the log.
+    for text in &spec.notes {
+        let entry = note("stderr", &format!("[IssueRelay] {text}"));
+        log_failures.note(log.write_all(entry.as_bytes()).await);
+    }
     let started = Instant::now();
     let deadline = checked_deadline(started, limits.total);
     let mut last_output = started;
@@ -635,7 +646,15 @@ pub async fn run(
                 line = rx.recv(), if pipes_open => match line {
                     Some(line) => {
                         last_output = Instant::now();
+                        let violation = match (&mut lean_check, &line) {
+                            (Some(check), Line::Out(text)) => check.observe(text),
+                            _ => None,
+                        };
+                        // The line goes into the log either way, so the log shows what was wrong.
                         log_failures.note(record(&mut log, &mut tracker, line).await);
+                        if let Some(detail) = violation {
+                            break ExitKind::LeanNotApplied(detail);
+                        }
                     }
                     None => pipes_open = false,
                 },
