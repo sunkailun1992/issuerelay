@@ -1,4 +1,4 @@
-# 精简运行：沙箱实机验收（2026-10-20）— macOS 通过，Windows 待实机
+# 精简运行：沙箱实机验收与 v0.2.0 发布（2026-10-20）— macOS 通过，Windows 待实机
 
 ## 结论
 
@@ -53,6 +53,29 @@
 | N3 | 从 Claude Code 会话的终端启动开发宿主，会把这个会话的一整串环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`ANTHROPIC_BASE_URL`、`CLAUDE_CODE_CHILD_SESSION` 等）传给执行者；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。打包的托盘程序由 launchd 启动，不受影响。 | 属验收方法：之后的运行都用 `env -i` 启动开发宿主。记入遗留：要不要再去掉 Claude Code 会话自己的变量（`ANTHROPIC_BASE_URL` 等可能是用户的网关，不能一概去掉）。 |
 | N4 | 需求要求「先等一会儿」时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束（DEMO-36），单独的前台 `sleep` 又被 Claude Code 拦下（DEMO-37）。真实需求里少见，但跑测试、等服务起来时会遇到。 | 记入遗留，由维护者决定是否在提示词里加一条（提示词固定规则属极高风险，要单独决定）。 |
 | N5 | 用 `issuerelay bind add` 改完绑定后马上运行 `doctor`，两个绑定都报 `executor not ready`；几秒后再查就正常了。 | 记入遗留：查清原因。猜测是配置变了以后，就绪检查重做期间给出了空结果。 |
+
+## 发布 v0.2.0
+
+- 版本号：PR #9 把 `0.1.0` 升到 `0.2.0`，11:45:36 合并为 `79ce58f`。它的 CI 里 Windows 的 `test` 第一次失败在 `crates/core/tests/ipc.rs` 的空闲断开测试（暂停的时钟在等真实管道断开时自己往前跳），只重跑这个任务后通过；测试本身由 PR #10 修好，12:28:57 合并为 `42afe2a`，只改测试文件。
+- 试打包（`MAINTAINERS.md`「发布」第 2 步）：在 `main` 的 `79ce58f` 上手动运行 release 工作流（运行 39417306280），全部通过：`verify` 输出 `updater=true`，两个打包任务分别打出 `verified IssueRelay.app.tar.gz`、`verified IssueRelay_0.2.0_x64-setup.exe` 与 `verified IssueRelay_0.2.0_x64_en-US.msi`，`verify-dry-run` 通过。
+- 标签：`v0.2.0` 打在当时的 `origin/main`，也就是 `42afe2a`。PR #10 只改测试文件，不在发布相关文件之列，所以没有重做试打包（第 7 步）。标签上的运行（39422712075）全部通过，包括两个平台的 `release-test`、`bundle-release` 与 `verify-release`。
+- 草稿的资产（字节），与第 5 步要求的集合一致：
+
+  | 文件 | 大小 |
+  |---|---|
+  | `IssueRelay_0.2.0_universal.dmg` | 27635050 |
+  | `IssueRelay_0.2.0_universal.app.tar.gz` 与 `.sig` | 28316006 / 428 |
+  | `IssueRelay_0.2.0_x64-setup.exe` 与 `.sig` | 10014227 / 440 |
+  | `IssueRelay_0.2.0_x64_en-US.msi` 与 `.sig` | 14401536 / 440 |
+  | `latest.json` | 5354 |
+
+- 在本机核对草稿（没有安装）：
+  - `latest.json`：版本 `0.2.0`，9 个平台键，地址都指向本 Release 的资产，macOS 各键的签名等于 `.app.tar.gz.sig` 的内容。
+  - 用 `gh` 下载 dmg（没有下载标记），只读挂载：`IssueRelay.app` 的版本是 0.2.0，标识 `com.sunkailun.issuerelay`，最低系统 13.3；`codesign --verify --deep --strict` 通过（ad hoc 签名）；主程序与命令行程序都是 x86_64 加 arm64；包里的 `issuerelay --version` 输出 `issuerelay 0.2.0`。
+  - 没有按第 5 步从草稿装一遍：换装要先退出正在监看的托盘程序，维护者决定不等，直接发布（2026-10-20）。本机仍是 0.1.0，之后经自动更新装上 0.2.0。
+- 发布说明：在工作流生成的说明后面补了「新功能」与「升级须知」：已有的绑定会变成精简运行，Linear 服务用了别的名字时精简绑定会停在「执行者未就绪」；用户设置 `env` 里的推理力度在不精简的运行里仍然生效（N2）；0.1.0 会在程序里提示这个更新；Windows 只经 CI 测试。
+- 公开：维护者在会话里让 AI 直接发布（第 6 步写的是维护者亲手点，与 v0.1.0 一样由维护者当场授权）。2026-10-20 12:59:28 UTC 公开，并设为最新版本；`releases/latest` 跳转到 v0.2.0，`releases/latest/download/latest.json` 返回 200，版本 0.2.0。
+- Windows：所有者决定这次不做 Windows 实机验证（2026-10-20），发布说明里写明。
 
 ## 与设计不一致之处
 
