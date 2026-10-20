@@ -1577,8 +1577,17 @@ impl Engine {
                         JobState::Failed
                     };
                     let reason = match &output.exit {
-                        // What the run itself showed says more than the failed look at its result.
-                        ExitKind::LeanNotApplied(_) => decide(&output.exit, None, None, &names).1,
+                        // What the run itself showed says more than the failed look at its result,
+                        // whose error goes into the host's log instead.
+                        ExitKind::LeanNotApplied(_) => {
+                            tracing::warn!(
+                                job_id,
+                                issue = %identifier,
+                                error = %format!("{e:#}"),
+                                "could not read the issue to verify a lean run that did not take effect"
+                            );
+                            decide(&output.exit, None, None, &names).1
+                        }
                         _ => Some(format!("could not verify the result in Linear: {e:#}")),
                     };
                     (state, reason, None)
