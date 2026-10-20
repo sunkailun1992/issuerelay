@@ -18,7 +18,7 @@
 - 软件版本：macOS 27.0.1（26A434），Apple 芯片；Claude Code 2.1.285；codex-cli 0.159.2；rustc 1.99.0。
 - IssueRelay：分支 `feat/lean-run`（PR #7）的调试构建，开发宿主 `issuerelay-devhost` 加命令行 `issuerelay`，与托盘程序用同一个数据目录。第一段用 `13ccea2`，第二段用含 N1 修正的 `2c432e5`。
   - 每段之前退出已装的托盘程序（0.1.0），备份 `config.toml` 与 `state.db`；之后恢复配置（与备份逐字节相同），重新打开托盘程序，没有重跑任何运行。
-  - 第二段的构建是新的：第一次读 Linear 凭据时钥匙串又要了一次密码（ad hoc 签名，换了构建就会再问），由维护者输入，开发宿主等了约 3 分钟才连上 Linear。
+  - 第二段的构建是新的。开发宿主启动后约 2 分 44 秒才连上 Linear（06:28:33 启动，06:31:17 连上），其间系统里有一个钥匙串授权进程（SecurityAgent）在运行；维护者没有看到对话框，也没有输入密码，等待的原因没有查明。
 - 执行者的环境：开发宿主用 `env -i` 启动，只留 `HOME`、`USER`、`LOGNAME`、`SHELL`、`TMPDIR`、系统默认的 `PATH`、`__CF_USER_TEXT_ENCODING` 与 `SSH_AUTH_SOCK`，接近由 launchd 启动的托盘程序。DEMO-31 那次是从 Claude Code 会话的终端直接启动的，见 N3。
 - 沙箱：Demo Project 与 `~/issuerelay-sandbox/demo`（本地裸仓库充当远端）。每项之前用 `issuerelay bind add` 改这个绑定的执行者、权限档、精简与推理力度。第一段在设置里把默认推理力度设为 `high`，第二段没有设。
 - 测试需求：DEMO-31 至 DEMO-40。每条建好后运行 `issuerelay poll`，7 到 12 秒内开始运行。
