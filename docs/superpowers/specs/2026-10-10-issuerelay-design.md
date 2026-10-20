@@ -171,12 +171,15 @@ issuerelay/
 | 完全放开（默认） | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
 | 自动审查 | `--permission-mode auto` | `--approve-for-me` |
 | 按个人设置 | `--permission-mode dontAsk` | 不加权限参数，沿用 `~/.codex/config.toml` |
+| 精简运行（默认开） | 最后加 `--strict-mcp-config`、只含 `linear-server` 的 `--mcp-config`、`--setting-sources project,local`，以及排除用户级 `CLAUDE.md` 的 `--settings`；环境变量 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` | 在 `-m` 与末尾的 `-` 之前加 `--ignore-user-config`、`--disable hooks / plugins / apps / memories / skill_mcp_dependency_install`、只定义 `linear` 一个必需服务的 `-c mcp_servers.linear.*`、`-c skills.include_instructions=false` |
+| 推理力度 | `--effort <档位>` | `-c model_reasoning_effort=<档位>`，在末尾的 `-` 之前 |
 
 - `--permission-prompts none`：任何需要人确认的操作都自动拒绝，保证无人值守时不会卡在等待确认上。
-- 模型默认沿用用户自己的配置，绑定里可以单独指定。
+- 模型默认沿用用户自己的配置，绑定里可以单独指定。推理力度（`low`、`medium`、`high`、`xhigh`、`max`）同理：设置里有一个可选的默认，绑定可以另选，都不设时不传，执行者用它自己的设置。
+- 精简运行：参数逐字见 `2026-10-19-issuerelay-lean-run-design.md` 第 5 节。「按个人设置」的绑定和绑定目录就是用户主目录时不精简（加载全部配置）；精简的运行在开始时核对精简确实生效，没生效就结束整棵进程树、记为失败（该设计第 8 节）。
 - 输出逐行读取：原样写进日志文件，同时解析出面板显示用的时间线（AI 消息、工具调用、命令、错误）。
 - 结果：Claude 取 `type` 为 `result` 的事件的 `result` 字段；Codex 取最后一个 `item.type` 为 `agent_message` 的 `item.completed` 事件的 `item.text`。两者末行都是结果 JSON。
-- 命令行参数里不放提示词、路径或任何来自 Linear 的文本。
+- 命令行参数里不放提示词、路径或任何来自 Linear 的文本。唯一的路径是精简运行（Claude）`--settings` 里 IssueRelay 自己得出的用户级 `CLAUDE.md` 路径（「一页概览」安全底线的第 ③ 处例外）。
 - 三档写法的实测结果（macOS，Claude Code 2.1.285、codex-cli 0.159.2）：
   - 「完全放开」在 M0（2026-10-10）和 M1（2026-10-12）都跑通。
   - 「自动审查」两个执行者都跑通；Codex 的 `--approve-for-me` 明显更慢。
@@ -217,9 +220,14 @@ issuerelay/
 - 已登录（`claude auth status`、`codex login status`；后者把结果写在标准错误，检查时两路输出都读）；
 - 已配置并授权 Linear MCP（在 `claude mcp list`、`codex mcp list` 中能看到 Linear 并且连通）。
 
-任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）。
+精简的绑定另要两项（精简运行设计第 7 节）：
 
-三项检查同时进行。引擎按执行者分别缓存结果：确认的结果（包括「未安装」「未登录」）用 5 分钟；某项检查没跑成（超时、启动失败、输出读不懂）的执行者 60 秒后重查。「环境检查」页总是现查。检查命令在用户主目录、在自己的进程组（Windows：Job Object，同样不弹控制台窗口）里运行，超时连同它启动的进程一起结束；命令自身退出就算检查完成，它留在进程组里的进程（例如 `claude mcp list` 启动的 stdio MCP 服务器）随即结束，不等它们放开输出管道；「环境检查」页重查时同时重新读取 PATH 与代理。
+- 精简运行加载的 Linear 服务可用：名字正好是 `linear-server`（Codex：`linear`），网址正好是 `https://mcp.linear.app/mcp`，并且连通；
+- 精简时也已登录，并且登录方式与平常相同：Claude 在 IssueRelay 数据目录的空目录 `lean-check/` 里另跑 `claude --setting-sources project,local auth status`，`authMethod` 与 `apiProvider` 都要与平常那次相同；Codex 另跑 `codex -c cli_auth_credentials_store=file login status`，登录方式相同，并且 `config.toml` 没有设自定义的 `model_provider`。
+
+任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）；精简的两项不满足时给出原因和要运行的命令。
+
+四项检查同时进行（精简登录那条每次都跑；它没跑成只记为精简问题，不影响前三项的结论与缓存）。引擎按执行者分别缓存结果：确认的结果（包括「未安装」「未登录」）用 5 分钟；某项检查没跑成（超时、启动失败、输出读不懂）的执行者 60 秒后重查。「环境检查」页总是现查。检查命令在用户主目录、在自己的进程组（Windows：Job Object，同样不弹控制台窗口）里运行，超时连同它启动的进程一起结束；命令自身退出就算检查完成，它留在进程组里的进程（例如 `claude mcp list` 启动的 stdio MCP 服务器）随即结束，不等它们放开输出管道；「环境检查」页重查时同时重新读取 PATH 与代理。
 
 ## 7. Linear 连接
 
@@ -260,10 +268,10 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 | 概览 | 监控开关、上次检查时间、运行中与排队中的任务、最近结果，以及需要处理的提醒（失败、待验收、环境问题） |
 | 需求 | 指派给当前用户、带 `ai-ready` 的需求中最近更新的 50 条（不限状态）及其本地状态，以及不满足派活条件的原因；操作：在 Linear 中打开、停止、重新运行、标记完成 |
 | 运行记录 | 历史运行列表；详情页显示可读的时间线和原始日志，支持复制 |
-| 项目绑定 | 每个绑定的目录、执行者、权限档位、提示词覆盖和检查结果 |
-| 环境检查 | 第 8 节的各项检查和修复按钮 |
-| 设置 | 语言、检查间隔、总并发上限、超时、默认执行者与权限档位、默认提示词模板、AI 评论语言、通知、开机自启、在程序坞显示图标（仅 macOS，随「保存」生效）、把命令行加入 PATH、自动更新；高级设置：标签名、状态名、个人 API key |
-| 使用说明 | 触发条件、状态流转、需求示例写法、常见问题 |
+| 项目绑定 | 每个绑定的目录、执行者、权限档位、精简运行（开、关，或「按个人设置」与主目录时不适用）、模型、推理力度、提示词覆盖和检查结果 |
+| 环境检查 | 第 8 节的各项检查和修复按钮；每个执行者另有「精简运行」一节 |
+| 设置 | 语言、检查间隔、总并发上限、超时、默认执行者与权限档位、默认推理力度、默认提示词模板、AI 评论语言、通知、开机自启、在程序坞显示图标（仅 macOS，随「保存」生效）、把命令行加入 PATH、自动更新；高级设置：标签名、状态名、个人 API key |
+| 使用说明 | 触发条件、状态流转、需求示例写法、精简运行、常见问题 |
 
 需求页按原因代码显示等待原因；排队中因启动失败暂缓的任务显示下次重试的时间。需求页里需求的编号就是「在 Linear 中打开」（最小窗口下表格放不下另一个按钮）；满足触发条件的需求，如果它上一次运行已结束、Linear 上又没有变化，会写明「Linear 上有改动后才会再次运行」（轮询不会再次入队，只有手动「重新运行」），引擎用判定入队的同一个函数得出这一点（`IssueStatus::Eligible` 的 `picked_up`）；运行还在进行时不重复说需求的状态不是 Todo。
 
@@ -356,7 +364,7 @@ macOS 上从访达或开机自启启动的图形程序只有最小 PATH，找不
 - 程序自身不保存 Git、CI、测试环境的凭据；Linear 令牌只放在系统钥匙串 / 凭据管理器。
 - 「标记完成」只在面板上提供。
 - 面板（网页视图）只能调用本程序自己的命令，Tauri 自带的接口只开放事件监听；插件（打开链接、选目录、通知、开机自启）只在 Rust 侧使用，浏览器只打开 Linear 的 `https` 链接。
-- 无人值守运行会加载用户本机 Claude Code / Codex 的全部配置：用户级指令文件、插件、hooks 和 MCP 服务器（M0 发现）。README 的安全须知写明这一点；是否提供只加载 Linear MCP 的精简运行方式见第 18 节。
+- 无人值守运行默认精简（`2026-10-19-issuerelay-lean-run-design.md`）：只带 Linear 的 MCP 服务和目标仓库自己的规则与设置，不带用户的其他 MCP 服务、插件、用户级技能与钩子、自动记忆和用户级 `CLAUDE.md`。只有绑定关掉精简运行，或档位是「按个人设置」、绑定目录就是主目录时，才加载用户本机 Claude Code / Codex 的全部配置（M0 发现的情形）。精简运行不是沙箱，AI 仍能用用户的各种命令行凭据；Codex 仍读 `~/.codex/AGENTS.md`。README 的安全须知写明这些。
 - 仓库开源：代码、文档、示例、测试和提交历史中不得出现任何公司名、内网地址、内部仓库名或需求内容。`scripts/check-secrets.sh` 扫描疑似密钥、内网地址和本机绝对路径，CI 中运行。
 
 ## 15. 测试策略
@@ -407,4 +415,4 @@ M3 现状（2026-10-14）：安装包、发布流程、自动更新、把命令�
 3. **仓库公开**：已于 2026-10-10 按用户要求公开，并开启密钥扫描、推送拦截、私密漏洞报告与 `main` 分支保护（见 16.1）。
 4. **Windows 验证环境**：用户暂无 Windows 机器（2026-10-10）。M0 的 Windows 实测已跳过，Windows 先只靠 CI 覆盖；M2、M3 的 Windows 实机验收待有机器后补做。
 5. **第一版语言清单**（9.4）是否合适。
-6. **精简运行**：是否按绑定提供只加载 Linear MCP 的运行方式，避免用户的其他 MCP、插件和 hooks 影响无人值守运行（M0 发现）；M2 评估。M2 评估结论（2026-10-14，见验收报告）：Claude 加 `--strict-mcp-config --mcp-config '{"mcpServers":{"linear-server":{"type":"http","url":"https://mcp.linear.app/mcp"}}}'` 只加载 Linear MCP 可行，沿用已有授权，启动约快 40%、简单回答约快一半，并让无人值守运行碰不到用户的其他连接器；Codex 的 `-c mcp_servers=…` 是合并而不是替换，暂无简单做法。做成按绑定的选项另起任务（执行者参数属于极高风险，单独提交），默认值由维护者决定。
+6. **精简运行**：已定（用户 2026-10-20），见 `2026-10-19-issuerelay-lean-run-design.md`。无人值守运行默认只带 Linear 的 MCP 服务和目标仓库自己的规则与设置，按绑定可关，Claude 与 Codex 都做，另加推理力度设置。经过：M0 发现运行会加载用户的全部配置；M2 评估（2026-10-14）证实 Claude 的 `--strict-mcp-config` 可行，当时 Codex 暂无简单做法；2026-10-19 实测 Codex 的 `--ignore-user-config` 加 `-c` 只定义 Linear 可行，并能沿用已有授权。
