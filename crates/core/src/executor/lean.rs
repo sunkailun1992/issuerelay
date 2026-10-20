@@ -235,6 +235,36 @@ mod tests {
         assert_eq!(user_instructions_path(None, None), None);
     }
 
+    // `claudeMdExcludes` holds glob patterns matched against absolute paths (Claude Code's
+    // documentation, lean-run design section 5.5), so the string matters, not only the path it
+    // names: one with a `/` where Windows puts `\` equals the expected `PathBuf` all the same.
+    #[test]
+    fn the_derived_path_goes_into_the_settings_json_with_the_platform_separator() {
+        let home = absolute("srv/demo-home");
+        let config_dir = absolute("opt/demo-claude");
+        let (from_home, from_config_dir) = if cfg!(windows) {
+            (
+                r#"{"claudeMdExcludes":["D:\\srv\\demo-home\\.claude\\CLAUDE.md"]}"#,
+                r#"{"claudeMdExcludes":["D:\\opt\\demo-claude\\CLAUDE.md"]}"#,
+            )
+        } else {
+            (
+                r#"{"claudeMdExcludes":["/srv/demo-home/.claude/CLAUDE.md"]}"#,
+                r#"{"claudeMdExcludes":["/opt/demo-claude/CLAUDE.md"]}"#,
+            )
+        };
+        for (path, settings) in [
+            (user_instructions_path(Some(&home), None), from_home),
+            (
+                user_instructions_path(Some(&home), Some(&config_dir)),
+                from_config_dir,
+            ),
+        ] {
+            let args = claude_args(path.as_deref());
+            assert_eq!(args[args.len() - 2..], ["--settings", settings]);
+        }
+    }
+
     #[test]
     fn passable_paths() {
         for rest in [
@@ -242,6 +272,9 @@ mod tests {
             "srv/李 四/.claude/CLAUDE.md",
             "srv/o'brien/.claude/CLAUDE.md",
             "srv/Demo User/.claude/CLAUDE.md",
+            // Punctuation that a Windows file name may hold and the shims pass on intact, as in
+            // `json_arguments_survive_npm_and_pnpm_style_cmd_shims`: `passable` must not stop it.
+            "srv/Demo & Co (x) #1 $a +b ,c ;d =e @f [g] {h} ~i `j/.claude/CLAUDE.md",
         ] {
             assert!(passable(&absolute(rest)), "{rest}");
         }
@@ -256,6 +289,36 @@ mod tests {
         ] {
             assert!(!passable(&absolute(bad)), "{bad:?}");
         }
+    }
+
+    /// An absolute path that is not valid Unicode: a byte that is not UTF-8 on Unix, an unpaired
+    /// surrogate on Windows.
+    #[cfg(unix)]
+    fn not_unicode() -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(
+            b"/srv/demo-\xff/.claude/CLAUDE.md",
+        ))
+    }
+
+    #[cfg(windows)]
+    fn not_unicode() -> PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = r"D:\srv\demo-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(r"\.claude\CLAUDE.md".encode_utf16());
+        PathBuf::from(std::ffi::OsString::from_wide(&wide))
+    }
+
+    #[test]
+    fn a_path_that_is_not_unicode_never_goes_in() {
+        let path = not_unicode();
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(!passable(&path), "{path:?}");
+        assert!(
+            !claude_args(Some(&path)).contains(&"--settings".to_string()),
+            "{path:?}"
+        );
     }
 
     const LINEAR_ONLY_INIT: &str = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#;
@@ -341,6 +404,26 @@ mod tests {
     }
 
     #[test]
+    fn an_event_without_a_type_before_init_is_a_violation() {
+        let lines = [
+            r#"{"subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"}]}"#,
+            LINEAR_ONLY_INIT,
+        ];
+        let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
+        assert!(detail.contains("`unknown`"), "{detail}");
+    }
+
+    #[test]
+    fn a_result_before_init_is_a_violation() {
+        let lines = [
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+            LINEAR_ONLY_INIT,
+        ];
+        let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
+        assert!(detail.contains("`result`"), "{detail}");
+    }
+
+    #[test]
     fn lines_after_init_are_not_checked() {
         let lines = [
             LINEAR_ONLY_INIT,
@@ -365,5 +448,12 @@ mod tests {
         assert!(first_violation(ExecutorKind::Codex, &[completed]).is_some());
         let linear = r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"linear","tool":"get_issue"}}"#;
         assert_eq!(first_violation(ExecutorKind::Codex, &[linear]), None);
+    }
+
+    #[test]
+    fn a_codex_call_that_names_no_server_is_a_violation() {
+        let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"get_issue"}}"#;
+        let detail = first_violation(ExecutorKind::Codex, &[started]).unwrap();
+        assert!(detail.contains("`unnamed`"), "{detail}");
     }
 }
