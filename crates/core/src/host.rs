@@ -364,7 +364,11 @@ fn system_readiness(paths: &AppPaths, env: SharedEnv) -> SystemReadiness {
 /// `CLAUDE_CONFIG_DIR` as the executors inherit it from the host (`ExecEnv` changes only the
 /// PATH and the proxy), when it is set and not empty.
 fn claude_config_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
+    claude_config_dir_from(std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn claude_config_dir_from(value: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    value
         .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
 }
@@ -759,6 +763,16 @@ mod tests {
         assert_eq!(
             setup,
             serde_json::json!({"kind": "connect_failed", "message": "down"})
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_is_the_variable_when_it_is_set_and_not_empty() {
+        assert_eq!(claude_config_dir_from(None), None);
+        assert_eq!(claude_config_dir_from(Some("".into())), None);
+        assert_eq!(
+            claude_config_dir_from(Some("/srv/demo-claude".into())),
+            Some(std::path::PathBuf::from("/srv/demo-claude"))
         );
     }
 

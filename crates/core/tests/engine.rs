@@ -5316,10 +5316,11 @@ async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
     assert!(spec.notes.is_empty(), "{:?}", spec.notes);
 }
 
+// The next three know no home folder: a lean Claude run would then get a note, which these runs
+// must not.
 #[tokio::test]
 async fn a_binding_with_lean_off_starts_with_the_full_configuration() {
-    let home = tempfile::tempdir().unwrap();
-    let h = lean_harness(home_at(home.path()));
+    let h = lean_harness(Homes::default());
     let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| b.lean = false).await;
     assert!(!spec.lean);
     assert!(!has(&spec, "--strict-mcp-config") && !has(&spec, "--settings"));
@@ -5328,15 +5329,14 @@ async fn a_binding_with_lean_off_starts_with_the_full_configuration() {
 
 #[tokio::test]
 async fn a_personal_binding_never_runs_lean() {
-    let home = tempfile::tempdir().unwrap();
-    let h = lean_harness(home_at(home.path()));
+    let h = lean_harness(Homes::default());
     let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
         b.permission = Some(PermissionProfile::Personal)
     })
     .await;
     assert!(!spec.lean);
     assert!(has(&spec, "dontAsk") && !has(&spec, "--strict-mcp-config"));
-    assert!(spec.env.is_empty());
+    assert!(spec.env.is_empty() && spec.notes.is_empty());
 }
 
 #[tokio::test]
@@ -5364,6 +5364,24 @@ async fn a_binding_in_the_home_folder_does_not_wait_for_the_lean_checks() {
     let report = h.engine.doctor().await;
     assert_eq!(report.bindings[0].lean, LeanStatus::HomeDirectory);
     assert!(report.bindings[0].executor_ready, "{:?}", report.bindings);
+}
+
+#[tokio::test]
+async fn the_issue_list_does_not_make_a_binding_in_the_home_folder_wait_for_the_lean_checks() {
+    let home = tempfile::tempdir().unwrap();
+    let h = Harness::with_parts(
+        Config::default(),
+        false,
+        home_at(home.path()),
+        Arc::new(FullOnlyReadiness),
+    );
+    h.engine
+        .add_binding(demo_binding("proj-1", home.path()))
+        .unwrap();
+    h.linear.upsert(issue("1", "proj-1"));
+    // Before any poll: the list says what a poll would do with it.
+    let issues = h.engine.issues().await.unwrap();
+    assert_eq!(issues[0].status, IssueStatus::Eligible { picked_up: true });
 }
 
 #[tokio::test]
@@ -5473,8 +5491,7 @@ async fn without_a_home_a_lean_claude_run_leaves_a_note() {
 
 #[tokio::test]
 async fn a_codex_lean_binding_starts_with_the_codex_lean_arguments() {
-    let home = tempfile::tempdir().unwrap();
-    let h = lean_harness(home_at(home.path()));
+    let h = lean_harness(Homes::default());
     let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
         b.executor = Some(ExecutorKind::Codex)
     })
