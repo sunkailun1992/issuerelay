@@ -19,6 +19,15 @@ export const JOB_STATES: JobState[] = [
 ];
 export type ExecutorKind = "claude" | "codex";
 export type PermissionProfile = "full" | "auto" | "personal";
+/** How hard the executor reasons (`config::Effort`). */
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+/** The reasoning effort levels, lowest first. */
+export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
+/**
+ * Whether a binding's runs are lean (`config::LeanStatus`): only `on` is; the other three run with
+ * the user's whole configuration (lean runs turned off, personal settings, or the home folder).
+ */
+export type LeanStatus = "on" | "off" | "personal" | "home_directory";
 
 export interface Viewer { id: string; name: string }
 
@@ -114,6 +123,8 @@ export interface Settings {
   log_max_total_mb: number;
   default_executor: ExecutorKind;
   default_permission: PermissionProfile;
+  /** The reasoning effort of bindings that set none; absent, each executor uses its own setting. */
+  default_effort?: Effort;
   prompt_template: string;
   /** "follow-ui" or a language code. */
   comment_language: string;
@@ -136,6 +147,10 @@ export interface Binding {
   permission?: PermissionProfile;
   model?: string;
   prompt_override?: string;
+  /** Whether runs are lean; absent means they are (only `false` is saved). */
+  lean?: boolean;
+  /** Absent: the default of the settings. */
+  effort?: Effort;
 }
 export interface Project { id: string; name: string; team_ids: string[] }
 
@@ -154,6 +169,12 @@ export interface ExecutorReport {
   logged_in: boolean;
   linear_mcp: boolean;
   problems: string[];
+  /** The Linear server lean runs load is there under its exact name and address, and connected. */
+  lean_linear_mcp: boolean;
+  /** A lean run would be signed in, the same way as a usual one. */
+  lean_logged_in: boolean;
+  /** Why lean runs cannot use the executor, besides `problems`. */
+  lean_problems: string[];
 }
 export interface WorkspaceReport { label_ok: boolean; missing_states: string[]; teams_checked: string[] }
 export interface BindingReport {
@@ -161,7 +182,9 @@ export interface BindingReport {
   project_name: string;
   directory_exists: boolean;
   executor: ExecutorKind;
+  /** Ready for the binding's runs: lean ones when `lean` is `on`, else usual ones. */
   executor_ready: boolean;
+  lean: LeanStatus;
 }
 export interface DoctorReport {
   viewer: Viewer | null;

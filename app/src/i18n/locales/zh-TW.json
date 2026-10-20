@@ -144,6 +144,15 @@
     "auto_hint": "執行者會自動審查每一步，Codex 明顯較慢。",
     "personal_hint": "Claude 只會做你的設定中預先允許的事：Linear 工具與 git 要在那裡預先允許，否則執行會失敗；Codex 沿用 ~/.codex/config.toml。"
   },
+  "effort": {
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "很高",
+    "max": "最高",
+    "default": "預設（{{name}}）",
+    "executor": "執行者自己的設定"
+  },
   "actions": {
     "stop": "停止",
     "run_again": "重新執行",
@@ -341,6 +350,17 @@
     "model_default": "沿用執行者自己的設定",
     "model_hint": "可以留空，留空時沿用執行者自己的設定。",
     "model_invalid": "只能使用字母、數字和 . _ : -，例如 sonnet 或 gpt-5-codex；帶方括號的名稱（如 sonnet[1m]）不支援",
+    "lean": "精簡執行",
+    "lean_hint": "只帶 Linear 與儲存庫自己的規則和設定，不帶你的其他 MCP 服務、外掛、鉤子、自動記憶和使用者層級指令（Codex 仍會讀 ~/.codex/AGENTS.md）。",
+    "lean_personal_hint": "「依個人設定」沿用你的全部設定，精簡執行不適用。",
+    "lean_state": {
+      "on": "開",
+      "off": "關",
+      "personal": "不適用（依個人設定）",
+      "home_directory": "不適用（主目錄）"
+    },
+    "effort": "推理力度",
+    "effort_hint": "精簡執行不讀你自己的設定，推理力度要在這裡設。",
     "prompt": "提示詞覆寫",
     "prompt_hint": "留空則使用設定裡的預設範本；固定規則一律生效。",
     "prompt_yes": "有",
@@ -399,6 +419,9 @@
     "login_note": "會開啟瀏覽器，IssueRelay 最多等你 5 分鐘。",
     "other_name": "已用其他名稱新增過 Linear？在終端機執行 {{list}} 找到名稱，再執行 {{login}}。",
     "server_check_failed": "無法確認 Linear 是以什麼名稱註冊的",
+    "lean_title": "精簡執行",
+    "lean_ready": "可用",
+    "lean_not_ready": "不可用",
     "env_title": "執行環境",
     "path_source": "PATH 來自",
     "proxy": "代理",
@@ -446,6 +469,8 @@
     "name_invalid": "請填寫一行文字，不含引號",
     "default_executor": "預設執行者",
     "default_permission": "預設權限檔位",
+    "default_effort": "預設推理力度",
+    "default_effort_hint": "綁定沒有另設時用它；不設就用執行者自己的設定。",
     "prompt_template": "預設提示詞範本",
     "prompt_hint": "固定規則一律生效。範本用來寫團隊的流程，例如測試分支名稱、部署後如何讀回結果。",
     "notify_run_started": "開始執行",
@@ -474,7 +499,7 @@
     "auto_update": "自動檢查更新",
     "auto_update_note": "啟動 1 分鐘後檢查一次，之後每 6 小時一次；安裝一律等你按下才進行。",
     "control_server_intro": "MCP 控制服務讓 Claude Code 與 Codex 能看到 IssueRelay 的執行情況。",
-    "control_server_note": "依使用者範圍註冊，無人值守的執行也會載入它；它的工具包含「暫停監控」。",
+    "control_server_note": "依使用者範圍註冊，不精簡的無人值守執行也會載入它（精簡執行只帶 Linear）；它的工具包含「暫停監控」。",
     "control_failed": "無法檢查 MCP 控制服務",
     "control_registered": "已註冊",
     "control_not_registered": "未註冊",
@@ -541,6 +566,10 @@
       "vague_body": "最近覺得有點慢。",
       "vague_note": "AI 不知道該量什麼、快到什麼程度才夠，所以會在需求下提問、把狀態改回 {{todo}} 並移除標籤。補充細節後重新加上標籤。"
     },
+    "lean_title": "精簡執行",
+    "lean_body": "精簡執行只帶 Linear 的 MCP 服務和儲存庫自己的規則與設定，不帶你的其他 MCP 服務、外掛、鉤子、自動記憶和使用者層級的 CLAUDE.md。Codex 仍會讀 ~/.codex/AGENTS.md，儲存庫的 .codex/ 設定也不生效。綁定預設精簡執行，除非你把它關掉；「依個人設定」的綁定和綁定到主目錄的綁定一律用你的全部設定。",
+    "lean_off": "要用別的 MCP 服務、儲存庫的 .codex/ 設定、你使用者設定裡的拒絕規則或自訂模型服務的綁定，請關掉精簡執行。",
+    "lean_effort": "精簡執行不讀你自己設定裡的推理力度：在設定裡設一個預設推理力度，或為每個綁定單獨設。",
     "faq_title": "常見問題",
     "faq": {
       "not_picked_q": "為什麼我的需求沒被接走？",
@@ -551,7 +580,7 @@
       "proxy_q": "需要代理時怎麼辦？",
       "proxy_a": "Claude Code 不讀系統代理，只認 HTTPS_PROXY 這類環境變數。IssueRelay 會從你的登入 shell 或系統設定讀出它們，再交給執行者。請把它們寫進你的 shell 設定檔，重新啟動 IssueRelay，再到「環境檢查」頁看讀到了什麼；密碼在那裡會被遮蔽。",
       "mcp_q": "怎麼讓 Claude Code 或 Codex 使用 IssueRelay 的 MCP 控制服務？",
-      "mcp_a": "在設定裡把 MCP 控制服務註冊到 Claude Code 或 Codex。它依使用者範圍註冊，無人值守的執行也會載入它。它的工具能讓 AI 查看狀態、列出執行、暫停與繼續監控、立即檢查一次；它不能把需求標記完成，也不能重新執行。",
+      "mcp_a": "在設定裡把 MCP 控制服務註冊到 Claude Code 或 Codex。它依使用者範圍註冊，不精簡的無人值守執行也會載入它（精簡執行只帶 Linear）。它的工具能讓 AI 查看狀態、列出執行、暫停與繼續監控、立即檢查一次；它不能把需求標記完成，也不能重新執行。",
       "logs_q": "日誌在哪裡？",
       "logs_a": "在「執行紀錄」頁打開一次執行：「原始日誌」分頁裡是它的日誌，「複製全部」可以複製。檔案在 IssueRelay 資料目錄的 logs 資料夾裡（macOS：~/Library/Application Support/com.sunkailun.issuerelay，Windows：%LOCALAPPDATA%\\com.sunkailun.issuerelay）；程式自己的日誌 app.<日期>.log 也在那裡。"
     }
@@ -601,6 +630,6 @@
     "add_another": "再新增一個",
     "add_another_title": "再新增一個綁定",
     "no_binding_note": "還沒有綁定任何專案，所以 IssueRelay 暫時不會處理任何需求。準備好之後，到「專案綁定」頁綁定一個。",
-    "control_server_note": "可以在設定中讓 Claude Code / Codex 呼叫 IssueRelay 的 MCP 控制服務；它依使用者範圍註冊，無人值守的執行也會載入它，它的工具包含「暫停監控」。"
+    "control_server_note": "可以在設定中讓 Claude Code / Codex 呼叫 IssueRelay 的 MCP 控制服務；它依使用者範圍註冊，不精簡的無人值守執行也會載入它，它的工具包含「暫停監控」。"
   }
 }

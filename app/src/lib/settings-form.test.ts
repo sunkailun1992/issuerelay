@@ -53,6 +53,7 @@ test("every field the form edits reaches the settings", () => {
     log_max_total_mb: "512",
     default_executor: "codex",
     default_permission: "auto",
+    default_effort: "max",
     prompt_template: "Push to the test branch.",
     auto_update: false,
     full_access_acknowledged: true,
@@ -72,6 +73,7 @@ test("every field the form edits reaches the settings", () => {
     log_max_total_mb: 512,
     default_executor: "codex",
     default_permission: "auto",
+    default_effort: "max",
     prompt_template: "Push to the test branch.",
     auto_update: false,
     full_access_acknowledged: true,
@@ -79,6 +81,18 @@ test("every field the form edits reaches the settings", () => {
     notifications: { run_started: false, awaiting_acceptance: false, needs_info: false, failed: false },
     trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" },
   });
+});
+
+test("the default effort comes from the settings and can be cleared, which leaves it out", () => {
+  const withEffort = { ...DEFAULT_SETTINGS, default_effort: "high" as const };
+  const draft = draftOf(withEffort);
+  expect(draft.default_effort).toBe("high");
+  expect(settingsOf(withEffort, draft)).toEqual(withEffort);
+  draft.default_effort = null;
+  const cleared = settingsOf(withEffort, draft)!;
+  expect("default_effort" in cleared).toBe(false);
+  expect(draftOf(DEFAULT_SETTINGS).default_effort).toBeNull();
+  expect("default_effort" in settingsOf(DEFAULT_SETTINGS, draftOf(DEFAULT_SETTINGS))!).toBe(false);
 });
 
 test("the Dock switch is part of the draft: it comes from the settings and a draft that left it alone gives it back", () => {

@@ -259,8 +259,15 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         doctor = {
           ...doctor,
           executors: doctor.executors.map((report) =>
+            // The setup commands use the names lean runs load, so lean runs get Linear too.
             report.kind === action.executor && (action.kind === "add_linear_mcp" || action.kind === "login_linear_mcp")
-              ? { ...report, linear_mcp: true, problems: report.problems.filter((p) => !p.startsWith("Linear MCP")) }
+              ? {
+                  ...report,
+                  linear_mcp: true,
+                  problems: report.problems.filter((p) => !p.startsWith("Linear MCP")),
+                  lean_linear_mcp: true,
+                  lean_problems: report.lean_problems.filter((p) => !p.includes("Linear MCP server")),
+                }
               : report,
           ),
         };

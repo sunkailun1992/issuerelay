@@ -73,9 +73,9 @@ test("a rejected API key says so and changes nothing", async () => {
   expect(screen.getByText(/did not accept the API key/)).toBeInTheDocument();
 });
 
-test("the control server note says unattended runs load it too", async () => {
+test("the control server note says unattended runs that are not lean load it too", async () => {
   await renderWithProviders(<Settings />);
-  expect(await screen.findByText(/unattended runs load it too/)).toBeInTheDocument();
+  expect(await screen.findByText(/unattended runs that are not lean load it too/)).toBeInTheDocument();
 });
 
 test("when the settings cannot be read the page says so", async () => {
@@ -1220,11 +1220,11 @@ test("both registrations that could not be checked can be checked again", async 
   expect(await screen.findByRole("button", { name: "Register with Codex" })).toBeInTheDocument();
 });
 
-test("the note says it is registered for the user, that unattended runs load it, and that its tools can pause", async () => {
+test("the note says it is registered for the user, that unattended runs that are not lean load it, and that its tools can pause", async () => {
   await renderWithProviders(<Settings />);
-  const note = await screen.findByText(/unattended runs load it too/);
-  expect(note).toHaveTextContent("It is registered for your user, so unattended runs load it too; its tools can pause monitoring.");
-  expect(screen.getAllByText(/unattended runs load it too/)).toHaveLength(1);
+  const note = await screen.findByText(/unattended runs that are not lean load it too/);
+  expect(note).toHaveTextContent("It is registered for your user, so unattended runs that are not lean load it too; its tools can pause monitoring.");
+  expect(screen.getAllByText(/unattended runs that are not lean load it too/)).toHaveLength(1);
 });
 
 // ---- the API key ------------------------------------------------------------------------------
@@ -1310,4 +1310,32 @@ test("the page reads in Chinese, and the language names stay in their own langua
   expect(screen.getByRole("combobox", { name: "界面语言" })).toHaveTextContent("跟随系统");
   await userEvent.click(screen.getByRole("combobox", { name: "界面语言" }));
   expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["跟随系统", "简体中文", "繁體中文", "English", "日本語", "한국어"]);
+});
+
+// ---- the reasoning effort -----------------------------------------------------------------------
+
+test("the default reasoning effort can be chosen and cleared", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const field = await screen.findByRole("combobox", { name: "Default reasoning effort" });
+  expect(field).toHaveTextContent("The executor's own setting");
+  expect(field).toHaveAccessibleDescription(/Used by bindings that do not set their own/);
+  await userEvent.click(field);
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual([
+    "The executor's own setting",
+    "Low",
+    "Medium",
+    "High",
+    "Extra high",
+    "Max",
+  ]);
+  await userEvent.click(screen.getByRole("option", { name: "Max" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).default_effort).toBe("max");
+  await pick("Default reasoning effort", "The executor's own setting");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect("default_effort" in lastSaved(save)).toBe(false);
 });

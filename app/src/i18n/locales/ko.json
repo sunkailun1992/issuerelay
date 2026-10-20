@@ -144,6 +144,15 @@
     "auto_hint": "실행기가 각 단계를 자동으로 검토합니다. Codex는 눈에 띄게 느려집니다.",
     "personal_hint": "Claude는 내 설정에서 미리 허용한 작업만 합니다. Linear 도구와 git은 거기서 미리 허용하지 않으면 실행이 실패합니다. Codex는 ~/.codex/config.toml을 따릅니다."
   },
+  "effort": {
+    "low": "낮음",
+    "medium": "보통",
+    "high": "높음",
+    "xhigh": "매우 높음",
+    "max": "최대",
+    "default": "기본값({{name}})",
+    "executor": "실행기 자체 설정"
+  },
   "actions": {
     "stop": "중지",
     "run_again": "다시 실행",
@@ -341,6 +350,17 @@
     "model_default": "실행기 자체 설정",
     "model_hint": "비워 둘 수 있습니다. 비우면 실행기 자체 설정을 따릅니다.",
     "model_invalid": "영문자, 숫자와 . _ : - 만 사용할 수 있습니다(예: sonnet, gpt-5-codex). 대괄호가 있는 이름(sonnet[1m] 등)은 지원하지 않습니다",
+    "lean": "경량 실행",
+    "lean_hint": "Linear와 저장소 자체의 규칙과 설정만 불러옵니다. 다른 MCP 서버, 플러그인, 훅, 자동 메모리, 사용자 수준 지침은 불러오지 않습니다(Codex는 ~/.codex/AGENTS.md를 계속 읽습니다).",
+    "lean_personal_hint": "'개인 설정에 따름' 실행은 항상 사용자 설정 전체를 사용하므로 경량 실행이 적용되지 않습니다.",
+    "lean_state": {
+      "on": "켜짐",
+      "off": "꺼짐",
+      "personal": "적용되지 않음(개인 설정에 따름)",
+      "home_directory": "적용되지 않음(홈 폴더)"
+    },
+    "effort": "추론 강도",
+    "effort_hint": "경량 실행은 사용자 자신의 설정을 읽지 않으므로 추론 강도를 여기에서 설정하세요.",
     "prompt": "프롬프트 덮어쓰기",
     "prompt_hint": "비워 두면 설정의 기본 템플릿을 사용합니다. 고정 규칙은 항상 적용됩니다.",
     "prompt_yes": "있음",
@@ -399,6 +419,9 @@
     "login_note": "브라우저가 열립니다. IssueRelay는 최대 5분 동안 완료를 기다립니다.",
     "other_name": "다른 이름으로 Linear를 추가했나요? 터미널에서 {{list}}을(를) 실행해 이름을 찾은 뒤 {{login}}을(를) 실행하세요.",
     "server_check_failed": "Linear가 어떤 이름으로 등록되어 있는지 확인하지 못했습니다",
+    "lean_title": "경량 실행",
+    "lean_ready": "사용 가능",
+    "lean_not_ready": "사용 불가",
     "env_title": "실행 환경",
     "path_source": "PATH를 읽은 곳",
     "proxy": "프록시",
@@ -446,6 +469,8 @@
     "name_invalid": "따옴표 없이 한 줄로 입력하세요",
     "default_executor": "기본 실행기",
     "default_permission": "기본 권한 수준",
+    "default_effort": "기본 추론 강도",
+    "default_effort_hint": "자체 설정이 없는 연결에 사용됩니다. 설정하지 않으면 각 실행기가 자체 설정을 사용합니다.",
     "prompt_template": "기본 프롬프트 템플릿",
     "prompt_hint": "고정 규칙은 항상 적용됩니다. 템플릿에는 팀의 절차를 적으세요(예: 테스트 브랜치 이름, 배포 결과를 확인하는 방법).",
     "notify_run_started": "실행 시작",
@@ -474,7 +499,7 @@
     "auto_update": "업데이트 자동 확인",
     "auto_update_note": "시작 1분 뒤에 한 번, 이후 6시간마다 확인합니다. 설치는 항상 직접 누를 때까지 기다립니다.",
     "control_server_intro": "MCP 제어 서버를 쓰면 Claude Code와 Codex가 IssueRelay의 상태를 볼 수 있습니다.",
-    "control_server_note": "사용자 범위로 등록되므로 무인 실행에서도 불러옵니다. 도구에는 모니터링 일시 중지도 있습니다.",
+    "control_server_note": "사용자 범위로 등록되므로 경량 실행이 아닌 무인 실행에서도 불러옵니다(경량 실행은 Linear만 불러옵니다). 도구에는 모니터링 일시 중지도 있습니다.",
     "control_failed": "MCP 제어 서버를 확인하지 못했습니다",
     "control_registered": "등록됨",
     "control_not_registered": "등록되지 않음",
@@ -541,6 +566,10 @@
       "vague_body": "요즘 좀 느린 것 같아요.",
       "vague_note": "AI는 무엇을 측정해야 하는지, 얼마나 빨라야 충분한지 알 수 없으므로 이슈에 질문을 남기고 상태를 {{todo}}로 되돌리고 라벨을 뗍니다. 내용을 보충한 뒤 라벨을 다시 붙이세요."
     },
+    "lean_title": "경량 실행",
+    "lean_body": "경량 실행은 Linear의 MCP 서버와 저장소 자체의 규칙과 설정만 불러옵니다. 다른 MCP 서버, 플러그인, 훅, 자동 메모리, 사용자 수준 CLAUDE.md는 불러오지 않습니다. Codex는 ~/.codex/AGENTS.md를 계속 읽으며, 저장소의 .codex/ 설정은 적용되지 않습니다. 연결은 끄지 않는 한 경량 실행으로 실행됩니다. '개인 설정에 따름' 연결과 홈 폴더의 연결은 항상 사용자 설정 전체를 사용합니다.",
+    "lean_off": "다른 MCP 서버, 저장소의 .codex/ 설정, 사용자 설정의 거부 규칙, 사용자 지정 모델 공급자가 필요한 연결에서는 끄세요.",
+    "lean_effort": "경량 실행은 사용자 자신의 설정에 있는 추론 강도를 읽지 않습니다. 설정에서 기본 추론 강도를 정하거나 연결마다 설정하세요.",
     "faq_title": "자주 묻는 질문",
     "faq": {
       "not_picked_q": "내 이슈가 처리되지 않는 이유는 무엇인가요?",
@@ -551,7 +580,7 @@
       "proxy_q": "프록시가 필요하면 어떻게 하나요?",
       "proxy_a": "Claude Code는 시스템 프록시를 읽지 않고 HTTPS_PROXY 같은 환경 변수만 읽습니다. IssueRelay는 로그인 셸이나 시스템 설정에서 이를 읽어 실행기에 전달합니다. 셸 설정 파일에 적고 IssueRelay를 다시 시작한 뒤 '환경 점검' 페이지에서 무엇을 읽었는지 확인하세요(비밀번호는 가려서 표시됩니다).",
       "mcp_q": "Claude Code나 Codex에서 IssueRelay의 MCP 제어 서버를 쓰려면 어떻게 하나요?",
-      "mcp_a": "설정에서 MCP 제어 서버를 Claude Code나 Codex에 등록하세요. 사용자 범위로 등록되므로 무인 실행에서도 불러옵니다. 도구로 AI는 상태 확인, 실행 목록 보기, 모니터링 일시 중지와 다시 시작, 지금 확인을 할 수 있습니다. 이슈를 완료로 표시하거나 다시 실행할 수는 없습니다.",
+      "mcp_a": "설정에서 MCP 제어 서버를 Claude Code나 Codex에 등록하세요. 사용자 범위로 등록되므로 경량 실행이 아닌 무인 실행에서도 불러옵니다(경량 실행은 Linear만 불러옵니다). 도구로 AI는 상태 확인, 실행 목록 보기, 모니터링 일시 중지와 다시 시작, 지금 확인을 할 수 있습니다. 이슈를 완료로 표시하거나 다시 실행할 수는 없습니다.",
       "logs_q": "로그는 어디에 있나요?",
       "logs_a": "'실행 기록' 페이지에서 실행을 열면 '원본 로그' 탭에 로그가 나오고 '모두 복사'로 복사할 수 있습니다. 파일은 IssueRelay 데이터 폴더의 logs 폴더에 있습니다(macOS: ~/Library/Application Support/com.sunkailun.issuerelay, Windows: %LOCALAPPDATA%\\com.sunkailun.issuerelay). 프로그램 자체 로그 app.<날짜>.log도 같은 곳에 있습니다."
     }
@@ -601,6 +630,6 @@
     "add_another": "하나 더 추가",
     "add_another_title": "연결 하나 더 추가",
     "no_binding_note": "아직 연결된 프로젝트가 없어 IssueRelay는 어떤 이슈도 처리하지 않습니다. 준비되면 '프로젝트 연결' 페이지에서 연결하세요.",
-    "control_server_note": "설정에서 Claude Code와 Codex가 IssueRelay의 MCP 제어 서버를 호출하도록 할 수 있습니다. 사용자 범위로 등록되므로 무인 실행에서도 불러오며, 도구에는 모니터링 일시 중지도 있습니다."
+    "control_server_note": "설정에서 Claude Code와 Codex가 IssueRelay의 MCP 제어 서버를 호출하도록 할 수 있습니다. 사용자 범위로 등록되므로 경량 실행이 아닌 무인 실행에서도 불러오며, 도구에는 모니터링 일시 중지도 있습니다."
   }
 }

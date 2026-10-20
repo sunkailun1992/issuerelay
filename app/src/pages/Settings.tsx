@@ -48,14 +48,16 @@ import {
   settingsOf,
   unsaved,
 } from "@/lib/settings-form";
-import type {
-  CliPathStatus,
-  ControlServer,
-  ExecutorKind,
-  NotificationSettings,
-  PermissionProfile,
-  Settings as SettingsData,
-  TriggerNames,
+import {
+  type CliPathStatus,
+  type ControlServer,
+  EFFORTS,
+  type Effort,
+  type ExecutorKind,
+  type NotificationSettings,
+  type PermissionProfile,
+  type Settings as SettingsData,
+  type TriggerNames,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -519,6 +521,9 @@ const LOGS: { field: CountField; label: string }[] = [
  * says so while it waits. Starting at login and the control server act at once and are not part of
  * the draft.
  */
+/** The entry of the default effort list that sets none: each executor uses its own setting. */
+const NO_EFFORT = "none";
+
 function SettingsForm({ settings }: { settings: SettingsData }) {
   const { t } = useTranslation();
   const client = useQueryClient();
@@ -633,6 +638,25 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
                   <SelectItem value="personal">{t("permission.personal")}</SelectItem>
                 </SelectContent>
               </Select>
+            </Field>
+            <Field label={t("settings.default_effort")} htmlFor={id("effort")}>
+              <Select
+                value={draft.default_effort ?? NO_EFFORT}
+                onValueChange={(value) => edit("default_effort", value === NO_EFFORT ? null : (value as Effort))}
+              >
+                <SelectTrigger id={id("effort")} className="w-full" aria-describedby={id("effort-hint")}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_EFFORT}>{t("effort.executor")}</SelectItem>
+                  {EFFORTS.map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {t(`effort.${level}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Hint id={id("effort-hint")}>{t("settings.default_effort_hint")}</Hint>
             </Field>
           </div>
           <Hint id={id("permission-hint")}>{t(`permission.${draft.default_permission}_hint`)}</Hint>

@@ -139,3 +139,20 @@ test("an installed executor whose version could not be read is still installed",
   expect(within(card).getByText("Installed")).toBeInTheDocument();
   expect(within(card).queryByText(/Claude Code\)/)).not.toBeInTheDocument();
 });
+
+test("the lean part is shown only where it is asked for: the environment check, not the guide", async () => {
+  const { unmount } = await renderWithProviders(<ExecutorCheck report={claude} onFixed={() => {}} />);
+  const card = screen.getByRole("region", { name: "Claude Code" });
+  expect(within(card).queryByRole("region", { name: "Lean runs" })).not.toBeInTheDocument();
+  unmount();
+  await renderWithProviders(<ExecutorCheck report={claude} lean />);
+  const checked = screen.getByRole("region", { name: "Claude Code" });
+  expect(within(checked).getByRole("region", { name: "Lean runs" })).toHaveTextContent("Ready");
+});
+
+test("an executor that is not installed is not ready for lean runs, whatever the lean checks say", async () => {
+  await renderWithProviders(<ExecutorCheck report={with_(notInstalled(claude), { lean_linear_mcp: true, lean_logged_in: true })} lean />);
+  const lean = screen.getByRole("region", { name: "Lean runs" });
+  expect(within(lean).getByText("Not ready")).toBeInTheDocument();
+  expect(symbolOf(lean, "Not ready")).toContain("text-state-failed");
+});

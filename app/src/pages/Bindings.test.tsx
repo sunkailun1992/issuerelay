@@ -103,7 +103,7 @@ test("when the settings cannot be read the defaults are said to be unknown, not 
   backend.settings = vi.fn().mockRejectedValue(new BackendError("settings are gone"));
   await renderWithProviders(<Bindings />, { backend });
   const card = await screen.findByRole("region", { name: "Demo Project" });
-  expect(within(card).getAllByText("Default (Unknown)")).toHaveLength(2);
+  expect(within(card).getAllByText("Default (Unknown)")).toHaveLength(3);
 });
 
 test("the cards wait for the settings, so that they never say 'Unknown' about what is only not read yet", async () => {
@@ -680,4 +680,36 @@ test("the buttons of a card are described by the project they belong to, under t
   }
   const demo = screen.getByRole("region", { name: "Demo Project" });
   expect(within(demo).getByRole("button", { name: "Edit" })).toHaveAccessibleDescription("Demo Project");
+});
+
+// ---- lean runs and the reasoning effort --------------------------------------------------------
+
+test("a card says whether runs are lean and which reasoning effort they use", async () => {
+  const backend = backendWithBindings([
+    { id: "proj-1", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-app" },
+    { id: "proj-2", project_id: "proj-2", project_name: "Demo Mobile", directory: "~/code/demo-mobile", lean: false, effort: "max" },
+    { id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs", permission: "personal" },
+  ]);
+  await renderWithProviders(<Bindings />, { backend });
+  const demo = await screen.findByRole("region", { name: "Demo Project" });
+  expect(within(demo).getByText("On")).toBeInTheDocument();
+  expect(within(demo).getByText("Default (The executor's own setting)")).toBeInTheDocument();
+  const mobile = screen.getByRole("region", { name: "Demo Mobile" });
+  expect(within(mobile).getByText("Off")).toBeInTheDocument();
+  expect(within(mobile).getByText("Max")).toBeInTheDocument();
+  const docs = screen.getByRole("region", { name: "Docs Site" });
+  expect(within(docs).getByText("Not applicable (personal settings)")).toBeInTheDocument();
+});
+
+test("once checked, a card shows the lean state the check found, also for the home folder", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const report = structuredClone(DEMO_DOCTOR);
+  report.bindings[0] = { ...report.bindings[0], lean: "home_directory" };
+  backend.doctor = vi.fn().mockResolvedValue(report);
+  await renderWithProviders(<Bindings />, { backend });
+  const demo = await screen.findByRole("region", { name: "Demo Project" });
+  expect(within(demo).getByText("On")).toBeInTheDocument();
+  await userEvent.click(within(demo).getByRole("button", { name: "Check again" }));
+  expect(await within(demo).findByText("Not applicable (home folder)")).toBeInTheDocument();
+  expect(within(demo).queryByText("On")).not.toBeInTheDocument();
 });

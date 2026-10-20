@@ -144,6 +144,15 @@
     "auto_hint": "The executor reviews each step by itself before it runs. Codex is clearly slower this way.",
     "personal_hint": "Claude only does what your own settings allow in advance: the Linear tools and git must be allowed there, or the run fails. Codex follows ~/.codex/config.toml."
   },
+  "effort": {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra high",
+    "max": "Max",
+    "default": "Default ({{name}})",
+    "executor": "The executor's own setting"
+  },
   "actions": {
     "stop": "Stop",
     "run_again": "Run again",
@@ -341,6 +350,17 @@
     "model_default": "The executor's own setting",
     "model_hint": "Optional. Leave empty to use the executor's own setting.",
     "model_invalid": "Only letters, digits and . _ : - are allowed, for example sonnet or gpt-5-codex; names with brackets (such as sonnet[1m]) are not supported",
+    "lean": "Lean run",
+    "lean_hint": "Loads only Linear and the repository's own rules and settings: not your other MCP servers, plugins, hooks, auto memory or user-level instructions (Codex still reads ~/.codex/AGENTS.md).",
+    "lean_personal_hint": "Personal-settings runs always use your whole setup, so lean runs do not apply.",
+    "lean_state": {
+      "on": "On",
+      "off": "Off",
+      "personal": "Not applicable (personal settings)",
+      "home_directory": "Not applicable (home folder)"
+    },
+    "effort": "Reasoning effort",
+    "effort_hint": "Lean runs do not read your own settings, so set the effort here.",
     "prompt": "Prompt override",
     "prompt_hint": "Leave empty to use the default template from the settings. The fixed rules always apply.",
     "prompt_yes": "Yes",
@@ -399,6 +419,9 @@
     "login_note": "Opens your browser. IssueRelay waits up to 5 minutes for you to finish.",
     "other_name": "Added Linear under another name? Run {{list}} in a terminal to find it, then {{login}}.",
     "server_check_failed": "Could not check how Linear is registered",
+    "lean_title": "Lean runs",
+    "lean_ready": "Ready",
+    "lean_not_ready": "Not ready",
     "env_title": "Runtime environment",
     "path_source": "PATH is read from",
     "proxy": "Proxy",
@@ -446,6 +469,8 @@
     "name_invalid": "Use a name on one line, without quotes",
     "default_executor": "Default executor",
     "default_permission": "Default permission level",
+    "default_effort": "Default reasoning effort",
+    "default_effort_hint": "Used by bindings that do not set their own; without it, each executor uses its own setting.",
     "prompt_template": "Default prompt template",
     "prompt_hint": "The fixed rules always apply. Use the template for your team's process, for example the test branch name or how to read a deployment back.",
     "notify_run_started": "Run started",
@@ -474,7 +499,7 @@
     "auto_update": "Check for updates automatically",
     "auto_update_note": "Checks a minute after start and every 6 hours. Installing always waits for your click.",
     "control_server_intro": "The MCP control server lets Claude Code and Codex see how IssueRelay stands.",
-    "control_server_note": "It is registered for your user, so unattended runs load it too; its tools can pause monitoring.",
+    "control_server_note": "It is registered for your user, so unattended runs that are not lean load it too; its tools can pause monitoring.",
     "control_failed": "Could not check the MCP control server",
     "control_registered": "Registered",
     "control_not_registered": "Not registered",
@@ -541,6 +566,10 @@
       "vague_body": "It feels slow lately.",
       "vague_note": "The AI cannot tell what to measure or what is fast enough, so it asks on the issue, sets the status back to {{todo}} and removes the label. Add the details and label it again."
     },
+    "lean_title": "Lean runs",
+    "lean_body": "A lean run loads only Linear's MCP server and the repository's own rules and settings: not your other MCP servers, plugins, hooks, auto memory or user-level CLAUDE.md. Codex still reads ~/.codex/AGENTS.md, and the repository's .codex/ configuration does not apply. Bindings run lean unless you turn it off; personal-settings bindings and a binding of your home folder always use your whole setup.",
+    "lean_off": "Turn it off for a binding that needs other MCP servers, the repository's .codex/ configuration, deny rules from your user settings, or a custom model provider.",
+    "lean_effort": "Lean runs do not read the reasoning effort from your own settings: set a default reasoning effort in Settings, or one for each binding.",
     "faq_title": "Questions and answers",
     "faq": {
       "not_picked_q": "Why was my issue not picked up?",
@@ -551,7 +580,7 @@
       "proxy_q": "What if I need a proxy?",
       "proxy_a": "Claude Code does not read the system proxy, only environment variables such as HTTPS_PROXY. IssueRelay reads them from your login shell or the system settings and passes them to the executors. Set them in your shell profile, restart IssueRelay, and look at the Environment page to see what was found; passwords are masked there.",
       "mcp_q": "How can Claude Code or Codex use IssueRelay's MCP control server?",
-      "mcp_a": "In Settings, register the MCP control server with Claude Code or Codex. It is registered for your user, so unattended runs load it too. Its tools let the AI see the status, list runs, pause and resume monitoring and check now; it cannot mark an issue done or run it again.",
+      "mcp_a": "In Settings, register the MCP control server with Claude Code or Codex. It is registered for your user, so unattended runs that are not lean load it too (lean runs load only Linear). Its tools let the AI see the status, list runs, pause and resume monitoring and check now; it cannot mark an issue done or run it again.",
       "logs_q": "Where are the logs?",
       "logs_a": "Open a run on the Runs page: the Raw log tab shows its log, and Copy all copies it. The files are in the logs folder inside IssueRelay's data folder (macOS: ~/Library/Application Support/com.sunkailun.issuerelay, Windows: %LOCALAPPDATA%\\com.sunkailun.issuerelay). The program's own log, app.<date>.log, is there too."
     }
@@ -601,6 +630,6 @@
     "add_another": "Add another",
     "add_another_title": "Add another binding",
     "no_binding_note": "No project is bound yet, so IssueRelay will not take on any issue. Bind one on the Bindings page when you are ready.",
-    "control_server_note": "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs load it too, and its tools can pause monitoring."
+    "control_server_note": "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs that are not lean load it too, and its tools can pause monitoring."
   }
 }

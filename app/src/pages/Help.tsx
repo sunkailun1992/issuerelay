@@ -33,6 +33,18 @@ function Examples({ names }: { names: TriggerNames }) {
   );
 }
 
+/** What lean runs leave out, when to turn them off, and where the reasoning effort is set (lean-run design 6.3). */
+function LeanRuns() {
+  const { t } = useTranslation();
+  return (
+    <Section title={t("help.lean_title")}>
+      <p className="text-muted-foreground">{t("help.lean_body")}</p>
+      <p className="text-muted-foreground">{t("help.lean_off")}</p>
+      <p className="text-muted-foreground">{t("help.lean_effort")}</p>
+    </Section>
+  );
+}
+
 /** A question and what answers it. */
 function Question({ question, children }: { question: string; children: ReactNode }) {
   return (
@@ -79,7 +91,7 @@ function Questions({ names }: { names: TriggerNames }) {
 
 /**
  * The help page (design 9.2): when IssueRelay takes an issue on, how an issue moves, how to write
- * one, and the questions that come up. It is all text from the translations, with the label and
+ * one, what lean runs are, and the questions that come up. It is all text from the translations, with the label and
  * the statuses of the settings put in; until the settings are read (and if they cannot be) the
  * default names stand, and in that case the page says so under its title.
  */
@@ -95,6 +107,7 @@ export default function Help() {
         <TriggerConditions names={names} />
         <IssueFlow names={names} />
         <Examples names={names} />
+        <LeanRuns />
         <Questions names={names} />
       </div>
     </>

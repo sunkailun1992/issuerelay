@@ -1124,7 +1124,7 @@ test("the last step tells the four conditions, one example, how an issue moves a
   expect(within(flow).getByRole("list", { name: "What the statuses in the panel mean" }).children).toHaveLength(8);
   expect(
     screen.getByText(
-      "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs load it too, and its tools can pause monitoring.",
+      "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs that are not lean load it too, and its tools can pause monitoring.",
     ),
   ).toBeInTheDocument();
 });
