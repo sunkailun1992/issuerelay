@@ -361,6 +361,14 @@ fn system_readiness(paths: &AppPaths, env: SharedEnv) -> SystemReadiness {
     })
 }
 
+/// `CLAUDE_CONFIG_DIR` as the executors inherit it from the host (`ExecEnv` changes only the
+/// PATH and the proxy), when it is set and not empty.
+fn claude_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 impl Host {
     /// Binds the IPC endpoint (fails with `AlreadyRunning` when another host serves this user),
     /// starts the engine's loop and the IPC server, and connects to Linear in the background:
@@ -392,6 +400,8 @@ impl Host {
                 .job_runner
                 .unwrap_or_else(|| Arc::new(ProcessJobRunner::new(env.clone()))),
             logs_dir: paths.logs_dir(),
+            user_home: dirs::home_dir(),
+            claude_config_dir: claude_config_dir(),
         })?;
         let engine_shutdown = CancellationToken::new();
         let ipc_shutdown = CancellationToken::new();
@@ -868,6 +878,8 @@ mod tests {
             readiness: Arc::new(SystemReadiness::new(READINESS_TTL, env.clone())),
             job_runner: Arc::new(ProcessJobRunner::new(env.clone())),
             logs_dir: paths.logs_dir(),
+            user_home: None,
+            claude_config_dir: None,
         })
         .unwrap();
         Host {

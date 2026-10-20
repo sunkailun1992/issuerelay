@@ -899,6 +899,35 @@ fn latest_job_state(host: &Host) -> JobState {
 }
 
 #[tokio::test]
+async fn a_host_gives_lean_runs_the_users_own_folders() {
+    bounded(async {
+        let (host, runner, _root) = host_with_a_running_job(true).await;
+        let spec = runner.specs.lock().unwrap()[0].clone();
+        stop_now(&host).await;
+        assert!(spec.lean, "{:?}", spec.args);
+        // Where Claude Code keeps the user-level CLAUDE.md for the user running the test.
+        let instructions = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join("CLAUDE.md"))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude").join("CLAUDE.md")))
+            .expect("the test user has a home folder");
+        let settings = spec.args.iter().position(|a| a == "--settings");
+        if issuerelay_core::executor::lean::passable(&instructions) {
+            let settings: serde_json::Value =
+                serde_json::from_str(&spec.args[settings.expect("--settings") + 1]).unwrap();
+            assert_eq!(
+                settings["claudeMdExcludes"][0].as_str(),
+                instructions.to_str()
+            );
+        } else {
+            assert_eq!(settings, None, "{:?}", spec.args);
+            assert_eq!(spec.notes.len(), 1, "{:?}", spec.notes);
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn waiting_for_runs_lets_the_running_job_finish() {
     bounded(async {
         let (host, runner, _root) = host_with_a_running_job(true).await;

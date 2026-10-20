@@ -41,7 +41,7 @@ use crate::config::{Binding, Config, ExecutorKind, Settings, TriggerNames};
 use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe, WorkspaceReport};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor::{
-    self, CommandSpec,
+    self, CommandSpec, lean,
     outcome::{self, Report},
 };
 use crate::linear::{LinearApi, Project, Viewer};
@@ -135,6 +135,12 @@ pub struct EngineDeps {
     pub job_runner: Arc<dyn JobRunner>,
     /// Holds one `<job id>.jsonl` log per job.
     pub logs_dir: PathBuf,
+    /// The user's home folder: a binding of that very folder does not run lean, and a lean
+    /// Claude run leaves out the user-level `CLAUDE.md` under it. `None` when it is not known.
+    pub user_home: Option<PathBuf>,
+    /// `CLAUDE_CONFIG_DIR` as the executors get it, when it is set and not empty: Claude Code
+    /// then keeps the user-level `CLAUDE.md` there instead.
+    pub claude_config_dir: Option<PathBuf>,
 }
 
 /// What the panel, CLI and MCP show about the engine right now.
@@ -297,6 +303,10 @@ struct Inner {
     readiness: Arc<dyn ReadinessProbe>,
     job_runner: Arc<dyn JobRunner>,
     logs_dir: PathBuf,
+    /// `EngineDeps::user_home`.
+    user_home: Option<PathBuf>,
+    /// `EngineDeps::claude_config_dir`.
+    claude_config_dir: Option<PathBuf>,
     running: Mutex<HashMap<i64, RunningJob>>,
     /// The user a connection is authorized as, with the connection that said so. Only that
     /// connection's answer is ever kept: `set_linear` empties it, and an answer that arrives
@@ -479,6 +489,8 @@ impl Engine {
                 readiness: deps.readiness,
                 job_runner: deps.job_runner,
                 logs_dir: deps.logs_dir,
+                user_home: deps.user_home,
+                claude_config_dir: deps.claude_config_dir,
                 running: Mutex::new(HashMap::new()),
                 viewer: Mutex::new(None),
                 poll: Mutex::new(PollState::default()),
@@ -496,6 +508,11 @@ impl Engine {
 
     fn config(&self) -> Config {
         self.inner.config.read().expect("config lock").clone()
+    }
+
+    /// The user's home folder, when it is known (`EngineDeps::user_home`).
+    fn home(&self) -> Option<&Path> {
+        self.inner.user_home.as_deref()
     }
 
     fn store(&self) -> MutexGuard<'_, Store> {
@@ -838,7 +855,7 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                match trigger::evaluate(&issue, &cfg, &me.id, &ready, None) {
+                match trigger::evaluate(&issue, &cfg, &me.id, &ready, self.home()) {
                     Eligibility::Eligible(_) => IssueStatus::Eligible {
                         // What the poll does with such an issue (`reconcile`): a run in hand stays
                         // as it is, anything else is recorded anew only when `should_enqueue` says
@@ -952,7 +969,7 @@ impl Engine {
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, None);
+            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, self.home());
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
@@ -1296,7 +1313,7 @@ impl Engine {
             }
             return Ok(false);
         };
-        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, None) {
+        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, self.home()) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
                 let waiting = self.assign_if_queued(
@@ -1360,13 +1377,32 @@ impl Engine {
             comment_language: &language,
             template: &template,
         });
+        // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
+        // arguments is not passed, and the run log says so (lean-run design, section 5.1).
+        let instructions =
+            lean::user_instructions_path(self.home(), self.inner.claude_config_dir.as_deref());
+        let passable = instructions.as_deref().filter(|path| lean::passable(path));
+        let lean_run = cfg.lean_for(&binding, self.home()).applies();
         let options = executor::RunOptions {
             profile: cfg.permission_for(&binding),
             model: binding.model.as_deref(),
-            effort: None,
-            lean: None,
+            effort: cfg.effort_for(&binding),
+            lean: lean_run.then_some(executor::Lean {
+                user_instructions: passable,
+            }),
         };
-        let spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
+        let mut spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
+        if lean_run && kind == ExecutorKind::Claude && passable.is_none() {
+            spec.notes.push(if instructions.is_some() {
+                "the user-level CLAUDE.md path cannot be passed safely, so this lean run still \
+                 reads it"
+                    .into()
+            } else {
+                "could not tell where the user-level CLAUDE.md is, so this lean run may still \
+                 read it"
+                    .into()
+            });
+        }
         // A manual retry reuses the row, so its log replaces the previous attempt's log.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
         // Right before the run is registered: a pause or a changed binding that came while the
@@ -1816,7 +1852,7 @@ impl Engine {
             linear_error,
             executors,
             workspace,
-            bindings: doctor::check_bindings(&cfg, &ready, None),
+            bindings: doctor::check_bindings(&cfg, &ready, self.home()),
             env,
         }
     }

@@ -13,12 +13,15 @@ use anyhow::Result;
 #[cfg(target_os = "macos")]
 use common::orphan::Orphan;
 use common::{
-    engine_kit::{FakeReadiness, Harness, Script, ScriptedRunner},
+    engine_kit::{FakeReadiness, FullOnlyReadiness, Harness, Homes, Script, ScriptedRunner},
     fake_linear::FakeLinear,
     issue,
 };
 use issuerelay_core::{
-    config::{Binding, Config, ExecutorKind, PermissionProfile, Settings, TriggerNames},
+    config::{
+        Binding, Config, Effort, ExecutorKind, LeanStatus, PermissionProfile, Settings,
+        TriggerNames,
+    },
     doctor::{ExecutorReport, ReadinessProbe},
     engine::{
         Engine, EngineDeps, EngineEvent, IssueStatus, IssueView, JobRunner, ProcessJobRunner,
@@ -407,6 +410,8 @@ async fn a_config_file_edited_while_running_is_never_overwritten() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: h.root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     restarted.pause().unwrap();
@@ -431,6 +436,8 @@ async fn a_config_file_created_or_removed_while_running_is_a_change_too() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     std::fs::write(&config_path, "[settings]\npoll_interval_secs = 10\n").unwrap();
@@ -502,6 +509,8 @@ async fn interrupted_runs_fail_on_restart() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     let job = engine.list_jobs(10).unwrap().remove(0);
@@ -556,6 +565,8 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
         readiness: Arc::new(FakeReadiness),
         job_runner: runner.clone(),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.tick().await.unwrap();
@@ -590,6 +601,8 @@ async fn a_started_run_records_its_executor_process() {
         readiness: Arc::new(FakeReadiness),
         job_runner: runner.clone(),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.tick().await.unwrap();
@@ -673,6 +686,8 @@ fn engine_on(db: &Path, root: &Path) -> Engine {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap()
 }
@@ -899,6 +914,8 @@ fn build_engine(
         readiness,
         job_runner,
         logs_dir: root.join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap()
 }
@@ -2154,6 +2171,8 @@ async fn a_row_that_says_running_without_a_run_cannot_be_stopped() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(fake, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.poll_once().await.unwrap();
@@ -2248,6 +2267,8 @@ async fn mark_done_does_not_overwrite_a_row_that_changed_while_linear_was_update
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(fake.clone(), false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.tick().await.unwrap();
@@ -2539,6 +2560,8 @@ async fn a_hand_edited_binding_with_a_relative_directory_stops_the_engine_from_s
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     });
     let err = result.err().expect("a relative folder must not start");
     let message = format!("{err:#}");
@@ -2561,6 +2584,8 @@ async fn an_unreadable_configuration_stops_the_engine_from_starting() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     });
     let err = result.err().expect("a broken configuration must not start");
     assert!(format!("{err:#}").contains("config.toml"), "{err:#}");
@@ -2636,6 +2661,8 @@ fn starting_with_config_keys_this_version_does_not_know_warns_naming_only_the_ke
                 readiness: Arc::new(FakeReadiness),
                 job_runner: Arc::new(ScriptedRunner::new(linear, false)),
                 logs_dir: root.path().join("logs"),
+                user_home: None,
+                claude_config_dir: None,
             })
         });
         engine.expect("the file loads, unknown keys and all");
@@ -4079,6 +4106,8 @@ async fn a_store_error_while_abandoning_a_run_does_not_stop_it_from_freeing_the_
         readiness: Arc::new(FakeReadiness),
         job_runner: runner.clone(),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     // The database refuses to store a failed run, so the abandoned run cannot be recorded.
@@ -4123,6 +4152,8 @@ async fn an_abandoned_run_leaves_a_row_that_is_no_longer_running_alone() {
         readiness: Arc::new(FakeReadiness),
         job_runner: runner.clone(),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.tick().await.unwrap();
@@ -4167,6 +4198,8 @@ async fn a_result_that_cannot_be_stored_fails_the_job_and_frees_the_folder() {
         readiness: Arc::new(FakeReadiness),
         job_runner: runner.clone(),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.tick().await.unwrap();
@@ -4753,6 +4786,8 @@ async fn job_counts_that_cannot_be_read_are_reported_in_the_status() {
         readiness: Arc::new(FakeReadiness),
         job_runner: Arc::new(ScriptedRunner::new(fake, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     engine.poll_once().await.unwrap();
@@ -5216,4 +5251,250 @@ async fn saved_settings_apply_without_waiting_for_the_timer() {
     h.runner.gate.add_permits(2);
     h.settle().await;
     stop_loop(&shutdown, worker).await;
+}
+
+/// A harness for a user whose folders are `homes`, with executors that are ready for lean runs.
+fn lean_harness(homes: Homes) -> Harness {
+    Harness::with_parts(Config::default(), false, homes, Arc::new(FakeReadiness))
+}
+
+/// The user's home folder `home`, and no Claude configuration folder.
+fn home_at(home: &Path) -> Homes {
+    Homes {
+        user_home: Some(home.to_path_buf()),
+        claude_config_dir: None,
+    }
+}
+
+/// Binds proj-1 to `dir` with the demo binding as `change` leaves it, then lets issue 1 run;
+/// what its run was started with.
+async fn started_spec(h: &Harness, dir: &Path, change: impl FnOnce(&mut Binding)) -> CommandSpec {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut binding = demo_binding("proj-1", dir);
+    change(&mut binding);
+    h.engine.add_binding(binding).unwrap();
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let specs = h.runner.specs.lock().unwrap();
+    assert_eq!(specs.len(), 1, "the run started");
+    specs[0].clone()
+}
+
+/// The path a lean Claude run's `--settings` leaves out, as the JSON names it.
+fn excluded(spec: &CommandSpec) -> Option<String> {
+    let at = spec.args.iter().position(|a| a == "--settings")?;
+    let settings: serde_json::Value = serde_json::from_str(&spec.args[at + 1]).unwrap();
+    Some(
+        settings["claudeMdExcludes"][0]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
+fn has(spec: &CommandSpec, arg: &str) -> bool {
+    spec.args.iter().any(|a| a == arg)
+}
+
+const AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+
+fn auto_memory_off() -> Vec<(String, String)> {
+    vec![(AUTO_MEMORY_OFF.0.to_string(), AUTO_MEMORY_OFF.1.to_string())]
+}
+
+#[tokio::test]
+async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
+    let home = tempfile::tempdir().unwrap();
+    let h = lean_harness(home_at(home.path()));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |_| {}).await;
+    assert!(spec.lean);
+    assert!(has(&spec, "--strict-mcp-config"), "{:?}", spec.args);
+    let instructions = home.path().join(".claude").join("CLAUDE.md");
+    assert_eq!(excluded(&spec).as_deref(), instructions.to_str());
+    assert_eq!(spec.env, auto_memory_off());
+    assert!(spec.notes.is_empty(), "{:?}", spec.notes);
+}
+
+#[tokio::test]
+async fn a_binding_with_lean_off_starts_with_the_full_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let h = lean_harness(home_at(home.path()));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| b.lean = false).await;
+    assert!(!spec.lean);
+    assert!(!has(&spec, "--strict-mcp-config") && !has(&spec, "--settings"));
+    assert!(spec.env.is_empty() && spec.notes.is_empty());
+}
+
+#[tokio::test]
+async fn a_personal_binding_never_runs_lean() {
+    let home = tempfile::tempdir().unwrap();
+    let h = lean_harness(home_at(home.path()));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
+        b.permission = Some(PermissionProfile::Personal)
+    })
+    .await;
+    assert!(!spec.lean);
+    assert!(has(&spec, "dontAsk") && !has(&spec, "--strict-mcp-config"));
+    assert!(spec.env.is_empty());
+}
+
+#[tokio::test]
+async fn a_binding_in_the_home_folder_never_runs_lean() {
+    let home = tempfile::tempdir().unwrap();
+    let h = lean_harness(home_at(home.path()));
+    let spec = started_spec(&h, home.path(), |_| {}).await;
+    assert!(!spec.lean);
+    assert!(!has(&spec, "--strict-mcp-config"));
+    assert!(spec.env.is_empty());
+}
+
+#[tokio::test]
+async fn a_binding_in_the_home_folder_does_not_wait_for_the_lean_checks() {
+    let home = tempfile::tempdir().unwrap();
+    let h = Harness::with_parts(
+        Config::default(),
+        false,
+        home_at(home.path()),
+        Arc::new(FullOnlyReadiness),
+    );
+    // It started at all: a lean binding would wait for the lean checks.
+    let spec = started_spec(&h, home.path(), |_| {}).await;
+    assert!(!spec.lean);
+    let report = h.engine.doctor().await;
+    assert_eq!(report.bindings[0].lean, LeanStatus::HomeDirectory);
+    assert!(report.bindings[0].executor_ready, "{:?}", report.bindings);
+}
+
+#[tokio::test]
+async fn a_lean_binding_waits_while_its_executor_is_not_ready_for_lean_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let h = Harness::with_parts(
+        Config::default(),
+        false,
+        home_at(home.path()),
+        Arc::new(FullOnlyReadiness),
+    );
+    h.bind("proj-1", "repo-a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::WaitingBinding);
+    assert_eq!(job.reason.as_deref(), Some("executor claude is not ready"));
+    assert!(h.runner.started().is_empty());
+    let report = h.engine.doctor().await;
+    assert_eq!(report.bindings[0].lean, LeanStatus::On);
+    assert!(!report.bindings[0].executor_ready, "{:?}", report.bindings);
+}
+
+#[tokio::test]
+async fn the_binding_effort_wins_over_the_default() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.settings.default_effort = Some(Effort::High);
+    let h = Harness::with_parts(cfg, false, home_at(home.path()), Arc::new(FakeReadiness));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
+        b.effort = Some(Effort::Max)
+    })
+    .await;
+    let efforts: Vec<_> = spec
+        .args
+        .windows(2)
+        .filter(|w| w[0] == "--effort")
+        .map(|w| w[1].as_str())
+        .collect();
+    assert_eq!(efforts, ["max"]);
+}
+
+#[tokio::test]
+async fn the_default_effort_applies_to_a_binding_without_its_own() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.settings.default_effort = Some(Effort::High);
+    let h = Harness::with_parts(cfg, false, home_at(home.path()), Arc::new(FakeReadiness));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
+        b.executor = Some(ExecutorKind::Codex)
+    })
+    .await;
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=high"),
+        "{:?}",
+        spec.args
+    );
+}
+
+#[tokio::test]
+async fn an_unpassable_home_leaves_a_note_and_no_settings_argument() {
+    let parent = tempfile::tempdir().unwrap();
+    let home = parent.path().join("demo 50% home");
+    std::fs::create_dir_all(&home).unwrap();
+    let h = lean_harness(home_at(&home));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |_| {}).await;
+    assert!(spec.lean);
+    assert_eq!(excluded(&spec), None);
+    assert!(has(&spec, "--strict-mcp-config"));
+    assert_eq!(
+        spec.notes,
+        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+    );
+}
+
+#[tokio::test]
+async fn an_unpassable_claude_config_dir_leaves_a_note_too() {
+    let home = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let config_dir = parent.path().join("claude!config");
+    let h = lean_harness(Homes {
+        user_home: Some(home.path().to_path_buf()),
+        claude_config_dir: Some(config_dir),
+    });
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |_| {}).await;
+    assert_eq!(excluded(&spec), None);
+    assert_eq!(
+        spec.notes,
+        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+    );
+}
+
+#[tokio::test]
+async fn without_a_home_a_lean_claude_run_leaves_a_note() {
+    let h = lean_harness(Homes::default());
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |_| {}).await;
+    assert!(spec.lean);
+    assert_eq!(excluded(&spec), None);
+    assert_eq!(
+        spec.notes,
+        ["could not tell where the user-level CLAUDE.md is, so this lean run may still read it"]
+    );
+}
+
+#[tokio::test]
+async fn a_codex_lean_binding_starts_with_the_codex_lean_arguments() {
+    let home = tempfile::tempdir().unwrap();
+    let h = lean_harness(home_at(home.path()));
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |b| {
+        b.executor = Some(ExecutorKind::Codex)
+    })
+    .await;
+    assert!(spec.lean);
+    assert!(has(&spec, "--ignore-user-config"), "{:?}", spec.args);
+    assert!(has(&spec, "mcp_servers.linear.required=true"));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+    assert!(spec.env.is_empty() && spec.notes.is_empty());
+}
+
+#[tokio::test]
+async fn claude_config_dir_moves_the_excluded_path() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let h = lean_harness(Homes {
+        user_home: Some(home.path().to_path_buf()),
+        claude_config_dir: Some(config_dir.path().to_path_buf()),
+    });
+    let spec = started_spec(&h, &h.root.path().join("repo-a"), |_| {}).await;
+    let instructions = config_dir.path().join("CLAUDE.md");
+    assert_eq!(excluded(&spec).as_deref(), instructions.to_str());
 }
