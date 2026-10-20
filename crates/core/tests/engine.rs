@@ -2846,6 +2846,12 @@ fn logged_warnings<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     }
 
     let events = Arc::new(Mutex::new(Vec::new()));
+    // tracing caches whether a log call is wanted when the call is first reached, and with a
+    // single registered subscriber it asks the default of the thread that reaches it first: a
+    // parallel test's thread, which has none, would switch the call off here too (a verification
+    // read fails in many tests). With a second, idle subscriber registered it asks every
+    // registered one instead, as in `tests/host.rs`.
+    let _idle = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let result = tracing::subscriber::with_default(Capture(events.clone()), f);
     let events = events.lock().unwrap().clone();
     (result, events)
