@@ -35,12 +35,12 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 通信 | `core::ipc` | 本机 JSON-RPC，薄层 | `engine` |
 | 入口 | `core::host`（宿主组装）、`crates/cli`、`crates/devhost`、（M2）`app/` | 用户与 AI 的入口 | `core`；`core::host` 在 `core` 内，依赖以上全部 |
 
-规则：纯逻辑层不读文件、不看系统时间、不发请求（例外：`trigger::evaluate` 检查绑定目录是否存在）；运行状态只在 `engine`；命令行只经 IPC 访问引擎。
+规则：纯逻辑层不读文件、不看系统时间、不发请求（例外：`trigger::evaluate` 检查绑定目录是否存在，并经 `Config::lean_for` 把它与用户主目录各自解析后比较）；运行状态只在 `engine`；命令行只经 IPC 访问引擎。
 
 ## 4. 关键数据流
 
 1. `engine::poll_once` 调 `LinearApi::candidate_issues`，取「指派给我 + 标签 + Todo」的需求。
-2. `trigger::evaluate` 判断能否派活（项目已绑定、目录存在、执行者就绪），`trigger::should_enqueue` 防止重复。
+2. `trigger::evaluate` 判断能否派活（项目已绑定、目录存在、执行者对这个绑定的运行就绪：精简的绑定看精简的两项检查），`trigger::should_enqueue` 防止重复。
 3. 新需求写入 `store`，状态为「排队中」或「等待绑定」。
 4. `engine::dispatch` 用 `scheduler::pick` 选出可以开始的任务（同目录一次一条，总数不超上限）。
 5. 开跑前重新读取需求，不再满足条件就取消。
@@ -90,6 +90,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 | 设置与绑定 | `<配置目录>/com.sunkailun.issuerelay/config.toml` | TOML；先写临时文件再改名；每次保存前清扫同目录下超过 10 分钟的残留临时文件（`config.toml.<pid>.<n>.tmp`，保存中途崩溃留下的）；加载时对本版本不认识的配置键在日志里警告一次（只记键名，不记值），下次保存会丢掉它们 |
 | 运行记录 | `<数据目录>/com.sunkailun.issuerelay/state.db` | SQLite；表结构版本记在 `user_version`（当前 2），比当前程序新的拒绝打开，没记版本的旧库（版本 0）按实际缺的列补齐；macOS 上每次运行记下执行者的进程号和启动时间，运行正常结束时清除，宿主崩溃后留到下次启动清扫处理完才清除 |
 | 运行日志 | `<数据目录>/com.sunkailun.issuerelay/logs/<任务 ID>.jsonl` | 执行者的原始输出，一行一条：标准输出原样，标准错误记为 `{"stream":"stderr","text":…}`，启动失败记为 `{"stream":"runner","text":…}`；运行器每次打开日志都把 Unix 上的权限设为 0600（重试沿用的旧文件也一样）；单行最多保留 4 MiB，更长的被截断并记一条说明；`logs.rs` 按保留天数（`log_retention_days`，默认 30）和总大小（`log_max_total_mb`，默认 1024）清理，宿主启动时和之后每 6 小时一次，正在运行的任务的日志不删 |
+| 精简登录检查的空目录 | `<数据目录>/com.sunkailun.issuerelay/lean-check/` | 环境检查在这里跑 Claude 的 `--setting-sources project,local auth status`（在主目录里跑会把 `~/.claude/settings.json` 当成项目设置）；每次检查前没有就建，里面不放任何文件 |
 | 桌面应用的程序日志 | `<数据目录>/com.sunkailun.issuerelay/logs/app.<日期>.log` | tracing 日志：每天一个（按 UTC 日期命名），保留 7 个（只数 `app.*.log`，运行日志不受影响）；每行先经 `logscrub::CleanWriter` 去掉控制字符与不可见字符；`RUST_LOG` 可改过滤，但 rmcp 不低于 info（它在 debug 级写出 OAuth 授权码）；调试构建同时写 stderr |
 | Linear 凭据 | 系统钥匙串：服务名 `com.sunkailun.issuerelay`，账户 `linear-oauth` / `linear-api-key` | 不写盘；改用 API key 时清掉 OAuth 凭据，OAuth 登录时清掉 API key（`auth::clear_oauth_credentials`、`clear_api_key`） |
 | IPC 端点 | macOS：数据目录下的 `issuerelay.sock`，路径超过 103 字节时改用 `<临时目录>/issuerelay-<哈希>/issuerelay.sock`；Windows：`\\.\pipe\issuerelay-<哈希>`（哈希取自数据目录） | 只限当前用户 |
