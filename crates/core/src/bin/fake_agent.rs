@@ -16,7 +16,8 @@
 //!   the next step then comes once its child is running)
 //! - `{"late_out": text, "after_ms": n}`: start a child that leaves the run's process group, as
 //!   above, and prints the line to stdout after `n` ms. With an `exit` step next, the line comes
-//!   after this process exited (Unix only: on Windows the Job Object ends the child with the run)
+//!   after this process exited (Unix only: on Windows the runner ends the Job Object, and the
+//!   child with it, right after the exit)
 //! - `{"repeat_out": text, "every_ms": n}` / `{"repeat_err": text, "every_ms": n}`: print a line
 //!   to stdout / stderr every `n` ms, forever
 //! - `{"exit": code}`: exit at once

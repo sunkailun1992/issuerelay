@@ -1017,8 +1017,9 @@ mod tests {
         )
         .unwrap();
         // Node from PATH, as npm's shim runs it when no node.exe sits next to it (and pnpm's
-        // below): cmd reads a batch file in the OEM code page, so an absolute path written into it
-        // as UTF-8 would fail the test wherever Node's folder name is not ASCII.
+        // below): cmd reads a batch file in the console's code page, the OEM one by default, so an
+        // absolute path written into it as UTF-8 would fail the test wherever Node's folder name
+        // is not ASCII.
         std::fs::write(
             shim.path().join("npm-style.cmd"),
             concat!(
