@@ -358,6 +358,7 @@ fn system_readiness(paths: &AppPaths, env: SharedEnv) -> SystemReadiness {
     SystemReadiness::new(READINESS_TTL, env).with_lean_checks(LeanCheckPaths {
         empty_dir: paths.lean_check_dir(),
         codex_config: doctor::codex_config_path(),
+        claude_settings: doctor::claude_settings_path(),
     })
 }
 

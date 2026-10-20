@@ -373,6 +373,10 @@ pub struct LeanCheckPaths {
     /// Codex's configuration file (`codex_config_path`), read for a model provider lean runs
     /// would not use; `None` when there is none to read.
     pub codex_config: Option<PathBuf>,
+    /// Claude Code's user settings file (`claude_settings_path`), read for variables in its `env`
+    /// that send Claude Code through a gateway or a proxy, which lean runs would not apply;
+    /// `None` when there is none to read.
+    pub claude_settings: Option<PathBuf>,
 }
 
 /// Where Codex keeps its configuration: `config.toml` in `CODEX_HOME`, else in `.codex` in the
@@ -393,6 +397,24 @@ fn codex_config_path_from(
         .map(|dir| dir.join("config.toml"))
 }
 
+/// Where Claude Code keeps its user settings: `settings.json` in `CLAUDE_CONFIG_DIR`, else in
+/// `.claude` in the home folder. Executors inherit the host's `CLAUDE_CONFIG_DIR` (`ExecEnv`
+/// changes only the PATH and the proxy). `None` without either.
+pub fn claude_settings_path() -> Option<PathBuf> {
+    claude_settings_path_from(std::env::var_os("CLAUDE_CONFIG_DIR"), dirs::home_dir())
+}
+
+fn claude_settings_path_from(
+    config_dir: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    config_dir
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".claude")))
+        .map(|dir| dir.join("settings.json"))
+}
+
 /// Checks that one executor is installed, logged in and connected to Linear's MCP server.
 /// `program` is where the executable was found, `None` when it was not found. The three
 /// commands (`--version`, the login check, `mcp list`) run together, since `claude mcp list`
@@ -410,7 +432,10 @@ pub async fn check_executor(
 /// `check_executor`, plus whether every check gave a usable answer, and with the lean checks
 /// (lean-run design, section 7) when `lean` is given: the Linear server lean runs load is read
 /// from the same `mcp list`, and the lean sign-in check runs as a fourth command, together with
-/// the other three. A check gives no usable answer when its command could not run (it timed out
+/// the other three. Once that sign-in matches, what the executor's own configuration would change
+/// in a lean run is read too: Codex's model provider (`codex_default_provider`), and a gateway or
+/// proxy in the `env` of Claude Code's user settings (`claude_user_routing`). A check gives no
+/// usable answer when its command could not run (it timed out
 /// or did not start, or what it printed could not be read), when the login check's output
 /// cannot be understood, or when `mcp list` exited non-zero without showing any Linear line (it
 /// crashed). A negative answer that can be read ("not logged in", no Linear server) is usable.
@@ -518,16 +543,20 @@ async fn check_executor_detailed(
     // The lean sign-in is judged against the usual one, so only once that says logged in.
     if let (true, Ok(usual)) = (report.logged_in, &login) {
         let signed_in = lean_login.and_then(|lean_out| lean_sign_in(kind, usual, &lean_out));
-        let provider = match (kind, lean) {
+        // What the executor's own configuration changes that a lean run would leave out.
+        let configured = match (kind, lean) {
             (ExecutorKind::Codex, Some(lean)) => {
                 codex_default_provider(lean.codex_config.as_deref()).await
             }
+            (ExecutorKind::Claude, Some(lean)) => {
+                claude_user_routing(lean.claude_settings.as_deref()).await
+            }
             _ => Ok(()),
         };
-        report.lean_logged_in = signed_in.is_ok() && provider.is_ok();
+        report.lean_logged_in = signed_in.is_ok() && configured.is_ok();
         report
             .lean_problems
-            .extend([signed_in.err(), provider.err()].into_iter().flatten());
+            .extend([signed_in.err(), configured.err()].into_iter().flatten());
     }
     (report, complete)
 }
@@ -731,6 +760,63 @@ async fn codex_default_provider(config: Option<&Path>) -> Result<(), String> {
         )),
         Err(_) => Err(format!("{UNREADABLE}: it is not valid TOML")),
     }
+}
+
+/// The variables of the `env` of Claude Code's user settings that send Claude Code through a
+/// gateway or a proxy. Lean runs leave the user settings out, so they would connect without
+/// them. A switch of the provider (Bedrock, Vertex) or of the sign-in shows in the lean sign-in
+/// check instead.
+const CLAUDE_ROUTING_VARS: [&str; 9] = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+/// Checks Claude Code's user settings at `settings` for routing variables lean runs would not
+/// apply (`claude_routing_env`); `Err` holds the lean problem. A missing file sets none; one that
+/// cannot be read, or is not JSON, rules lean runs out, as what it sets cannot be known.
+async fn claude_user_routing(settings: Option<&Path>) -> Result<(), String> {
+    const UNREADABLE: &str = "could not read the Claude Code user settings to check their `env`";
+    let Some(settings) = settings else {
+        return Ok(());
+    };
+    let text = match tokio::fs::read_to_string(settings).await {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{UNREADABLE}: {e}")),
+    };
+    match claude_routing_env(&text) {
+        Ok(vars) if vars.is_empty() => Ok(()),
+        Ok(vars) => {
+            let named: Vec<String> = vars.iter().map(|var| format!("`{var}`")).collect();
+            Err(format!(
+                "the Claude Code user settings set {} in `env`, which lean runs do not apply \
+                 (they leave the user settings out), so turn lean runs off for this binding",
+                named.join(", ")
+            ))
+        }
+        Err(_) => Err(format!("{UNREADABLE}: they are not valid JSON")),
+    }
+}
+
+/// The routing variables (`CLAUDE_ROUTING_VARS`, in that order) that the `env` of Claude Code's
+/// user settings text sets to a non-empty string. `Err` when the text is not JSON, without the
+/// parser's message.
+pub fn claude_routing_env(settings_text: &str) -> Result<Vec<String>> {
+    let settings: serde_json::Value =
+        serde_json::from_str(settings_text).map_err(|_| anyhow::anyhow!("not valid JSON"))?;
+    let env = &settings["env"];
+    Ok(CLAUDE_ROUTING_VARS
+        .iter()
+        .filter(|var| env[**var].as_str().is_some_and(|value| !value.is_empty()))
+        .map(|var| var.to_string())
+        .collect())
 }
 
 /// The model provider Codex's configuration text chooses when it is not the default
@@ -2571,6 +2657,7 @@ mod tests {
         LeanCheckPaths {
             empty_dir: dir.path().join("lean-check"),
             codex_config: None,
+            claude_settings: None,
         }
     }
 
@@ -2791,6 +2878,7 @@ mod tests {
         let blocked = LeanCheckPaths {
             empty_dir: file.join("lean-check"),
             codex_config: None,
+            claude_settings: None,
         };
         let fake = runner(&claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK));
         let (report, complete) = check_executor_detailed(
@@ -2826,6 +2914,122 @@ mod tests {
         assert_eq!(codex_config_path_from(None, Some(home.clone())), usual);
         assert_eq!(codex_config_path_from(Some("".into()), Some(home)), usual);
         assert_eq!(codex_config_path_from(None, None), None);
+    }
+
+    #[test]
+    fn claude_user_settings_follow_claude_config_dir() {
+        let home = PathBuf::from("demo-home");
+        assert_eq!(
+            claude_settings_path_from(Some("demo-claude".into()), Some(home.clone())),
+            Some(PathBuf::from("demo-claude").join("settings.json"))
+        );
+        let usual = Some(home.join(".claude").join("settings.json"));
+        assert_eq!(claude_settings_path_from(None, Some(home.clone())), usual);
+        assert_eq!(
+            claude_settings_path_from(Some("".into()), Some(home)),
+            usual
+        );
+        assert_eq!(claude_settings_path_from(None, None), None);
+    }
+
+    #[test]
+    fn routing_variables_are_found_in_the_claude_user_settings() {
+        let found = |text: &str| claude_routing_env(text).unwrap();
+        assert_eq!(
+            found(r#"{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.com"}}"#),
+            ["ANTHROPIC_BASE_URL"]
+        );
+        assert_eq!(
+            found(r#"{"env":{"https_proxy":"http://proxy.example.com:8080","HTTPS_PROXY":"x"}}"#),
+            ["HTTPS_PROXY", "https_proxy"]
+        );
+        // Lean runs may leave the rest out: other variables, empty values, no `env` at all.
+        assert!(found(r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max"}}"#).is_empty());
+        assert!(found(r#"{"env":{"ANTHROPIC_BASE_URL":""}}"#).is_empty());
+        assert!(found(r#"{"model":"opus"}"#).is_empty());
+        assert!(found("{}").is_empty());
+        assert!(claude_routing_env("{ not json").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_gateway_or_proxy_in_the_claude_user_settings_rules_out_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.com/demo-token-value"}}"#,
+        )
+        .unwrap();
+        let paths = LeanCheckPaths {
+            claude_settings: Some(settings.clone()),
+            ..lean_paths(&dir)
+        };
+        let replies = claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK);
+        let (report, _) = lean_detailed(ExecutorKind::Claude, &replies, &paths).await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("`ANTHROPIC_BASE_URL`")),
+            "{report:?}"
+        );
+        // The value, which can hold a token, is not shown.
+        assert!(
+            !report
+                .lean_problems
+                .iter()
+                .any(|p| p.contains("demo-token-value")),
+            "{report:?}"
+        );
+        // Other variables, or no file at all, leave lean runs ready.
+        std::fs::write(&settings, r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max"}}"#).unwrap();
+        let (report, _) = lean_detailed(ExecutorKind::Claude, &replies, &paths).await;
+        assert!(report.ready_lean(), "{report:?}");
+        let missing = LeanCheckPaths {
+            claude_settings: Some(dir.path().join("missing.json")),
+            ..lean_paths(&dir)
+        };
+        let (report, _) = lean_detailed(ExecutorKind::Claude, &replies, &missing).await;
+        assert!(report.ready_lean(), "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn claude_user_settings_that_cannot_be_read_rule_out_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"demo-token-value""#,
+        )
+        .unwrap();
+        // A folder where the file should be cannot be read either, on both platforms.
+        for (path, says) in [
+            (settings, "they are not valid JSON"),
+            (
+                dir.path().to_path_buf(),
+                "could not read the Claude Code user settings",
+            ),
+        ] {
+            let paths = LeanCheckPaths {
+                claude_settings: Some(path),
+                ..lean_paths(&dir)
+            };
+            let replies = claude_replies(out(0, CLAUDE_USUAL), CLAUDE_OK);
+            let (report, _) = lean_detailed(ExecutorKind::Claude, &replies, &paths).await;
+            assert!(report.ready() && !report.ready_lean(), "{report:?}");
+            assert!(
+                report.lean_problems.iter().any(|p| p.contains(says)),
+                "{report:?}"
+            );
+            assert!(
+                !report
+                    .lean_problems
+                    .iter()
+                    .any(|p| p.contains("demo-token-value")),
+                "{report:?}"
+            );
+        }
     }
 
     #[tokio::test]
