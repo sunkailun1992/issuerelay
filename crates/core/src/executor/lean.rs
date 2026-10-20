@@ -20,11 +20,12 @@ use crate::linear::auth::LINEAR_MCP_URL;
 pub const CLAUDE_LINEAR_SERVER: &str = "linear-server";
 
 /// The same for Codex, which keys a stored sign-in by the server's name and URL (codex-cli
-/// 0.159.2: under another name the server reports `AuthRequired`).
+/// 0.159.2, measured 2026-10-19: under another name the server reports `AuthRequired`).
 pub const CODEX_LINEAR_SERVER: &str = "linear";
 
 /// Set in the environment of a lean Claude run: Claude Code then neither reads nor writes its
-/// auto memory.
+/// auto memory (its documentation says so; measured with Claude Code 2.1.285 on 2026-10-19, with
+/// the same effect as the setting `autoMemoryEnabled: false`).
 pub const DISABLE_AUTO_MEMORY: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
 
 /// What a lean Claude run adds after its other arguments: only Linear's server, no user settings
@@ -38,6 +39,9 @@ pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
     });
     let mut args = vec![
         "--strict-mcp-config".to_string(),
+        // `--mcp-config` takes any number of values (`--mcp-config <configs...>` in the help of
+        // Claude Code 2.1.285, read 2026-10-20), so an option has to follow its one value: any
+        // other argument there would be read as one more configuration.
         "--mcp-config".to_string(),
         servers.to_string(),
         "--setting-sources".to_string(),
@@ -56,7 +60,7 @@ pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
 /// What a lean Codex run adds before its model and the closing `-`: no user configuration, no
 /// hooks, plugins, ChatGPT connectors or memories, and Linear's server as the only (required)
 /// MCP server. The skill list is not shown to the model: user-level skills cannot be left out on
-/// their own in codex-cli 0.159.2.
+/// their own in codex-cli 0.159.2 (measured 2026-10-19).
 pub fn codex_args() -> Vec<String> {
     let server = CODEX_LINEAR_SERVER;
     let mut args: Vec<String> = [
@@ -101,9 +105,13 @@ pub fn user_instructions_path(
 }
 
 /// Whether `path` may go into the arguments: absolute, valid UTF-8, and free of control
-/// characters and of `"`, `%`, `!` and `^`, which a Windows batch file (the npm shims
-/// `claude.cmd` and `codex.cmd`) would interpret. A home folder almost never has them; when it
-/// does, the run keeps the user-level `CLAUDE.md` and its log says so.
+/// characters and of `"`, `%`, `!` and `^`. On Windows `claude` and `codex` are often the npm or
+/// pnpm shims `claude.cmd` and `codex.cmd`: Rust quotes an argument for a batch file so that cmd
+/// hands it on intact, `&`, `(` and `)` included, and the shims pass it to Node as it is
+/// (`json_arguments_survive_npm_and_pnpm_style_cmd_shims`). The four characters kept out are a
+/// margin on top of that: cmd can still act on them inside quotes, for example in a shim that
+/// parses its arguments again (`call`, delayed expansion). A home folder almost never has them;
+/// when it does, the run keeps the user-level `CLAUDE.md` and its log says so.
 pub fn passable(path: &Path) -> bool {
     path.is_absolute()
         && path.to_str().is_some_and(|text| {
@@ -116,11 +124,14 @@ pub fn passable(path: &Path) -> bool {
 /// Watches a lean run's output for signs that lean did not take effect (lean-run design section
 /// 8), so the run can be stopped instead of carrying on with the user's whole configuration.
 /// Claude Code names its MCP servers and its auto-memory folder in its `system/init` event, which
-/// comes before any work (only `system` events such as hook events may come first); Codex names
-/// nothing up front, so the server of each of its MCP calls is checked as it starts.
+/// comes before any work: only `system` events, such as a project's session-start hooks, may come
+/// first (Claude Code 2.1.285, measured 2026-10-19). Codex names nothing up front, so the server
+/// of each of its MCP calls is checked as it starts: every `mcp_tool_call` item names its `server`
+/// (codex-cli 0.159.2, from its source; seen in the sandbox acceptance on 2026-10-20).
 pub struct LeanCheck {
     kind: ExecutorKind,
-    /// Claude's init event was seen and passed: nothing after it is checked.
+    /// Set by Claude's init event, whatever it showed: the lines after it are not checked (an init
+    /// that did not pass has been reported already).
     done: bool,
 }
 
@@ -171,8 +182,9 @@ impl LeanCheck {
                 "the init event lists the MCP servers {listed} instead of only `{CLAUDE_LINEAR_SERVER}`"
             ));
         }
-        // Not a documented field (both versions measured send it): no field is fine, a field
-        // that names a folder is not.
+        // Not a documented field (Claude Code 2.1.285 and 2.1.299 sent it with auto memory on,
+        // measured 2026-10-19; the lean runs of the 2026-10-20 sandbox acceptance sent none): no
+        // field is fine, a field that names a folder is not.
         memory_is_on(&event["memory_paths"]).then(|| "auto memory is on".to_string())
     }
 }
