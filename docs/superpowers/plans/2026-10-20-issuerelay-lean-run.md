@@ -909,3 +909,50 @@ git push
 CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR 里写明（设计 16.1）。
 
 合并后升版本号、打标签、发布另问用户，不在本计划里。
+
+## 评审遗留的小项
+
+本计划执行中，Task 3–6 的逐任务评审与整条分支的最终评审接受、没有修复的项，留给所有者决定的事，以及还要在真实机器上确认的事。各评审的严重与应该修的问题都已修复并补了测试。SDD 工作区在合并后删除，这里是这些结论唯一的存放处；写后续计划或做验收时逐条认领，或写明不做及原因。
+
+**留给所有者决定**
+
+| 内容 | 建议 |
+|---|---|
+| Codex 的运行时核对只认 `item.started` / `item.completed` 里类型为 `mcp_tool_call` 的项目：Codex 改了事件名或改用 `item.updated`，核对就悄悄失效，违反第 8 节「读不懂就报错」的取向 | 精简的 Codex 运行从头到尾没有一条可辨认的 `linear` 调用，就判为「精简没有生效」 |
+| 精简没有生效时，按设计「像用户点停止」先给 SIGTERM 和宽限：只有 `--setting-sources` 也失效、用户插件真的载入时，SIGTERM 可能触发插件的会话结束钩子（M3 N3） | 直接 SIGKILL（Claude 在 `init` 时还没有工具进程），或维持现状并在设计第 8 节写明取舍 |
+| 用户设置的 `env` 里只设了 `ANTHROPIC_BASE_URL`（公司网关），`authMethod` 与 `apiProvider` 却与平常相同时，精简登录检查看不出区别，精简运行会绕过网关直连（反目标里举的例子；Task 5 与最终评审都提到） | 环境检查另读用户设置（`~/.claude/settings.json`，设了 `CLAUDE_CONFIG_DIR` 时读那里）的 `env`，有 `ANTHROPIC_BASE_URL` 就判精简不可用 |
+
+**最终评审接受的遗留项**
+
+| 内容 | 认领 |
+|---|---|
+| 精简运行设计第 6.2 节说 `bind list` 与 `doctor` 的绑定行都写精简生效值与推理力度；实际 `bind list` 只能写 `lean off` 与 `effort <值>`（原始绑定分不出「不适用」），`doctor` 的绑定行有精简状态、没有推理力度（`BindingReport` 没有 `effort`） | 下次改设计或命令行时：改第 6.2 节的说法，或给 `BindingReport` 加 `effort` |
+| 第 8 节举的是「AI 的消息、工具调用或结果」，代码在 `init` 之前遇到任何不是 `system` 的事件都判违规（失败即关闭，与第 8 节第一句一致） | 改第 8 节措辞；实机验收第 1 条核对 `init` 之前只有钩子事件 |
+| 跑完的运行看不出当时是不是精简的：只有被拦下的运行在原因里写明 | 精简运行在运行日志开头写一行固定说明；长期并入 M2 遗留 N3（结构化原因） |
+| 精简绑定只差精简检查时，等待原因仍是通用的「执行者未就绪」，而环境检查页前三项全绿 | 加一个「精简运行未就绪」的等待原因（改 IPC 视图的 JSON，单独提交），或在发布说明里写清 |
+| `RunDetail.test.tsx` 没有 `lean run did not take effect: …` 原因的显示用例（走现有的原因细节行，行为应当正确） | 补一行测试 |
+
+**逐任务评审接受的遗留项**
+
+| 内容 | 认领 |
+|---|---|
+| `lean::user_instructions_path` 的测试比的是 `PathBuf`，没有钉住最后进 JSON 的字符串（Windows 的分隔符） | 下次改 `lean.rs` 时 |
+| `passable` 放行的字符集在 Unix 上几乎没被钉住（让它也挡 `&`、`(`、`)` 测试照过），也没有非 UTF-8 路径不通过的用例 | 下次改 `lean.rs` 时 |
+| Windows 的 npm 式 shim 测试把 node 的绝对路径写进 `.cmd`，cmd 按 OEM 代码页读，node 路径含非 ASCII 字符时会误报失败 | 改用 PATH 上的 `node`（pnpm 式 shim 已这样做） |
+| `lean_args_hold_the_instructions_path_only_in_the_settings_argument` 与 `lean_claude_runs_turn_auto_memory_off_and_full_runs_set_nothing` 可以断言得更多（临时目录的根不出现在其余参数里；完整配置的 Codex 的 `env` 与 `lean`） | 下次改这两个测试时 |
+| 注释：`lean.rs`、`doctor.rs` 里几条实测事实没写版本与日期（注释规范第 4 节）；`passable` 的理由可以写明那四个字符是给会重新解析参数的 shim 留的余量；`--mcp-config` 会吃多个值，所以后面必须紧跟一个选项；`doctor.rs` 有一行约 130 列的文档注释；`LeanCheck::done` 的注释写「seen and passed」，其实任何 `init` 都会设它 | 下次改这些文件时 |
+| 引擎测试 `a_lean_violation_keeps_its_reason_when_linear_cannot_be_read` 没有断言走的是读不到 Linear 的分支（`verified_updated_at == None`） | 补一行断言 |
+| 精简没有生效时，最后一次读 Linear 的错误既不在原因里，也没写进程序日志 | 加一行 `tracing::warn!` |
+| 测试没有钉住：精简停止时整棵进程树被结束（可比照 `an_escaped_grandchild_is_ended_on_cancel`）；`spec.env` 盖过 `ExecEnv::apply` 设的同名变量；`LeanCheck` 的缺 `type`、`result` 早于 `init`、Codex 缺 `server` 三种情形 | 下次改 `runner.rs` 或 `lean.rs` 时 |
+| 排空阶段不再核对（计划的决定）：执行者退出时还在队列里的违规行只写进日志，Codex 的运行这时按现有规则判定 | 排空时继续 `observe`，结束方式是 `Exited` 就改判 `LeanNotApplied` |
+| 运行日志开头的说明用 `stream: "stderr"`，面板时间线把它显示成执行者的标准错误；拦下时也没有一行 IssueRelay 自己的说明 | 改用 `runner` 流，并在拦下时补写一行 |
+| `memory_paths` 里不是字符串的值（例如 `{"auto": true}`）会放行 | 若有执行者这样写再改 |
+| Codex 的 `mcp list` 一行 Auth 栏是 `Bearer token` 或 `Unsupported` 时，精简的 Linear 判定也算可用；精简运行丢掉用户配置，只有已存的 OAuth 能用，`required=true` 会让运行一开始就退出 | 沙箱核对 codex-cli 0.159.2 的 Auth 栏含义后，精简判定要求 `OAuth`；Claude 一侧可另要求 `(HTTP)` |
+| Codex 用 API key 登录时 `login status` 可能印出遮罩过的 key（`Logged in using an API key - <遮罩>`，仓库里没有样本），它会进精简问题的文字 | 显示时只取 ` - ` 之前的部分 |
+| 几条裁定没有测试钉住：`mcp list` 崩溃时不加精简问题；平常登录为否时不做精简登录比较；`lean_linear_needs_the_exact_name_and_url` 没有 `plugin:` 前缀的反例；`codex_custom_providers_are_found` 没有「顶层与档案都设了」的情形 | 下次改 `doctor.rs` 时 |
+| 面板的精简一节没有一键修复按钮：报告分不清「缺这个服务」与「这个名字指向别的网址」 | 要做时给 `ExecutorReport` 加一个结构化的精简 Linear 结论 |
+
+**待实机的检查**
+
+- 精简运行设计第 5.5 节（Windows）与第 11 节（沙箱）的各条，包括实现评审加进去的：`claudeMdExcludes` 的排除确实生效（glob 字符、Windows 反斜杠、`~/.claude` 是符号链接时）；Windows 上 `dirs::home_dir()` 与 Node 的 `os.homedir()`（先看 `USERPROFILE`）是否一致；`lean-check/` 里的精简登录检查不会往上层目录找到 `.claude/settings.json`。
+- CI 日志里 Windows 的 `.cmd` 往返测试（`json_arguments_survive_npm_and_pnpm_style_cmd_shims`）是跑过的，不是跳过。
