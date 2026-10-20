@@ -22,7 +22,7 @@ Linear（指派给你 · 带 ai-ready · 状态 Todo）
 IssueRelay（你电脑上的托盘程序）
    │  按「Linear 项目 → 本地目录」的绑定找到工作目录；同一目录一次只跑一条
    ▼
-Claude Code / Codex（无人值守运行，用你自己的登录）
+Claude Code / Codex（无人值守运行，用你自己的登录；默认精简：只带 Linear 和仓库自己的规则）
    │  读需求 → 改代码 → 推测试分支 → 把状态改成 In Testing，并留言（以「🤖 IssueRelay」开头）
    ▼
 你验收后，在面板上点「标记完成」→ Linear 状态变为 Done
@@ -37,9 +37,9 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 ## 界面预览 / Screenshots
 
-桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者与权限档位）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者、权限档位、精简运行与推理力度）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
 
-*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor and permission level of each Linear project). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor, permission level, lean runs and reasoning effort of each Linear project). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
 
 **中文界面**
 
@@ -57,7 +57,11 @@ Claude Code / Codex（无人值守运行，用你自己的登录）
 
 - **默认以「完全放开」权限无人值守运行 AI**：它能执行任意命令、使用你电脑上的全部凭据。只在你信任的仓库和需求上使用；可以按项目调低档位。
 - AI 被要求遵守三条固定规则：不把状态设为 Done、不推主分支、不发正式环境。这些规则写在提示词里，约束力取决于 AI 本身，请同时为主分支开启分支保护。
-- AI 用的是你本机 Claude Code / Codex 的全部配置：用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效，它们也会影响无人值守运行。
+- **默认是精简运行**：无人值守运行只带 Linear 的 MCP 服务和目标仓库自己的规则与设置（`CLAUDE.md` / `AGENTS.md`、`.claude/settings.json` 和项目钩子），不带你的其他 MCP 服务、插件、用户级技能与钩子、自动记忆和用户级 `CLAUDE.md`。它缩小的是这一面，不是沙箱：AI 仍以你的身份运行，能用你的 git、SSH 和各种命令行凭据。
+  - Codex 仍读 `~/.codex/AGENTS.md`，仓库的 `.codex/` 配置也不生效。
+  - 精简运行不读你的用户级设置，写在那里的拒绝规则（例如挡危险命令的规则）也不生效；靠它们的话，把规则放进项目的 `.claude/settings.json`，或关掉这个绑定的精简运行。推理力度同样不从那里读，在设置页或绑定里设。
+  - 管理员下发了 MCP 配置（`managed-mcp.json`）的电脑上，Claude 的精简运行会在启动时失败，运行记录里有 Claude 的原文；关掉精简运行即可。
+  - 要用别的 MCP 服务、仓库的 `.codex/` 配置、用户设置里的拒绝规则或自定义模型服务的绑定，在面板里关掉精简运行。关掉精简运行才加载全部配置：你本机 Claude Code / Codex 的用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效；「按个人设置」档位和绑定到主目录的绑定也总是这样。
 - Linear 令牌只存在系统钥匙串（macOS 钥匙串、Windows 凭据管理器）。IssueRelay 不上传任何数据，也没有遥测。
 
 ## 开发

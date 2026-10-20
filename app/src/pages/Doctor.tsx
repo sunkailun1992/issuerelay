@@ -187,7 +187,7 @@ function Report({ report, labelName }: { report: DoctorReport; labelName: string
         {/* One column at the smallest window, two where there is room. */}
         <div className="grid grid-cols-[repeat(auto-fit,minmax(20rem,1fr))] gap-4">
           {report.executors.map((executor) => (
-            <ExecutorCheck key={executor.kind} report={executor} />
+            <ExecutorCheck key={executor.kind} report={executor} lean />
           ))}
         </div>
       </Section>

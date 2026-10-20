@@ -52,6 +52,8 @@ export const DEMO_BINDINGS: Binding[] = [
     executor: "codex",
     permission: "auto",
     model: "gpt-5-codex",
+    lean: false,
+    effort: "high",
   },
 ];
 
@@ -162,13 +164,33 @@ export const DEMO_DOCTOR: DoctorReport = {
   viewer: DEMO_VIEWER,
   linear_error: null,
   executors: [
-    { kind: "claude", program: "~/.local/bin/claude", version: "2.1.285 (Claude Code)", logged_in: true, linear_mcp: true, problems: [] },
-    { kind: "codex", program: "~/.local/bin/codex", version: "codex-cli 0.159.2", logged_in: false, linear_mcp: true, problems: ["codex is not logged in"] },
+    {
+      kind: "claude",
+      program: "~/.local/bin/claude",
+      version: "2.1.285 (Claude Code)",
+      logged_in: true,
+      linear_mcp: true,
+      problems: [],
+      lean_linear_mcp: true,
+      lean_logged_in: true,
+      lean_problems: [],
+    },
+    {
+      kind: "codex",
+      program: "~/.local/bin/codex",
+      version: "codex-cli 0.159.2",
+      logged_in: false,
+      linear_mcp: true,
+      problems: ["codex is not logged in"],
+      lean_linear_mcp: false,
+      lean_logged_in: false,
+      lean_problems: ["lean runs use the Linear MCP server named `linear` in codex (register it with: codex mcp add linear --url https://mcp.linear.app/mcp)"],
+    },
   ],
   workspace: { label_ok: true, missing_states: [], teams_checked: ["Demo"] },
   bindings: [
-    { binding_id: "proj-1", project_name: "Demo Project", directory_exists: true, executor: "claude", executor_ready: true },
-    { binding_id: "proj-2", project_name: "Demo Mobile", directory_exists: true, executor: "codex", executor_ready: false },
+    { binding_id: "proj-1", project_name: "Demo Project", directory_exists: true, executor: "claude", executor_ready: true, lean: "on" },
+    { binding_id: "proj-2", project_name: "Demo Mobile", directory_exists: true, executor: "codex", executor_ready: false, lean: "off" },
   ],
   env: {
     path: "~/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",

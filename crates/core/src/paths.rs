@@ -55,6 +55,11 @@ impl AppPaths {
         self.data_dir.join("logs")
     }
 
+    /// The empty folder Claude's lean sign-in check runs in (`doctor::LeanCheckPaths`).
+    pub fn lean_check_dir(&self) -> PathBuf {
+        self.data_dir.join("lean-check")
+    }
+
     /// The Unix socket (macOS) or named pipe (Windows) the CLI uses to reach the running host.
     ///
     /// Derived from the data directory alone: `USER` / `USERNAME` can differ between the
@@ -101,6 +106,7 @@ mod tests {
         assert_eq!(p.config_file(), root.join("config").join("config.toml"));
         assert_eq!(p.state_db(), root.join("data").join("state.db"));
         assert_eq!(p.logs_dir(), root.join("data").join("logs"));
+        assert_eq!(p.lean_check_dir(), root.join("data").join("lean-check"));
     }
 
     #[test]

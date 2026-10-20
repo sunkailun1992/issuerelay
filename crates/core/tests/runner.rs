@@ -33,6 +33,9 @@ fn spec(program: PathBuf, cwd: &Path, script: &Path, stdin: &str) -> CommandSpec
         args: vec![script.to_string_lossy().into_owned()],
         cwd: cwd.to_path_buf(),
         stdin: stdin.into(),
+        env: Vec::new(),
+        lean: false,
+        notes: Vec::new(),
     }
 }
 
@@ -930,4 +933,126 @@ async fn cmd_wrapper_passes_prompt_and_paths_intact() {
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
     assert_eq!(std::fs::read_to_string(&copy).unwrap(), prompt);
+}
+
+/// The first line of a Claude run whose lean configuration did not hold: a second MCP server.
+const TWO_SERVER_INIT: &str = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"linear-server","status":"connected"},{"name":"demo-tools","status":"connected"}]}"#;
+
+#[tokio::test]
+async fn a_lean_violation_ends_the_run_like_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": TWO_SERVER_INIT}, {"sleep_ms": 30_000}, {"exit": 0}]),
+    );
+    let log = dir.path().join("logs").join("1.jsonl");
+    let started = Instant::now();
+    let out = runner::run(
+        CommandSpec {
+            lean: true,
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(60_000, 60_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    match &out.exit {
+        ExitKind::LeanNotApplied(detail) => assert!(detail.contains("demo-tools"), "{detail}"),
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the run was stopped, not waited for: {:?}",
+        started.elapsed()
+    );
+    assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
+}
+
+#[tokio::test]
+async fn a_full_run_is_not_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": TWO_SERVER_INIT}, {"sleep_ms": 50}, {"exit": 0}]),
+    );
+    let log = dir.path().join("logs").join("1.jsonl");
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, "p"),
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+}
+
+#[tokio::test]
+async fn notes_come_first_in_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": RESULT_LINE}, {"exit": 0}]),
+    );
+    let log = dir.path().join("logs").join("1.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            notes: vec!["demo note".into()],
+            ..spec(agent(), dir.path(), &s, "p")
+        },
+        ExecutorKind::Claude,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    let lines = log_lines(&log);
+    assert!(
+        lines[0].contains("[IssueRelay] demo note") && lines[0].contains(r#""stream":"stderr""#),
+        "{lines:?}"
+    );
+    assert_eq!(lines.len(), 2, "{lines:?}");
+}
+
+#[tokio::test]
+async fn the_runs_own_variables_reach_the_executor() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"print_env": "ISSUERELAY_DEMO_VAR"}, {"exit": 0}]),
+    );
+    for (env, expected) in [
+        (
+            vec![("ISSUERELAY_DEMO_VAR".to_string(), "1".to_string())],
+            "ISSUERELAY_DEMO_VAR=1",
+        ),
+        (Vec::new(), "ISSUERELAY_DEMO_VAR=<unset>"),
+    ] {
+        let log = dir.path().join("logs").join(format!("{}.jsonl", env.len()));
+        let out = runner::run(
+            CommandSpec {
+                env,
+                ..spec(agent(), dir.path(), &s, "p")
+            },
+            ExecutorKind::Claude,
+            &log,
+            limits(30_000, 30_000),
+            CancellationToken::new(),
+            &ExecEnv::inherit(),
+            None,
+        )
+        .await;
+        assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+        let lines = log_lines(&log);
+        assert!(lines.iter().any(|l| l == expected), "{lines:?}");
+    }
 }

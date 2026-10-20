@@ -582,3 +582,39 @@ test("the page reads in Chinese too, with the engine's lines untranslated beneat
   expect(screen.getByRole("button", { name: "重新检查" })).toBeInTheDocument();
   expect(screen.getByText("codex is not logged in")).toBeInTheDocument();
 });
+
+// ---- lean runs --------------------------------------------------------------------------------
+
+test("an executor ready for lean runs says so in a part of its own", async () => {
+  await renderWithProviders(<Doctor />);
+  const claude = await screen.findByRole("region", { name: "Claude Code" });
+  const lean = await within(claude).findByRole("region", { name: "Lean runs" });
+  expect(within(lean).getByText("Ready")).toBeInTheDocument();
+  expect(symbolOf(lean, "Ready")).toContain("text-state-done");
+});
+
+test("an executor not ready for lean runs has a translated title with the engine's lines below", async () => {
+  const backend = await demoWith((report) => {
+    changeExecutor(report, 0, {
+      lean_linear_mcp: false,
+      lean_problems: ["lean runs use the Linear MCP server named `linear-server` in claude", "p\u0007q"],
+    });
+  });
+  await renderWithProviders(<Doctor />, { backend });
+  const claude = await screen.findByRole("region", { name: "Claude Code" });
+  const lean = await within(claude).findByRole("region", { name: "Lean runs" });
+  expect(within(lean).getByText("Not ready")).toBeInTheDocument();
+  expect(symbolOf(lean, "Not ready")).toContain("text-state-failed");
+  expect(within(lean).getByText("lean runs use the Linear MCP server named `linear-server` in claude")).toBeInTheDocument();
+  // The engine's lines are cleaned like the others.
+  expect(within(lean).getByText("p q")).toBeInTheDocument();
+  // The usual checks above still pass.
+  expect(within(claude).getByText("Linear MCP is connected")).toBeInTheDocument();
+});
+
+test("an executor that is not logged in is not ready for lean runs either", async () => {
+  await renderWithProviders(<Doctor />);
+  const codex = await screen.findByRole("region", { name: "Codex" });
+  const lean = await within(codex).findByRole("region", { name: "Lean runs" });
+  expect(within(lean).getByText("Not ready")).toBeInTheDocument();
+});

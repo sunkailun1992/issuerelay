@@ -8,8 +8,10 @@ import { Alert, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useBindings, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
 import { useFocusReturn } from "@/hooks/useFocusReturn";
@@ -17,9 +19,9 @@ import { useBackend } from "@/lib/backend-context";
 import { bindingLabels } from "@/lib/binding-labels";
 import { reportFailure } from "@/lib/errors";
 import { isValidModelName } from "@/lib/model-name";
-import type { Binding, ExecutorKind, PermissionProfile, Settings } from "@/lib/types";
+import { type Binding, EFFORTS, type Effort, type ExecutorKind, type PermissionProfile, type Settings } from "@/lib/types";
 
-/** The entry of the executor and permission lists that names none: the binding follows the settings. */
+/** The entry of the executor, permission and effort lists that names none: the binding follows the settings. */
 const DEFAULT = "default";
 
 interface FieldsProps {
@@ -33,8 +35,10 @@ interface FieldsProps {
 
 /**
  * The fields of a binding (design 8 step 5, 9.2). The Linear project and the folder are needed;
- * the executor, the permission level, the model and the prompt override are left to the settings
- * and the executor unless named. Whatever the engine refuses is told at the top of the form, in its
+ * the executor, the permission level, the model, the reasoning effort and the prompt override are
+ * left to the settings and the executor unless named. Runs are lean unless that is turned off
+ * (lean-run design 6.3); a binding with personal settings never runs lean, so the switch is off
+ * limits there, and its value is kept for another level. Whatever the engine refuses is told at the top of the form, in its
  * own words under a translated headline. The first time full access would take effect, the user
  * is asked to understand what it means (design 14) and the answer is kept in the settings.
  */
@@ -62,6 +66,8 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const [executor, setExecutor] = useState<ExecutorKind | typeof DEFAULT>(initial?.executor ?? DEFAULT);
   const [permission, setPermission] = useState<PermissionProfile | typeof DEFAULT>(initial?.permission ?? DEFAULT);
   const [model, setModel] = useState(initial?.model ?? "");
+  const [lean, setLean] = useState(initial?.lean ?? true);
+  const [effort, setEffort] = useState<Effort | typeof DEFAULT>(initial?.effort ?? DEFAULT);
   const [prompt, setPrompt] = useState(initial?.prompt_override ?? "");
   const [warning, setWarning] = useState(false);
   // The project that was chosen is not among the projects any more by the time it is saved.
@@ -71,6 +77,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const modelName = model.trim();
   const modelInvalid = modelName !== "" && !isValidModelName(modelName);
   const effectivePermission = permission === DEFAULT ? settings.default_permission : permission;
+  const leanApplies = effectivePermission !== "personal";
   const needsWarning = effectivePermission === "full" && !settings.full_access_acknowledged;
   const busy = save.isPending || saveSettings.isPending;
   const canSave = (creating ? projectId !== "" : true) && directory !== "" && !modelInvalid && !busy;
@@ -175,6 +182,9 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
     if (executor !== DEFAULT) binding.executor = executor;
     if (permission !== DEFAULT) binding.permission = permission;
     if (modelName !== "") binding.model = modelName;
+    // Only what differs from the defaults is written, as the engine does.
+    if (!lean) binding.lean = false;
+    if (effort !== DEFAULT) binding.effort = effort;
     // Typed text is kept as typed; only an override of blanks counts as none.
     if (prompt.trim() !== "") binding.prompt_override = prompt;
     return binding;
@@ -300,6 +310,23 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
             <Hint id={id("permission-hint")}>{t(`permission.${effectivePermission}_hint`)}</Hint>
           </Field>
 
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor={id("lean")}>{t("bindings.lean")}</Label>
+              <Switch
+                id={id("lean")}
+                checked={lean}
+                disabled={!leanApplies}
+                aria-describedby={id("lean-hint")}
+                onCheckedChange={(checked) => {
+                  edited();
+                  setLean(checked);
+                }}
+              />
+            </div>
+            <Hint id={id("lean-hint")}>{leanApplies ? t("bindings.lean_hint") : t("bindings.lean_personal_hint")}</Hint>
+          </div>
+
           <Field label={t("bindings.model")} htmlFor={id("model")}>
             <Input
               id={id("model")}
@@ -322,6 +349,29 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
             ) : (
               <Hint id={id("model-hint")}>{t("bindings.model_hint")}</Hint>
             )}
+          </Field>
+
+          <Field label={t("bindings.effort")} htmlFor={id("effort")}>
+            <Select
+              value={effort}
+              onValueChange={(value) => {
+                edited();
+                setEffort(value as Effort | typeof DEFAULT);
+              }}
+            >
+              <SelectTrigger id={id("effort")} className="w-full" aria-describedby={id("effort-hint")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DEFAULT}>{labels.effort(undefined)}</SelectItem>
+                {EFFORTS.map((level) => (
+                  <SelectItem key={level} value={level}>
+                    {labels.effort(level)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Hint id={id("effort-hint")}>{t("bindings.effort_hint")}</Hint>
           </Field>
 
           <Field label={t("bindings.prompt")} htmlFor={id("prompt")}>

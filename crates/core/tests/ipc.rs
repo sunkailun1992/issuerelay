@@ -933,6 +933,8 @@ async fn a_request_slower_than_the_idle_timeout_is_answered_not_cut_off() {
         }),
         job_runner: Arc::new(ScriptedRunner::new(linear, false)),
         logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
     })
     .unwrap();
     let (endpoint, token) = serve(&engine, root.path()).await;

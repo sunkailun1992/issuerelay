@@ -862,6 +862,8 @@ async fn run_a_job(host: &Host, root: &Path, linear: &FakeLinear) {
             permission: None,
             model: None,
             prompt_override: None,
+            lean: true,
+            effort: None,
         })
         .unwrap();
     linear.upsert(issue("1", "proj-1"));
@@ -894,6 +896,35 @@ async fn host_with_a_running_job(gated: bool) -> (Host, Arc<ScriptedRunner>, tem
 
 fn latest_job_state(host: &Host) -> JobState {
     host.engine().list_jobs(10).unwrap().remove(0).state
+}
+
+#[tokio::test]
+async fn a_host_gives_lean_runs_the_users_own_folders() {
+    bounded(async {
+        let (host, runner, _root) = host_with_a_running_job(true).await;
+        let spec = runner.specs.lock().unwrap()[0].clone();
+        stop_now(&host).await;
+        assert!(spec.lean, "{:?}", spec.args);
+        // Where Claude Code keeps the user-level CLAUDE.md for the user running the test.
+        let instructions = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join("CLAUDE.md"))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude").join("CLAUDE.md")))
+            .expect("the test user has a home folder");
+        let settings = spec.args.iter().position(|a| a == "--settings");
+        if issuerelay_core::executor::lean::passable(&instructions) {
+            let settings: serde_json::Value =
+                serde_json::from_str(&spec.args[settings.expect("--settings") + 1]).unwrap();
+            assert_eq!(
+                settings["claudeMdExcludes"][0].as_str(),
+                instructions.to_str()
+            );
+        } else {
+            assert_eq!(settings, None, "{:?}", spec.args);
+            assert_eq!(spec.notes.len(), 1, "{:?}", spec.notes);
+        }
+    })
+    .await;
 }
 
 #[tokio::test]

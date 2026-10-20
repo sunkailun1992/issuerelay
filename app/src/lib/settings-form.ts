@@ -1,5 +1,5 @@
 import { cleanDisplayText } from "./clean";
-import type { ExecutorKind, NotificationSettings, PermissionProfile, Settings, TriggerNames } from "./types";
+import type { Effort, ExecutorKind, NotificationSettings, PermissionProfile, Settings, TriggerNames } from "./types";
 
 /** The settings that are counts: seconds, minutes, runs, days and megabytes. */
 export type CountField =
@@ -31,6 +31,8 @@ export interface Draft extends Record<CountField, string> {
   comment_language: string;
   default_executor: ExecutorKind;
   default_permission: PermissionProfile;
+  /** `null`: no default, each executor uses its own setting. */
+  default_effort: Effort | null;
   prompt_template: string;
   notifications: NotificationSettings;
   auto_update: boolean;
@@ -56,6 +58,7 @@ export function draftOf(settings: Settings): Draft {
     log_max_total_mb: String(settings.log_max_total_mb),
     default_executor: settings.default_executor,
     default_permission: settings.default_permission,
+    default_effort: settings.default_effort ?? null,
     prompt_template: settings.prompt_template,
     notifications: { ...settings.notifications },
     auto_update: settings.auto_update,
@@ -109,7 +112,8 @@ export function problemsOf(draft: Draft): Partial<Record<string, Problem>> {
 /**
  * The settings to save: `base` (the settings as they are now) with the fields of the draft. Names
  * lose the blanks around them (a status is matched by its name); the template stays as it was typed.
- * `null` when a count is not a number: `problemsOf` says which.
+ * No default effort is left out, as the engine writes it. `null` when a count is not a number:
+ * `problemsOf` says which.
  */
 export function settingsOf(base: Settings, draft: Draft): Settings | null {
   const counts: Partial<Record<CountField, number>> = {};
@@ -117,7 +121,7 @@ export function settingsOf(base: Settings, draft: Draft): Settings | null {
     if (countProblem(draft[field], MINIMUM[field]) !== null) return null;
     counts[field] = Number(draft[field].trim());
   }
-  return {
+  const settings: Settings = {
     ...base,
     ...counts,
     language: draft.language,
@@ -137,6 +141,9 @@ export function settingsOf(base: Settings, draft: Draft): Settings | null {
     full_access_acknowledged: draft.full_access_acknowledged,
     show_in_dock: draft.show_in_dock,
   };
+  if (draft.default_effort === null) delete settings.default_effort;
+  else settings.default_effort = draft.default_effort;
+  return settings;
 }
 
 /** Whether two drafts hold the same everything. */

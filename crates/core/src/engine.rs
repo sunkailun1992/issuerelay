@@ -41,7 +41,7 @@ use crate::config::{Binding, Config, ExecutorKind, Settings, TriggerNames};
 use crate::doctor::{self, DoctorReport, ExecutorReport, ReadinessProbe, WorkspaceReport};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::executor::{
-    self, CommandSpec,
+    self, CommandSpec, lean,
     outcome::{self, Report},
 };
 use crate::linear::{LinearApi, Project, Viewer};
@@ -52,7 +52,7 @@ use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
 use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
-use crate::trigger::{self, Eligibility, WaitReason, WaitReasonView, same_name};
+use crate::trigger::{self, Eligibility, Readiness, WaitReason, WaitReasonView, same_name};
 
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
@@ -63,6 +63,16 @@ const LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// The pauses before the second and the third read that verifies a run's result in Linear. One
 /// failed read (a network hiccup) must not fail a run that did its work.
 const VERIFY_RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// The pauses before reading the issue of a run that ended cleanly again, while Linear still shows
+/// the issue unchanged since the run started and the run would fail: a connection can answer from
+/// an older snapshot for a while (seen in the lean-run acceptance). A run that really left the
+/// issue alone is recorded as failed about 90 s later for it.
+const STALE_REREAD_PAUSES: [Duration; 3] = [
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(45),
+];
 
 /// How many events wait for a slow subscriber before it lags.
 const EVENT_CAPACITY: usize = 256;
@@ -135,6 +145,12 @@ pub struct EngineDeps {
     pub job_runner: Arc<dyn JobRunner>,
     /// Holds one `<job id>.jsonl` log per job.
     pub logs_dir: PathBuf,
+    /// The user's home folder: a binding of that very folder does not run lean, and a lean
+    /// Claude run leaves out the user-level `CLAUDE.md` under it. `None` when it is not known.
+    pub user_home: Option<PathBuf>,
+    /// `CLAUDE_CONFIG_DIR` as the executors get it, when it is set and not empty: Claude Code
+    /// then keeps the user-level `CLAUDE.md` there instead.
+    pub claude_config_dir: Option<PathBuf>,
 }
 
 /// What the panel, CLI and MCP show about the engine right now.
@@ -297,6 +313,10 @@ struct Inner {
     readiness: Arc<dyn ReadinessProbe>,
     job_runner: Arc<dyn JobRunner>,
     logs_dir: PathBuf,
+    /// `EngineDeps::user_home`.
+    user_home: Option<PathBuf>,
+    /// `EngineDeps::claude_config_dir`.
+    claude_config_dir: Option<PathBuf>,
     running: Mutex<HashMap<i64, RunningJob>>,
     /// The user a connection is authorized as, with the connection that said so. Only that
     /// connection's answer is ever kept: `set_linear` empties it, and an answer that arrives
@@ -415,6 +435,10 @@ pub fn decide(
             JobState::Failed,
             Some(format!("could not start the executor: {e}")),
         ),
+        ExitKind::LeanNotApplied(detail) => (
+            JobState::Failed,
+            Some(format!("lean run did not take effect: {detail}")),
+        ),
         ExitKind::Exited(code) if *code != Some(0) => {
             let code = code.map_or_else(|| "unknown".to_string(), |c| c.to_string());
             (
@@ -475,6 +499,8 @@ impl Engine {
                 readiness: deps.readiness,
                 job_runner: deps.job_runner,
                 logs_dir: deps.logs_dir,
+                user_home: deps.user_home,
+                claude_config_dir: deps.claude_config_dir,
                 running: Mutex::new(HashMap::new()),
                 viewer: Mutex::new(None),
                 poll: Mutex::new(PollState::default()),
@@ -492,6 +518,11 @@ impl Engine {
 
     fn config(&self) -> Config {
         self.inner.config.read().expect("config lock").clone()
+    }
+
+    /// The user's home folder, when it is known (`EngineDeps::user_home`).
+    fn home(&self) -> Option<&Path> {
+        self.inner.user_home.as_deref()
     }
 
     fn store(&self) -> MutexGuard<'_, Store> {
@@ -834,7 +865,7 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                match trigger::evaluate(&issue, &cfg, &me.id, &ready) {
+                match trigger::evaluate(&issue, &cfg, &me.id, &ready, self.home()) {
                     Eligibility::Eligible(_) => IssueStatus::Eligible {
                         // What the poll does with such an issue (`reconcile`): a run in hand stays
                         // as it is, anything else is recorded anew only when `should_enqueue` says
@@ -880,7 +911,7 @@ impl Engine {
         Ok(viewer)
     }
 
-    async fn readiness(&self) -> (HashSet<ExecutorKind>, Vec<ExecutorReport>) {
+    async fn readiness(&self) -> (Readiness, Vec<ExecutorReport>) {
         let reports = self.inner.readiness.executor_reports(false).await;
         (doctor::ready_set(&reports), reports)
     }
@@ -938,7 +969,7 @@ impl Engine {
         cfg: &Config,
         me: &Viewer,
         issues: &[Issue],
-        ready: &HashSet<ExecutorKind>,
+        ready: &Readiness,
         changed: &mut Vec<i64>,
     ) -> Result<()> {
         let names = &cfg.settings.trigger;
@@ -948,7 +979,7 @@ impl Engine {
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready);
+            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, self.home());
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
@@ -1269,7 +1300,7 @@ impl Engine {
         linear: &dyn LinearApi,
         cfg: &Config,
         me: &Viewer,
-        ready: &HashSet<ExecutorKind>,
+        ready: &Readiness,
         reports: &[ExecutorReport],
         job: Job,
     ) -> Result<bool> {
@@ -1292,7 +1323,7 @@ impl Engine {
             }
             return Ok(false);
         };
-        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready) {
+        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, self.home()) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
                 let waiting = self.assign_if_queued(
@@ -1356,14 +1387,32 @@ impl Engine {
             comment_language: &language,
             template: &template,
         });
-        let spec = executor::build(
-            kind,
-            program,
-            cfg.permission_for(&binding),
-            binding.model.as_deref(),
-            &binding.directory,
-            prompt_text,
-        );
+        // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
+        // arguments is not passed, and the run log says so (lean-run design, section 5.1).
+        let instructions =
+            lean::user_instructions_path(self.home(), self.inner.claude_config_dir.as_deref());
+        let passable = instructions.as_deref().filter(|path| lean::passable(path));
+        let lean_run = cfg.lean_for(&binding, self.home()).applies();
+        let options = executor::RunOptions {
+            profile: cfg.permission_for(&binding),
+            model: binding.model.as_deref(),
+            effort: cfg.effort_for(&binding),
+            lean: lean_run.then_some(executor::Lean {
+                user_instructions: passable,
+            }),
+        };
+        let mut spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
+        if lean_run && kind == ExecutorKind::Claude && passable.is_none() {
+            spec.notes.push(if instructions.is_some() {
+                "the user-level CLAUDE.md path cannot be passed safely, so this lean run still \
+                 reads it"
+                    .into()
+            } else {
+                "could not tell where the user-level CLAUDE.md is, so this lean run may still \
+                 read it"
+                    .into()
+            });
+        }
         // A manual retry reuses the row, so its log replaces the previous attempt's log.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
         // Right before the run is registered: a pause or a changed binding that came while the
@@ -1427,6 +1476,7 @@ impl Engine {
         let job_id = job.id;
         let issue_uuid = job.issue_uuid.clone();
         let identifier = job.issue_identifier.clone();
+        let started_from = issue.updated_at;
         // The executor's process goes on the row once it runs, so that a host started after a
         // crash can end what this run left behind.
         let recorder = self.clone();
@@ -1452,7 +1502,14 @@ impl Engine {
                 },
             };
             if let Err(e) = engine
-                .finish_job(job_id, &issue_uuid, &identifier, output, &mut slot)
+                .finish_job(
+                    job_id,
+                    &issue_uuid,
+                    &identifier,
+                    started_from,
+                    output,
+                    &mut slot,
+                )
                 .await
             {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not record the run result");
@@ -1483,40 +1540,67 @@ impl Engine {
     }
 
     /// Checks the result in Linear, records it, frees the run's slot and wakes the loop so the
-    /// next queued job can start.
+    /// next queued job can start. When a clean run would fail although Linear shows its issue
+    /// unchanged since `started_from` (the issue's `updatedAt` right before the run started), the
+    /// issue is read again after each pause in `STALE_REREAD_PAUSES` unless the run is told to stop
+    /// meanwhile, and the last read decides.
     async fn finish_job(
         &self,
         job_id: i64,
         issue_uuid: &str,
         identifier: &str,
+        started_from: DateTime<Utc>,
         output: RunOutput,
         slot: &mut RunSlot,
     ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
-        let verified = self.verify_read(job_id, issue_uuid).await;
-        let (state, reason, verified_at) = match verified {
-            Ok(issue) => {
-                let (state, reason) = decide(
-                    &output.exit,
-                    issue.as_ref().map(|i| i.state.as_str()),
-                    report.as_ref(),
-                    &names,
+        let mut rereads = STALE_REREAD_PAUSES.into_iter();
+        let (state, reason, verified_at) = loop {
+            let verified = self.verify_read(job_id, issue_uuid).await;
+            let unchanged =
+                matches!(&verified, Ok(Some(issue)) if issue.updated_at <= started_from);
+            let result = match verified {
+                Ok(issue) => {
+                    let (state, reason) = decide(
+                        &output.exit,
+                        issue.as_ref().map(|i| i.state.as_str()),
+                        report.as_ref(),
+                        &names,
+                    );
+                    (state, reason, issue.map(|i| i.updated_at))
+                }
+                Err(e) => {
+                    let state = if output.exit == ExitKind::Canceled {
+                        JobState::Canceled
+                    } else {
+                        JobState::Failed
+                    };
+                    let reason = match &output.exit {
+                        // What the run itself showed says more than the failed look at its result.
+                        ExitKind::LeanNotApplied(_) => decide(&output.exit, None, None, &names).1,
+                        _ => Some(format!("could not verify the result in Linear: {e:#}")),
+                    };
+                    (state, reason, None)
+                }
+            };
+            // Only a failure is doubted. A question for the reporter is recorded at once: its
+            // status is Todo, and an older snapshot shows Todo as well.
+            let doubtful = unchanged
+                && output.exit == ExitKind::Exited(Some(0))
+                && result.0 == JobState::Failed;
+            if doubtful && let Some(pause) = rereads.next() {
+                tracing::info!(
+                    job_id,
+                    issue = %identifier,
+                    wait_secs = pause.as_secs(),
+                    "Linear still shows the issue as it was before the run; reading it again"
                 );
-                (state, reason, issue.map(|i| i.updated_at))
+                if self.pause_unless_stopped(job_id, pause).await {
+                    continue;
+                }
             }
-            Err(e) => {
-                let state = if output.exit == ExitKind::Canceled {
-                    JobState::Canceled
-                } else {
-                    JobState::Failed
-                };
-                (
-                    state,
-                    Some(format!("could not verify the result in Linear: {e:#}")),
-                    None,
-                )
-            }
+            break result;
         };
         // These texts come from outside (the AI, Linear, the operating system) and reach the
         // panel, the CLI and MCP. The summary is the AI's own; without a report line it is the
@@ -1577,6 +1661,18 @@ impl Engine {
                     tokio::time::sleep(pause).await;
                 }
             }
+        }
+    }
+
+    /// Waits `pause`, unless the run of this job is told to stop meanwhile, by the user or by a
+    /// shutdown (`run_forever` passes it on to every run); says whether the whole pause passed.
+    async fn pause_unless_stopped(&self, job_id: i64, pause: Duration) -> bool {
+        let Some(token) = self.run_token(job_id) else {
+            return false;
+        };
+        tokio::select! {
+            () = token.cancelled() => false,
+            () = tokio::time::sleep(pause) => true,
         }
     }
 
@@ -1687,20 +1783,23 @@ impl Engine {
 
     /// Tells the run of this job, if there is one, to stop; `false` when there is none.
     fn stop_run(&self, job_id: i64) -> bool {
-        let token = self
-            .inner
-            .running
-            .lock()
-            .expect("running lock")
-            .get(&job_id)
-            .map(|run| run.cancel.clone());
-        match token {
+        match self.run_token(job_id) {
             Some(token) => {
                 token.cancel();
                 true
             }
             None => false,
         }
+    }
+
+    /// The stop token of this job's run, while one is in progress.
+    fn run_token(&self, job_id: i64) -> Option<CancellationToken> {
+        self.inner
+            .running
+            .lock()
+            .expect("running lock")
+            .get(&job_id)
+            .map(|run| run.cancel.clone())
     }
 
     /// Queues a failed, stopped or needs-info run again. Only the issue's latest run qualifies.
@@ -1812,7 +1911,7 @@ impl Engine {
             linear_error,
             executors,
             workspace,
-            bindings: doctor::check_bindings(&cfg, &ready),
+            bindings: doctor::check_bindings(&cfg, &ready, self.home()),
             env,
         }
     }
@@ -1977,6 +2076,22 @@ mod tests {
         assert_eq!(
             decide(&ExitKind::SpawnFailed("x".into()), None, None, &names()).0,
             JobState::Failed
+        );
+    }
+
+    #[test]
+    fn a_lean_violation_is_a_failure_with_its_reason() {
+        assert_eq!(
+            decide(
+                &ExitKind::LeanNotApplied("auto memory is on".into()),
+                Some("In Testing"),
+                None,
+                &names()
+            ),
+            (
+                JobState::Failed,
+                Some("lean run did not take effect: auto memory is on".into())
+            )
         );
     }
 }

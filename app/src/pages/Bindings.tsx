@@ -206,7 +206,8 @@ interface CardActions {
 }
 
 /**
- * One binding (design 9.2): its folder, executor, permission level, model, prompt override and what the last check found.
+ * One binding (design 9.2): its folder, executor, permission level, whether its runs are lean, model,
+ * reasoning effort, prompt override and what the last check found.
  * Edit, Remove and Check again are named for what they do and described by the project, which their
  * name leaves out (they are one in every card).
  */
@@ -241,10 +242,14 @@ function BindingCard({ binding, labels, check, actions }: { binding: Binding; la
             <dd>{labels.executor(binding.executor)}</dd>
             <dt className="text-muted-foreground">{t("bindings.permission")}</dt>
             <dd>{labels.permission(binding.permission)}</dd>
+            <dt className="text-muted-foreground">{t("bindings.lean")}</dt>
+            <dd>{labels.lean(binding, report?.lean)}</dd>
             <dt className="text-muted-foreground">{t("bindings.model")}</dt>
             <dd className={cn(binding.model === undefined ? "text-muted-foreground" : "font-mono text-xs")}>
               {binding.model ?? t("bindings.model_default")}
             </dd>
+            <dt className="text-muted-foreground">{t("bindings.effort")}</dt>
+            <dd>{labels.effort(binding.effort)}</dd>
             <dt id={promptId} className="text-muted-foreground">
               {t("bindings.prompt")}
             </dt>

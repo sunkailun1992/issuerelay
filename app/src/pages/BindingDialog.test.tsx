@@ -465,12 +465,15 @@ test("a model or a prompt that is emptied is taken out of the binding", async ()
   await pick("Executor", "Default (Claude Code)");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  // What the binding had besides the model and the prompt stays.
   expect(saveBinding.mock.calls[0][0]).toEqual({
     id: "proj-2",
     project_id: "proj-2",
     project_name: "Demo Mobile",
     directory: "~/code/demo-mobile",
     permission: "auto",
+    lean: false,
+    effort: "high",
   });
   expect("executor" in saveBinding.mock.calls[0][0]).toBe(false);
 });
@@ -825,4 +828,111 @@ test("while the first connection to Linear is under way the project list says so
   });
   expect(await screen.findByRole("combobox", { name: "Linear project" })).toBeInTheDocument();
   expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
+});
+
+// ---- lean runs and the reasoning effort --------------------------------------------------------
+
+test("saving with lean on and no effort keeps the binding shape", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials();
+  expect(screen.getByRole("switch", { name: "Lean run" })).toBeChecked();
+  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("Default (The executor's own setting)");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(Object.keys(saveBinding.mock.calls[0][0]).sort()).toEqual(["directory", "id", "project_id", "project_name"]);
+});
+
+test("turning lean off saves lean false", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials();
+  const lean = screen.getByRole("switch", { name: "Lean run" });
+  expect(lean).toHaveAccessibleDescription(/Loads only Linear and the repository's own rules and settings/);
+  await userEvent.click(lean);
+  expect(lean).not.toBeChecked();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding.mock.calls[0][0]).toEqual({
+    id: "proj-3",
+    project_id: "proj-3",
+    project_name: "Docs Site",
+    directory: "~/code/new-project",
+    lean: false,
+  });
+});
+
+test("editing keeps lean off and the effort", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  const initial = { ...DEMO_BINDINGS[0], lean: false, effort: "max" as const };
+  await renderWithProviders(<BindingForm initial={initial} onSaved={() => {}} />, { backend });
+  expect(await screen.findByRole("switch", { name: "Lean run" })).not.toBeChecked();
+  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("Max");
+  await userEvent.click(screen.getByRole("button", { name: "Choose…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding).toHaveBeenCalledWith({ ...initial, directory: "~/code/new-project" });
+});
+
+test("under personal settings the lean switch is disabled and explains why", async () => {
+  await renderWithProviders(<BindingForm onSaved={() => {}} />);
+  const lean = await screen.findByRole("switch", { name: "Lean run" });
+  expect(lean).toBeEnabled();
+  await pick("Permission level", "Personal settings");
+  expect(lean).toBeDisabled();
+  // Its value stays, for when another level is chosen again.
+  expect(lean).toBeChecked();
+  expect(lean).toHaveAccessibleDescription("Personal-settings runs always use your whole setup, so lean runs do not apply.");
+  await pick("Permission level", "Automatic review");
+  expect(lean).toBeEnabled();
+  expect(lean).toHaveAccessibleDescription(/Loads only Linear/);
+});
+
+test("a binding that follows personal settings by default cannot turn lean runs on or off either", async () => {
+  const backend = await backendWith({ defaultPermission: "personal", acknowledged: true });
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  expect(await screen.findByRole("switch", { name: "Lean run" })).toBeDisabled();
+});
+
+test("a chosen effort is saved and the default saves none", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials();
+  await userEvent.click(screen.getByRole("combobox", { name: "Reasoning effort" }));
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual([
+    "Default (The executor's own setting)",
+    "Low",
+    "Medium",
+    "High",
+    "Extra high",
+    "Max",
+  ]);
+  await userEvent.click(screen.getByRole("option", { name: "High" }));
+  expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveAccessibleDescription(/set the effort here/);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding.mock.calls[0][0].effort).toBe("high");
+});
+
+test("choosing the default effort again takes the effort out of the binding", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  const initial = { ...DEMO_BINDINGS[0], effort: "low" as const };
+  await renderWithProviders(<BindingForm initial={initial} onSaved={() => {}} />, { backend });
+  await pick("Reasoning effort", "Default (The executor's own setting)");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect("effort" in saveBinding.mock.calls[0][0]).toBe(false);
+});
+
+test("the effort list says what the default of the settings is", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const settings = await backend.settings();
+  backend.settings = async () => ({ ...settings, default_effort: "xhigh" });
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  expect(await screen.findByRole("combobox", { name: "Reasoning effort" })).toHaveTextContent("Default (Extra high)");
 });

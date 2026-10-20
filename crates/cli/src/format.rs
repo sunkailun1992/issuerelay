@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 
 use issuerelay_core::{
+    config::LeanStatus,
     env::{EnvSource, mask_credentials},
     text::is_invisible,
 };
@@ -183,16 +184,22 @@ fn doctor(v: &Value) -> String {
         )),
     }
     for e in v["executors"].as_array().into_iter().flatten() {
-        let ready = e["program"].is_string() && e["logged_in"] == true && e["linear_mcp"] == true;
-        let problems = strings(&e["problems"]);
-        let detail = if ready {
-            "ready".to_string()
-        } else if problems.is_empty() {
-            "not ready".to_string()
-        } else {
-            format!("not ready ({})", problems.join("; "))
-        };
-        out.push(format!("{}: {detail}", text(e, "kind")));
+        let installed = e["program"].is_string() && e["logged_in"] == true;
+        let ready = installed && e["linear_mcp"] == true;
+        out.push(format!(
+            "{}: {}",
+            text(e, "kind"),
+            readiness(ready, &strings(&e["problems"]))
+        ));
+        // A host from before lean runs sends no lean checks; then nothing is said about them.
+        if e.get("lean_linear_mcp").is_some() {
+            let ready = installed && e["lean_linear_mcp"] == true && e["lean_logged_in"] == true;
+            out.push(format!(
+                "{} (lean runs): {}",
+                text(e, "kind"),
+                readiness(ready, &strings(&e["lean_problems"]))
+            ));
+        }
     }
     if let Some(env) = v.get("env").filter(|x| x.is_object()) {
         out.extend(environment(env));
@@ -240,12 +247,36 @@ fn doctor(v: &Value) -> String {
             wrong.join(", ")
         };
         out.push(format!(
-            "Binding {} -> {}: {verdict}",
+            "Binding {} -> {}{}: {verdict}",
             text(b, "project_name"),
             text(b, "executor"),
+            lean_label(&b["lean"]),
         ));
     }
     out.join("\n")
+}
+
+/// `ready`, or `not ready` with the problems that say why, when there are any.
+fn readiness(ready: bool, problems: &[String]) -> String {
+    if ready {
+        "ready".to_string()
+    } else if problems.is_empty() {
+        "not ready".to_string()
+    } else {
+        format!("not ready ({})", problems.join("; "))
+    }
+}
+
+/// What a binding report's `lean` means, after the executor's name; nothing when the host sent
+/// none (it is from before lean runs) or one this version does not know.
+fn lean_label(value: &Value) -> &'static str {
+    match serde_json::from_value::<LeanStatus>(value.clone()) {
+        Ok(LeanStatus::On) => " (lean)",
+        Ok(LeanStatus::Off) => " (full configuration)",
+        Ok(LeanStatus::Personal) => " (full configuration: personal settings)",
+        Ok(LeanStatus::HomeDirectory) => " (full configuration: home folder)",
+        Err(_) => "",
+    }
 }
 
 /// The lines for the environment executors get: where the PATH and the proxy come from, the
@@ -294,16 +325,24 @@ fn bindings(v: &Value) -> String {
     items
         .iter()
         .map(|b| {
-            let executor = clean(
+            let mut tags = vec![clean(
                 b.get("executor")
                     .and_then(Value::as_str)
                     .unwrap_or("default"),
-            );
+            )];
+            // Only what differs from the defaults: lean runs on, the effort from the settings.
+            if b["lean"] == false {
+                tags.push("lean off".into());
+            }
+            if let Some(effort) = b.get("effort").and_then(Value::as_str) {
+                tags.push(format!("effort {}", clean(effort)));
+            }
             format!(
-                "{}  {}  ->  {}  [{executor}]",
+                "{}  {}  ->  {}  [{}]",
                 text(b, "id"),
                 text(b, "project_name"),
-                text(b, "directory")
+                text(b, "directory"),
+                tags.join(", ")
             )
         })
         .collect::<Vec<_>>()
@@ -684,6 +723,128 @@ mod tests {
             line(false, false),
             "Binding Demo Project -> claude: directory missing, executor not ready"
         );
+    }
+
+    #[test]
+    fn binding_lines_name_lean_off_and_effort() {
+        let line = |fields: &[(&str, Value)]| {
+            let mut binding = json!({"id": "p1", "project_name": "Demo Project",
+                "directory": "demo", "executor": "claude"});
+            for (name, value) in fields {
+                binding[*name] = value.clone();
+            }
+            human("bindings.list", &json!([binding]))
+        };
+        assert_eq!(line(&[]), "p1  Demo Project  ->  demo  [claude]");
+        assert_eq!(
+            line(&[("lean", json!(true))]),
+            "p1  Demo Project  ->  demo  [claude]"
+        );
+        assert_eq!(
+            line(&[("lean", json!(false)), ("effort", json!("max"))]),
+            "p1  Demo Project  ->  demo  [claude, lean off, effort max]"
+        );
+        assert_eq!(
+            line(&[("effort", json!("low"))]),
+            "p1  Demo Project  ->  demo  [claude, effort low]"
+        );
+        // What the host sends is cleaned like everything else.
+        assert_eq!(
+            line(&[("effort", json!("m\u{1b}ax"))]),
+            "p1  Demo Project  ->  demo  [claude, effort m ax]"
+        );
+    }
+
+    #[test]
+    fn doctor_binding_lines_say_whether_runs_are_lean() {
+        let line = |lean: Option<&str>| {
+            let mut binding = json!({"binding_id": "p", "project_name": "Demo Project",
+                "directory_exists": true, "executor": "claude", "executor_ready": true});
+            if let Some(lean) = lean {
+                binding["lean"] = json!(lean);
+            }
+            let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+                "workspace": null, "bindings": [binding]});
+            human("doctor", &report).lines().last().unwrap().to_string()
+        };
+        // A host from before lean runs sends no `lean`, and a value this version does not know
+        // is not echoed.
+        assert_eq!(line(None), "Binding Demo Project -> claude: ok");
+        assert_eq!(line(Some("newer")), "Binding Demo Project -> claude: ok");
+        assert_eq!(
+            line(Some("on")),
+            "Binding Demo Project -> claude (lean): ok"
+        );
+        assert_eq!(
+            line(Some("off")),
+            "Binding Demo Project -> claude (full configuration): ok"
+        );
+        assert_eq!(
+            line(Some("personal")),
+            "Binding Demo Project -> claude (full configuration: personal settings): ok"
+        );
+        assert_eq!(
+            line(Some("home_directory")),
+            "Binding Demo Project -> claude (full configuration: home folder): ok"
+        );
+    }
+
+    #[test]
+    fn doctor_prints_the_lean_readiness_of_each_executor() {
+        let executor = |kind: &str, lean: Option<(bool, bool, Value)>| {
+            let mut e = json!({"kind": kind, "program": format!("/x/{kind}"), "logged_in": true,
+                "linear_mcp": true, "problems": []});
+            if let Some((linear, logged_in, problems)) = lean {
+                e["lean_linear_mcp"] = json!(linear);
+                e["lean_logged_in"] = json!(logged_in);
+                e["lean_problems"] = problems;
+            }
+            e
+        };
+        let lines = |executors: Value| {
+            let report = json!({"viewer": null, "linear_error": "offline",
+                "executors": executors, "workspace": null, "bindings": []});
+            human("doctor", &report)
+                .lines()
+                .skip(1)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(json!([
+                executor("claude", Some((true, true, json!([])))),
+                executor(
+                    "codex",
+                    Some((
+                        false,
+                        true,
+                        json!([
+                            "lean runs use the Linear MCP server named `linear` in codex",
+                            "p\u{7}2"
+                        ])
+                    ))
+                ),
+            ])),
+            [
+                "claude: ready",
+                "claude (lean runs): ready",
+                "codex: ready",
+                "codex (lean runs): not ready (lean runs use the Linear MCP server named `linear` in codex; p 2)",
+            ]
+        );
+        // A lean check that a failed usual check left unjudged adds no problem of its own.
+        let mut signed_out = executor("codex", Some((true, false, json!([]))));
+        signed_out["logged_in"] = json!(false);
+        signed_out["problems"] = json!(["codex is not logged in"]);
+        assert_eq!(
+            lines(json!([signed_out])),
+            [
+                "codex: not ready (codex is not logged in)",
+                "codex (lean runs): not ready"
+            ]
+        );
+        // A host from before lean runs sends none of the lean fields.
+        assert_eq!(lines(json!([executor("claude", None)])), ["claude: ready"]);
     }
 
     #[test]

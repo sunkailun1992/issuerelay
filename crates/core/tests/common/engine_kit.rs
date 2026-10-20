@@ -24,18 +24,40 @@ pub struct FakeReadiness;
 #[async_trait::async_trait]
 impl ReadinessProbe for FakeReadiness {
     async fn executor_reports(&self, _fresh: bool) -> Vec<ExecutorReport> {
-        [ExecutorKind::Claude, ExecutorKind::Codex]
-            .into_iter()
-            .map(|kind| ExecutorReport {
-                kind,
-                program: Some(PathBuf::from(format!("/fake/{}", kind.as_str()))),
-                version: Some("test".into()),
-                logged_in: true,
-                linear_mcp: true,
-                problems: Vec::new(),
-            })
-            .collect()
+        fake_reports(true)
     }
+}
+
+/// Both executors ready with the user's whole configuration, neither for lean runs.
+pub struct FullOnlyReadiness;
+
+#[async_trait::async_trait]
+impl ReadinessProbe for FullOnlyReadiness {
+    async fn executor_reports(&self, _fresh: bool) -> Vec<ExecutorReport> {
+        fake_reports(false)
+    }
+}
+
+/// Both executors installed, logged in and connected to Linear; ready for lean runs when `lean`.
+fn fake_reports(lean: bool) -> Vec<ExecutorReport> {
+    [ExecutorKind::Claude, ExecutorKind::Codex]
+        .into_iter()
+        .map(|kind| ExecutorReport {
+            kind,
+            program: Some(PathBuf::from(format!("/fake/{}", kind.as_str()))),
+            version: Some("test".into()),
+            logged_in: true,
+            linear_mcp: true,
+            problems: Vec::new(),
+            lean_linear_mcp: lean,
+            lean_logged_in: lean,
+            lean_problems: if lean {
+                Vec::new()
+            } else {
+                vec!["demo lean problem".into()]
+            },
+        })
+        .collect()
 }
 
 /// What a scripted run does: optionally move the issue's status (as the AI would), then exit.
@@ -172,6 +194,13 @@ impl JobRunner for ScriptedRunner {
     }
 }
 
+/// The user's folders an engine is told about (`EngineDeps`); none by default.
+#[derive(Default)]
+pub struct Homes {
+    pub user_home: Option<PathBuf>,
+    pub claude_config_dir: Option<PathBuf>,
+}
+
 pub struct Harness {
     pub engine: Engine,
     pub linear: FakeLinear,
@@ -188,6 +217,17 @@ impl Harness {
 
     /// Starts from `cfg`, which is saved as the engine's configuration file.
     pub fn with_config(cfg: Config, gated: bool) -> Self {
+        Self::with_parts(cfg, gated, Homes::default(), Arc::new(FakeReadiness))
+    }
+
+    /// `with_config` for a user whose folders are `homes`, with `readiness` as the executor
+    /// checks.
+    pub fn with_parts(
+        cfg: Config,
+        gated: bool,
+        homes: Homes,
+        readiness: Arc<dyn ReadinessProbe>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.toml");
         cfg.save(&config_path).unwrap();
@@ -197,9 +237,11 @@ impl Harness {
             config_path,
             store: Store::open_in_memory().unwrap(),
             linear: Arc::new(linear.clone()),
-            readiness: Arc::new(FakeReadiness),
+            readiness,
             job_runner: runner.clone(),
             logs_dir: root.path().join("logs"),
+            user_home: homes.user_home,
+            claude_config_dir: homes.claude_config_dir,
         })
         .unwrap();
         Self {
@@ -224,6 +266,8 @@ impl Harness {
                 permission: None,
                 model: None,
                 prompt_override: None,
+                lean: true,
+                effort: None,
             })
             .unwrap();
         dir

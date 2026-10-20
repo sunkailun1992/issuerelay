@@ -60,6 +60,66 @@ impl PermissionProfile {
     }
 }
 
+/// How hard the executor reasons: Claude Code's `--effort`, Codex's `model_reasoning_effort`
+/// (lean-run design section 5.6). Both executors take these five names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    /// Every level, lowest first: the order the panel and the CLI list them in.
+    pub const ALL: [Effort; 5] = [
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+
+    /// Case-insensitive and ignores surrounding whitespace; `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|effort| effort.as_str() == text)
+    }
+}
+
+/// Whether a binding's runs are lean (lean-run design section 5.3): only `On` applies the lean
+/// arguments; the other three run with the user's whole configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeanStatus {
+    On,
+    /// The binding turned lean runs off.
+    Off,
+    /// "Personal settings" means the user's own whole setup, which lean runs do not read.
+    Personal,
+    /// The binding's folder is the user's home folder: its project settings
+    /// (`.claude/settings.json`) are the user settings, so they cannot be told apart.
+    HomeDirectory,
+}
+
+impl LeanStatus {
+    pub fn applies(self) -> bool {
+        self == LeanStatus::On
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TriggerNames {
@@ -141,6 +201,10 @@ pub struct Settings {
     /// stays. Windows has no Dock (a window's taskbar button follows the window), so it ignores
     /// this setting; the value is still saved.
     pub show_in_dock: bool,
+    /// The reasoning effort of bindings that do not choose one; `None` leaves it to each
+    /// executor's own settings (which lean runs do not read).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<Effort>,
 }
 
 impl Default for Settings {
@@ -164,6 +228,7 @@ impl Default for Settings {
             onboarding_completed: false,
             full_access_acknowledged: false,
             show_in_dock: true,
+            default_effort: None,
         }
     }
 }
@@ -284,6 +349,24 @@ pub struct Binding {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_override: Option<String>,
+    /// Lean runs (lean-run design): on unless the binding turns them off. Written to the file
+    /// only when off, so a file from before the setting reads as on.
+    #[serde(
+        default = "lean_by_default",
+        skip_serializing_if = "is_lean_by_default"
+    )]
+    pub lean: bool,
+    /// This binding's reasoning effort; `None` follows `Settings::default_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+}
+
+fn lean_by_default() -> bool {
+    true
+}
+
+fn is_lean_by_default(lean: &bool) -> bool {
+    *lean
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,6 +489,31 @@ impl Config {
             .permission
             .unwrap_or(self.settings.default_permission)
     }
+
+    pub fn effort_for(&self, binding: &Binding) -> Option<Effort> {
+        binding.effort.or(self.settings.default_effort)
+    }
+
+    /// Whether `binding`'s runs are lean. `home` is the user's home folder when it is known; a
+    /// binding of that very folder cannot be lean (see `LeanStatus::HomeDirectory`).
+    pub fn lean_for(&self, binding: &Binding, home: Option<&Path>) -> LeanStatus {
+        if !binding.lean {
+            LeanStatus::Off
+        } else if self.permission_for(binding) == PermissionProfile::Personal {
+            LeanStatus::Personal
+        } else if home.is_some_and(|home| same_folder(&binding.directory, home)) {
+            LeanStatus::HomeDirectory
+        } else {
+            LeanStatus::On
+        }
+    }
+}
+
+/// Whether two paths name the same folder once symlinks and `.` / `..` are resolved; a path that
+/// cannot be resolved (it does not exist) is compared as written.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolve(a) == resolve(b)
 }
 
 /// The keys in a config file's text that this version does not know, such as `settings.foo` or
@@ -423,7 +531,9 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     // file that sets it, which a save writes, would be reported as holding an unknown key at
     // every start. When adding one, set it on `sample.settings` below and in
     // `every_key_a_save_writes_is_known`, which fails until the sample knows the key.
+    // `lean` is written only when it is off, so the sample turns it off.
     let mut sample = Config::default();
+    sample.settings.default_effort = Some(Effort::High);
     sample.bindings.push(Binding {
         id: "x".into(),
         project_id: "x".into(),
@@ -433,6 +543,8 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
         permission: Some(PermissionProfile::Full),
         model: Some("x".into()),
         prompt_override: Some("x".into()),
+        lean: false,
+        effort: Some(Effort::Max),
     });
     let known = toml::Table::try_from(&sample).expect("the config serializes");
     let mut unknown = Vec::new();
@@ -542,6 +654,8 @@ mod tests {
             permission: None,
             model: None,
             prompt_override: None,
+            lean: true,
+            effort: None,
         }
     }
 
@@ -1054,6 +1168,7 @@ mod tests {
         config.settings.onboarding_completed = true;
         config.settings.full_access_acknowledged = true;
         config.settings.show_in_dock = false;
+        config.settings.default_effort = Some(Effort::High);
         config.bindings.push(Binding {
             id: "proj-1".into(),
             project_id: "proj-1".into(),
@@ -1063,15 +1178,182 @@ mod tests {
             permission: Some(PermissionProfile::Personal),
             model: Some("gpt-5.5".into()),
             prompt_override: Some("Be brief.".into()),
+            lean: false,
+            effort: Some(Effort::Max),
         });
         let text = toml::to_string_pretty(&config).unwrap();
-        for key in ["executor", "permission", "model", "prompt_override"] {
+        for key in [
+            "executor",
+            "permission",
+            "model",
+            "prompt_override",
+            "lean",
+            "effort",
+            "default_effort",
+        ] {
             assert!(
                 text.contains(&format!("\n{key} = ")),
                 "the sample sets {key}: {text}"
             );
         }
         assert_eq!(unknown_keys(&text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn effort_names_parse_case_insensitively_and_round_trip() {
+        let levels = [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+            (Effort::Max, "max"),
+        ];
+        assert_eq!(Effort::ALL, levels.map(|(effort, _)| effort));
+        for (effort, name) in levels {
+            assert_eq!(effort.as_str(), name);
+            assert_eq!(Effort::parse(&name.to_uppercase()), Some(effort));
+            let config: Config =
+                toml::from_str(&binding_toml(&[("effort", format!("\"{name}\""))])).unwrap();
+            assert_eq!(config.bindings[0].effort, Some(effort));
+            let text = toml::to_string_pretty(&config).unwrap();
+            assert!(text.contains(&format!("\neffort = \"{name}\"\n")), "{text}");
+        }
+        assert_eq!(Effort::parse(" max "), Some(Effort::Max));
+        assert_eq!(Effort::parse("turbo"), None);
+        assert_eq!(Effort::parse(""), None);
+    }
+
+    #[test]
+    fn an_unknown_effort_in_the_file_is_an_error() {
+        let error = load_error(&binding_toml(&[("effort", "\"turbo\"".into())]));
+        assert!(error.contains("turbo"), "{error}");
+        let error = load_error("[settings]\ndefault_effort = \"turbo\"\n");
+        assert!(error.contains("turbo"), "{error}");
+    }
+
+    #[test]
+    fn a_binding_from_before_lean_runs_reads_as_lean() {
+        let config: Config = toml::from_str(&binding_toml(&[])).unwrap();
+        assert!(config.bindings[0].lean);
+        assert_eq!(config.bindings[0].effort, None);
+        assert_eq!(config.settings.default_effort, None);
+    }
+
+    #[test]
+    fn lean_is_written_only_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.bindings.push(binding("proj-1", None));
+        config.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("lean"), "{text}");
+        config.bindings[0].lean = false;
+        config.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\nlean = false\n"), "{text}");
+        assert_eq!(Config::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn the_default_effort_is_written_only_when_set() {
+        let mut config = Config::default();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(!text.contains("effort"), "{text}");
+        config.settings.default_effort = Some(Effort::Xhigh);
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("\ndefault_effort = \"xhigh\"\n"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.settings.default_effort, Some(Effort::Xhigh));
+    }
+
+    #[test]
+    fn effort_for_takes_the_binding_then_the_settings() {
+        let mut config = Config::default();
+        let plain = binding("proj-1", None);
+        assert_eq!(config.effort_for(&plain), None);
+        config.settings.default_effort = Some(Effort::High);
+        assert_eq!(config.effort_for(&plain), Some(Effort::High));
+        let own = Binding {
+            effort: Some(Effort::Max),
+            ..binding("proj-1", None)
+        };
+        assert_eq!(config.effort_for(&own), Some(Effort::Max));
+    }
+
+    #[test]
+    fn lean_for_is_off_personal_home_or_on() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let at = |dir: &Path| Binding {
+            directory: dir.to_path_buf(),
+            ..binding("proj-1", None)
+        };
+        let mut config = Config::default();
+        assert_eq!(
+            config.lean_for(&at(elsewhere.path()), Some(home.path())),
+            LeanStatus::On
+        );
+        assert_eq!(config.lean_for(&at(elsewhere.path()), None), LeanStatus::On);
+        assert_eq!(
+            config.lean_for(&at(home.path()), Some(home.path())),
+            LeanStatus::HomeDirectory
+        );
+        // Another spelling of the home folder is still the home folder.
+        assert_eq!(
+            config.lean_for(&at(&home.path().join(".")), Some(home.path())),
+            LeanStatus::HomeDirectory
+        );
+        let off = Binding {
+            lean: false,
+            ..at(home.path())
+        };
+        assert_eq!(config.lean_for(&off, Some(home.path())), LeanStatus::Off);
+        let personal = Binding {
+            permission: Some(PermissionProfile::Personal),
+            ..at(elsewhere.path())
+        };
+        assert_eq!(
+            config.lean_for(&personal, Some(home.path())),
+            LeanStatus::Personal
+        );
+        config.settings.default_permission = PermissionProfile::Personal;
+        assert_eq!(
+            config.lean_for(&at(elsewhere.path()), Some(home.path())),
+            LeanStatus::Personal
+        );
+        let off_and_personal = Binding {
+            lean: false,
+            ..at(elsewhere.path())
+        };
+        assert_eq!(
+            config.lean_for(&off_and_personal, Some(home.path())),
+            LeanStatus::Off
+        );
+        let full_of_its_own = Binding {
+            permission: Some(PermissionProfile::Full),
+            ..at(elsewhere.path())
+        };
+        assert_eq!(
+            config.lean_for(&full_of_its_own, Some(home.path())),
+            LeanStatus::On
+        );
+    }
+
+    #[test]
+    fn only_the_on_status_applies_and_statuses_reach_the_panel_in_snake_case() {
+        assert!(LeanStatus::On.applies());
+        for (status, name) in [
+            (LeanStatus::On, "\"on\""),
+            (LeanStatus::Off, "\"off\""),
+            (LeanStatus::Personal, "\"personal\""),
+            (LeanStatus::HomeDirectory, "\"home_directory\""),
+        ] {
+            assert_eq!(serde_json::to_string(&status).unwrap(), name);
+            if status != LeanStatus::On {
+                assert!(!status.applies(), "{status:?}");
+            }
+        }
     }
 
     #[test]

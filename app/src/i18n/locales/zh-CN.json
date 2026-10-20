@@ -144,6 +144,15 @@
     "auto_hint": "执行者会自动审查每一步，Codex 明显更慢。",
     "personal_hint": "Claude 只做你的设置里预先允许的事：Linear 工具和 git 要在那里预先允许，否则运行会失败；Codex 沿用 ~/.codex/config.toml。"
   },
+  "effort": {
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "很高",
+    "max": "最高",
+    "default": "默认（{{name}}）",
+    "executor": "执行者自己的设置"
+  },
   "actions": {
     "stop": "停止",
     "run_again": "重新运行",
@@ -341,6 +350,17 @@
     "model_default": "沿用执行者自己的配置",
     "model_hint": "可以留空，留空时沿用执行者自己的配置。",
     "model_invalid": "只能用字母、数字和 . _ : -，例如 sonnet 或 gpt-5-codex；带方括号的名字（如 sonnet[1m]）不支持",
+    "lean": "精简运行",
+    "lean_hint": "只带 Linear 与仓库自己的规则和设置，不带你的其他 MCP 服务、插件、钩子、自动记忆和用户级指令（Codex 仍会读 ~/.codex/AGENTS.md）。",
+    "lean_personal_hint": "「按个人设置」沿用你的全部配置，精简运行不适用。",
+    "lean_state": {
+      "on": "开",
+      "off": "关",
+      "personal": "不适用（按个人设置）",
+      "home_directory": "不适用（主目录）"
+    },
+    "effort": "推理力度",
+    "effort_hint": "精简运行不读你自己的设置，推理力度要在这里设。",
     "prompt": "提示词覆盖",
     "prompt_hint": "留空用设置里的默认模板；固定规则始终生效。",
     "prompt_yes": "有",
@@ -399,6 +419,9 @@
     "login_note": "会打开浏览器，IssueRelay 最多等你 5 分钟。",
     "other_name": "已用别的名字添加过 Linear？在终端运行 {{list}} 找到名字，再运行 {{login}}。",
     "server_check_failed": "无法确认 Linear 是以什么名字注册的",
+    "lean_title": "精简运行",
+    "lean_ready": "可用",
+    "lean_not_ready": "不可用",
     "env_title": "运行环境",
     "path_source": "PATH 来自",
     "proxy": "代理",
@@ -446,6 +469,8 @@
     "name_invalid": "请填写一行文字，不含引号",
     "default_executor": "默认执行者",
     "default_permission": "默认权限档位",
+    "default_effort": "默认推理力度",
+    "default_effort_hint": "绑定没有另设时用它；不设就用执行者自己的设置。",
     "prompt_template": "默认提示词模板",
     "prompt_hint": "固定规则始终生效。模板用来写团队的流程，例如测试分支名、部署后怎样读回结果。",
     "notify_run_started": "开始运行",
@@ -474,7 +499,7 @@
     "auto_update": "自动检查更新",
     "auto_update_note": "启动 1 分钟后检查一次，之后每 6 小时一次；安装总要等你点。",
     "control_server_intro": "MCP 控制服务让 Claude Code 和 Codex 能看到 IssueRelay 的运行情况。",
-    "control_server_note": "按用户范围注册，无人值守的运行也会加载它；它的工具里有「暂停监控」。",
+    "control_server_note": "按用户范围注册，不精简的无人值守运行也会加载它（精简运行只带 Linear）；它的工具里有「暂停监控」。",
     "control_failed": "无法检查 MCP 控制服务",
     "control_registered": "已注册",
     "control_not_registered": "未注册",
@@ -541,6 +566,10 @@
       "vague_body": "最近感觉有点慢。",
       "vague_note": "AI 不知道该测什么、快到什么程度算够，所以会在需求下提问、把状态改回 {{todo}} 并去掉标签。补充细节后重新加上标签。"
     },
+    "lean_title": "精简运行",
+    "lean_body": "精简运行只带 Linear 的 MCP 服务和仓库自己的规则与设置，不带你的其他 MCP 服务、插件、钩子、自动记忆和用户级 CLAUDE.md。Codex 仍会读 ~/.codex/AGENTS.md，仓库的 .codex/ 配置也不生效。绑定默认精简运行，除非你把它关掉；「按个人设置」的绑定和绑定到主目录的绑定总是用你的全部配置。",
+    "lean_off": "要用别的 MCP 服务、仓库的 .codex/ 配置、你用户设置里的拒绝规则或自定义模型服务的绑定，请关掉精简运行。",
+    "lean_effort": "精简运行不读你自己设置里的推理力度：在设置里设一个默认推理力度，或给每个绑定单独设。",
     "faq_title": "常见问题",
     "faq": {
       "not_picked_q": "为什么我的需求没被接走？",
@@ -551,7 +580,7 @@
       "proxy_q": "需要代理时怎么办？",
       "proxy_a": "Claude Code 不读系统代理，只认 HTTPS_PROXY 这类环境变量。IssueRelay 会从你的登录 shell 或系统设置里读出它们，再交给执行者。请把它们写进你的 shell 配置文件，重启 IssueRelay，再到「环境检查」页看读到了什么；密码在那里是打码的。",
       "mcp_q": "怎样让 Claude Code 或 Codex 调用 IssueRelay 的 MCP 控制服务？",
-      "mcp_a": "在设置里把 MCP 控制服务注册到 Claude Code 或 Codex。它按用户范围注册，无人值守的运行也会加载它。它的工具能让 AI 查看状态、列出运行、暂停和恢复监控、立即检查一次；它不能把需求标记完成，也不能重新运行。",
+      "mcp_a": "在设置里把 MCP 控制服务注册到 Claude Code 或 Codex。它按用户范围注册，不精简的无人值守运行也会加载它（精简运行只带 Linear）。它的工具能让 AI 查看状态、列出运行、暂停和恢复监控、立即检查一次；它不能把需求标记完成，也不能重新运行。",
       "logs_q": "日志在哪里？",
       "logs_a": "在「运行记录」页打开一次运行：「原始日志」标签里是它的日志，「复制全部」可以复制。文件在 IssueRelay 数据目录的 logs 文件夹里（macOS：~/Library/Application Support/com.sunkailun.issuerelay，Windows：%LOCALAPPDATA%\\com.sunkailun.issuerelay）；程序自己的日志 app.<日期>.log 也在那里。"
     }
@@ -601,6 +630,6 @@
     "add_another": "再加一个",
     "add_another_title": "再添加一个绑定",
     "no_binding_note": "还没有绑定任何项目，所以 IssueRelay 暂时不会处理任何需求。准备好之后，到「项目绑定」页绑定一个。",
-    "control_server_note": "可以在设置里让 Claude Code / Codex 调用 IssueRelay 的 MCP 控制服务；它按用户范围注册，无人值守的运行也会加载它，它的工具里有「暂停监控」。"
+    "control_server_note": "可以在设置里让 Claude Code / Codex 调用 IssueRelay 的 MCP 控制服务；它按用户范围注册，不精简的无人值守运行也会加载它，它的工具里有「暂停监控」。"
   }
 }

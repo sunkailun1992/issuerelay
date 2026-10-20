@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ExecutorKind;
 use crate::env::ExecEnv;
-use crate::executor::{CommandSpec, outcome::FinalTextTracker};
+use crate::executor::{CommandSpec, lean::LeanCheck, outcome::FinalTextTracker};
 use crate::model::ProcessTag;
 
 /// The time limits of one run.
@@ -45,6 +45,9 @@ pub enum ExitKind {
     Canceled,
     /// The log file could not be created or the executor could not be started.
     SpawnFailed(String),
+    /// The output of a lean run showed that lean did not take effect (`lean::LeanCheck`), what
+    /// it showed being the text; the run was stopped as a cancelled one is.
+    LeanNotApplied(String),
 }
 
 /// What one run produced.
@@ -69,8 +72,9 @@ const LINE_QUEUE: usize = 1024;
 /// dropped, and a note in the log says so.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// How long an executor that is being stopped (timeout, stall, cancel) may take to exit after
-/// SIGTERM before the rest of its tree is killed. It lets Claude Code / Codex end their own
+/// How long an executor that is being stopped (timeout, stall, cancel, a lean run whose output
+/// showed that lean did not take effect) may take to exit after SIGTERM before the rest of its
+/// tree is killed. It lets Claude Code / Codex end their own
 /// detached tool processes. Windows has no such step: see `TreeGuard`.
 #[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_secs(5);
@@ -78,7 +82,7 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Owns the spawned child and ends its whole process tree, however `run` ends.
 ///
 /// - `end`, the explicit cleanup, runs after every run. On Unix, while the executor still runs
-///   (the run was stopped by a limit or cancelled), it records the executor's descendants by
+///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the executor's descendants by
 ///   walking parent PIDs, each with its start time; sends SIGTERM to the process group and
 ///   gives the executor up to `TERM_GRACE` to exit; records the descendants again (adding to the
 ///   first record); then sends SIGKILL to the process group, and to every recorded descendant
@@ -523,15 +527,18 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
     failed(message)
 }
 
-/// Runs `spec` until it exits, a limit is hit or `cancel` fires. The JSONL file at `log_path` is
-/// created (or truncated) and gets one line per output line: stdout verbatim, stderr as
-/// `{"stream":"stderr","text":…}`; a run that cannot start gets one
+/// Runs `spec` until it exits, a limit is hit, `cancel` fires or, in a lean run (`spec.lean`),
+/// an output line shows that lean did not take effect (`lean::LeanCheck`): that line is logged
+/// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. The JSONL file
+/// at `log_path` is created (or truncated) and starts with `spec.notes`, each as a
+/// `{"stream":"stderr","text":"[IssueRelay] …"}` line; then it gets one line per output line:
+/// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. A run that cannot start gets one
 /// `{"stream":"runner","text":"spawn failed: …"}` line. Once the executor has started, its whole
 /// process tree is ended however the run ends (before this returns), and also if this future is
 /// dropped before it finishes (`TreeGuard` has the details): on Unix the process group and every
 /// descendant, including ones that left the group (`setsid`, `setpgid`); on Windows the Job
-/// Object. On Unix an executor stopped by a limit or `cancel` gets SIGTERM and up to
-/// `TERM_GRACE` to exit before the rest is killed. Descendants are found through their parents,
+/// Object. On Unix an executor stopped by a limit, `cancel` or the lean check gets SIGTERM and up
+/// to `TERM_GRACE` to exit before the rest is killed. Descendants are found through their parents,
 /// so a process whose parent exited before the run ended is out of reach, and after a normal exit
 /// only the process group is left to end: the executor is gone, so its descendants that left the
 /// group can no longer be found through it.
@@ -543,7 +550,8 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// user (mode 0600) also when a retry reuses the previous attempt's file.
 ///
 /// `env` supplies PATH and proxy variables on top of the host's environment and removes the
-/// nested-session markers (`env::REMOVED_VARS`). On Windows the executor starts without a console
+/// nested-session markers (`env::REMOVED_VARS`); `spec.env`, the run's own variables, is set
+/// after that, so it wins over both. On Windows the executor starts without a console
 /// window and out of reach of a Ctrl+C in the host's console (`creation_flags`).
 ///
 /// `on_spawn` gets the executor's process (`process_tag`) right after it started, so that a host
@@ -576,6 +584,8 @@ pub async fn run(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         env.apply(c);
+        // After `apply`, so that a variable of the run's own is never removed again.
+        c.envs(spec.env.iter().map(|(name, value)| (name, value)));
     });
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());
@@ -613,7 +623,13 @@ pub async fn run(
     drop(tx);
 
     let mut tracker = FinalTextTracker::new(kind);
+    let mut lean_check = spec.lean.then(|| LeanCheck::new(kind));
     let mut log_failures = LogFailures::new(log_path);
+    // Before the loop reads the first line, so the notes open the log.
+    for text in &spec.notes {
+        let entry = note("stderr", &format!("[IssueRelay] {text}"));
+        log_failures.note(log.write_all(entry.as_bytes()).await);
+    }
     let started = Instant::now();
     let deadline = checked_deadline(started, limits.total);
     let mut last_output = started;
@@ -635,7 +651,15 @@ pub async fn run(
                 line = rx.recv(), if pipes_open => match line {
                     Some(line) => {
                         last_output = Instant::now();
+                        let violation = match (&mut lean_check, &line) {
+                            (Some(check), Line::Out(text)) => check.observe(text),
+                            _ => None,
+                        };
+                        // The line goes into the log either way, so the log shows what was wrong.
                         log_failures.note(record(&mut log, &mut tracker, line).await);
+                        if let Some(detail) = violation {
+                            break ExitKind::LeanNotApplied(detail);
+                        }
                     }
                     None => pipes_open = false,
                 },

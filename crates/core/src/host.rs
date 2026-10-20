@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::doctor::{ReadinessProbe, SystemReadiness};
+use crate::doctor::{self, LeanCheckPaths, ReadinessProbe, SystemReadiness};
 use crate::engine::{Engine, EngineDeps, JobRunner, ProcessJobRunner, display_viewer};
 use crate::env::{ExecEnv, SharedEnv};
 use crate::ipc::server::IpcServer;
@@ -352,6 +352,27 @@ fn stop_runs(engine: &Engine) {
     }
 }
 
+/// The readiness probe of a host that is not given one: the real checks, the lean ones with a
+/// folder in the data folder and Codex's own configuration file.
+fn system_readiness(paths: &AppPaths, env: SharedEnv) -> SystemReadiness {
+    SystemReadiness::new(READINESS_TTL, env).with_lean_checks(LeanCheckPaths {
+        empty_dir: paths.lean_check_dir(),
+        codex_config: doctor::codex_config_path(),
+    })
+}
+
+/// `CLAUDE_CONFIG_DIR` as the executors inherit it from the host (`ExecEnv` changes only the
+/// PATH and the proxy), when it is set and not empty.
+fn claude_config_dir() -> Option<std::path::PathBuf> {
+    claude_config_dir_from(std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn claude_config_dir_from(value: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    value
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 impl Host {
     /// Binds the IPC endpoint (fails with `AlreadyRunning` when another host serves this user),
     /// starts the engine's loop and the IPC server, and connects to Linear in the background:
@@ -378,11 +399,13 @@ impl Host {
             linear: Arc::new(Disconnected::new("connecting to Linear")),
             readiness: parts
                 .readiness
-                .unwrap_or_else(|| Arc::new(SystemReadiness::new(READINESS_TTL, env.clone()))),
+                .unwrap_or_else(|| Arc::new(system_readiness(&paths, env.clone()))),
             job_runner: parts
                 .job_runner
                 .unwrap_or_else(|| Arc::new(ProcessJobRunner::new(env.clone()))),
             logs_dir: paths.logs_dir(),
+            user_home: dirs::home_dir(),
+            claude_config_dir: claude_config_dir(),
         })?;
         let engine_shutdown = CancellationToken::new();
         let ipc_shutdown = CancellationToken::new();
@@ -743,6 +766,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_config_dir_is_the_variable_when_it_is_set_and_not_empty() {
+        assert_eq!(claude_config_dir_from(None), None);
+        assert_eq!(claude_config_dir_from(Some("".into())), None);
+        assert_eq!(
+            claude_config_dir_from(Some("/srv/demo-claude".into())),
+            Some(std::path::PathBuf::from("/srv/demo-claude"))
+        );
+    }
+
+    // Unix only because the fake `claude` is a shell script; that a check command runs in the
+    // folder it is given is tested on both platforms in tests/doctor.rs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_lean_checks_of_a_host_run_in_a_folder_of_its_data_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::under(root.path());
+        let bin = tempfile::tempdir().unwrap();
+        let record = bin.path().join("lean-check-folder");
+        let claude = bin.path().join("claude");
+        let signed_in = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#;
+        std::fs::write(
+            &claude,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n\
+                 --version) echo 2.1.285 ;;\n\
+                 '--setting-sources project,local auth status') pwd -P > '{}'; echo '{signed_in}' ;;\n\
+                 'auth status') echo '{signed_in}' ;;\n\
+                 'mcp list') echo 'linear-server: https://mcp.linear.app/mcp (HTTP) - Connected' ;;\n\
+                 esac\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Only the folder with the fake `claude` is on the PATH, so no executor installed on the
+        // machine running the test is found.
+        let env = ExecEnv {
+            path: Some(bin.path().to_string_lossy().into_owned()),
+            ..ExecEnv::inherit()
+        }
+        .shared();
+        // Executing a script right after writing it can fail with `ETXTBSY` when another test
+        // thread forks in between: try again, with a new probe since a probe keeps its result.
+        let mut reports = Vec::new();
+        for _ in 0..5 {
+            reports = system_readiness(&paths, env.clone())
+                .executor_reports(false)
+                .await;
+            if reports[0].version.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reports[0].ready_lean(), "{reports:?}");
+        let folder = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            std::path::Path::new(folder.trim_end()),
+            paths.lean_check_dir().canonicalize().unwrap()
+        );
+    }
+
     // `Host::stop` may be called again, also at the same time and also after a call was dropped.
     #[tokio::test]
     async fn every_caller_waits_for_the_task_and_a_caller_that_gives_up_does_not_lose_it() {
@@ -805,6 +892,8 @@ mod tests {
             readiness: Arc::new(SystemReadiness::new(READINESS_TTL, env.clone())),
             job_runner: Arc::new(ProcessJobRunner::new(env.clone())),
             logs_dir: paths.logs_dir(),
+            user_home: None,
+            claude_config_dir: None,
         })
         .unwrap();
         Host {

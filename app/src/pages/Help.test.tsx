@@ -41,10 +41,10 @@ async function backendNaming(trigger: Partial<Record<"label" | "todo" | "in_prog
 
 // ---- the page ---------------------------------------------------------------------------------
 
-test("the page is four sections, each named by its heading", async () => {
+test("the page is five sections, each named by its heading", async () => {
   await renderWithProviders(<Help />);
   expect(await screen.findByRole("heading", { level: 1, name: "Help" })).toBeInTheDocument();
-  const names = ["Trigger conditions", "How an issue moves", "Writing an issue", "Questions and answers"];
+  const names = ["Trigger conditions", "How an issue moves", "Writing an issue", "Lean runs", "Questions and answers"];
   expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(names);
   for (const name of names) expect(screen.getByRole("region", { name })).toBeInTheDocument();
 });
@@ -207,11 +207,11 @@ test("the answer about a proxy says where the variables are read from and where 
   expect(answer).toHaveTextContent("Environment");
 });
 
-test("the answer about the control server says it is registered for the user, that unattended runs load it, and that its tools can pause", async () => {
+test("the answer about the control server says it is registered for the user, that unattended runs that are not lean load it, and that its tools can pause", async () => {
   await renderWithProviders(<Help />);
   const faq = await screen.findByRole("region", { name: "Questions and answers" });
   const answer = within(faq).getByText(/registered for your user/);
-  expect(answer).toHaveTextContent("unattended runs load it too");
+  expect(answer).toHaveTextContent("unattended runs that are not lean load it too");
   expect(answer).toHaveTextContent("pause");
   expect(answer).toHaveTextContent("cannot mark an issue done");
 });
@@ -236,4 +236,19 @@ test.each([
   expect(await screen.findByRole("region", { name: conditions })).toBeInTheDocument();
   expect(screen.getByRole("region", { name: examples })).toBeInTheDocument();
   expect(within(screen.getByRole("region", { name: conditions })).getAllByRole("listitem")).toHaveLength(4);
+});
+
+// ---- lean runs --------------------------------------------------------------------------------
+
+test("the lean runs section says what they leave out, when to turn them off and where the effort is set", async () => {
+  await renderWithProviders(<Help />);
+  const lean = await screen.findByRole("region", { name: "Lean runs" });
+  expect(lean).toHaveTextContent("only Linear's MCP server and the repository's own rules and settings");
+  // What Codex still reads is said, as the design asks.
+  expect(lean).toHaveTextContent("~/.codex/AGENTS.md");
+  expect(lean).toHaveTextContent("Turn it off for a binding that needs other MCP servers");
+  expect(lean).toHaveTextContent(".codex/");
+  expect(lean).toHaveTextContent("deny rules");
+  expect(lean).toHaveTextContent("custom model provider");
+  expect(lean).toHaveTextContent("reasoning effort");
 });

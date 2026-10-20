@@ -28,6 +28,10 @@ export default defineConfig({
     // Only the component and unit tests: the Playwright specs under `tests/` (`*.spec.ts`) are not Vitest's.
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
+    // The page tests type and click through whole forms. On a hosted Windows runner the slowest take
+    // about 2 s, and a busy runner was measured at 2.5 times that (2026-10-20), past Vitest's default
+    // limit of 5 s. A test that hangs still fails, after 15 s.
+    testTimeout: 15_000,
     // Vitest turns every CSS file into an empty string; styles.test.ts reads the design tokens as text.
     css: { include: [/styles\.css\?raw/] },
   },

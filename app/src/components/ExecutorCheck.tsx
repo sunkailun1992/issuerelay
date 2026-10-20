@@ -108,15 +108,45 @@ function LinearFix({ report, name, onFixed }: { report: ExecutorReport; name: st
 }
 
 /**
+ * Whether lean runs can use the executor (lean-run design 7): a translated title from the report's
+ * booleans (the same as the engine's `ready_lean`), with the engine's lines under it.
+ */
+function LeanCheck({ report }: { report: ExecutorReport }) {
+  const { t } = useTranslation();
+  const titleId = useId();
+  const ready = report.program !== null && report.logged_in && report.lean_linear_mcp && report.lean_logged_in;
+  return (
+    <section aria-labelledby={titleId} className="flex flex-col gap-1.5 border-t pt-3">
+      <h4 id={titleId} className="font-medium">
+        {t("doctor.lean_title")}
+      </h4>
+      <ul className="flex flex-col gap-1.5">
+        <CheckRow ok={ready}>
+          <span>{ready ? t("doctor.lean_ready") : t("doctor.lean_not_ready")}</span>
+        </CheckRow>
+      </ul>
+      {report.lean_problems.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {report.lean_problems.map((problem, index) => (
+            <DetailLine key={index} text={problem} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
  * One executor's part of the environment check (design 6.4, 8): whether it is installed (and which
  * version), logged in and connected to Linear, each as a translated title from the report's
  * booleans, the engine's own lines under them, and the fix for what is missing. A fix that works
  * is followed by a new check (the setup action makes it outdated); `onFixed` also tells the
  * host, for one that does not show the check live (the first-run guide).
  *
- * The executor's name stands in the card's heading only, as the whole text of one element.
+ * The executor's name stands in the card's heading only, as the whole text of one element. `lean`
+ * adds whether lean runs can use it, which the environment check page shows and the guide does not.
  */
-export function ExecutorCheck({ report, onFixed }: { report: ExecutorReport; onFixed?: () => void }) {
+export function ExecutorCheck({ report, onFixed, lean = false }: { report: ExecutorReport; onFixed?: () => void; lean?: boolean }) {
   const { t } = useTranslation();
   const titleId = useId();
   const name = t(`executor.${report.kind}`);
@@ -162,6 +192,7 @@ export function ExecutorCheck({ report, onFixed }: { report: ExecutorReport; onF
             </p>
           )}
           {installed && !report.linear_mcp && <LinearFix report={report} name={name} onFixed={onFixed} />}
+          {lean && <LeanCheck report={report} />}
         </CardContent>
       </Card>
     </section>

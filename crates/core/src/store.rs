@@ -491,6 +491,8 @@ mod tests {
             permission: None,
             model: None,
             prompt_override: None,
+            lean: true,
+            effort: None,
         }
     }
 
