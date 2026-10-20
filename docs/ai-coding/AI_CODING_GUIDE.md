@@ -123,7 +123,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 ## 10. 版本
 
 - 语义化版本，唯一来源是工作区 `Cargo.toml` 的 `[workspace.package] version`，各 crate 都用 `version.workspace = true`。应用的版本也只在这里：`app/src-tauri/tauri.conf.json` 不写 `version`，安装包的版本和应用对外报告的版本（`CARGO_PKG_VERSION`）都跟随 Cargo；`app/package.json` 的 `version` 只是私有前端包的版本，发布时不动。
-- 另有三处写着对 `issuerelay-core` 的版本要求：`crates/cli`、`crates/devhost`、`app/src-tauri` 的 `Cargo.toml`（现在是 `"0.1.0"`，按 Cargo 的规则即 `^0.1.0`）。新版本不再满足它时（0.x 阶段升次版本号，或升主版本号），这三处一起改，否则 Cargo 解析不了；`Cargo.lock` 随之更新、一起提交。
+- 另有三处写着对 `issuerelay-core` 的版本要求：`crates/cli`、`crates/devhost`、`app/src-tauri` 的 `Cargo.toml`（现在是 `"0.2.0"`，按 Cargo 的规则即 `^0.2.0`）。新版本不再满足它时（0.x 阶段升次版本号，或升主版本号），这三处一起改，否则 Cargo 解析不了；`Cargo.lock` 随之更新、一起提交。
 - 版本号只由维护者在发布时升。外部贡献者的 PR 不改任何版本号（`Cargo.toml`、`Cargo.lock` 里本仓库 crate 的版本、`app/package.json`）。
 - 发布时，上次发布以来有运行行为变化才升版本，一次发布只升一次；只改了文档、测试、规范不升。
 - 升版本的提交同样经 PR 进 `main`。推送前按 `origin/main` 的最新值顺延，开工时算的号不作数；PR 里的号在合入前都是暂定，合入时已被占用就再顺延，并同步改 PR 标题、提交信息和文档里写到的版本号。PR 里写明旧版本、新版本和这次发布包含的行为变化。
