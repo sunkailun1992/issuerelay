@@ -533,9 +533,10 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. Such a line
 /// among those still read after the executor exited on its own makes the run end that way too
 /// (after a stop for any other reason, the stop stands). The JSONL file
-/// at `log_path` is created (or truncated) and starts with `spec.notes`, each as a
-/// `{"stream":"stderr","text":"[IssueRelay] …"}` line; then it gets one line per output line:
-/// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. A run that cannot start gets one
+/// at `log_path` is created (or truncated) and starts with `spec.notes`, each as one of
+/// IssueRelay's own lines, `{"stream":"runner","text":…}`; then it gets one line per output line:
+/// stdout verbatim, stderr as `{"stream":"stderr","text":…}`. After the line that shows lean did
+/// not take effect, a `runner` line says so. A run that cannot start gets one
 /// `{"stream":"runner","text":"spawn failed: …"}` line. Once the executor has started, its whole
 /// process tree is ended however the run ends (before this returns), and also if this future is
 /// dropped before it finishes (`TreeGuard` has the details): on Unix the process group and every
@@ -630,7 +631,7 @@ pub async fn run(
     let mut log_failures = LogFailures::new(log_path);
     // Before the loop reads the first line, so the notes open the log.
     for text in &spec.notes {
-        let entry = note("stderr", &format!("[IssueRelay] {text}"));
+        let entry = note("runner", text);
         log_failures.note(log.write_all(entry.as_bytes()).await);
     }
     let started = Instant::now();
@@ -661,6 +662,11 @@ pub async fn run(
                         // The line goes into the log either way, so the log shows what was wrong.
                         log_failures.note(record(&mut log, &mut tracker, line).await);
                         if let Some(detail) = violation {
+                            let said = note(
+                                "runner",
+                                &format!("lean run did not take effect: {detail}; stopping the run"),
+                            );
+                            log_failures.note(log.write_all(said.as_bytes()).await);
                             break ExitKind::LeanNotApplied(detail);
                         }
                     }
@@ -686,6 +692,11 @@ pub async fn run(
         };
         log_failures.note(record(&mut log, &mut tracker, line).await);
         if let Some(detail) = violation {
+            let said = note(
+                "runner",
+                &format!("lean run did not take effect: {detail}; the executor had already exited"),
+            );
+            log_failures.note(log.write_all(said.as_bytes()).await);
             exit = ExitKind::LeanNotApplied(detail);
         }
     }

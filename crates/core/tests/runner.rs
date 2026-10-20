@@ -95,6 +95,13 @@ fn log_lines(log: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The text of one of IssueRelay's own lines in the log (`{"stream":"runner",…}`); `None` for
+/// any other line.
+fn runner_note(line: &str) -> Option<String> {
+    let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+    (entry["stream"] == "runner").then(|| entry["text"].as_str().unwrap_or_default().to_string())
+}
+
 #[tokio::test]
 async fn exits_zero_captures_final_text_and_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -969,7 +976,18 @@ async fn a_lean_violation_ends_the_run_like_a_stop() {
         "the run was stopped, not waited for: {:?}",
         started.elapsed()
     );
-    assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
+    // The line that showed it, then IssueRelay's own line saying what happens.
+    let lines = log_lines(&log);
+    let at = lines.iter().position(|l| l.contains("demo-tools"));
+    let said = at
+        .and_then(|at| runner_note(lines.get(at + 1)?))
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("lean run did not take effect: ")
+            && said.contains("demo-tools")
+            && said.ends_with("; stopping the run"),
+        "{lines:?}"
+    );
 }
 
 // A lean stop ends the tree as a cancel does, including a grandchild that left the run's process
@@ -1044,7 +1062,18 @@ async fn a_violation_read_after_the_executor_exited_still_fails_a_lean_run() {
         ExitKind::LeanNotApplied(detail) => assert!(detail.contains("demo-tools"), "{detail}"),
         other => panic!("expected a lean violation, got {other:?}"),
     }
-    assert!(log_lines(&log).iter().any(|l| l.contains("demo-tools")));
+    let lines = log_lines(&log);
+    assert!(lines[0].contains("demo-tools"), "{lines:?}");
+    let said = lines
+        .get(1)
+        .and_then(|line| runner_note(line))
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("lean run did not take effect: ")
+            && said.contains("demo-tools")
+            && said.ends_with("; the executor had already exited"),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -1091,8 +1120,10 @@ async fn notes_come_first_in_the_log() {
     .await;
     assert_eq!(out.exit, ExitKind::Exited(Some(0)));
     let lines = log_lines(&log);
-    assert!(
-        lines[0].contains("[IssueRelay] demo note") && lines[0].contains(r#""stream":"stderr""#),
+    // IssueRelay's own line, which the panel labels as such, not the executor's stderr.
+    assert_eq!(
+        runner_note(&lines[0]).as_deref(),
+        Some("demo note"),
         "{lines:?}"
     );
     assert_eq!(lines.len(), 2, "{lines:?}");
