@@ -278,7 +278,7 @@
 - 登录（第 5.4 节，主智能体定）：
   - Claude：另跑一次 `claude --setting-sources project,local auth status`。它在 IssueRelay 数据目录下的一个空目录里运行：在主目录里跑时，「项目设置」就是 `~/.claude/settings.json` 本身，查不出区别。精简可用的条件是这次也已登录，并且 `authMethod`、`apiProvider` 与平常那次 `auth status` 相同；不同就说明精简运行会换一种登录或换一个服务，按反目标拦下。
   - Codex：另跑一次 `codex -c cli_auth_credentials_store=file login status`，要已登录，并且登录方式（ChatGPT 或 API key）与平常那次相同。另外读用户的 `config.toml`（只读）：设了非默认的 `model_provider`（或默认档案里设了）就算不可用，因为精简运行会改连默认的服务。
-  - Claude 另读用户设置（`CLAUDE_CONFIG_DIR` 里的 `settings.json`，没设就是 `~/.claude/settings.json`，只读）：它的 `env` 把 `ANTHROPIC_BASE_URL`、Bedrock 或 Vertex 的 base URL，或代理变量（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，大小写都算）设成了值，就算不可用。精简运行不读用户设置，会绕过这个网关或代理，而登录检查看不出来（登录方式与服务都不变），正是反目标里的例子。问题只写变量名，不写值；文件读不了或不是 JSON 也算不可用，因为看不出它设了什么（所有者让主智能体决定，2026-10-20）。
+  - Claude 另读用户设置（`CLAUDE_CONFIG_DIR` 里的 `settings.json`，没设就是 `~/.claude/settings.json`，只读）：它的 `env` 把 `ANTHROPIC_BASE_URL`、Bedrock 或 Vertex 的 base URL，或代理变量（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`，全大写与全小写都算）设成了值，就算不可用。精简运行不读用户设置，会绕过这个网关或代理，而登录检查看不出来（登录方式与服务都不变），正是反目标里的例子。问题只写变量名，不写值；文件读不了或不是 JSON 也算不可用，因为看不出它设了什么（所有者让主智能体决定，2026-10-20）。
   - 两边的回答都要说出登录方式（Claude 的 `authMethod` 与 `apiProvider`，Codex 的 `Logged in using` 后面那段）：说不出就无法比较，精简判为不可用，问题写明检查做不了。执行者升级改了输出时，不能因此放过一次换了登录的精简运行（实现评审，2026-10-20）。
   - 这两条新命令每次环境检查都跑，不先看有没有精简绑定：每个执行者多一条一秒内的命令，换来检查结果不依赖配置，也不用在缓存里处理「开关刚改」的情形（计划细化第 2 条）。它们与其他检查同时进行、同样限时；没跑成只记为精简问题，不影响平常的就绪判断和它的缓存。
   - Claude 那条检查用的空目录是 IssueRelay 数据目录下的 `lean-check/`，每次检查前没有就建；建不起来时记为精简问题。

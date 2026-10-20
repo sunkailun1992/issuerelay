@@ -340,11 +340,12 @@ pub struct ExecutorReport {
     #[serde(default)]
     pub lean_linear_mcp: bool,
     /// A lean run would be signed in, and the same way as a usual run (Codex: also to the same
-    /// model provider). Judged only when the usual login check says logged in.
+    /// model provider; Claude: also with no gateway or proxy in the user settings' `env`).
+    /// Judged only when the usual login check says logged in.
     #[serde(default)]
     pub lean_logged_in: bool,
-    /// Why lean runs cannot use this executor, besides `problems`: what the two lean checks
-    /// found. A lean check that a failed usual check leaves unjudged adds nothing here.
+    /// Why lean runs cannot use this executor, besides `problems`: what the lean checks found.
+    /// A lean check that a failed usual check leaves unjudged adds nothing here.
     #[serde(default)]
     pub lean_problems: Vec<String>,
 }
@@ -765,7 +766,8 @@ async fn codex_default_provider(config: Option<&Path>) -> Result<(), String> {
 /// The variables of the `env` of Claude Code's user settings that send Claude Code through a
 /// gateway or a proxy. Lean runs leave the user settings out, so they would connect without
 /// them. A switch of the provider (Bedrock, Vertex) or of the sign-in shows in the lean sign-in
-/// check instead.
+/// check instead. The list was decided on 2026-10-20 (the lean-run plan's leftovers): the base
+/// URLs, and the proxy variables in their upper- and lower-case spellings.
 const CLAUDE_ROUTING_VARS: [&str; 9] = [
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
