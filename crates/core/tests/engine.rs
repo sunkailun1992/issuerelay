@@ -2020,6 +2020,169 @@ async fn the_result_is_read_three_times_with_pauses_before_the_run_fails() {
     );
 }
 
+/// `script`, but the run leaves the issue's status alone: Linear still shows the issue as it was
+/// before the run.
+fn leaving_the_issue_alone(script: Script) -> Script {
+    Script {
+        set_state: None,
+        ..script
+    }
+}
+
+/// Lets the gated run end and returns how long, on the paused clock, recording its result took.
+async fn finish_and_time(h: &Harness) -> Duration {
+    let opened = tokio::time::Instant::now();
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    opened.elapsed()
+}
+
+/// `waited` is `secs` seconds, give or take the timer's rounding.
+fn assert_waited(waited: Duration, secs: u64) {
+    let secs = Duration::from_secs(secs);
+    assert!(
+        waited >= secs && waited < secs + Duration::from_secs(1),
+        "{waited:?}"
+    );
+}
+
+// Paused time in the tests below: the pauses before reading a result again pass at once, and the
+// paused clock measures them.
+
+#[tokio::test(start_paused = true)]
+async fn a_result_read_from_before_the_run_is_read_again_until_linear_shows_the_change() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    let before_run = h.linear.get("1");
+    h.engine.tick().await.unwrap();
+    // The run moved the issue to In Testing, but the next two reads still answer with the issue as
+    // it was before the run, as Linear did in the lean-run acceptance.
+    h.linear.serve_stale_reads(before_run, 2);
+    let waited = finish_and_time(&h).await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+    assert_eq!(job.reason, None);
+    assert_eq!(job.verified_updated_at, Some(h.linear.get("1").updated_at));
+    // Read again 15 s and then 30 s later.
+    assert_waited(waited, 45);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_clean_run_that_left_the_issue_unchanged_fails_after_three_more_reads() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .script("DEMO-1", leaving_the_issue_alone(Script::success()));
+    h.engine.tick().await.unwrap();
+    let waited = finish_and_time(&h).await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some(r#"run finished but the issue status is "Todo", not "In Testing""#)
+    );
+    assert_eq!(job.verified_updated_at, Some(h.linear.get("1").updated_at));
+    // Read again 15, 30 and 45 s later: a run that really failed is recorded about 90 s late.
+    assert_waited(waited, 90);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_clean_run_that_moved_the_issue_to_another_status_fails_at_once() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            set_state: Some("In Progress"),
+            ..Script::success()
+        },
+    );
+    h.engine.tick().await.unwrap();
+    let waited = finish_and_time(&h).await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some(r#"run finished but the issue status is "In Progress", not "In Testing""#)
+    );
+    // Linear shows a change made after the run started, so the read is taken as it is.
+    assert_waited(waited, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_that_exited_with_an_error_is_not_read_again() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::exit_code(1));
+    h.engine.tick().await.unwrap();
+    let waited = finish_and_time(&h).await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(job.reason.as_deref(), Some("executor exited with code 1"));
+    assert_waited(waited, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_question_for_the_reporter_is_recorded_without_reading_again() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    // A question leaves the status at Todo, so Linear may well show the issue unchanged.
+    h.runner
+        .script("DEMO-1", leaving_the_issue_alone(Script::needs_info()));
+    h.engine.tick().await.unwrap();
+    let waited = finish_and_time(&h).await;
+    assert_eq!(h.latest("1").state, JobState::NeedsInfo);
+    assert_waited(waited, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_ends_the_wait_to_read_a_result_again() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .script("DEMO-1", leaving_the_issue_alone(Script::success()));
+    let shutdown = CancellationToken::new();
+    let worker = spawn_loop(&h.engine, &shutdown);
+    eventually("DEMO-1 to start", || h.runner.started() == ["DEMO-1"]).await;
+    // The run ends, its result is read once, and the engine waits to read it again.
+    h.runner.gate.add_permits(1);
+    quiesce().await;
+    let stopping = tokio::time::Instant::now();
+    stop_loop(&shutdown, worker).await;
+    h.settle().await;
+    assert_waited(stopping.elapsed(), 0);
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some(r#"run finished but the issue status is "Todo", not "In Testing""#)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_a_job_ends_the_wait_to_read_its_result_again() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .script("DEMO-1", leaving_the_issue_alone(Script::success()));
+    h.engine.tick().await.unwrap();
+    h.runner.gate.add_permits(1);
+    quiesce().await;
+    let stopping = tokio::time::Instant::now();
+    h.engine.cancel_job(h.latest("1").id).unwrap();
+    h.settle().await;
+    assert_waited(stopping.elapsed(), 0);
+    // The run had ended on its own: what the last read showed is its result.
+    assert_eq!(h.latest("1").state, JobState::Failed);
+}
+
 #[tokio::test]
 async fn the_process_runner_runs_the_executor_and_reports_its_final_text() {
     let dir = tempfile::tempdir().unwrap();

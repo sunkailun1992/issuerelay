@@ -64,6 +64,16 @@ const LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// failed read (a network hiccup) must not fail a run that did its work.
 const VERIFY_RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
+/// The pauses before reading the issue of a run that ended cleanly again, while Linear still shows
+/// the issue unchanged since the run started and the run would fail: a connection can answer from
+/// an older snapshot for a while (seen in the lean-run acceptance). A run that really left the
+/// issue alone is recorded as failed about 90 s later for it.
+const STALE_REREAD_PAUSES: [Duration; 3] = [
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(45),
+];
+
 /// How many events wait for a slow subscriber before it lags.
 const EVENT_CAPACITY: usize = 256;
 
@@ -1466,6 +1476,7 @@ impl Engine {
         let job_id = job.id;
         let issue_uuid = job.issue_uuid.clone();
         let identifier = job.issue_identifier.clone();
+        let started_from = issue.updated_at;
         // The executor's process goes on the row once it runs, so that a host started after a
         // crash can end what this run left behind.
         let recorder = self.clone();
@@ -1491,7 +1502,14 @@ impl Engine {
                 },
             };
             if let Err(e) = engine
-                .finish_job(job_id, &issue_uuid, &identifier, output, &mut slot)
+                .finish_job(
+                    job_id,
+                    &issue_uuid,
+                    &identifier,
+                    started_from,
+                    output,
+                    &mut slot,
+                )
                 .await
             {
                 tracing::error!(job_id, error = %format!("{e:#}"), "could not record the run result");
@@ -1522,41 +1540,67 @@ impl Engine {
     }
 
     /// Checks the result in Linear, records it, frees the run's slot and wakes the loop so the
-    /// next queued job can start.
+    /// next queued job can start. When a clean run would fail although Linear shows its issue
+    /// unchanged since `started_from` (the issue's `updatedAt` right before the run started), the
+    /// issue is read again after each pause in `STALE_REREAD_PAUSES` unless the run is told to stop
+    /// meanwhile, and the last read decides.
     async fn finish_job(
         &self,
         job_id: i64,
         issue_uuid: &str,
         identifier: &str,
+        started_from: DateTime<Utc>,
         output: RunOutput,
         slot: &mut RunSlot,
     ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
-        let verified = self.verify_read(job_id, issue_uuid).await;
-        let (state, reason, verified_at) = match verified {
-            Ok(issue) => {
-                let (state, reason) = decide(
-                    &output.exit,
-                    issue.as_ref().map(|i| i.state.as_str()),
-                    report.as_ref(),
-                    &names,
+        let mut rereads = STALE_REREAD_PAUSES.into_iter();
+        let (state, reason, verified_at) = loop {
+            let verified = self.verify_read(job_id, issue_uuid).await;
+            let unchanged =
+                matches!(&verified, Ok(Some(issue)) if issue.updated_at <= started_from);
+            let result = match verified {
+                Ok(issue) => {
+                    let (state, reason) = decide(
+                        &output.exit,
+                        issue.as_ref().map(|i| i.state.as_str()),
+                        report.as_ref(),
+                        &names,
+                    );
+                    (state, reason, issue.map(|i| i.updated_at))
+                }
+                Err(e) => {
+                    let state = if output.exit == ExitKind::Canceled {
+                        JobState::Canceled
+                    } else {
+                        JobState::Failed
+                    };
+                    let reason = match &output.exit {
+                        // What the run itself showed says more than the failed look at its result.
+                        ExitKind::LeanNotApplied(_) => decide(&output.exit, None, None, &names).1,
+                        _ => Some(format!("could not verify the result in Linear: {e:#}")),
+                    };
+                    (state, reason, None)
+                }
+            };
+            // Only a failure is doubted: a question for the reporter leaves the issue at Todo, and
+            // may leave it unchanged, without anything being wrong.
+            let doubtful = unchanged
+                && output.exit == ExitKind::Exited(Some(0))
+                && result.0 == JobState::Failed;
+            if doubtful && let Some(pause) = rereads.next() {
+                tracing::info!(
+                    job_id,
+                    issue = %identifier,
+                    wait_secs = pause.as_secs(),
+                    "Linear still shows the issue as it was before the run; reading it again"
                 );
-                (state, reason, issue.map(|i| i.updated_at))
+                if self.pause_unless_stopped(job_id, pause).await {
+                    continue;
+                }
             }
-            Err(e) => {
-                let state = if output.exit == ExitKind::Canceled {
-                    JobState::Canceled
-                } else {
-                    JobState::Failed
-                };
-                let reason = match &output.exit {
-                    // What the run itself showed says more than the failed look at its result.
-                    ExitKind::LeanNotApplied(_) => decide(&output.exit, None, None, &names).1,
-                    _ => Some(format!("could not verify the result in Linear: {e:#}")),
-                };
-                (state, reason, None)
-            }
+            break result;
         };
         // These texts come from outside (the AI, Linear, the operating system) and reach the
         // panel, the CLI and MCP. The summary is the AI's own; without a report line it is the
@@ -1617,6 +1661,18 @@ impl Engine {
                     tokio::time::sleep(pause).await;
                 }
             }
+        }
+    }
+
+    /// Waits `pause`, unless the run of this job is told to stop meanwhile, by the user or by a
+    /// shutdown (`run_forever` passes it on to every run); says whether the whole pause passed.
+    async fn pause_unless_stopped(&self, job_id: i64, pause: Duration) -> bool {
+        let Some(token) = self.run_token(job_id) else {
+            return false;
+        };
+        tokio::select! {
+            () = token.cancelled() => false,
+            () = tokio::time::sleep(pause) => true,
         }
     }
 
@@ -1727,20 +1783,23 @@ impl Engine {
 
     /// Tells the run of this job, if there is one, to stop; `false` when there is none.
     fn stop_run(&self, job_id: i64) -> bool {
-        let token = self
-            .inner
-            .running
-            .lock()
-            .expect("running lock")
-            .get(&job_id)
-            .map(|run| run.cancel.clone());
-        match token {
+        match self.run_token(job_id) {
             Some(token) => {
                 token.cancel();
                 true
             }
             None => false,
         }
+    }
+
+    /// The stop token of this job's run, while one is in progress.
+    fn run_token(&self, job_id: i64) -> Option<CancellationToken> {
+        self.inner
+            .running
+            .lock()
+            .expect("running lock")
+            .get(&job_id)
+            .map(|run| run.cancel.clone())
     }
 
     /// Queues a failed, stopped or needs-info run again. Only the issue's latest run qualifies.

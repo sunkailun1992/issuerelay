@@ -24,6 +24,9 @@ struct State {
     statuses: Vec<String>,
     /// Uuids whose `issue()` reads fail until `clear_issue_failures`.
     failing_issue_reads: HashSet<String>,
+    /// Uuids whose next `issue()` reads answer with an older copy of the issue, and how many such
+    /// reads are left (`serve_stale_reads`).
+    stale_reads: HashMap<String, (Issue, usize)>,
     /// What `teams()` lists after `set_teams`; empty means the default team.
     teams: Vec<Team>,
     /// What `projects()` lists after `set_projects`; empty means the default project.
@@ -105,6 +108,17 @@ impl FakeLinear {
 
     pub fn clear_issue_failures(&self) {
         self.state.lock().unwrap().failing_issue_reads.clear();
+    }
+
+    /// Makes the next `reads` reads of this issue (by uuid or identifier) answer with `issue` as
+    /// it is now, whatever changes later, like a Linear connection that answers from an old
+    /// snapshot for a while.
+    pub fn serve_stale_reads(&self, issue: Issue, reads: usize) {
+        self.state
+            .lock()
+            .unwrap()
+            .stale_reads
+            .insert(issue.uuid.clone(), (issue, reads));
     }
 
     pub fn set_statuses(&self, statuses: &[&str]) {
@@ -203,14 +217,24 @@ impl LinearApi for FakeLinear {
 
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
         self.check_failure()?;
-        let s = self.state.lock().unwrap();
-        let found = s.issues.iter().find(|i| i.uuid == id || i.identifier == id);
-        // A read by identifier fails like a read by uuid.
-        let uuid = found.map_or(id, |i| i.uuid.as_str());
-        if s.failing_issue_reads.contains(uuid) {
+        let mut s = self.state.lock().unwrap();
+        let found = s
+            .issues
+            .iter()
+            .find(|i| i.uuid == id || i.identifier == id)
+            .cloned();
+        // A read by identifier fails, or answers from an old snapshot, like a read by uuid.
+        let uuid = found.as_ref().map_or(id, |i| i.uuid.as_str()).to_string();
+        if s.failing_issue_reads.contains(&uuid) {
             return Err(anyhow!("Linear is unreachable"));
         }
-        Ok(found.cloned())
+        if let Some((stale, left)) = s.stale_reads.get_mut(&uuid)
+            && *left > 0
+        {
+            *left -= 1;
+            return Ok(Some(stale.clone()));
+        }
+        Ok(found)
     }
 
     async fn set_state(&self, id: &str, state: &str) -> Result<()> {
