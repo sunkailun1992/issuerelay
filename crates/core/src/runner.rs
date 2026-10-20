@@ -83,18 +83,18 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Owns the spawned child and ends its whole process tree, however `run` ends.
 ///
 /// - `end`, the explicit cleanup, runs after every run. On Unix, while the executor still runs
-///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the executor's descendants by
-///   walking parent PIDs, each with its start time; sends SIGTERM to the process group and
-///   gives the executor up to `TERM_GRACE` to exit; records the descendants again (adding to the
-///   first record); then sends SIGKILL to the process group, and to every recorded descendant
-///   whose PID still has the recorded start time, or to its whole process group when it leads
-///   one (it may have started members after it was recorded). That reaches descendants that left
-///   the group with `setsid` or `setpgid`, as Claude Code's tool shells do on macOS. After a
-///   normal exit only the process group is killed: the executor is gone, so its descendants can
-///   no longer be found through it. On Windows `end` terminates the Job Object at once; the job
-///   does not allow breakaway, so it holds every descendant, and Windows has no SIGTERM to give
-///   the executor first. On both platforms `end` then waits, for at most ten seconds, until the
-///   tree is reaped.
+///   (the run was stopped by a limit, cancelled, or stopped by the lean check), it records the
+///   executor's descendants by walking parent PIDs, each with its start time; sends SIGTERM to
+///   the process group and gives the executor up to `TERM_GRACE` to exit; records the
+///   descendants again (adding to the first record); then sends SIGKILL to the process group,
+///   and to every recorded descendant whose PID still has the recorded start time, or to its
+///   whole process group when it leads one (it may have started members after it was recorded).
+///   That reaches descendants that left the group with `setsid` or `setpgid`, as Claude Code's
+///   tool shells do on macOS. After a normal exit only the process group is killed: the executor
+///   is gone, so its descendants can no longer be found through it. On Windows `end` terminates
+///   the Job Object at once; the job does not allow breakaway, so it holds every descendant, and
+///   Windows has no SIGTERM to give the executor first. On both platforms `end` then waits, for
+///   at most ten seconds, until the tree is reaped.
 /// - `Drop` covers a `run` future dropped before `end` finished: the task was aborted, an outer
 ///   timeout fired, the runtime is shutting down, a panic unwound. Immediately and synchronously,
 ///   without a grace period, it does on Unix what `end` does after the grace: it records the

@@ -101,6 +101,8 @@ const LINEAR_MCP_HOST: &str = "mcp.linear.app";
 /// under the same limit. Claude: `auth status` without the user settings, which lean runs leave
 /// out. Codex: `login status` from the credentials file (`auth.json`), the store a run that
 /// ignores the user configuration falls back to (`cli_auth_credentials_store` is a user setting).
+/// Both commands run that way and report the sign-in (measured 2026-10-19 with Claude Code
+/// 2.1.285 and codex-cli 0.159.2).
 const CLAUDE_LEAN_LOGIN: [&str; 4] = ["--setting-sources", "project,local", "auth", "status"];
 const CODEX_LEAN_LOGIN: [&str; 4] = ["-c", "cli_auth_credentials_store=file", "login", "status"];
 
@@ -108,16 +110,17 @@ const CODEX_LEAN_LOGIN: [&str; 4] = ["-c", "cli_auth_credentials_store=file", "l
 /// `mcp list` and 20 s for the rest (`MCP_LIST_TIMEOUT`, `CHECK_TIMEOUT`). `run_limited` takes
 /// the limit from its caller instead, which the one-click setup commands do (a login waits up to
 /// five minutes for the browser). A command runs in the user's home directory (`run_in`: in the
-/// folder it is given), in a process group of its own (Windows: a Job Object, and without a console window, like the executors),
-/// with the shared environment (the PATH and proxy the executors will get). A check is done when
-/// the command's own process exits: whatever it left running in its group is ended then
-/// (`claude mcp list` starts stdio MCP servers of its own, which inherit its pipes), and the
-/// output is what the pipes delivered up to `PIPE_DRAIN` after that. A pipe that cannot be read
-/// fails the call: half of an `mcp list` must not pass for the whole answer. A command still
-/// running at its limit is killed together with everything it started and the call fails with
-/// `timed out after 20s` (the limit as `Duration` prints it). Every command also gets
-/// `NO_COLOR=1` on top of the inherited environment so the CLIs do not colour what they print
-/// into the pipe (a `FORCE_COLOR` may still win, which is why the parsers strip colour codes too).
+/// folder it is given), in a process group of its own (Windows: a Job Object, and without a
+/// console window, like the executors), with the shared environment (the PATH and proxy the
+/// executors will get). A check is done when the command's own process exits: whatever it left
+/// running in its group is ended then (`claude mcp list` starts stdio MCP servers of its own,
+/// which inherit its pipes), and the output is what the pipes delivered up to `PIPE_DRAIN` after
+/// that. A pipe that cannot be read fails the call: half of an `mcp list` must not pass for the
+/// whole answer. A command still running at its limit is killed together with everything it
+/// started and the call fails with `timed out after 20s` (the limit as `Duration` prints it).
+/// Every command also gets `NO_COLOR=1` on top of the inherited environment so the CLIs do not
+/// colour what they print into the pipe (a `FORCE_COLOR` may still win, which is why the parsers
+/// strip colour codes too).
 pub struct SystemRunner {
     check_timeout: Duration,
     mcp_list_timeout: Duration,
@@ -364,7 +367,8 @@ impl ExecutorReport {
 pub struct LeanCheckPaths {
     /// An empty folder of IssueRelay's own, made when missing, to run Claude's lean sign-in check
     /// in: in the home folder, the project settings it reads would be `~/.claude/settings.json`,
-    /// the very user settings lean runs leave out.
+    /// the very user settings lean runs leave out. The project settings of the folders above it
+    /// do not count (Claude Code 2.1.285, the sandbox acceptance of 2026-10-20).
     pub empty_dir: PathBuf,
     /// Codex's configuration file (`codex_config_path`), read for a model provider lean runs
     /// would not use; `None` when there is none to read.
@@ -787,8 +791,8 @@ pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool 
 /// Whether `mcp list` output shows the Linear server lean runs load (`executor::lean`) usable:
 /// a line whose server name is exactly `CLAUDE_LINEAR_SERVER` / `CODEX_LINEAR_SERVER`, whose URL
 /// is exactly `LINEAR_MCP_URL`, and whose status is usable as `mcp_list_has_linear` reads it. A
-/// lean run reuses the sign-in stored under that name; another server, claude.ai's Linear
-/// connector among them, is not loaded.
+/// lean run reuses the sign-in stored under that name (measured: see the two constants); another
+/// server, claude.ai's Linear connector among them, is not loaded.
 pub fn mcp_list_has_lean_linear(kind: ExecutorKind, stdout: &str) -> bool {
     let stdout = strip_ansi(stdout);
     lean_linear_line(kind, &stdout)
@@ -813,7 +817,8 @@ fn lean_linear_line(kind: ExecutorKind, stdout: &str) -> Option<(&str, &str)> {
 
 /// The server name of an `mcp list` line and the first thing after it, its URL or command.
 /// Claude prints `<name>: <url> ...` (a name may hold colons, as `plugin:a:b` does), Codex
-/// `<name>  <url>  ...`.
+/// `<name>  <url>  ...`, as in the M0 samples of Claude Code 2.1.285 and codex-cli 0.159.2
+/// (docs/gates/samples/m0/executors/*-mcp-list.txt, 2026-10-10).
 fn server_and_target(kind: ExecutorKind, line: &str) -> Option<(&str, &str)> {
     let (server, rest) = match kind {
         ExecutorKind::Claude => line.split_once(": ")?,
