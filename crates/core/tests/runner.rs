@@ -1029,7 +1029,8 @@ async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
     assert_stops_growing(&hb, "the escaped grandchild survived the lean stop").await;
 }
 
-/// A Codex event of a call to an MCP server other than Linear's.
+/// A Codex event of a call to an MCP server other than Linear's. Only the Unix test below uses it.
+#[cfg(unix)]
 const OTHER_SERVER_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
 
 // The executor exits first and its last line comes after that, from a process that left its
