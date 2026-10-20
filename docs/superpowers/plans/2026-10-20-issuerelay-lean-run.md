@@ -920,19 +920,19 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 
 | 内容 | 建议 |
 |---|---|
-| Codex 的运行时核对只认 `item.started` / `item.completed` 里类型为 `mcp_tool_call` 的项目：Codex 改了事件名或改用 `item.updated`，核对就悄悄失效，违反第 8 节「读不懂就报错」的取向 | 精简的 Codex 运行从头到尾没有一条可辨认的 `linear` 调用，就判为「精简没有生效」 |
-| 精简没有生效时，按设计「像用户点停止」先给 SIGTERM 和宽限：只有 `--setting-sources` 也失效、用户插件真的载入时，SIGTERM 可能触发插件的会话结束钩子（M3 N3） | 直接 SIGKILL（Claude 在 `init` 时还没有工具进程），或维持现状并在设计第 8 节写明取舍 |
-| 用户设置的 `env` 里只设了 `ANTHROPIC_BASE_URL`（公司网关），`authMethod` 与 `apiProvider` 却与平常相同时，精简登录检查看不出区别，精简运行会绕过网关直连（反目标里举的例子；Task 5 与最终评审都提到） | 环境检查另读用户设置（`~/.claude/settings.json`，设了 `CLAUDE_CONFIG_DIR` 时读那里）的 `env`，有 `ANTHROPIC_BASE_URL` 就判精简不可用 |
-| 用户设置的 `env` 里设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，它盖过命令行的 `--effort`：不精简的运行读用户设置，IssueRelay 设的推理力度不生效，设计第 5.6 节「不精简时它会盖过用户设置里的推理力度」对这种设法不成立（实机验收 N2） | 在设计第 5.6 节、帮助与 README 里写明这个例外；IssueRelay 不改用户的设置 |
-| 需求要求先等一会儿时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束，单独的前台 `sleep` 又被 Claude Code 拦下（实机验收 N4） | 提示词加一条「要等的命令放在前台，不要放到后台」（提示词固定规则属极高风险，要单独决定）；或者不改，在帮助里写明 |
-| 开发宿主从 Claude Code 会话的终端启动时，执行者继承这个会话的环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_CHILD_SESSION` 等）；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。托盘程序由 launchd 启动，不受影响（实机验收 N3） | 再去掉 Claude Code 会话自己的变量；`ANTHROPIC_BASE_URL` 一类可能是用户的网关，不能一概去掉 |
+| Codex 的运行时核对只认 `item.started` / `item.completed` 里类型为 `mcp_tool_call` 的项目：Codex 改了事件名或改用 `item.updated`，核对就悄悄失效，违反第 8 节「读不懂就报错」的取向 | 精简的 Codex 运行从头到尾没有一条可辨认的 `linear` 调用，就判为「精简没有生效」。**已定（2026-10-20，所有者让主智能体决定）**：照建议做，只看正常退出的运行（以非 0 退出的照现有规则判定，例如撞到用量上限的 Codex），随 v0.2.1 |
+| 精简没有生效时，按设计「像用户点停止」先给 SIGTERM 和宽限：只有 `--setting-sources` 也失效、用户插件真的载入时，SIGTERM 可能触发插件的会话结束钩子（M3 N3） | 直接 SIGKILL（Claude 在 `init` 时还没有工具进程），或维持现状并在设计第 8 节写明取舍。**已定（2026-10-20，所有者让主智能体决定）**：维持现状，取舍写进精简运行设计第 8 节：直接 SIGKILL 可能在 Codex 运行中途留下 git 锁文件之类的半成品 |
+| 用户设置的 `env` 里只设了 `ANTHROPIC_BASE_URL`（公司网关），`authMethod` 与 `apiProvider` 却与平常相同时，精简登录检查看不出区别，精简运行会绕过网关直连（反目标里举的例子；Task 5 与最终评审都提到） | 环境检查另读用户设置（`~/.claude/settings.json`，设了 `CLAUDE_CONFIG_DIR` 时读那里）的 `env`，有 `ANTHROPIC_BASE_URL` 就判精简不可用。**已定（2026-10-20，所有者让主智能体决定）**：照建议做，代理变量也算（问题只写变量名，不写值），随 v0.2.1 |
+| 用户设置的 `env` 里设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，它盖过命令行的 `--effort`：不精简的运行读用户设置，IssueRelay 设的推理力度不生效，设计第 5.6 节「不精简时它会盖过用户设置里的推理力度」对这种设法不成立（实机验收 N2） | 在设计第 5.6 节、帮助与 README 里写明这个例外；IssueRelay 不改用户的设置。**已定（2026-10-20，所有者让主智能体决定）**：照建议只写进文档：精简运行设计第 5.6 节与 README（v0.2.0 的发布说明已写） |
+| 需求要求先等一会儿时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束，单独的前台 `sleep` 又被 Claude Code 拦下（实机验收 N4） | 提示词加一条「要等的命令放在前台，不要放到后台」（提示词固定规则属极高风险，要单独决定）；或者不改，在帮助里写明。**已定（2026-10-20，所有者让主智能体决定）**：不改提示词，写进 README 的安全须知（改固定规则要另做实机验证） |
+| 开发宿主从 Claude Code 会话的终端启动时，执行者继承这个会话的环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_CHILD_SESSION` 等）；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。托盘程序由 launchd 启动，不受影响（实机验收 N3） | 再去掉 Claude Code 会话自己的变量；`ANTHROPIC_BASE_URL` 一类可能是用户的网关，不能一概去掉。**已定（2026-10-20，所有者让主智能体决定）**：不改 `ExecEnv`，在测试规范「实机验收规则」写明用 `env -i` 启动开发宿主 |
 
 **最终评审接受的遗留项**
 
 | 内容 | 认领 |
 |---|---|
 | 精简运行设计第 6.2 节说 `bind list` 与 `doctor` 的绑定行都写精简生效值与推理力度；实际 `bind list` 只能写 `lean off` 与 `effort <值>`（原始绑定分不出「不适用」），`doctor` 的绑定行有精简状态、没有推理力度（`BindingReport` 没有 `effort`） | 下次改设计或命令行时：改第 6.2 节的说法，或给 `BindingReport` 加 `effort`。小项清理没做：两条路都改设计说的行为，留给所有者定 |
-| 第 8 节举的是「AI 的消息、工具调用或结果」，代码在 `init` 之前遇到任何不是 `system` 的事件都判违规（失败即关闭，与第 8 节第一句一致） | 改第 8 节措辞；实机验收第 1 条核对 `init` 之前只有钩子事件。小项清理没做：改的是设计的措辞，留给所有者；后半条实机验收已核对（DEMO-32、DEMO-40 的运行日志第一行就是 `init`） |
+| 第 8 节举的是「AI 的消息、工具调用或结果」，代码在 `init` 之前遇到任何不是 `system` 的事件都判违规（失败即关闭，与第 8 节第一句一致） | 已做（随 v0.2.1）：第 8 节改为「任何不是 `system` 的事件」，并记下实机验收里精简运行在 `init` 之前什么事件都没有 |
 | 跑完的运行看不出当时是不是精简的：只有被拦下的运行在原因里写明 | 精简运行在运行日志开头写一行固定说明；长期并入 M2 遗留 N3（结构化原因）。小项清理没做：说明怎样写、是否等 N3，留给所有者；被拦下的运行现在多了一行说明（见下表「运行日志开头的说明」一行） |
 | 精简绑定只差精简检查时，等待原因仍是通用的「执行者未就绪」，而环境检查页前三项全绿 | 加一个「精简运行未就绪」的等待原因（改 IPC 视图的 JSON，单独提交），或在发布说明里写清。小项清理没做：要改 IPC 视图或定发布说明，留给所有者 |
 | `RunDetail.test.tsx` 没有 `lean run did not take effect: …` 原因的显示用例（走现有的原因细节行，行为应当正确） | 已做（PR #8）：`a lean run that did not take effect fails like any other run, the engine's words under the headline` |

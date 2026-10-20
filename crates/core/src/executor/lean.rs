@@ -127,17 +127,25 @@ pub fn passable(path: &Path) -> bool {
 /// comes before any work: only `system` events, such as a project's session-start hooks, may come
 /// first (Claude Code 2.1.285, measured 2026-10-19). Codex names nothing up front, so the server
 /// of each of its MCP calls is checked as it starts: every `mcp_tool_call` item names its `server`
-/// (codex-cli 0.159.2, from its source; seen in the sandbox acceptance on 2026-10-20).
+/// (codex-cli 0.159.2, from its source; seen in the sandbox acceptance on 2026-10-20). A Codex
+/// run that ends cleanly must also have made one call to Linear the check recognized
+/// (`unconfirmed`).
 pub struct LeanCheck {
     kind: ExecutorKind,
     /// Set by Claude's init event, whatever it showed: the lines after it are not checked (an init
     /// that did not pass has been reported already).
     done: bool,
+    /// Set by a Codex call to Linear's server.
+    linear_seen: bool,
 }
 
 impl LeanCheck {
     pub fn new(kind: ExecutorKind) -> Self {
-        Self { kind, done: false }
+        Self {
+            kind,
+            done: false,
+            linear_seen: false,
+        }
     }
 
     /// What `line`, one line of the executor's stdout, shows to be wrong; `None` when nothing is.
@@ -151,8 +159,29 @@ impl LeanCheck {
         };
         match self.kind {
             ExecutorKind::Claude => self.claude(&event),
-            ExecutorKind::Codex => codex_violation(&event),
+            ExecutorKind::Codex => {
+                let server = codex_mcp_server(&event)?;
+                if server == CODEX_LINEAR_SERVER {
+                    self.linear_seen = true;
+                    return None;
+                }
+                Some(format!("a call to the MCP server `{server}`"))
+            }
         }
+    }
+
+    /// What the end of a run that exited cleanly leaves unconfirmed: a lean Codex run in which no
+    /// call to Linear's server was recognized. A run that did its work called Linear, so none at
+    /// all points to events this check cannot read (renamed in a newer Codex, say), and the check
+    /// fails closed (lean-run design section 8). `None` for Claude, whose init event is checked
+    /// as it comes.
+    pub fn unconfirmed(&self) -> Option<String> {
+        (self.kind == ExecutorKind::Codex && !self.linear_seen).then(|| {
+            format!(
+                "no call to the MCP server `{CODEX_LINEAR_SERVER}` was recognized, so the lean \
+                 configuration could not be confirmed (the Codex output format may have changed)"
+            )
+        })
     }
 
     fn claude(&mut self, event: &Value) -> Option<String> {
@@ -189,8 +218,9 @@ impl LeanCheck {
     }
 }
 
-/// A Codex event that starts or ends a call to an MCP server other than Linear's.
-fn codex_violation(event: &Value) -> Option<String> {
+/// The server of a Codex event that starts or ends a call to an MCP server (`unnamed` when the
+/// item names none); `None` for every other event.
+fn codex_mcp_server(event: &Value) -> Option<&str> {
     if !matches!(
         event["type"].as_str(),
         Some("item.started" | "item.completed")
@@ -201,8 +231,7 @@ fn codex_violation(event: &Value) -> Option<String> {
     if item["type"] != "mcp_tool_call" {
         return None;
     }
-    let server = item["server"].as_str().unwrap_or("unnamed");
-    (server != CODEX_LINEAR_SERVER).then(|| format!("a call to the MCP server `{server}`"))
+    Some(item["server"].as_str().unwrap_or("unnamed"))
 }
 
 /// Whether `paths` (Claude's `memory_paths`) names a folder: any non-empty string in it.
@@ -467,5 +496,35 @@ mod tests {
         let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"get_issue"}}"#;
         let detail = first_violation(ExecutorKind::Codex, &[started]).unwrap();
         assert!(detail.contains("`unnamed`"), "{detail}");
+    }
+
+    #[test]
+    fn a_codex_run_is_confirmed_by_a_call_to_linear() {
+        let mut check = LeanCheck::new(ExecutorKind::Codex);
+        let started =
+            r#"{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}"#;
+        assert_eq!(check.observe(started), None);
+        let detail = check
+            .unconfirmed()
+            .expect("not confirmed before a call to Linear");
+        assert!(detail.contains("`linear`"), "{detail}");
+        let linear = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"linear","tool":"get_issue"}}"#;
+        assert_eq!(check.observe(linear), None);
+        assert_eq!(check.unconfirmed(), None);
+    }
+
+    #[test]
+    fn the_recorded_codex_stream_is_confirmed() {
+        let mut check = LeanCheck::new(ExecutorKind::Codex);
+        for line in include_str!("../../tests/fixtures/codex-exec.jsonl").lines() {
+            assert_eq!(check.observe(line), None);
+        }
+        assert_eq!(check.unconfirmed(), None);
+    }
+
+    #[test]
+    fn a_claude_run_needs_no_confirmation_at_its_end() {
+        // Its init event is checked as it comes; nothing is left for the end of the run.
+        assert_eq!(LeanCheck::new(ExecutorKind::Claude).unconfirmed(), None);
     }
 }

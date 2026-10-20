@@ -532,8 +532,10 @@ async fn spawn_failed(log: &mut File, message: String) -> RunOutput {
 /// an output line shows that lean did not take effect (`lean::LeanCheck`): that line is logged
 /// and the run is stopped as a cancelled one is, with `ExitKind::LeanNotApplied`. Such a line
 /// among those still read after the executor exited on its own makes the run end that way too
-/// (after a stop for any other reason, the stop stands). The JSONL file at `log_path` is created
-/// (or truncated) and starts with `spec.notes`, each as one of IssueRelay's own lines,
+/// (after a stop for any other reason, the stop stands), and so does a clean exit the check
+/// cannot confirm (`LeanCheck::unconfirmed`: a lean Codex run with no call to Linear). The JSONL
+/// file at `log_path` is created (or truncated) and starts with `spec.notes`, each as one of
+/// IssueRelay's own lines,
 /// `{"stream":"runner","text":…}`; then it gets one line per output line: stdout verbatim,
 /// stderr as `{"stream":"stderr","text":…}`. After the line that shows lean did not take effect,
 /// a `runner` line says so. A run that cannot start gets one
@@ -699,6 +701,17 @@ pub async fn run(
             log_failures.note(log.write_all(said.as_bytes()).await);
             exit = ExitKind::LeanNotApplied(detail);
         }
+    }
+    // A clean exit has to be confirmed as well: a lean Codex run in which no call to Linear was
+    // recognized may have printed events the check cannot read.
+    let clean = matches!(exit, ExitKind::Exited(Some(0)));
+    if clean && let Some(detail) = lean_check.as_ref().and_then(LeanCheck::unconfirmed) {
+        let said = note(
+            "runner",
+            &format!("lean run did not take effect: {detail}; the executor had already exited"),
+        );
+        log_failures.note(log.write_all(said.as_bytes()).await);
+        exit = ExitKind::LeanNotApplied(detail);
     }
     // A tokio file reports a failed write with a later call, so the last one shows here.
     log_failures.note(log.flush().await);

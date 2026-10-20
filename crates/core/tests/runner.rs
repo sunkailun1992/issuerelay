@@ -1029,6 +1029,102 @@ async fn an_escaped_grandchild_is_ended_when_lean_stops_the_run() {
     assert_stops_growing(&hb, "the escaped grandchild survived the lean stop").await;
 }
 
+/// A Codex event that names no MCP server.
+const THREAD_STARTED: &str =
+    r#"{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}"#;
+
+/// A Codex event of a call to Linear's MCP server, as a lean run makes.
+const LINEAR_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"linear","tool":"get_issue"}}"#;
+
+/// Runs the fake agent with `steps` as a Codex run, lean or not, and returns how it ended and
+/// the lines of its log.
+async fn codex_run(dir: &Path, lean: bool, steps: serde_json::Value) -> (ExitKind, Vec<String>) {
+    let s = script(dir, steps);
+    let log = dir.join("l.jsonl");
+    let out = runner::run(
+        CommandSpec {
+            lean,
+            ..spec(agent(), dir, &s, "p")
+        },
+        ExecutorKind::Codex,
+        &log,
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    (out.exit, log_lines(&log))
+}
+
+// A lean Codex run that ends cleanly without one call to Linear the check recognized may have
+// used an event format the check cannot read, so its lean configuration is not confirmed.
+#[tokio::test]
+async fn a_clean_lean_codex_run_without_a_linear_call_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, lines) = codex_run(
+        dir.path(),
+        true,
+        serde_json::json!([{"out": THREAD_STARTED}, {"exit": 0}]),
+    )
+    .await;
+    match &exit {
+        ExitKind::LeanNotApplied(detail) => assert!(detail.contains("`linear`"), "{detail}"),
+        other => panic!("expected a lean violation, got {other:?}"),
+    }
+    assert_eq!(lines[0], THREAD_STARTED);
+    let said = lines
+        .get(1)
+        .and_then(|line| runner_note(line))
+        .unwrap_or_default();
+    assert!(
+        said.starts_with("lean run did not take effect: ")
+            && said.contains("`linear`")
+            && said.ends_with("; the executor had already exited"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_clean_lean_codex_run_that_called_linear_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, lines) = codex_run(
+        dir.path(),
+        true,
+        serde_json::json!([{"out": LINEAR_CALL}, {"exit": 0}]),
+    )
+    .await;
+    assert_eq!(exit, ExitKind::Exited(Some(0)));
+    assert_eq!(lines, [LINEAR_CALL]);
+}
+
+// A run that failed keeps its exit code: that it made no call to Linear then says nothing about
+// lean (a Codex that stops at its usage limit makes none).
+#[tokio::test]
+async fn a_failed_lean_codex_run_keeps_its_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, lines) = codex_run(
+        dir.path(),
+        true,
+        serde_json::json!([{"out": THREAD_STARTED}, {"exit": 1}]),
+    )
+    .await;
+    assert_eq!(exit, ExitKind::Exited(Some(1)));
+    assert_eq!(lines, [THREAD_STARTED]);
+}
+
+#[tokio::test]
+async fn a_codex_run_that_is_not_lean_needs_no_linear_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, _) = codex_run(
+        dir.path(),
+        false,
+        serde_json::json!([{"out": THREAD_STARTED}, {"exit": 0}]),
+    )
+    .await;
+    assert_eq!(exit, ExitKind::Exited(Some(0)));
+}
+
 /// A Codex event of a call to an MCP server other than Linear's. Only the Unix test below uses it.
 #[cfg(unix)]
 const OTHER_SERVER_CALL: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"demo-tools","tool":"search"}}"#;
