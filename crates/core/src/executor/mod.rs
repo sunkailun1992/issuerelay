@@ -45,7 +45,8 @@ pub struct RunOptions<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lean<'a> {
     /// The user-level `CLAUDE.md` a lean Claude run leaves out, already checked with
-    /// `lean::passable`; `None` keeps it. Codex has no such argument and ignores it.
+    /// `lean::passable` (a path that does not pass is dropped again by `lean::claude_args`);
+    /// `None` keeps it. Codex has no such argument and ignores it.
     pub user_instructions: Option<&'a Path>,
 }
 
@@ -483,8 +484,17 @@ mod tests {
         }
     }
 
-    /// The user-level CLAUDE.md a lean Claude run leaves out in these tests.
+    /// The user-level CLAUDE.md a lean Claude run leaves out in these tests, an absolute path on
+    /// this platform, and the `--settings` argument that leaves it out, written out.
+    #[cfg(unix)]
     const DEMO_INSTRUCTIONS: &str = "/srv/demo-home/.claude/CLAUDE.md";
+    #[cfg(unix)]
+    const DEMO_SETTINGS: &str = r#"{"claudeMdExcludes":["/srv/demo-home/.claude/CLAUDE.md"]}"#;
+    #[cfg(windows)]
+    const DEMO_INSTRUCTIONS: &str = r"D:\srv\demo-home\.claude\CLAUDE.md";
+    #[cfg(windows)]
+    const DEMO_SETTINGS: &str =
+        r#"{"claudeMdExcludes":["D:\\srv\\demo-home\\.claude\\CLAUDE.md"]}"#;
 
     /// The `--mcp-config` of a lean Claude run (lean-run design section 5.1), written out.
     const LEAN_MCP_CONFIG: &str =
@@ -531,7 +541,7 @@ mod tests {
                 "--setting-sources",
                 "project,local",
                 "--settings",
-                r#"{"claudeMdExcludes":["/srv/demo-home/.claude/CLAUDE.md"]}"#,
+                DEMO_SETTINGS,
             ]
         );
         assert!(spec.lean);
@@ -566,6 +576,37 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_cannot_be_passed_never_reaches_the_arguments() {
+        let relative = PathBuf::from("demo-home/.claude/CLAUDE.md");
+        let with_percent = std::env::temp_dir().join("50%").join("CLAUDE.md");
+        for path in [relative, with_percent] {
+            let options = RunOptions {
+                lean: lean(Some(&path)),
+                ..opts(PermissionProfile::Full, None)
+            };
+            let args = build(
+                ExecutorKind::Claude,
+                PathBuf::from("claude"),
+                &options,
+                Path::new("."),
+                "p".into(),
+            )
+            .args;
+            assert_eq!(
+                &args[8..],
+                [
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    LEAN_MCP_CONFIG,
+                    "--setting-sources",
+                    "project,local",
+                ],
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_lean_mcp_config_names_only_the_linear_server() {
         let options = RunOptions {
             lean: lean(None),
@@ -590,9 +631,23 @@ mod tests {
         );
     }
 
+    /// A path with a space, Chinese, a quote and (on Unix) a backslash, and the JSON `--settings`
+    /// argument that leaves it out.
+    #[cfg(unix)]
+    const TRICKY: [&str; 2] = [
+        r"/srv/de mo/李四's\x/.claude/CLAUDE.md",
+        r#"{"claudeMdExcludes":["/srv/de mo/李四's\\x/.claude/CLAUDE.md"]}"#,
+    ];
+    #[cfg(windows)]
+    const TRICKY: [&str; 2] = [
+        r"D:\srv\de mo\李四's\x\.claude\CLAUDE.md",
+        r#"{"claudeMdExcludes":["D:\\srv\\de mo\\李四's\\x\\.claude\\CLAUDE.md"]}"#,
+    ];
+
     #[test]
     fn the_settings_argument_encodes_the_path_as_json() {
-        let tricky = Path::new(r"/srv/de mo/李四's\x/.claude/CLAUDE.md");
+        let [path, json] = TRICKY;
+        let tricky = Path::new(path);
         let options = RunOptions {
             lean: lean(Some(tricky)),
             ..opts(PermissionProfile::Full, None)
@@ -606,15 +661,9 @@ mod tests {
         )
         .args;
         let settings = args.last().unwrap();
-        assert_eq!(
-            settings,
-            r#"{"claudeMdExcludes":["/srv/de mo/李四's\\x/.claude/CLAUDE.md"]}"#
-        );
+        assert_eq!(settings, json);
         let parsed: serde_json::Value = serde_json::from_str(settings).unwrap();
-        assert_eq!(
-            parsed["claudeMdExcludes"][0],
-            r"/srv/de mo/李四's\x/.claude/CLAUDE.md"
-        );
+        assert_eq!(parsed["claudeMdExcludes"][0], path);
     }
 
     #[test]
@@ -691,6 +740,140 @@ mod tests {
                 "-",
             ]
         );
+    }
+
+    /// What `build` must give for every profile, with and without lean, a model and an effort,
+    /// and for Codex inside and outside a git checkout, put together from the design's argument
+    /// lists written out here (lean-run design, sections 5.1, 5.2 and 10): the lean arguments add
+    /// to every profile without changing its permission arguments, and the model and the effort
+    /// keep their places.
+    #[test]
+    fn every_combination_is_built_word_for_word() {
+        const CLAUDE_LEAN: [&str; 7] = [
+            "--strict-mcp-config",
+            "--mcp-config",
+            LEAN_MCP_CONFIG,
+            "--setting-sources",
+            "project,local",
+            "--settings",
+            DEMO_SETTINGS,
+        ];
+        const CODEX_LEAN: [&str; 19] = [
+            "--ignore-user-config",
+            "--disable",
+            "hooks",
+            "--disable",
+            "plugins",
+            "--disable",
+            "apps",
+            "--disable",
+            "memories",
+            "--disable",
+            "skill_mcp_dependency_install",
+            "-c",
+            "mcp_servers.linear.url=https://mcp.linear.app/mcp",
+            "-c",
+            "mcp_servers.linear.required=true",
+            "-c",
+            "mcp_servers.linear.startup_timeout_sec=30",
+            "-c",
+            "skills.include_instructions=false",
+        ];
+        let repo = git_repo();
+        let plain = tempfile::tempdir().unwrap();
+        for profile in [
+            PermissionProfile::Full,
+            PermissionProfile::Auto,
+            PermissionProfile::Personal,
+        ] {
+            for lean_run in [false, true] {
+                for model in [None, Some("demo-model")] {
+                    for effort in [None, Some(Effort::Max)] {
+                        let options = RunOptions {
+                            profile,
+                            model,
+                            effort,
+                            lean: lean_run.then(|| Lean {
+                                user_instructions: Some(Path::new(DEMO_INSTRUCTIONS)),
+                            }),
+                        };
+                        let case = format!("{profile:?} lean={lean_run} {model:?} {effort:?}");
+
+                        let mut expected = vec![
+                            "-p",
+                            "--output-format",
+                            "stream-json",
+                            "--verbose",
+                            "--permission-prompts",
+                            "none",
+                            "--permission-mode",
+                            match profile {
+                                PermissionProfile::Full => "bypassPermissions",
+                                PermissionProfile::Auto => "auto",
+                                PermissionProfile::Personal => "dontAsk",
+                            },
+                        ];
+                        if model.is_some() {
+                            expected.extend(["--model", "demo-model"]);
+                        }
+                        if effort.is_some() {
+                            expected.extend(["--effort", "max"]);
+                        }
+                        if lean_run {
+                            expected.extend(CLAUDE_LEAN);
+                        }
+                        let spec = build(
+                            ExecutorKind::Claude,
+                            PathBuf::from("claude"),
+                            &options,
+                            repo.path(),
+                            "p".into(),
+                        );
+                        assert_eq!(spec.args, expected, "claude {case}");
+                        assert_eq!(spec.lean, lean_run, "claude {case}");
+                        let memory_off = [(
+                            "CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(),
+                            "1".to_string(),
+                        )];
+                        assert_eq!(spec.env, &memory_off[..usize::from(lean_run)], "{case}");
+
+                        for (dir, in_git) in [(repo.path(), true), (plain.path(), false)] {
+                            let mut expected = vec!["exec", "--json"];
+                            match profile {
+                                PermissionProfile::Full => {
+                                    expected.push("--dangerously-bypass-approvals-and-sandbox")
+                                }
+                                PermissionProfile::Auto => expected.push("--approve-for-me"),
+                                PermissionProfile::Personal => {}
+                            }
+                            if !in_git {
+                                expected.push("--skip-git-repo-check");
+                            }
+                            if lean_run {
+                                expected.extend(CODEX_LEAN);
+                            }
+                            if model.is_some() {
+                                expected.extend(["-m", "demo-model"]);
+                            }
+                            if effort.is_some() {
+                                expected.extend(["-c", "model_reasoning_effort=max"]);
+                            }
+                            expected.push("-");
+                            let spec = build(
+                                ExecutorKind::Codex,
+                                PathBuf::from("codex"),
+                                &options,
+                                dir,
+                                "p".into(),
+                            );
+                            assert_eq!(spec.args, expected, "codex {case} git={in_git}");
+                            assert_eq!(spec.lean, lean_run, "codex {case}");
+                            assert!(spec.env.is_empty(), "codex {case}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -801,13 +984,20 @@ mod tests {
         }
     }
 
-    /// Runs the lean arguments through a batch file like the npm shims `claude.cmd` and
-    /// `codex.cmd`, which hand `%*` to Node: what Node sees must be what `build` produced
-    /// (lean-run design section 5.5). Needs Node on PATH, which the CI job installs.
+    /// Runs the lean arguments through batch files like the npm and pnpm shims `claude.cmd` and
+    /// `codex.cmd`, which hand `%*` to Node (pnpm's inside an `IF … ( … )` block, which an
+    /// unquoted `)` would end early): what Node sees must be what `build` produced (lean-run
+    /// design section 5.5). The path holds every character that `lean::passable` lets through
+    /// and a Windows file name may hold. Needs Node on PATH, which the CI job installs; without
+    /// it the test is skipped, except on CI, where that would hide the check.
     #[cfg(windows)]
     #[test]
-    fn json_arguments_survive_an_npm_style_cmd_shim() {
+    fn json_arguments_survive_npm_and_pnpm_style_cmd_shims() {
         let Ok(node) = which::which("node") else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "node is not on PATH, so the shims cannot be checked"
+            );
             eprintln!("skipped: node is not on PATH");
             return;
         };
@@ -818,32 +1008,57 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            shim.path().join("echo-args.cmd"),
+            shim.path().join("npm-style.cmd"),
             format!("@\"{}\" \"%~dp0echo-args.js\" %*\r\n", node.display()),
         )
         .unwrap();
-        let instructions = PathBuf::from(r"D:\Profiles\Demo User\李\.claude\CLAUDE.md");
+        std::fs::write(
+            shim.path().join("pnpm-style.cmd"),
+            concat!(
+                "@SETLOCAL\r\n",
+                "@IF EXIST \"%~dp0\\node.exe\" (\r\n",
+                "  \"%~dp0\\node.exe\" \"%~dp0echo-args.js\" %*\r\n",
+                ") ELSE (\r\n",
+                "  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n",
+                "  node \"%~dp0echo-args.js\" %*\r\n",
+                ")\r\n",
+            ),
+        )
+        .unwrap();
+        let instructions = PathBuf::from(
+            r"D:\Profiles\Demo User\李 o'brien & (x) #1 $a +b ,c ;d =e @f [g] {h} ~i `j\.claude\CLAUDE.md",
+        );
+        assert!(lean::passable(&instructions));
         let repo = git_repo();
         let options = RunOptions {
             effort: Some(Effort::Max),
             lean: lean(Some(&instructions)),
             ..opts(PermissionProfile::Full, Some("demo-model"))
         };
-        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
-            let spec = build(
-                kind,
-                shim.path().join("echo-args.cmd"),
-                &options,
-                repo.path(),
-                "p".into(),
-            );
-            let output = std::process::Command::new(&spec.program)
-                .args(&spec.args)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{kind:?}: {output:?}");
-            let echoed: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(echoed, spec.args, "{kind:?}");
+        for shim_name in ["npm-style.cmd", "pnpm-style.cmd"] {
+            for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+                let spec = build(
+                    kind,
+                    shim.path().join(shim_name),
+                    &options,
+                    repo.path(),
+                    "p".into(),
+                );
+                if kind == ExecutorKind::Claude {
+                    assert!(
+                        spec.args.iter().any(|a| a == "--settings"),
+                        "the path went in: {:?}",
+                        spec.args
+                    );
+                }
+                let output = std::process::Command::new(&spec.program)
+                    .args(&spec.args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{kind:?} {shim_name}: {output:?}");
+                let echoed: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(echoed, spec.args, "{kind:?} {shim_name}");
+            }
         }
     }
 }

@@ -29,7 +29,9 @@ pub const DISABLE_AUTO_MEMORY: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 
 /// What a lean Claude run adds after its other arguments: only Linear's server, no user settings
 /// (so neither the user's plugins nor their hooks and skills), and `user_instructions`, the
-/// user-level `CLAUDE.md`, left out when it is given.
+/// user-level `CLAUDE.md`, left out when it is given. A path that is not `passable` never goes
+/// into the arguments: the caller checks it first to say so in the run log, and it is checked
+/// again here.
 pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
     let servers = json!({
         "mcpServers": { CLAUDE_LINEAR_SERVER: { "type": "http", "url": LINEAR_MCP_URL } }
@@ -41,7 +43,10 @@ pub fn claude_args(user_instructions: Option<&Path>) -> Vec<String> {
         "--setting-sources".to_string(),
         "project,local".to_string(),
     ];
-    if let Some(path) = user_instructions.and_then(Path::to_str) {
+    if let Some(path) = user_instructions
+        .filter(|path| passable(path))
+        .and_then(Path::to_str)
+    {
         args.push("--settings".to_string());
         args.push(json!({ "claudeMdExcludes": [path] }).to_string());
     }
