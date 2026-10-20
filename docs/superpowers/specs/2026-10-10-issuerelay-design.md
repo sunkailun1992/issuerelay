@@ -409,6 +409,8 @@ M2 现状（2026-10-14）：macOS 实机验收通过（`docs/gates/2026-10-14-m2
 
 M3 现状（2026-10-14）：安装包、发布流程、自动更新、把命令行加入 PATH 已在 macOS 实机验收（`docs/gates/2026-10-14-m3-acceptance.md`）；`v0.1.0` 已于 2026-10-14 公开；Windows 与同事安装待实机。
 
+v0.2.0（2026-10-20）：精简运行与推理力度随 `v0.2.0` 公开；macOS 沙箱验收与发布过程见 `docs/gates/2026-10-20-lean-run-acceptance.md`。所有者决定这次不做 Windows 实机验证，Windows 仍只靠 CI。
+
 ## 18. 待定问题
 
 1. **产品名与图标**：产品名 IssueRelay（不含「Linear」，避开商标问题）。图标在 M2 出了三套方案，由主智能体代选 A「接力」（2026-10-14），用户可以改选：改用 `pnpm --dir app icons --option <x>` 后重新生成（见 9.6）。
