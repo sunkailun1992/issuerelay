@@ -188,8 +188,8 @@ export interface BindingReport {
   executor_ready: boolean;
   lean: LeanStatus;
   /**
-   * The effort its runs start with: its own, else the settings' default; `null` when neither sets
-   * one.
+   * The effort IssueRelay passes to its runs: its own, else the settings' default; `null` when
+   * neither sets one.
    */
   effort: Effort | null;
 }

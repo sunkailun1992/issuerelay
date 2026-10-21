@@ -246,8 +246,8 @@ fn doctor(v: &Value) -> String {
         } else {
             wrong.join(", ")
         };
-        // The effort the runs start with; nothing when no level is set (the executor's own
-        // setting applies) or the host is from before the field.
+        // The effort IssueRelay passes to the runs; nothing when no level is set (the executor's
+        // own setting applies) or the host is from before the field.
         let effort = b
             .get("effort")
             .and_then(Value::as_str)

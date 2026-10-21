@@ -1249,8 +1249,10 @@ pub struct BindingReport {
     pub executor_ready: bool,
     /// Whether the binding's runs are lean, or why not.
     pub lean: LeanStatus,
-    /// The reasoning effort its runs start with: its own, else the settings' default; `None`
-    /// when neither sets one (the executor's own setting applies).
+    /// The reasoning effort IssueRelay passes to its runs: its own, else the settings' default;
+    /// `None` when neither sets one (the executor's own setting applies). In a Claude run that is
+    /// not lean, `CLAUDE_CODE_EFFORT_LEVEL` in the user settings' `env` wins over it (lean-run
+    /// design, section 5.6).
     pub effort: Option<Effort>,
 }
 
