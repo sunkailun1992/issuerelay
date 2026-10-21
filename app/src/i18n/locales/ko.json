@@ -245,7 +245,8 @@
     "waiting": {
       "project_not_bound": "프로젝트가 로컬 폴더에 연결되어 있지 않습니다",
       "directory_missing": "연결된 폴더 {{directory}}이(가) 없습니다",
-      "executor_not_ready": "{{executor}}이(가) 준비되지 않았습니다. 환경 점검을 확인하세요"
+      "executor_not_ready": "{{executor}}이(가) 준비되지 않았습니다. 환경 점검을 확인하세요",
+      "lean_not_ready": "{{executor}}의 경량 실행이 준비되지 않았습니다. 환경 점검을 확인하세요"
     },
     "load_failed": "Linear에서 이슈를 읽지 못했습니다",
     "open_guide": "가이드 열기",

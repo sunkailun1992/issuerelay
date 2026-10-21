@@ -246,8 +246,15 @@ fn doctor(v: &Value) -> String {
         } else {
             wrong.join(", ")
         };
+        // The effort IssueRelay passes to the runs; nothing when no level is set (the executor's
+        // own setting applies) or the host is from before the field.
+        let effort = b
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(|effort| format!(", effort {}", clean(effort)))
+            .unwrap_or_default();
         out.push(format!(
-            "Binding {} -> {}{}: {verdict}",
+            "Binding {} -> {}{}{effort}: {verdict}",
             text(b, "project_name"),
             text(b, "executor"),
             lean_label(&b["lean"]),
@@ -786,6 +793,36 @@ mod tests {
         assert_eq!(
             line(Some("home_directory")),
             "Binding Demo Project -> claude (full configuration: home folder): ok"
+        );
+    }
+
+    #[test]
+    fn doctor_binding_lines_name_the_effort() {
+        let line = |effort: Option<Value>| {
+            let mut binding = json!({"binding_id": "p", "project_name": "Demo Project",
+                "directory_exists": true, "executor": "claude", "executor_ready": true,
+                "lean": "on"});
+            if let Some(effort) = effort {
+                binding["effort"] = effort;
+            }
+            let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+                "workspace": null, "bindings": [binding]});
+            human("doctor", &report).lines().last().unwrap().to_string()
+        };
+        assert_eq!(
+            line(Some(json!("max"))),
+            "Binding Demo Project -> claude (lean), effort max: ok"
+        );
+        // No level set (the executor's own setting applies), or a host from before the field.
+        assert_eq!(
+            line(Some(Value::Null)),
+            "Binding Demo Project -> claude (lean): ok"
+        );
+        assert_eq!(line(None), "Binding Demo Project -> claude (lean): ok");
+        // What the host sends is cleaned like everything else.
+        assert_eq!(
+            line(Some(json!("m\u{1b}ax"))),
+            "Binding Demo Project -> claude (lean), effort m ax: ok"
         );
     }
 

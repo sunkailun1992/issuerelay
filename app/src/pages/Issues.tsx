@@ -41,6 +41,8 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
           return t("issues.waiting.directory_missing", { directory: cleanDisplayText(status.reason.directory).trim() });
         case "executor_not_ready":
           return t("issues.waiting.executor_not_ready", { executor: t(`executor.${status.reason.executor}`) });
+        case "lean_not_ready":
+          return t("issues.waiting.lean_not_ready", { executor: t(`executor.${status.reason.executor}`) });
       }
   }
 }

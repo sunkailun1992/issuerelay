@@ -916,6 +916,8 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 
 2026-10-20 的小项清理（PR #8）认领了「最终评审」与「逐任务评审」两张表里属于测试、注释与小改动的各行；每行的「认领」一栏写明做了什么，没做的写明原因；推送后做了一次独立评审，它找出的问题也在同一 PR 里修了。「留给所有者决定」与实机验收那张表没有动。
 
+2026-10-21 的第二次清理（PR #15）按所有者当天的决定，认领了「最终评审」表剩下的三行和「逐任务评审」表的 Codex Auth 一行，并查了实机验收表的 N5；`memory_paths` 与面板一键修复两行，所有者确认维持不做。查 N5 引出的一个新问题（执行者检查失败时程序日志不记）与复审提出的一个（Claude 靠固定请求头连上的 Linear 服务）加进了「留给所有者决定」表，未定。
+
 **留给所有者决定**
 
 | 内容 | 建议 |
@@ -926,22 +928,24 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 | 用户设置的 `env` 里设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，它盖过命令行的 `--effort`：不精简的运行读用户设置，IssueRelay 设的推理力度不生效，设计第 5.6 节「不精简时它会盖过用户设置里的推理力度」对这种设法不成立（实机验收 N2） | 在设计第 5.6 节、帮助与 README 里写明这个例外；IssueRelay 不改用户的设置。**已定（2026-10-20，所有者让主智能体决定）**：照建议只写进文档：精简运行设计第 5.6 节与 README（v0.2.0 的发布说明已写） |
 | 需求要求先等一会儿时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束，单独的前台 `sleep` 又被 Claude Code 拦下（实机验收 N4） | 提示词加一条「要等的命令放在前台，不要放到后台」（提示词固定规则属极高风险，要单独决定）；或者不改，在帮助里写明。**已定（2026-10-20，所有者让主智能体决定）**：不改提示词，写进 README 的安全须知（改固定规则要另做实机验证） |
 | 开发宿主从 Claude Code 会话的终端启动时，执行者继承这个会话的环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_CHILD_SESSION` 等）；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。托盘程序由 launchd 启动，不受影响（实机验收 N3） | 再去掉 Claude Code 会话自己的变量；`ANTHROPIC_BASE_URL` 一类可能是用户的网关，不能一概去掉。**已定（2026-10-20，所有者让主智能体决定）**：不改 `ExecEnv`，在测试规范「实机验收规则」写明用 `env -i` 启动开发宿主 |
+| 执行者检查由就绪变成未就绪时，宿主的程序日志什么都不记（2026-10-21 查 N5 时发现：那一次的原因只在 `doctor` 的执行者几行里，验收时又被过滤掉了） | 在宿主日志里记一条带问题的警告，只在就绪与否变化时记，免得每次检查都记；或维持现状，`doctor` 的执行者几行已经写明原因。未定 |
+| Claude 的 `linear-server` 靠用户配置里固定的请求头连上、又没有存 OAuth 登录时，`mcp list` 照样显示 Connected，精简判为可用，精简运行里 Linear 应当会要求授权（设计第 7 节的已知限制，推测，未实测；复审 2026-10-21 提出） | 把运行开头的核对（设计第 8 节）改为要求 `linear-server` 的状态是 `connected`，在开头拦下并写明原因；或维持现状（第 8 节：状态不管，AI 照常报失败）。要先在沙箱上看清 `init` 里这时的状态。未定 |
 
 **最终评审接受的遗留项**
 
 | 内容 | 认领 |
 |---|---|
-| 精简运行设计第 6.2 节说 `bind list` 与 `doctor` 的绑定行都写精简生效值与推理力度；实际 `bind list` 只能写 `lean off` 与 `effort <值>`（原始绑定分不出「不适用」），`doctor` 的绑定行有精简状态、没有推理力度（`BindingReport` 没有 `effort`） | 下次改设计或命令行时：改第 6.2 节的说法，或给 `BindingReport` 加 `effort`。小项清理没做：两条路都改设计说的行为，留给所有者定 |
+| 精简运行设计第 6.2 节说 `bind list` 与 `doctor` 的绑定行都写精简生效值与推理力度；实际 `bind list` 只能写 `lean off` 与 `effort <值>`（原始绑定分不出「不适用」），`doctor` 的绑定行有精简状态、没有推理力度（`BindingReport` 没有 `effort`） | 已做（PR #15，所有者 2026-10-21 定两条一起做）：`BindingReport` 加 `effort`（绑定自己的，否则设置的默认值；都没设时为 `null`），`doctor` 的绑定一行写 `, effort <值>`；第 6.2 节改成照实现写：`bind list` 只写与默认不同的设定，`doctor` 写精简的生效值与推理力度 |
 | 第 8 节举的是「AI 的消息、工具调用或结果」，代码在 `init` 之前遇到任何不是 `system` 的事件都判违规（失败即关闭，与第 8 节第一句一致） | 已做（随 v0.2.1）：第 8 节改为「任何不是 `system` 的事件」，并记下实机验收里精简运行在 `init` 之前什么事件都没有 |
-| 跑完的运行看不出当时是不是精简的：只有被拦下的运行在原因里写明 | 精简运行在运行日志开头写一行固定说明；长期并入 M2 遗留 N3（结构化原因）。小项清理没做：说明怎样写、是否等 N3，留给所有者；被拦下的运行现在多了一行说明（见下表「运行日志开头的说明」一行） |
-| 精简绑定只差精简检查时，等待原因仍是通用的「执行者未就绪」，而环境检查页前三项全绿 | 加一个「精简运行未就绪」的等待原因（改 IPC 视图的 JSON，单独提交），或在发布说明里写清。小项清理没做：要改 IPC 视图或定发布说明，留给所有者 |
+| 跑完的运行看不出当时是不是精简的：只有被拦下的运行在原因里写明 | 已做（PR #15，所有者 2026-10-21 定不等 N3）：每条精简运行的日志开头写一行 `runner` 流的固定说明，以 `lean run: ` 开头，Claude 与 Codex 各一句（`executor::lean::log_note`）；用户级 `CLAUDE.md` 传不过去时，那一行说明排在它后面。结构化原因仍留给 N3 |
+| 精简绑定只差精简检查时，等待原因仍是通用的「执行者未就绪」，而环境检查页前三项全绿 | 已做（PR #15 里单独一个提交，所有者 2026-10-21 定）：`WaitReason::LeanNotReady`，面板代码 `lean_not_ready`（五种语言），运行记录、命令行与 MCP 控制服务写 `executor <名字> is not ready for lean runs`；平常检查也没过的仍是 `executor_not_ready` |
 | `RunDetail.test.tsx` 没有 `lean run did not take effect: …` 原因的显示用例（走现有的原因细节行，行为应当正确） | 已做（PR #8）：`a lean run that did not take effect fails like any other run, the engine's words under the headline` |
 
 **实机验收（2026-10-20）接受的遗留项**
 
 | 内容 | 认领 |
 |---|---|
-| 用 `issuerelay bind add` 改完绑定后马上运行 `doctor`，两个绑定都报 `executor not ready`，几秒后再查就正常（实机验收 N5） | 查清原因：猜测是配置变了以后，就绪检查重做期间给出了空结果 |
+| 用 `issuerelay bind add` 改完绑定后马上运行 `doctor`，两个绑定都报 `executor not ready`，几秒后再查就正常（实机验收 N5） | 查过（2026-10-21），与配置变更无关，没有改代码：`bind add` 只保存配置并发出 `EngineEvent::Config`（只有面板订阅），不碰就绪检查的缓存；`doctor` 每次都重新检查（`executor_reports(true)`），绑定一行用的就是同一份结果。当时（10-20 03:38:58Z）的输出只留了 `^Binding` 两行：一个按完整配置、一个按精简判定，都报未就绪，说明那一次 Claude 的平常检查（登录或 `mcp list`）本身失败了；原因在被滤掉的执行者几行里，宿主日志也不记执行者检查的失败。8 秒后开始的下一次检查全部就绪。下次遇到先看 `doctor` 未过滤的执行者几行或 `--json`；要不要在执行者检查由就绪变成未就绪时写一条程序日志，见「留给所有者决定」表的最后一行 |
 
 **逐任务评审接受的遗留项**
 
@@ -957,11 +961,11 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 | 测试没有钉住：精简停止时整棵进程树被结束（可比照 `an_escaped_grandchild_is_ended_on_cancel`）；`spec.env` 盖过 `ExecEnv::apply` 设的同名变量；`LeanCheck` 的缺 `type`、`result` 早于 `init`、Codex 缺 `server` 三种情形 | 已做（PR #8）：`an_escaped_grandchild_is_ended_when_lean_stops_the_run`（假执行者加了 `wait_for` 一步）、`the_runs_own_variables_win_over_the_executor_environment`、`an_event_without_a_type_before_init_is_a_violation`、`a_result_before_init_is_a_violation`、`a_codex_call_that_names_no_server_is_a_violation` |
 | 排空阶段不再核对（计划的决定）：执行者退出时还在队列里的违规行只写进日志，Codex 的运行这时按现有规则判定 | 已做（PR #8）：照这个改；因别的原因停下的运行保留原来的结束方式。测试 `a_violation_read_after_the_executor_exited_still_fails_a_lean_run`（Unix；假执行者加了 `late_out` 一步：Windows 上运行器在退出后马上结束 Job Object，晚到的那个进程随之结束，造不出这种情形）；独立评审后另补两个分支：`a_clean_lean_run_whose_result_comes_after_the_exit_passes`（排空沿用主循环的核对，干净运行的结果在排空里不算违规）与 `the_violation_that_stopped_a_lean_run_is_the_one_it_keeps`（已被拦下的运行在排空里再读到违规，原因与说明都不变） |
 | 运行日志开头的说明用 `stream: "stderr"`，面板时间线把它显示成执行者的标准错误；拦下时也没有一行 IssueRelay 自己的说明 | 已做（PR #8）：开头的说明改用 `runner` 流，去掉 `[IssueRelay] ` 前缀；拦下时补一行 `lean run did not take effect: <细节>; stopping the run`，排空时才判定的写 `…; the executor had already exited`；`AI_CODING_GUIDE.md` 第 6 节的运行日志一行同步 |
-| `memory_paths` 里不是字符串的值（例如 `{"auto": true}`）会放行 | 若有执行者这样写再改。小项清理没做：这个条件还没出现 |
-| Codex 的 `mcp list` 一行 Auth 栏是 `Bearer token` 或 `Unsupported` 时，精简的 Linear 判定也算可用；精简运行丢掉用户配置，只有已存的 OAuth 能用，`required=true` 会让运行一开始就退出 | 沙箱核对 codex-cli 0.159.2 的 Auth 栏含义后，精简判定要求 `OAuth`；Claude 一侧可另要求 `(HTTP)`。小项清理没做：要先在沙箱上实测，再改判定，留给所有者 |
+| `memory_paths` 里不是字符串的值（例如 `{"auto": true}`）会放行 | 若有执行者这样写再改。小项清理没做：这个条件还没出现。2026-10-21 所有者确认维持不做：收紧以后，执行者万一改用别的值表示关闭，会拦下所有精简运行 |
+| Codex 的 `mcp list` 一行 Auth 栏是 `Bearer token` 或 `Unsupported` 时，精简的 Linear 判定也算可用；精简运行丢掉用户配置，只有已存的 OAuth 能用，`required=true` 会让运行一开始就退出 | 已做（PR #15，所有者 2026-10-21 定先读源码、实机核对后补）：按 codex-cli 0.159.2 的源码（2026-10-21 读），Auth 栏只在存着可用的 OAuth 登录时是 `OAuth`，配置里设了 token 时总是 `Bearer token`；精简判定改为要求 `OAuth`。精简问题写明这一栏显示什么：`Bearer token` 时建议删掉配置里的 token 再 `codex mcp login linear`（只登录、不删 token 解不开，独立评审发现），其他情形建议直接登录，或关掉精简；设了 token 又另存了 OAuth 登录的，判定偏保守。Claude 一侧不加 `(HTTP)`：Claude Code 按服务名保存登录（设计第 4.2 节），连接类型不影响；但 Claude 有同类的已知限制（靠固定请求头连上、没存 OAuth 登录时 `mcp list` 照样 Connected），写进设计第 7 节，没有改。可能的后续：让 Codex 的这项检查用精简运行自己的配置跑 `mcp list`，Auth 栏就等于精简运行实际看到的（要先在沙箱上核对能不能这样跑）。实机核对见下面「待实机的检查」 |
 | Codex 用 API key 登录时 `login status` 可能印出遮罩过的 key（`Logged in using an API key - <遮罩>`，仓库里没有样本），它会进精简问题的文字 | 已做（PR #8）：codex-cli 0.159.2 的源码印的是前 8 位与后 5 位；精简问题只写开头的词（到第一个既不是字母也不是空格的字符为止，所以 ` - ` 之后的遮罩 key 不写，以后换了印法也不写；什么都不剩时写 `an unknown method`），两次登录仍整段比较，换了 key 的写 `would sign in with an api key, but not the one usual runs use`。测试 `a_lean_problem_names_a_codex_api_key_login_without_the_key`、`a_codex_sign_in_is_shown_by_the_words_it_starts_with` |
 | 几条裁定没有测试钉住：`mcp list` 崩溃时不加精简问题；平常登录为否时不做精简登录比较；`lean_linear_needs_the_exact_name_and_url` 没有 `plugin:` 前缀的反例；`codex_custom_providers_are_found` 没有「顶层与档案都设了」的情形 | 已做（PR #8）：`a_crashed_mcp_list_adds_no_lean_problem`、`a_usual_login_that_says_logged_out_is_not_compared_for_lean_runs`，另两个测试各补了反例与情形 |
-| 面板的精简一节没有一键修复按钮：报告分不清「缺这个服务」与「这个名字指向别的网址」 | 要做时给 `ExecutorReport` 加一个结构化的精简 Linear 结论。小项清理没做：这是新功能，留给所有者 |
+| 面板的精简一节没有一键修复按钮：报告分不清「缺这个服务」与「这个名字指向别的网址」 | 要做时给 `ExecutorReport` 加一个结构化的精简 Linear 结论。小项清理没做：这是新功能，留给所有者。2026-10-21 所有者确认这次不做 |
 
 **待实机的检查**
 
@@ -969,3 +973,4 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 - 还要在 Windows 上做：设计第 5.5 节与第 11 节第 7 项，包括 `claudeMdExcludes` 的排除（glob 字符、Windows 反斜杠），以及 Windows 上 `dirs::home_dir()` 与 Node 的 `os.homedir()`（先看 `USERPROFILE`）是否一致。
 - `~/.claude` 是符号链接时的排除：验收那台机器不是符号链接，没有测。
 - 已核对：`1b45f15` 的 CI（Windows）日志里，`.cmd` 往返测试 `json_arguments_survive_npm_and_pnpm_style_cmd_shims` 是 `ok`，跑过，没有跳过。
+- PR #15（2026-10-21）待实机，只在沙箱上做：精简运行日志开头的那一行（Claude、Codex 各一次，看面板时间线与 `issuerelay logs`）；只差精简检查时，需求列表显示「精简运行未就绪」；Codex 的 Auth 栏：只有 OAuth 登录时精简可用，配置里设了 bearer token 时出现新的精简问题，照它的建议做完以后问题消失；`doctor` 绑定一行的 `, effort <值>`。不在本机改用户的执行者配置去制造；要碰钥匙串（例如换一个 `CODEX_HOME` 让 Codex 读已存的登录）时等所有者在场。

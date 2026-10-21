@@ -912,6 +912,8 @@ async fn a_host_gives_lean_runs_the_users_own_folders() {
             .or_else(|| dirs::home_dir().map(|home| home.join(".claude").join("CLAUDE.md")))
             .expect("the test user has a home folder");
         let settings = spec.args.iter().position(|a| a == "--settings");
+        // The log opens with the lean note; a path that cannot be passed adds a second one.
+        assert!(spec.notes[0].starts_with("lean run: "), "{:?}", spec.notes);
         if issuerelay_core::executor::lean::passable(&instructions) {
             let settings: serde_json::Value =
                 serde_json::from_str(&spec.args[settings.expect("--settings") + 1]).unwrap();
@@ -919,9 +921,10 @@ async fn a_host_gives_lean_runs_the_users_own_folders() {
                 settings["claudeMdExcludes"][0].as_str(),
                 instructions.to_str()
             );
+            assert_eq!(spec.notes.len(), 1, "{:?}", spec.notes);
         } else {
             assert_eq!(settings, None, "{:?}", spec.args);
-            assert_eq!(spec.notes.len(), 1, "{:?}", spec.notes);
+            assert_eq!(spec.notes.len(), 2, "{:?}", spec.notes);
         }
     })
     .await;

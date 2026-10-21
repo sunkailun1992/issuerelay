@@ -90,6 +90,26 @@ pub fn codex_args() -> Vec<String> {
     args
 }
 
+/// The line IssueRelay writes at the top of every lean run's log, so that a run that went
+/// through shows it was lean too, not only one stopped for it. It says what the run was started
+/// with, which a run stopped because lean did not take effect contradicts in a later line. The
+/// repository's own hooks and the plugins its settings enable still load (lean-run design, L2).
+/// Codex's does not claim the repository's settings, because a lean Codex run does not apply the
+/// project's `.codex/` layer either, and it still reads the user-level `AGENTS.md` (section 5.2).
+pub fn log_note(kind: ExecutorKind) -> &'static str {
+    match kind {
+        ExecutorKind::Claude => {
+            "lean run: started with only the Linear MCP server and the repository's own \
+             settings; none of the user's own settings, plugins or hooks, and no auto memory"
+        }
+        ExecutorKind::Codex => {
+            "lean run: started with only the Linear MCP server, without the user's Codex \
+             configuration, hooks, plugins, apps or memories; the user-level AGENTS.md is still \
+             read"
+        }
+    }
+}
+
 /// Where Claude Code keeps the user-level `CLAUDE.md`: in `CLAUDE_CONFIG_DIR` when that is set,
 /// otherwise in `.claude` in the home folder; `None` when neither is known. The file need not
 /// exist: leaving out a missing file changes nothing.

@@ -25,7 +25,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::config::{Binding, Config, ExecutorKind, LeanStatus, TriggerNames};
+use crate::config::{Binding, Config, Effort, ExecutorKind, LeanStatus, TriggerNames};
 use crate::env::{ExecEnv, SharedEnv, Sources};
 use crate::executor;
 use crate::executor::lean::{CLAUDE_LINEAR_SERVER, CODEX_LINEAR_SERVER};
@@ -885,11 +885,36 @@ pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool 
 /// a line whose server name is exactly `CLAUDE_LINEAR_SERVER` / `CODEX_LINEAR_SERVER`, whose URL
 /// is exactly `LINEAR_MCP_URL`, and whose status is usable as `mcp_list_has_linear` reads it. A
 /// lean run reuses the sign-in stored under that name (measured: see the two constants); another
-/// server, claude.ai's Linear connector among them, is not loaded.
+/// server, claude.ai's Linear connector among them, is not loaded. Codex's line must also show
+/// `OAuth` as its sign-in (`codex_lean_sign_in_usable`).
 pub fn mcp_list_has_lean_linear(kind: ExecutorKind, stdout: &str) -> bool {
     let stdout = strip_ansi(stdout);
-    lean_linear_line(kind, &stdout)
-        .is_some_and(|(url, line)| url == LINEAR_MCP_URL && line_usable(kind, line))
+    lean_linear_line(kind, &stdout).is_some_and(|(url, line)| {
+        url == LINEAR_MCP_URL
+            && line_usable(kind, line)
+            && (kind != ExecutorKind::Codex || codex_lean_sign_in_usable(line))
+    })
+}
+
+/// The sign-in a Codex `mcp list` line shows for an enabled HTTP server, in its last column: the
+/// words after the URL, the bearer token variable (`-` when there is none) and the status. In
+/// codex-cli 0.159.2 that is `OAuth`, `Bearer token`, `Not logged in`, `Unsupported` or
+/// `Unknown` (its source, read 2026-10-21: `McpAuthStatus` and rmcp-client's `auth_status.rs`).
+fn codex_sign_in(line: &str) -> String {
+    line.split_whitespace()
+        .skip_while(|token| !is_linear_url(token))
+        .skip(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a lean Codex run can sign in to the server of this line. It leaves out the user's
+/// configuration, so a bearer token variable or an `Authorization` header set there does not
+/// reach it, and only a stored OAuth sign-in for that name and URL does. codex-cli 0.159.2 shows
+/// `OAuth` exactly when one is stored and usable, and `Bearer token` whenever the configuration
+/// sets a token, stored sign-in or not (its source, read 2026-10-21).
+fn codex_lean_sign_in_usable(line: &str) -> bool {
+    codex_sign_in(line) == "OAuth"
 }
 
 /// The server lean runs load in `kind`.
@@ -922,7 +947,8 @@ fn server_and_target(kind: ExecutorKind, line: &str) -> Option<(&str, &str)> {
 
 /// The lean problem when `mcp list` ran without showing the Linear server lean runs load
 /// usable: it is missing, or its name points elsewhere (then adding it would fail, so only the
-/// reason is given), or what its line says.
+/// reason is given), or Codex's line shows a sign-in lean runs cannot use (with what to do about
+/// it), or what its line says.
 fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
     let name = kind.program_name();
     let server = lean_server_name(kind);
@@ -943,6 +969,35 @@ fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
              {LINEAR_MCP_URL}; change it yourself or turn lean runs off for this binding",
             clean(target)
         ),
+        // Usable for usual runs, which read the configuration that holds a token, but not for
+        // lean ones.
+        Some((_, line)) if kind == ExecutorKind::Codex && line_usable(kind, line) => {
+            match clean(&codex_sign_in(line)) {
+                // Signing in alone would not change the column: codex-cli 0.159.2 says `Bearer
+                // token` whenever the configuration sets a token, before it looks for a stored
+                // sign-in, and `mcp login` stores one all the same (its source, read 2026-10-21).
+                sign_in if sign_in == "Bearer token" => format!(
+                    "the Linear MCP server `{server}` in {name} signs in with a token from \
+                     {name}'s configuration (`Bearer token`), which lean runs leave out; to use \
+                     lean runs, remove the token from its entry (`bearer_token_env_var` or an \
+                     `Authorization` header) and sign in with `{name} mcp login {server}`, or \
+                     turn lean runs off for this binding"
+                ),
+                sign_in => {
+                    let shown = if sign_in.is_empty() {
+                        "no sign-in".to_string()
+                    } else {
+                        format!("`{sign_in}` as its sign-in")
+                    };
+                    format!(
+                        "the Linear MCP server `{server}` in {name} shows {shown}, but lean runs \
+                         leave out {name}'s configuration and can only use a stored OAuth \
+                         sign-in; sign in with `{name} mcp login {server}`, or turn lean runs off \
+                         for this binding"
+                    )
+                }
+            }
+        }
         Some((_, line)) => match clean(&line_status(kind, line)) {
             status if status.is_empty() => {
                 format!("the Linear MCP server `{server}` in {name} is not connected")
@@ -1194,6 +1249,11 @@ pub struct BindingReport {
     pub executor_ready: bool,
     /// Whether the binding's runs are lean, or why not.
     pub lean: LeanStatus,
+    /// The reasoning effort IssueRelay passes to its runs: its own, else the settings' default;
+    /// `None` when neither sets one (the executor's own setting applies). In a Claude run that is
+    /// not lean, `CLAUDE_CODE_EFFORT_LEVEL` in the user settings' `env` wins over it (lean-run
+    /// design, section 5.6).
+    pub effort: Option<Effort>,
 }
 
 /// One report per binding, in configuration order. `ready` is what `ready_set` gives; `home` is
@@ -1211,6 +1271,7 @@ pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> V
                 executor,
                 executor_ready: ready.ready(executor, lean),
                 lean,
+                effort: cfg.effort_for(b),
             }
         })
         .collect()
@@ -2653,6 +2714,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn binding_reports_carry_the_effort_issuerelay_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.settings.default_effort = Some(Effort::High);
+        for (project, effort) in [("proj-1", Some(Effort::Max)), ("proj-2", None)] {
+            cfg.bindings.push(crate::config::Binding {
+                id: project.into(),
+                project_id: project.into(),
+                project_name: "Demo Project".into(),
+                directory: dir.path().to_path_buf(),
+                executor: None,
+                permission: None,
+                model: None,
+                prompt_override: None,
+                lean: true,
+                effort,
+            });
+        }
+        let effort = |cfg: &Config, index: usize| {
+            let reports = check_bindings(cfg, &Readiness::default(), None);
+            serde_json::to_value(&reports[index]).unwrap()["effort"].clone()
+        };
+        // The binding's own level, else the default from the settings, named as the settings
+        // and `bind list` name it.
+        assert_eq!(effort(&cfg, 0), serde_json::json!("max"));
+        assert_eq!(effort(&cfg, 1), serde_json::json!("high"));
+        // Neither set: the executor's own setting applies, and the report names no level.
+        cfg.settings.default_effort = None;
+        assert_eq!(effort(&cfg, 1), serde_json::Value::Null);
+    }
+
     /// The lean checks of the tests: a folder in `dir` (the check makes it; the fake runner never
     /// enters it) and no Codex configuration file.
     fn lean_paths(dir: &tempfile::TempDir) -> LeanCheckPaths {
@@ -2727,6 +2820,102 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn lean_runs_take_codexs_linear_server_only_with_a_stored_oauth_sign_in() {
+        // As codex-cli 0.159.2 prints the table of HTTP servers: every cell padded to the widest
+        // in its column (docs/gates/samples/m0/executors/codex-mcp-list.txt).
+        let table = |token: &str, auth: &str| {
+            format!(
+                "Name    Url                         Bearer Token Env Var  Status   Auth\n\
+                 linear  https://mcp.linear.app/mcp  {token:<20}  enabled  {auth:<12}\n"
+            )
+        };
+        assert!(mcp_list_has_lean_linear(
+            ExecutorKind::Codex,
+            &table("-", "OAuth")
+        ));
+        for (token, auth) in [
+            ("DEMO_TOKEN", "Bearer token"),
+            ("-", "Bearer token"),
+            ("-", "Unsupported"),
+            ("-", "Unknown"),
+            // A column after it: the sign-in is no longer the whole of what follows the status.
+            ("-", "OAuth  extra"),
+        ] {
+            let listed = table(token, auth);
+            assert!(
+                !mcp_list_has_lean_linear(ExecutorKind::Codex, &listed),
+                "{listed}"
+            );
+            // Usual runs read the configuration that holds the token: they stay ready.
+            assert!(
+                mcp_list_has_linear(ExecutorKind::Codex, &listed),
+                "{listed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_codex_linear_server_without_an_oauth_sign_in_says_what_lean_runs_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut replies = codex_replies(out(0, "Logged in using ChatGPT"));
+        replies[3] = (
+            "mcp list",
+            out(
+                0,
+                "linear  https://mcp.linear.app/mcp  DEMO_TOKEN  enabled  Bearer token",
+            ),
+        );
+        let (report, complete) =
+            lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert!(
+            complete && report.ready() && !report.ready_lean(),
+            "{report:?}"
+        );
+        // Signing in alone would not do: the column says `Bearer token` while the configuration
+        // sets a token, stored sign-in or not.
+        assert_eq!(
+            report.lean_problems,
+            [
+                "the Linear MCP server `linear` in codex signs in with a token from codex's \
+                 configuration (`Bearer token`), which lean runs leave out; to use lean runs, \
+                 remove the token from its entry (`bearer_token_env_var` or an `Authorization` \
+                 header) and sign in with `codex mcp login linear`, or turn lean runs off for \
+                 this binding"
+            ]
+        );
+        replies[3] = (
+            "mcp list",
+            out(
+                0,
+                "linear  https://mcp.linear.app/mcp  -  enabled  Unsupported",
+            ),
+        );
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert_eq!(
+            report.lean_problems,
+            [
+                "the Linear MCP server `linear` in codex shows `Unsupported` as its sign-in, but \
+                 lean runs leave out codex's configuration and can only use a stored OAuth \
+                 sign-in; sign in with `codex mcp login linear`, or turn lean runs off for this \
+                 binding"
+            ]
+        );
+        // A Codex that stopped printing the column is not taken at its word either.
+        replies[3] = (
+            "mcp list",
+            out(0, "linear  https://mcp.linear.app/mcp  -  enabled"),
+        );
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report.lean_problems[0].starts_with(
+                "the Linear MCP server `linear` in codex shows no sign-in, but lean runs leave out"
+            ),
+            "{report:?}"
+        );
     }
 
     #[tokio::test]

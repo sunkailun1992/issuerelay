@@ -245,7 +245,8 @@
     "waiting": {
       "project_not_bound": "專案尚未綁定本機資料夾",
       "directory_missing": "綁定的資料夾 {{directory}} 不存在",
-      "executor_not_ready": "{{executor}} 尚未就緒，請查看環境檢查"
+      "executor_not_ready": "{{executor}} 尚未就緒，請查看環境檢查",
+      "lean_not_ready": "{{executor}} 的精簡執行尚未就緒，請查看環境檢查"
     },
     "load_failed": "無法從 Linear 讀取需求",
     "open_guide": "開啟引導",

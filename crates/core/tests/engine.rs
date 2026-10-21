@@ -5327,6 +5327,14 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
             },
             serde_json::json!({"kind": "waiting", "reason": {"code": "executor_not_ready", "executor": "claude"}}),
         ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::LeanNotReady {
+                    executor: ExecutorKind::Codex,
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "lean_not_ready", "executor": "codex"}}),
+        ),
         (IssueStatus::Paused, serde_json::json!({"kind": "paused"})),
     ];
     for (status, json) in shapes {
@@ -5516,6 +5524,14 @@ fn auto_memory_off() -> Vec<(String, String)> {
     vec![(AUTO_MEMORY_OFF.0.to_string(), AUTO_MEMORY_OFF.1.to_string())]
 }
 
+/// The first line of every lean run's log, so that a finished run shows it was lean.
+const CLAUDE_LEAN_NOTE: &str = "lean run: started with only the Linear MCP server and the \
+    repository's own settings; none of the user's own settings, plugins or hooks, and no auto \
+    memory";
+const CODEX_LEAN_NOTE: &str = "lean run: started with only the Linear MCP server, without the \
+    user's Codex configuration, hooks, plugins, apps or memories; the user-level AGENTS.md is \
+    still read";
+
 #[tokio::test]
 async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
     let home = tempfile::tempdir().unwrap();
@@ -5526,7 +5542,7 @@ async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
     let instructions = home.path().join(".claude").join("CLAUDE.md");
     assert_eq!(excluded(&spec).as_deref(), instructions.to_str());
     assert_eq!(spec.env, auto_memory_off());
-    assert!(spec.notes.is_empty(), "{:?}", spec.notes);
+    assert_eq!(spec.notes, [CLAUDE_LEAN_NOTE]);
 }
 
 // The next three know no home folder: a lean Claude run would then get a note, which these runs
@@ -5612,7 +5628,10 @@ async fn a_lean_binding_waits_while_its_executor_is_not_ready_for_lean_runs() {
     h.settle().await;
     let job = h.latest("1");
     assert_eq!(job.state, JobState::WaitingBinding);
-    assert_eq!(job.reason.as_deref(), Some("executor claude is not ready"));
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("executor claude is not ready for lean runs")
+    );
     assert!(h.runner.started().is_empty());
     let report = h.engine.doctor().await;
     assert_eq!(report.bindings[0].lean, LeanStatus::On);
@@ -5669,7 +5688,10 @@ async fn an_unpassable_home_leaves_a_note_and_no_settings_argument() {
     assert!(has(&spec, "--strict-mcp-config"));
     assert_eq!(
         spec.notes,
-        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"
+        ]
     );
 }
 
@@ -5686,7 +5708,10 @@ async fn an_unpassable_claude_config_dir_leaves_a_note_too() {
     assert_eq!(excluded(&spec), None);
     assert_eq!(
         spec.notes,
-        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"
+        ]
     );
 }
 
@@ -5698,7 +5723,10 @@ async fn without_a_home_a_lean_claude_run_leaves_a_note() {
     assert_eq!(excluded(&spec), None);
     assert_eq!(
         spec.notes,
-        ["could not tell where the user-level CLAUDE.md is, so this lean run may still read it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "could not tell where the user-level CLAUDE.md is, so this lean run may still read it"
+        ]
     );
 }
 
@@ -5713,7 +5741,8 @@ async fn a_codex_lean_binding_starts_with_the_codex_lean_arguments() {
     assert!(has(&spec, "--ignore-user-config"), "{:?}", spec.args);
     assert!(has(&spec, "mcp_servers.linear.required=true"));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
-    assert!(spec.env.is_empty() && spec.notes.is_empty());
+    assert!(spec.env.is_empty());
+    assert_eq!(spec.notes, [CODEX_LEAN_NOTE]);
 }
 
 #[tokio::test]
