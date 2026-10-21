@@ -5516,6 +5516,12 @@ fn auto_memory_off() -> Vec<(String, String)> {
     vec![(AUTO_MEMORY_OFF.0.to_string(), AUTO_MEMORY_OFF.1.to_string())]
 }
 
+/// The first line of every lean run's log, so that a finished run shows it was lean.
+const CLAUDE_LEAN_NOTE: &str = "lean run: only the Linear MCP server and the repository's own \
+    settings; no user-level settings, plugins, hooks or auto memory";
+const CODEX_LEAN_NOTE: &str = "lean run: only the Linear MCP server; the user's Codex \
+    configuration, hooks, plugins, apps and memories are left out";
+
 #[tokio::test]
 async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
     let home = tempfile::tempdir().unwrap();
@@ -5526,7 +5532,7 @@ async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
     let instructions = home.path().join(".claude").join("CLAUDE.md");
     assert_eq!(excluded(&spec).as_deref(), instructions.to_str());
     assert_eq!(spec.env, auto_memory_off());
-    assert!(spec.notes.is_empty(), "{:?}", spec.notes);
+    assert_eq!(spec.notes, [CLAUDE_LEAN_NOTE]);
 }
 
 // The next three know no home folder: a lean Claude run would then get a note, which these runs
@@ -5669,7 +5675,10 @@ async fn an_unpassable_home_leaves_a_note_and_no_settings_argument() {
     assert!(has(&spec, "--strict-mcp-config"));
     assert_eq!(
         spec.notes,
-        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"
+        ]
     );
 }
 
@@ -5686,7 +5695,10 @@ async fn an_unpassable_claude_config_dir_leaves_a_note_too() {
     assert_eq!(excluded(&spec), None);
     assert_eq!(
         spec.notes,
-        ["the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "the user-level CLAUDE.md path cannot be passed safely, so this lean run still reads it"
+        ]
     );
 }
 
@@ -5698,7 +5710,10 @@ async fn without_a_home_a_lean_claude_run_leaves_a_note() {
     assert_eq!(excluded(&spec), None);
     assert_eq!(
         spec.notes,
-        ["could not tell where the user-level CLAUDE.md is, so this lean run may still read it"]
+        [
+            CLAUDE_LEAN_NOTE,
+            "could not tell where the user-level CLAUDE.md is, so this lean run may still read it"
+        ]
     );
 }
 
@@ -5713,7 +5728,8 @@ async fn a_codex_lean_binding_starts_with_the_codex_lean_arguments() {
     assert!(has(&spec, "--ignore-user-config"), "{:?}", spec.args);
     assert!(has(&spec, "mcp_servers.linear.required=true"));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
-    assert!(spec.env.is_empty() && spec.notes.is_empty());
+    assert!(spec.env.is_empty());
+    assert_eq!(spec.notes, [CODEX_LEAN_NOTE]);
 }
 
 #[tokio::test]

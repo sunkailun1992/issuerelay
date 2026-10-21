@@ -1402,6 +1402,9 @@ impl Engine {
             }),
         };
         let mut spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
+        if lean_run {
+            spec.notes.push(lean::log_note(kind).into());
+        }
         if lean_run && kind == ExecutorKind::Claude && passable.is_none() {
             spec.notes.push(if instructions.is_some() {
                 "the user-level CLAUDE.md path cannot be passed safely, so this lean run still \
