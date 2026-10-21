@@ -5327,6 +5327,14 @@ async fn events_and_issue_statuses_have_the_json_shape_the_panel_reads() {
             },
             serde_json::json!({"kind": "waiting", "reason": {"code": "executor_not_ready", "executor": "claude"}}),
         ),
+        (
+            IssueStatus::Waiting {
+                reason: WaitReasonView::LeanNotReady {
+                    executor: ExecutorKind::Codex,
+                },
+            },
+            serde_json::json!({"kind": "waiting", "reason": {"code": "lean_not_ready", "executor": "codex"}}),
+        ),
         (IssueStatus::Paused, serde_json::json!({"kind": "paused"})),
     ];
     for (status, json) in shapes {
@@ -5618,7 +5626,10 @@ async fn a_lean_binding_waits_while_its_executor_is_not_ready_for_lean_runs() {
     h.settle().await;
     let job = h.latest("1");
     assert_eq!(job.state, JobState::WaitingBinding);
-    assert_eq!(job.reason.as_deref(), Some("executor claude is not ready"));
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("executor claude is not ready for lean runs")
+    );
     assert!(h.runner.started().is_empty());
     let report = h.engine.doctor().await;
     assert_eq!(report.bindings[0].lean, LeanStatus::On);

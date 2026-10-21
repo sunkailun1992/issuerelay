@@ -225,7 +225,7 @@ issuerelay/
 - 精简运行加载的 Linear 服务可用：名字正好是 `linear-server`（Codex：`linear`），网址正好是 `https://mcp.linear.app/mcp`，并且连通；
 - 精简时也已登录，并且登录方式与平常相同：Claude 在 IssueRelay 数据目录的空目录 `lean-check/` 里另跑 `claude --setting-sources project,local auth status`，`authMethod` 与 `apiProvider` 都要与平常那次相同；Codex 另跑 `codex -c cli_auth_credentials_store=file login status`，登录方式相同，并且 `config.toml` 没有设自定义的 `model_provider`。
 
-任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）；精简的两项不满足时给出原因和要运行的命令。
+任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）；精简的两项不满足时给出原因和要运行的命令。需求列表里的等待原因在执行者平常就绪、只差精简两项时写「精简运行未就绪」（2026-10-21）。
 
 四项检查同时进行（精简登录那条每次都跑；它没跑成只记为精简问题，不影响前三项的结论与缓存）。引擎按执行者分别缓存结果：确认的结果（包括「未安装」「未登录」）用 5 分钟；某项检查没跑成（超时、启动失败、输出读不懂）的执行者 60 秒后重查。「环境检查」页总是现查。检查命令在用户主目录、在自己的进程组（Windows：Job Object，同样不弹控制台窗口）里运行，超时连同它启动的进程一起结束；命令自身退出就算检查完成，它留在进程组里的进程（例如 `claude mcp list` 启动的 stdio MCP 服务器）随即结束，不等它们放开输出管道；「环境检查」页重查时同时重新读取 PATH 与代理。
 

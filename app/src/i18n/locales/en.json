@@ -245,7 +245,8 @@
     "waiting": {
       "project_not_bound": "Its project is not bound to a local folder",
       "directory_missing": "The bound folder {{directory}} does not exist",
-      "executor_not_ready": "{{executor}} is not ready; see the environment check"
+      "executor_not_ready": "{{executor}} is not ready; see the environment check",
+      "lean_not_ready": "{{executor}} is not ready for lean runs; see the environment check"
     },
     "load_failed": "Could not read the issues from Linear",
     "open_guide": "Open the guide",

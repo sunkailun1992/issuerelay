@@ -245,7 +245,8 @@
     "waiting": {
       "project_not_bound": "プロジェクトがローカルフォルダーに紐付けられていません",
       "directory_missing": "紐付けたフォルダー {{directory}} が存在しません",
-      "executor_not_ready": "{{executor}} の準備ができていません。環境チェックを確認してください"
+      "executor_not_ready": "{{executor}} の準備ができていません。環境チェックを確認してください",
+      "lean_not_ready": "{{executor}} の軽量実行の準備ができていません。環境チェックを確認してください"
     },
     "load_failed": "Linear から課題を読み込めませんでした",
     "open_guide": "ガイドを開く",

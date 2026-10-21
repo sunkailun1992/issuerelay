@@ -146,6 +146,8 @@ test("every verdict of the engine is said in the interface's words", async () =>
     [{ kind: "waiting", reason: { code: "directory_missing", directory: "~/code/missing" } }, "The bound folder ~/code/missing does not exist"],
     [{ kind: "waiting", reason: { code: "executor_not_ready", executor: "codex" } }, "Codex is not ready; see the environment check"],
     [{ kind: "waiting", reason: { code: "executor_not_ready", executor: "claude" } }, "Claude Code is not ready; see the environment check"],
+    [{ kind: "waiting", reason: { code: "lean_not_ready", executor: "claude" } }, "Claude Code is not ready for lean runs; see the environment check"],
+    [{ kind: "waiting", reason: { code: "lean_not_ready", executor: "codex" } }, "Codex is not ready for lean runs; see the environment check"],
     [{ kind: "not_todo", state: "In Review" }, "Its status is In Review, not Todo"],
   ];
   for (const [status, text] of cases) {
@@ -203,7 +205,7 @@ test("an issue whose run has ended still says what status stops the next check",
 test("the engine's codes are never shown as they are", async () => {
   await renderWithProviders(<Issues />, { backend: backendWhereDemo4Is({ kind: "waiting", reason: { code: "directory_missing", directory: "~/code/missing" } }) });
   await screen.findByText("DEMO-4");
-  expect(screen.queryByText(/directory_missing|project_not_bound|executor_not_ready/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/directory_missing|project_not_bound|executor_not_ready|lean_not_ready/)).not.toBeInTheDocument();
 });
 
 test("a folder name from the configuration is shown as text and cleaned", async () => {

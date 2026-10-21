@@ -98,7 +98,9 @@ export interface StatusView { status: StatusSnapshot; linear: LinearSetup }
 export type WaitReason =
   | { code: "project_not_bound" }
   | { code: "directory_missing"; directory: string }
-  | { code: "executor_not_ready"; executor: ExecutorKind };
+  | { code: "executor_not_ready"; executor: ExecutorKind }
+  /** Ready for usual runs, but the binding's runs are lean and the lean checks fail. */
+  | { code: "lean_not_ready"; executor: ExecutorKind };
 export type IssueStatus =
   /**
    * It meets every condition. `picked_up` is false only when its last run is over and Linear has not

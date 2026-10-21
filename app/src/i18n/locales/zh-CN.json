@@ -245,7 +245,8 @@
     "waiting": {
       "project_not_bound": "项目还没有绑定本地目录",
       "directory_missing": "绑定的目录 {{directory}} 不存在",
-      "executor_not_ready": "{{executor}} 还没有就绪，请看环境检查"
+      "executor_not_ready": "{{executor}} 还没有就绪，请看环境检查",
+      "lean_not_ready": "{{executor}} 的精简运行还没有就绪，请看环境检查"
     },
     "load_failed": "无法从 Linear 读取需求",
     "open_guide": "打开引导",

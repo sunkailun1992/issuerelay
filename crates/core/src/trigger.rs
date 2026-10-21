@@ -14,6 +14,8 @@ pub enum WaitReason {
     ProjectNotBound,
     DirectoryMissing(PathBuf),
     ExecutorNotReady(ExecutorKind),
+    /// The executor takes usual runs, but the binding's runs are lean and the lean checks fail.
+    LeanNotReady(ExecutorKind),
 }
 
 impl WaitReason {
@@ -27,6 +29,9 @@ impl WaitReason {
             WaitReason::ExecutorNotReady(kind) => {
                 format!("executor {} is not ready", kind.as_str())
             }
+            WaitReason::LeanNotReady(kind) => {
+                format!("executor {} is not ready for lean runs", kind.as_str())
+            }
         }
     }
 }
@@ -39,6 +44,7 @@ pub enum WaitReasonView {
     ProjectNotBound,
     DirectoryMissing { directory: String },
     ExecutorNotReady { executor: ExecutorKind },
+    LeanNotReady { executor: ExecutorKind },
 }
 
 impl WaitReason {
@@ -52,6 +58,7 @@ impl WaitReason {
             WaitReason::ExecutorNotReady(kind) => {
                 WaitReasonView::ExecutorNotReady { executor: *kind }
             }
+            WaitReason::LeanNotReady(kind) => WaitReasonView::LeanNotReady { executor: *kind },
         }
     }
 }
@@ -126,7 +133,13 @@ pub fn evaluate(
     }
     let kind = cfg.executor_for(binding);
     if !ready.ready(kind, cfg.lean_for(binding, home)) {
-        return Eligibility::Waiting(WaitReason::ExecutorNotReady(kind));
+        // Ready for usual runs, so only the lean checks hold this binding's runs back.
+        let reason = if ready.full.contains(&kind) {
+            WaitReason::LeanNotReady(kind)
+        } else {
+            WaitReason::ExecutorNotReady(kind)
+        };
+        return Eligibility::Waiting(reason);
     }
     Eligibility::Eligible(binding.clone())
 }
@@ -441,6 +454,10 @@ mod tests {
                 WaitReason::ExecutorNotReady(ExecutorKind::Codex),
                 serde_json::json!({"code": "executor_not_ready", "executor": "codex"}),
             ),
+            (
+                WaitReason::LeanNotReady(ExecutorKind::Claude),
+                serde_json::json!({"code": "lean_not_ready", "executor": "claude"}),
+            ),
         ];
         for (reason, json) in shapes {
             assert_eq!(serde_json::to_value(reason.view()).unwrap(), json);
@@ -470,12 +487,19 @@ mod tests {
             WaitReason::ExecutorNotReady(ExecutorKind::Codex).describe(),
             "executor codex is not ready"
         );
+        assert_eq!(
+            WaitReason::LeanNotReady(ExecutorKind::Claude).describe(),
+            "executor claude is not ready for lean runs"
+        );
     }
 
     #[test]
     fn lean_bindings_wait_for_the_lean_checks() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with("proj-1", dir.path(), None);
+        // Ready for usual runs: only the lean checks hold the binding back, and the reason says
+        // so (one not ready at all still waits with `ExecutorNotReady`: see
+        // `executor_not_ready_waits`).
         assert_eq!(
             evaluate(
                 &issue(Some("proj-1")),
@@ -484,7 +508,7 @@ mod tests {
                 &full_only(ExecutorKind::Claude),
                 None
             ),
-            Eligibility::Waiting(WaitReason::ExecutorNotReady(ExecutorKind::Claude))
+            Eligibility::Waiting(WaitReason::LeanNotReady(ExecutorKind::Claude))
         );
         assert!(matches!(
             evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
