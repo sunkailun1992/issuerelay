@@ -52,7 +52,7 @@
 | N2 | 用户设置的 `env` 里的 `CLAUDE_CODE_EFFORT_LEVEL` 盖过命令行的 `--effort`。不精简的运行读用户设置，所以 IssueRelay 传的 `--effort high` 没有生效，会话存档是 `max`。设计第 5.6 节「不精简时它会盖过用户设置里的推理力度」，对用 `env` 设的推理力度不成立。精简运行不读用户设置，不受影响。 | 记入计划的遗留项，由维护者决定：在设计、帮助与 README 里写明这个例外，或另想办法。IssueRelay 不改用户的设置。 |
 | N3 | 从 Claude Code 会话的终端启动开发宿主，会把这个会话的一整串环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`ANTHROPIC_BASE_URL`、`CLAUDE_CODE_CHILD_SESSION` 等）传给执行者；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。打包的托盘程序由 launchd 启动，不受影响。 | 属验收方法：之后的运行都用 `env -i` 启动开发宿主。记入遗留：要不要再去掉 Claude Code 会话自己的变量（`ANTHROPIC_BASE_URL` 等可能是用户的网关，不能一概去掉）。 |
 | N4 | 需求要求「先等一会儿」时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束（DEMO-36），单独的前台 `sleep` 又被 Claude Code 拦下（DEMO-37）。真实需求里少见，但跑测试、等服务起来时会遇到。 | 记入遗留，由维护者决定是否在提示词里加一条（提示词固定规则属极高风险，要单独决定）。 |
-| N5 | 用 `issuerelay bind add` 改完绑定后马上运行 `doctor`，两个绑定都报 `executor not ready`；几秒后再查就正常了。 | 记入遗留：查清原因。猜测是配置变了以后，就绪检查重做期间给出了空结果。 |
+| N5 | 用 `issuerelay bind add` 改完绑定后马上运行 `doctor`，两个绑定都报 `executor not ready`；几秒后再查就正常了。 | 记入遗留：查清原因。猜测是配置变了以后，就绪检查重做期间给出了空结果。2026-10-21 查过：与配置变更无关，那一次是 Claude 的平常检查本身失败了，原因在被 `grep ^Binding` 滤掉的执行者几行里（见计划「评审遗留的小项」N5 一行）。 |
 
 ## 发布 v0.2.0
 
