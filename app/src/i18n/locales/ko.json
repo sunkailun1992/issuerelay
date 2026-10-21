@@ -375,6 +375,7 @@
     "directory_missing": "폴더가 없습니다",
     "executor_ready": "{{executor}}이(가) 준비되었습니다",
     "executor_not_ready": "{{executor}}이(가) 준비되지 않았습니다",
+    "executor_lean_not_ready": "{{executor}}의 경량 실행이 준비되지 않았습니다",
     "open_doctor": "환경 점검 열기",
     "settings_failed": "설정을 읽지 못했습니다",
     "full_access_title": "전체 권한에는 제한이 없습니다",

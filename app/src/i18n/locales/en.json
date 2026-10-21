@@ -375,6 +375,7 @@
     "directory_missing": "The folder does not exist",
     "executor_ready": "{{executor}} is ready",
     "executor_not_ready": "{{executor}} is not ready",
+    "executor_lean_not_ready": "{{executor}} is not ready for lean runs",
     "open_doctor": "Open the environment check",
     "settings_failed": "Could not read the settings",
     "full_access_title": "Full access runs without limits",

@@ -918,6 +918,8 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 
 2026-10-21 的第二次清理（PR #15）按所有者当天的决定，认领了「最终评审」表剩下的三行和「逐任务评审」表的 Codex Auth 一行，并查了实机验收表的 N5；`memory_paths` 与面板一键修复两行，所有者确认维持不做。查 N5 引出的一个新问题（执行者检查失败时程序日志不记）与复审提出的一个（Claude 靠固定请求头连上的 Linear 服务）加进了「留给所有者决定」表，未定。
 
+2026-10-21 v0.2.2 发布以后，所有者看过 v0.2.2 验收的新观察与这两行的建议，说「升级版本吧」：日志那一行照建议做，与验收报告的 O1、O4 和 O3 的文档提示一起随 v0.2.3；`linear-server` 那一行仍未定。
+
 **留给所有者决定**
 
 | 内容 | 建议 |
@@ -928,7 +930,7 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 | 用户设置的 `env` 里设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，它盖过命令行的 `--effort`：不精简的运行读用户设置，IssueRelay 设的推理力度不生效，设计第 5.6 节「不精简时它会盖过用户设置里的推理力度」对这种设法不成立（实机验收 N2） | 在设计第 5.6 节、帮助与 README 里写明这个例外；IssueRelay 不改用户的设置。**已定（2026-10-20，所有者让主智能体决定）**：照建议只写进文档：精简运行设计第 5.6 节与 README（v0.2.0 的发布说明已写） |
 | 需求要求先等一会儿时，无人值守运行会失败：放到后台的命令让 `-p` 会话提前结束，单独的前台 `sleep` 又被 Claude Code 拦下（实机验收 N4） | 提示词加一条「要等的命令放在前台，不要放到后台」（提示词固定规则属极高风险，要单独决定）；或者不改，在帮助里写明。**已定（2026-10-20，所有者让主智能体决定）**：不改提示词，写进 README 的安全须知（改固定规则要另做实机验证） |
 | 开发宿主从 Claude Code 会话的终端启动时，执行者继承这个会话的环境变量（`CLAUDE_CODE_EFFORT_LEVEL`、`CLAUDE_CODE_CHILD_SESSION` 等）；`ExecEnv` 只去掉 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`。托盘程序由 launchd 启动，不受影响（实机验收 N3） | 再去掉 Claude Code 会话自己的变量；`ANTHROPIC_BASE_URL` 一类可能是用户的网关，不能一概去掉。**已定（2026-10-20，所有者让主智能体决定）**：不改 `ExecEnv`，在测试规范「实机验收规则」写明用 `env -i` 启动开发宿主 |
-| 执行者检查由就绪变成未就绪时，宿主的程序日志什么都不记（2026-10-21 查 N5 时发现：那一次的原因只在 `doctor` 的执行者几行里，验收时又被过滤掉了） | 在宿主日志里记一条带问题的警告，只在就绪与否变化时记，免得每次检查都记；或维持现状，`doctor` 的执行者几行已经写明原因。未定 |
+| 执行者检查由就绪变成未就绪时，宿主的程序日志什么都不记（2026-10-21 查 N5 时发现：那一次的原因只在 `doctor` 的执行者几行里，验收时又被过滤掉了） | 在宿主日志里记一条带问题的警告，只在就绪与否变化时记，免得每次检查都记；或维持现状，`doctor` 的执行者几行已经写明原因。**已定（2026-10-21，所有者看过建议后说「升级版本吧」）**：照建议做，随 v0.2.3：执行者能接的运行变少时记警告（`executor no longer ready`，或 `executor no longer ready for lean runs`），带上问题；变多时记一行（`executor ready now`，只差精简时 `executor ready now, but not for lean runs`，带上精简问题）；没有变化不记，宿主启动后的第一次检查也不记（`doctor::log_readiness_change`） |
 | Claude 的 `linear-server` 靠用户配置里固定的请求头连上、又没有存 OAuth 登录时，`mcp list` 照样显示 Connected，精简判为可用，精简运行里 Linear 应当会要求授权（设计第 7 节的已知限制，推测，未实测；复审 2026-10-21 提出） | 把运行开头的核对（设计第 8 节）改为要求 `linear-server` 的状态是 `connected`，在开头拦下并写明原因；或维持现状（第 8 节：状态不管，AI 照常报失败）。要先在沙箱上看清 `init` 里这时的状态。未定 |
 
 **最终评审接受的遗留项**
@@ -974,3 +976,4 @@ CI 全绿后，以所有者权限经管理员绕过 squash 合并，并在 PR �
 - `~/.claude` 是符号链接时的排除：验收那台机器不是符号链接，没有测。
 - 已核对：`1b45f15` 的 CI（Windows）日志里，`.cmd` 往返测试 `json_arguments_survive_npm_and_pnpm_style_cmd_shims` 是 `ok`，跑过，没有跳过。
 - PR #15 的实机核对已在 2026-10-21 做完，见 `docs/gates/2026-10-21-lean-leftovers-acceptance.md`，在 macOS 沙箱上都看到了：精简运行日志开头的那一行（Claude、Codex 各一次，用 `issuerelay logs` 看）；只差精简检查时需求记为等待，原因是 `executor codex is not ready for lean runs`（命令行与 MCP 控制服务）；Codex 的 Auth 栏：配置里设了 bearer token 时出现新的精简问题，照它的建议删掉 token、`codex mcp login linear` 以后问题消失，只有 OAuth 登录时精简可用；`doctor` 绑定一行的 `, effort <值>`。面板需求列表里的那一行没有看：开发宿主没有面板，所有者定用命令行代替。反面情形用一个临时的 `CODEX_HOME` 造（`mcp_oauth_credentials_store = "file"`），没有改用户的执行者配置；在这样的 `CODEX_HOME` 下不要运行 `codex mcp logout`，它会删掉各个 `CODEX_HOME` 共用的钥匙串登录（报告的「环境」一节）。
+- v0.2.3 的改动（2026-10-21）：只差精简检查时 `doctor` 与面板的绑定一行写明只差精简运行；`bind list` 写绑定自己的权限档；执行者能接的运行变化时宿主日志记一行。已在实机上看到的只有 `bind list`：本分支编出的命令行对本机运行中的 0.2.2 托盘程序列出沙箱绑定 `[claude, permission auto]`。其余待实机：照验收报告「环境」一节，用临时的 `CODEX_HOME` 设 bearer token 造出只差精简的 Codex（不改用户的 `~/.codex`，也不在那里运行 `codex mcp logout`），核对绑定一行是 `executor not ready for lean runs`、宿主日志有 `executor no longer ready for lean runs`，修好后有 `executor ready now`；绑定自己设 `--permission personal` 时 `bind list` 显示 `[claude, permission personal]`。

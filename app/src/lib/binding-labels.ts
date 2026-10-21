@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Binding, Effort, ExecutorKind, LeanStatus, PermissionProfile, Settings } from "./types";
+import type { Binding, BindingReport, Effort, ExecutorKind, LeanStatus, PermissionProfile, Settings } from "./types";
 
 /**
  * The names of the executors, permission levels and reasoning efforts as a binding shows them. A
@@ -47,3 +47,13 @@ export function bindingLabels(t: TFunction, settings: Settings | undefined) {
 
 /** The labels `bindingLabels` makes. */
 export type BindingLabels = ReturnType<typeof bindingLabels>;
+
+/**
+ * Whether the executor of `report` can take the binding's runs, as one sentence: a binding held
+ * back only by the lean checks says so, as its issues do when they wait.
+ */
+export function executorVerdict(t: TFunction, report: BindingReport): string {
+  const executor = t(`executor.${report.executor}`);
+  if (report.executor_ready) return t("bindings.executor_ready", { executor });
+  return t(report.lean_not_ready ? "bindings.executor_lean_not_ready" : "bindings.executor_not_ready", { executor });
+}

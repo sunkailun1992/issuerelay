@@ -10,7 +10,7 @@
 - 没有看：面板需求列表里的那一行。开发宿主没有面板，与 2026-10-20 一样用命令行代替（所有者 2026-10-21 定），面板的文字由组件测试覆盖。
 - 系统通知（M2 起未闭环）：用从草稿装上的 0.2.2 托盘程序核对。四种通知（开始运行、待验收、需要补充信息、运行失败）都由 IssueRelay 发出、由系统显示：usernoted 的日志里每一则都有 `Presenting`。维护者当时不在电脑前，没有人亲眼看到。第一次核对时，系统设置里 IssueRelay 的「允许通知」是关着的：通知照样送到系统，却不显示，程序这边看不出来（O3）。
 - v0.2.2：PR #16 合并（`ff3007d`），在 `main` 上试打包，推 `v0.2.2` 标签建出草稿，本机从草稿装上 0.2.2；09:52:42 UTC 由维护者明确授权公开，设为最新版本。
-- 新的观察四条（O1–O4），都没有改代码。
+- 新的观察四条（O1–O4），当时都没有改代码；O1、O4 与 O3 的文档提示之后随 v0.2.3 做了，见「新发现」的处理一栏（v0.2.3 的实机核对另记）。
 
 ## 环境
 
@@ -72,10 +72,10 @@
 
 | 编号 | 现象 | 处理 |
 |---|---|---|
-| O1 | 只差精简检查时，`doctor` 的绑定一行仍写通用的 `executor not ready`；具体原因在上面 `codex (lean runs)` 那一行，需求的等待原因已经分开写（c） | 观察项，没有改。绑定一行只回答这个绑定能不能派活（`BindingReport.executor_ready`）；要不要改成写明 `not ready for lean runs`，留给所有者 |
+| O1 | 只差精简检查时，`doctor` 的绑定一行仍写通用的 `executor not ready`；具体原因在上面 `codex (lean runs)` 那一行，需求的等待原因已经分开写（c） | 观察项，没有改。绑定一行只回答这个绑定能不能派活（`BindingReport.executor_ready`）；要不要改成写明 `not ready for lean runs`，留给所有者。之后（同日，所有者说「升级版本吧」）随 v0.2.3 改了：`BindingReport.lean_not_ready`，命令行写 `executor not ready for lean runs`，面板的环境检查页与绑定页写「Codex 的精简运行还没有就绪」（简体中文；五种语言都有） |
 | O2 | 精简的 Codex 运行开头，Codex 在标准错误打了两次 `failed to refresh available models: request timed out` | Codex 自己更新模型列表时超时，运行照常完成。没有查平常（不精简）的运行有没有同样的输出，记作观察 |
-| O3 | 系统设置里 IssueRelay 的「允许通知」关着时，通知照样送到系统、存进通知中心的数据库，却不显示；程序、面板与 `doctor` 都看不出来，维护者也以为是开着的 | 观察项，没有改。可能的后续：环境检查读出通知的授权状态，关着时提醒（要先确认通知插件在 macOS 上能不能读到）；留给所有者 |
-| O4 | `issuerelay bind list` 不写权限档：`--permission personal` 的绑定（运行用完整配置，不精简）列出来是 `[claude]`，与精简的绑定看起来一样；`doctor` 的绑定一行写明 `(full configuration: personal settings)` | 观察项，没有改：`bind list` 只写执行者、`lean off` 与推理力度（`crates/cli/src/format.rs` 的 `bindings`）；要不要加上权限档，留给所有者 |
+| O3 | 系统设置里 IssueRelay 的「允许通知」关着时，通知照样送到系统、存进通知中心的数据库，却不显示；程序、面板与 `doctor` 都看不出来，维护者也以为是开着的 | 观察项，没有改。可能的后续：环境检查读出通知的授权状态，关着时提醒（要先确认通知插件在 macOS 上能不能读到）；留给所有者。之后查过（2026-10-21 读 `tauri-plugin-notification` 2.6.0 的 `src/desktop.rs`）：它在桌面上的 `permission_state()` 总是返回 `Granted`，读不到；要读得自己调 macOS 的 `UNUserNotificationCenter`、Windows 的 `ToastNotifier.Setting`，并在签名后的安装包里实测。随 v0.2.3 只在安装说明的常见问题与 README 里写明去哪里打开「允许通知」 |
+| O4 | `issuerelay bind list` 不写权限档：`--permission personal` 的绑定（运行用完整配置，不精简）列出来是 `[claude]`，与精简的绑定看起来一样；`doctor` 的绑定一行写明 `(full configuration: personal settings)` | 观察项，没有改：`bind list` 只写执行者、`lean off` 与推理力度（`crates/cli/src/format.rs` 的 `bindings`）；要不要加上权限档，留给所有者。之后随 v0.2.3 加上了：绑定自己设了权限档时写 `permission <值>`，例如 `[claude, permission personal]`；跟随设置里「按个人设置」这个默认值的绑定仍看不出，要看 `doctor` |
 
 ## 与设计不一致之处
 
@@ -88,5 +88,6 @@
 - N1 的重读仍没在实机上走到：DEMO-41、DEMO-42 第一次核对就读到新值，宿主日志里没有「再读」。
 - 系统通知：四种都由系统显示（见「系统通知」），但没有人亲眼看到；维护者在场时随便一条运行即可补看。
 - Windows：所有者决定暂不做。
-- 本机：托盘程序是 0.2.2（从草稿装上）；0.2.1 的备份留在会话的临时目录里，临时用，不作长期依赖。
+- v0.2.3 的改动（O1、O4、执行者就绪变化的日志）待实机，清单见计划末节「待实机的检查」。
+- 本机：托盘程序是 0.2.2（从草稿装上）。0.2.1 的备份原先留在会话的临时目录里，10:27 UTC 按维护者的话与其他临时文件一起删掉了；要回退就用 GitHub 上 v0.2.1 的 dmg。
 - 沙箱里的测试需求：DEMO-41 至 DEMO-44 待验收（In Testing）；DEMO-45 是 Todo，`ai-ready` 已被 AI 去掉；DEMO-46 是 Todo、仍带 `ai-ready`，运行记为失败，它的 `updatedAt` 没变，所以不会被重新派活。

@@ -186,6 +186,11 @@ export interface BindingReport {
   executor: ExecutorKind;
   /** Ready for the binding's runs: lean ones when `lean` is `on`, else usual ones. */
   executor_ready: boolean;
+  /**
+   * Not ready only because of the lean checks: the runs are lean and the executor is ready for
+   * usual ones (its issues wait with `lean_not_ready`).
+   */
+  lean_not_ready: boolean;
   lean: LeanStatus;
   /**
    * The effort IssueRelay passes to its runs: its own, else the settings' default; `null` when

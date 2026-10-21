@@ -375,6 +375,7 @@
     "directory_missing": "フォルダーが存在しません",
     "executor_ready": "{{executor}} は準備できています",
     "executor_not_ready": "{{executor}} の準備ができていません",
+    "executor_lean_not_ready": "{{executor}} の軽量実行の準備ができていません",
     "open_doctor": "環境チェックを開く",
     "settings_failed": "設定を読み込めませんでした",
     "full_access_title": "フルアクセスには制限がありません",

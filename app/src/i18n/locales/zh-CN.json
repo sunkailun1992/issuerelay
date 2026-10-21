@@ -375,6 +375,7 @@
     "directory_missing": "目录不存在",
     "executor_ready": "{{executor}} 已就绪",
     "executor_not_ready": "{{executor}} 还没有就绪",
+    "executor_lean_not_ready": "{{executor}} 的精简运行还没有就绪",
     "open_doctor": "打开环境检查",
     "settings_failed": "无法读取设置",
     "full_access_title": "完全放开不设任何限制",

@@ -1247,6 +1247,11 @@ pub struct BindingReport {
     pub executor: ExecutorKind,
     /// Ready for the binding's runs: lean ones when `lean` applies, else usual ones.
     pub executor_ready: bool,
+    /// Not ready only because of the lean checks: the binding's runs are lean, and the executor
+    /// is ready for usual runs. Its issues wait with `WaitReason::LeanNotReady`. A host from before
+    /// the field sends none, which reads as `false`.
+    #[serde(default)]
+    pub lean_not_ready: bool,
     /// Whether the binding's runs are lean, or why not.
     pub lean: LeanStatus,
     /// The reasoning effort IssueRelay passes to its runs: its own, else the settings' default;
@@ -1270,6 +1275,7 @@ pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> V
                 directory_exists: b.directory.is_dir(),
                 executor,
                 executor_ready: ready.ready(executor, lean),
+                lean_not_ready: ready.held_back_by_lean(executor, lean),
                 lean,
                 effort: cfg.effort_for(b),
             }
@@ -1474,6 +1480,9 @@ impl ReadinessProbe for SystemReadiness {
             let refresh = self.refreshes.fetch_add(1, Ordering::SeqCst) + 1;
             for (kind, checked) in [(ExecutorKind::Claude, claude), (ExecutorKind::Codex, codex)] {
                 if let Some((report, complete, at)) = checked {
+                    if let Some(before) = cache.get(&kind) {
+                        log_readiness_change(&before.report, &report);
+                    }
                     cache.insert(
                         kind,
                         CachedCheck {
@@ -1499,6 +1508,53 @@ impl ReadinessProbe for SystemReadiness {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone(),
         )
+    }
+}
+
+/// What an executor's check lets it take: no runs, usual runs only, or lean runs too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    NotReady,
+    UsualOnly,
+    Ready,
+}
+
+impl Standing {
+    fn of(report: &ExecutorReport) -> Self {
+        match (report.ready(), report.ready_lean()) {
+            (false, _) => Standing::NotReady,
+            (true, false) => Standing::UsualOnly,
+            (true, true) => Standing::Ready,
+        }
+    }
+}
+
+/// Writes into the host's log what a check changed in the runs an executor can take, against
+/// the check before it: a warning naming the problems when it can take fewer, a line when it can
+/// take more. A check that changes nothing writes nothing, so checking every poll does not fill
+/// the log. Without this, a check that failed once left its reasons only in `doctor`
+/// (2026-10-21, while looking into N5 of the lean-run acceptance).
+fn log_readiness_change(before: &ExecutorReport, after: &ExecutorReport) {
+    let executor = after.kind.as_str();
+    let problems = |problems: &[String]| problems.join("; ");
+    match (Standing::of(before), Standing::of(after)) {
+        (was, now) if was == now => {}
+        (_, Standing::NotReady) => tracing::warn!(
+            executor,
+            problems = %problems(&after.problems),
+            "executor no longer ready"
+        ),
+        (Standing::Ready, Standing::UsualOnly) => tracing::warn!(
+            executor,
+            problems = %problems(&after.lean_problems),
+            "executor no longer ready for lean runs"
+        ),
+        (_, Standing::UsualOnly) => tracing::info!(
+            executor,
+            problems = %problems(&after.lean_problems),
+            "executor ready now, but not for lean runs"
+        ),
+        (_, Standing::Ready) => tracing::info!(executor, "executor ready now"),
     }
 }
 
@@ -2746,6 +2802,73 @@ mod tests {
         assert_eq!(effort(&cfg, 1), serde_json::Value::Null);
     }
 
+    #[test]
+    fn a_binding_held_back_only_by_the_lean_checks_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        for (project, executor, lean) in [
+            ("proj-1", ExecutorKind::Codex, true),
+            ("proj-2", ExecutorKind::Codex, false),
+            ("proj-3", ExecutorKind::Claude, true),
+        ] {
+            cfg.bindings.push(crate::config::Binding {
+                id: project.into(),
+                project_id: project.into(),
+                project_name: "Demo Project".into(),
+                directory: dir.path().to_path_buf(),
+                executor: Some(executor),
+                permission: None,
+                model: None,
+                prompt_override: None,
+                lean,
+                effort: None,
+            });
+        }
+        // What the command line and the panel read: `executor_ready`, and `lean_not_ready`.
+        let seen = |ready: &Readiness| -> Vec<(serde_json::Value, serde_json::Value)> {
+            check_bindings(&cfg, ready, None)
+                .iter()
+                .map(|report| {
+                    let json = serde_json::to_value(report).unwrap();
+                    (
+                        json["executor_ready"].clone(),
+                        json["lean_not_ready"].clone(),
+                    )
+                })
+                .collect()
+        };
+        let (yes, no) = (serde_json::json!(true), serde_json::json!(false));
+        // Codex passes its usual checks but not the lean ones; Claude passes both. Only the lean
+        // binding of Codex waits, and only for the lean checks.
+        let lean_missing = Readiness {
+            full: [ExecutorKind::Claude, ExecutorKind::Codex]
+                .into_iter()
+                .collect(),
+            lean: [ExecutorKind::Claude].into_iter().collect(),
+        };
+        assert_eq!(
+            seen(&lean_missing),
+            [
+                (no.clone(), yes.clone()),
+                (yes.clone(), no.clone()),
+                (yes.clone(), no.clone())
+            ]
+        );
+        // Codex fails its usual checks too: then it is not only the lean checks.
+        let codex_down = Readiness {
+            full: [ExecutorKind::Claude].into_iter().collect(),
+            lean: [ExecutorKind::Claude].into_iter().collect(),
+        };
+        assert_eq!(
+            seen(&codex_down),
+            [
+                (no.clone(), no.clone()),
+                (no.clone(), no.clone()),
+                (yes, no)
+            ]
+        );
+    }
+
     /// The lean checks of the tests: a folder in `dir` (the check makes it; the fake runner never
     /// enters it) and no Codex configuration file.
     fn lean_paths(dir: &tempfile::TempDir) -> LeanCheckPaths {
@@ -3851,6 +3974,183 @@ mod tests {
         // What the fresh call found is cached for the next ordinary call.
         probe.executor_reports(false).await;
         assert!(fake.take_calls().is_empty());
+    }
+
+    /// Every event at `INFO` or above that the current thread logs while `f` runs, one string per
+    /// event: the level, the message, then `name=value` for each field.
+    fn logged<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use std::fmt::{Debug, Write as _};
+        use tracing::{Event, Level, Metadata, Subscriber, field::Visit, span};
+
+        struct Capture(Arc<Mutex<Vec<String>>>);
+
+        struct Fields(String);
+
+        impl Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+                if field.name() == "message" {
+                    write!(self.0, " {value:?}").unwrap();
+                } else {
+                    write!(self.0, " {}={value:?}", field.name()).unwrap();
+                }
+            }
+        }
+
+        impl Subscriber for Capture {
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                *metadata.level() <= Level::INFO
+            }
+
+            fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+                span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let mut fields = Fields(event.metadata().level().to_string());
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+
+            fn enter(&self, _: &span::Id) {}
+
+            fn exit(&self, _: &span::Id) {}
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        // As in `tests/engine.rs`: with a second, idle subscriber registered, tracing asks every
+        // registered one whether a log call is wanted, instead of caching the answer of the first
+        // thread that reaches it (in a parallel test, a thread without a subscriber).
+        let _idle = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let result = tracing::subscriber::with_default(Capture(events.clone()), f);
+        let events = events.lock().unwrap().clone();
+        (result, events)
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    /// Both executors ready for usual runs and for lean ones, checked as the host checks them.
+    fn ready_for_lean_runs(dir: &tempfile::TempDir) -> (Arc<FakeRunner>, SystemReadiness) {
+        let fake = Arc::new(both_ready());
+        fake.set("claude auth status", out(0, CLAUDE_USUAL));
+        fake.set(
+            "claude --setting-sources project,local auth status",
+            out(0, CLAUDE_USUAL),
+        );
+        fake.set(
+            "codex -c cli_auth_credentials_store=file login status",
+            out(0, "Logged in using ChatGPT"),
+        );
+        let probe = readiness(&fake, TTL).with_lean_checks(lean_paths(dir));
+        (fake, probe)
+    }
+
+    #[test]
+    fn an_executor_that_stops_being_ready_is_logged_once_with_its_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, probe) = ready_for_lean_runs(&dir);
+        let (first, events) = logged(|| {
+            paused_runtime().block_on(async {
+                let first = probe.executor_reports(true).await;
+                // Claude's Linear server needs authentication for two checks, then it is back.
+                fake.set("claude mcp list", out(0, CLAUDE_AUTH));
+                probe.executor_reports(true).await;
+                probe.executor_reports(true).await;
+                fake.set("claude mcp list", out(0, CLAUDE_OK));
+                probe.executor_reports(true).await;
+                probe.executor_reports(true).await;
+                first
+            })
+        });
+        assert!(
+            first.iter().all(|r| r.ready() && r.ready_lean()),
+            "{first:?}"
+        );
+        // The first check has nothing to compare with, and a check that changes nothing logs
+        // nothing: one line when Claude falls, one when it is back.
+        let [fell, back] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(
+            fell.starts_with(r#"WARN executor no longer ready executor="claude" problems="#),
+            "{fell}"
+        );
+        // The usual problem, not the lean one ("the Linear MCP server `linear-server` in …").
+        assert!(fell.contains("Linear MCP in claude"), "{fell}");
+        assert!(
+            back.starts_with(r#"INFO executor ready now executor="claude""#),
+            "{back}"
+        );
+    }
+
+    #[test]
+    fn an_executor_that_stops_being_ready_for_lean_runs_says_only_that() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, probe) = ready_for_lean_runs(&dir);
+        let lean_login = "claude --setting-sources project,local auth status";
+        let ((), events) = logged(|| {
+            paused_runtime().block_on(async {
+                probe.executor_reports(true).await;
+                // A lean run would not be signed in; usual runs still are.
+                fake.set(lean_login, out(0, r#"{"loggedIn": false}"#));
+                probe.executor_reports(true).await;
+                fake.set(lean_login, out(0, CLAUDE_USUAL));
+                probe.executor_reports(true).await;
+            })
+        });
+        let [fell, back] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(
+            fell.starts_with(
+                r#"WARN executor no longer ready for lean runs executor="claude" problems="#
+            ),
+            "{fell}"
+        );
+        assert!(fell.contains("not signed in"), "{fell}");
+        assert!(
+            back.starts_with(r#"INFO executor ready now executor="claude""#),
+            "{back}"
+        );
+    }
+
+    #[test]
+    fn an_executor_back_for_usual_runs_only_names_what_still_holds_lean_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fake, probe) = ready_for_lean_runs(&dir);
+        fake.set("codex mcp list", out(1, ""));
+        let ((), events) = logged(|| {
+            paused_runtime().block_on(async {
+                // Not ready from the first check, which logs nothing.
+                probe.executor_reports(true).await;
+                // Codex's usual runs are fine again, its lean runs would not be signed in.
+                fake.set("codex mcp list", out(0, CODEX_OK));
+                fake.set(
+                    "codex -c cli_auth_credentials_store=file login status",
+                    out(1, "Not logged in"),
+                );
+                probe.executor_reports(true).await;
+            })
+        });
+        let [back] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(
+            back.starts_with(
+                r#"INFO executor ready now, but not for lean runs executor="codex" problems="#
+            ),
+            "{back}"
+        );
+        assert!(back.contains("not signed in"), "{back}");
     }
 
     #[tokio::test(start_paused = true)]
