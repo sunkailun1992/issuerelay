@@ -5525,10 +5525,12 @@ fn auto_memory_off() -> Vec<(String, String)> {
 }
 
 /// The first line of every lean run's log, so that a finished run shows it was lean.
-const CLAUDE_LEAN_NOTE: &str = "lean run: only the Linear MCP server and the repository's own \
-    settings; no user-level settings, plugins, hooks or auto memory";
-const CODEX_LEAN_NOTE: &str = "lean run: only the Linear MCP server; the user's Codex \
-    configuration, hooks, plugins, apps and memories are left out";
+const CLAUDE_LEAN_NOTE: &str = "lean run: started with only the Linear MCP server and the \
+    repository's own settings; none of the user's own settings, plugins or hooks, and no auto \
+    memory";
+const CODEX_LEAN_NOTE: &str = "lean run: started with only the Linear MCP server, without the \
+    user's Codex configuration, hooks, plugins, apps or memories; the user-level AGENTS.md is \
+    still read";
 
 #[tokio::test]
 async fn a_lean_claude_binding_starts_with_the_lean_arguments() {
