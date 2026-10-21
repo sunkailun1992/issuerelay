@@ -189,8 +189,8 @@ export const DEMO_DOCTOR: DoctorReport = {
   ],
   workspace: { label_ok: true, missing_states: [], teams_checked: ["Demo"] },
   bindings: [
-    { binding_id: "proj-1", project_name: "Demo Project", directory_exists: true, executor: "claude", executor_ready: true, lean: "on" },
-    { binding_id: "proj-2", project_name: "Demo Mobile", directory_exists: true, executor: "codex", executor_ready: false, lean: "off" },
+    { binding_id: "proj-1", project_name: "Demo Project", directory_exists: true, executor: "claude", executor_ready: true, lean: "on", effort: null },
+    { binding_id: "proj-2", project_name: "Demo Mobile", directory_exists: true, executor: "codex", executor_ready: false, lean: "off", effort: "high" },
   ],
   env: {
     path: "~/.local/bin:/opt/homebrew/bin:/usr/bin:/bin",

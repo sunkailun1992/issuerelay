@@ -185,6 +185,11 @@ export interface BindingReport {
   /** Ready for the binding's runs: lean ones when `lean` is `on`, else usual ones. */
   executor_ready: boolean;
   lean: LeanStatus;
+  /**
+   * The effort its runs start with: its own, else the settings' default; `null` when neither sets
+   * one.
+   */
+  effort: Effort | null;
 }
 export interface DoctorReport {
   viewer: Viewer | null;

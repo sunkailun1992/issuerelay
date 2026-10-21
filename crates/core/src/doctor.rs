@@ -25,7 +25,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::config::{Binding, Config, ExecutorKind, LeanStatus, TriggerNames};
+use crate::config::{Binding, Config, Effort, ExecutorKind, LeanStatus, TriggerNames};
 use crate::env::{ExecEnv, SharedEnv, Sources};
 use crate::executor;
 use crate::executor::lean::{CLAUDE_LINEAR_SERVER, CODEX_LINEAR_SERVER};
@@ -1194,6 +1194,9 @@ pub struct BindingReport {
     pub executor_ready: bool,
     /// Whether the binding's runs are lean, or why not.
     pub lean: LeanStatus,
+    /// The reasoning effort its runs start with: its own, else the settings' default; `None`
+    /// when neither sets one (the executor's own setting applies).
+    pub effort: Option<Effort>,
 }
 
 /// One report per binding, in configuration order. `ready` is what `ready_set` gives; `home` is
@@ -1211,6 +1214,7 @@ pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> V
                 executor,
                 executor_ready: ready.ready(executor, lean),
                 lean,
+                effort: cfg.effort_for(b),
             }
         })
         .collect()
@@ -2651,6 +2655,39 @@ mod tests {
                 (LeanStatus::HomeDirectory, true),
             ]
         );
+    }
+
+    #[test]
+    fn binding_reports_carry_the_effort_their_runs_get() {
+        use crate::config::Effort;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.settings.default_effort = Some(Effort::High);
+        for (project, effort) in [("proj-1", Some(Effort::Max)), ("proj-2", None)] {
+            cfg.bindings.push(crate::config::Binding {
+                id: project.into(),
+                project_id: project.into(),
+                project_name: "Demo Project".into(),
+                directory: dir.path().to_path_buf(),
+                executor: None,
+                permission: None,
+                model: None,
+                prompt_override: None,
+                lean: true,
+                effort,
+            });
+        }
+        let effort = |cfg: &Config, index: usize| {
+            let reports = check_bindings(cfg, &Readiness::default(), None);
+            serde_json::to_value(&reports[index]).unwrap()["effort"].clone()
+        };
+        // The binding's own level, else the default from the settings, named as the settings
+        // and `bind list` name it.
+        assert_eq!(effort(&cfg, 0), serde_json::json!("max"));
+        assert_eq!(effort(&cfg, 1), serde_json::json!("high"));
+        // Neither set: the executor's own setting applies, and the report names no level.
+        cfg.settings.default_effort = None;
+        assert_eq!(effort(&cfg, 1), serde_json::Value::Null);
     }
 
     /// The lean checks of the tests: a folder in `dir` (the check makes it; the fake runner never
