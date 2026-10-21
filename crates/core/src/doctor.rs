@@ -885,11 +885,36 @@ pub fn parse_codex_login(code: Option<i32>, stdout: &str, stderr: &str) -> bool 
 /// a line whose server name is exactly `CLAUDE_LINEAR_SERVER` / `CODEX_LINEAR_SERVER`, whose URL
 /// is exactly `LINEAR_MCP_URL`, and whose status is usable as `mcp_list_has_linear` reads it. A
 /// lean run reuses the sign-in stored under that name (measured: see the two constants); another
-/// server, claude.ai's Linear connector among them, is not loaded.
+/// server, claude.ai's Linear connector among them, is not loaded. Codex's line must also show
+/// `OAuth` as its sign-in (`codex_lean_sign_in_usable`).
 pub fn mcp_list_has_lean_linear(kind: ExecutorKind, stdout: &str) -> bool {
     let stdout = strip_ansi(stdout);
-    lean_linear_line(kind, &stdout)
-        .is_some_and(|(url, line)| url == LINEAR_MCP_URL && line_usable(kind, line))
+    lean_linear_line(kind, &stdout).is_some_and(|(url, line)| {
+        url == LINEAR_MCP_URL
+            && line_usable(kind, line)
+            && (kind != ExecutorKind::Codex || codex_lean_sign_in_usable(line))
+    })
+}
+
+/// The sign-in a Codex `mcp list` line shows for an enabled HTTP server, in its last column: the
+/// words after the URL, the bearer token variable (`-` when there is none) and the status. In
+/// codex-cli 0.159.2 that is `OAuth`, `Bearer token`, `Not logged in`, `Unsupported` or
+/// `Unknown` (its source, read 2026-10-21: `McpAuthStatus` and rmcp-client's `auth_status.rs`).
+fn codex_sign_in(line: &str) -> String {
+    line.split_whitespace()
+        .skip_while(|token| !is_linear_url(token))
+        .skip(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a lean Codex run can sign in to the server of this line. It leaves out the user's
+/// configuration, so a bearer token variable or an `Authorization` header set there does not
+/// reach it, and only a stored OAuth sign-in for that name and URL does. codex-cli 0.159.2 shows
+/// `OAuth` exactly when one is stored and usable, and `Bearer token` whenever the configuration
+/// sets a token, stored sign-in or not (its source, read 2026-10-21).
+fn codex_lean_sign_in_usable(line: &str) -> bool {
+    codex_sign_in(line) == "OAuth"
 }
 
 /// The server lean runs load in `kind`.
@@ -943,6 +968,19 @@ fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
              {LINEAR_MCP_URL}; change it yourself or turn lean runs off for this binding",
             clean(target)
         ),
+        // Usable for usual runs, which read the configuration that holds a token, but not for
+        // lean ones.
+        Some((_, line)) if kind == ExecutorKind::Codex && line_usable(kind, line) => {
+            let shown = match clean(&codex_sign_in(line)) {
+                sign_in if sign_in.is_empty() => "no sign-in".to_string(),
+                sign_in => format!("`{sign_in}` as its sign-in"),
+            };
+            format!(
+                "the Linear MCP server `{server}` in {name} shows {shown}, but lean runs leave \
+                 out {name}'s configuration and can only use a stored OAuth sign-in; sign in \
+                 with `{name} mcp login {server}`, or turn lean runs off for this binding"
+            )
+        }
         Some((_, line)) => match clean(&line_status(kind, line)) {
             status if status.is_empty() => {
                 format!("the Linear MCP server `{server}` in {name} is not connected")
@@ -2764,6 +2802,80 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn lean_runs_take_codexs_linear_server_only_with_a_stored_oauth_sign_in() {
+        // As codex-cli 0.159.2 prints the table of HTTP servers: every cell padded to the widest
+        // in its column (docs/gates/samples/m0/executors/codex-mcp-list.txt).
+        let table = |token: &str, auth: &str| {
+            format!(
+                "Name    Url                         Bearer Token Env Var  Status   Auth\n\
+                 linear  https://mcp.linear.app/mcp  {token:<20}  enabled  {auth:<12}\n"
+            )
+        };
+        assert!(mcp_list_has_lean_linear(
+            ExecutorKind::Codex,
+            &table("-", "OAuth")
+        ));
+        for (token, auth) in [
+            ("DEMO_TOKEN", "Bearer token"),
+            ("-", "Bearer token"),
+            ("-", "Unsupported"),
+            ("-", "Unknown"),
+        ] {
+            let listed = table(token, auth);
+            assert!(
+                !mcp_list_has_lean_linear(ExecutorKind::Codex, &listed),
+                "{listed}"
+            );
+            // Usual runs read the configuration that holds the token: they stay ready.
+            assert!(
+                mcp_list_has_linear(ExecutorKind::Codex, &listed),
+                "{listed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_codex_linear_server_without_an_oauth_sign_in_says_what_lean_runs_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut replies = codex_replies(out(0, "Logged in using ChatGPT"));
+        replies[3] = (
+            "mcp list",
+            out(
+                0,
+                "linear  https://mcp.linear.app/mcp  DEMO_TOKEN  enabled  Bearer token",
+            ),
+        );
+        let (report, complete) =
+            lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert!(
+            complete && report.ready() && !report.ready_lean(),
+            "{report:?}"
+        );
+        assert_eq!(
+            report.lean_problems,
+            [
+                "the Linear MCP server `linear` in codex shows `Bearer token` as its sign-in, but \
+                 lean runs leave out codex's configuration and can only use a stored OAuth \
+                 sign-in; sign in with `codex mcp login linear`, or turn lean runs off for this \
+                 binding"
+            ]
+        );
+        // A Codex that stopped printing the column is not taken at its word either.
+        replies[3] = (
+            "mcp list",
+            out(0, "linear  https://mcp.linear.app/mcp  -  enabled"),
+        );
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert!(report.ready() && !report.ready_lean(), "{report:?}");
+        assert!(
+            report.lean_problems[0].starts_with(
+                "the Linear MCP server `linear` in codex shows no sign-in, but lean runs leave out"
+            ),
+            "{report:?}"
+        );
     }
 
     #[tokio::test]

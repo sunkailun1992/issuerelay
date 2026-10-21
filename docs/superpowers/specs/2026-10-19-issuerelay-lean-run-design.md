@@ -276,7 +276,7 @@
 ## 7. 环境检查与就绪
 
 - 精简的 Claude 绑定：`claude mcp list` 里要有一行，服务名正好是 `linear-server`，网址正好是 `https://mcp.linear.app/mcp`，状态是 Connected。别的名字的 Linear 服务、claude.ai 的 Linear 连接器都不算，因为精简运行不会加载它们。
-- 精简的 Codex 绑定：`codex mcp list` 里要有一行，服务名正好是 `linear`，网址正好，`enabled`，并且不是 `Not logged in`。
+- 精简的 Codex 绑定：`codex mcp list` 里要有一行，服务名正好是 `linear`，网址正好，`enabled`，并且最后一栏（Auth，登录）正好是 `OAuth`。精简运行不读用户配置，配置里的 bearer token 变量或 `Authorization` 请求头带不过去，只用得上已存的 OAuth 登录。按 codex-cli 0.159.2 的源码（2026-10-21 读），这一栏只在为这个名字与网址存着可用的 OAuth 登录时是 `OAuth`；配置里设了 token 时，不论有没有存登录都是 `Bearer token`；另外还有 `Not logged in`、`Unsupported`、`Unknown`。以前只排除 `Not logged in`，`Bearer token` 与 `Unsupported` 也算可用，这样的精简运行一开始就会因 `required=true` 退出（所有者定，2026-10-21；实机核对待做）。Claude 一侧不加类似的条件：Claude Code 按服务名保存登录（第 4.2 节的实测），精简运行自带 http 类型的设置，用户那边登记成哪种类型都不影响。不满足时，精简问题写明这一栏显示什么，建议用 `codex mcp login linear` 登录，或关掉这个绑定的精简运行。
 - 登录（第 5.4 节，主智能体定）：
   - Claude：另跑一次 `claude --setting-sources project,local auth status`。它在 IssueRelay 数据目录下的一个空目录里运行：在主目录里跑时，「项目设置」就是 `~/.claude/settings.json` 本身，查不出区别。精简可用的条件是这次也已登录，并且 `authMethod`、`apiProvider` 与平常那次 `auth status` 相同；不同就说明精简运行会换一种登录或换一个服务，按反目标拦下。
   - Codex：另跑一次 `codex -c cli_auth_credentials_store=file login status`，要已登录，并且登录方式（ChatGPT 或 API key）与平常那次相同。另外读用户的 `config.toml`（只读）：设了非默认的 `model_provider`（或默认档案里设了）就算不可用，因为精简运行会改连默认的服务。

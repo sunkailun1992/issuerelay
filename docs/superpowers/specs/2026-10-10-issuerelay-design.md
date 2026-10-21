@@ -222,7 +222,7 @@ issuerelay/
 
 精简的绑定另要两项（精简运行设计第 7 节）：
 
-- 精简运行加载的 Linear 服务可用：名字正好是 `linear-server`（Codex：`linear`），网址正好是 `https://mcp.linear.app/mcp`，并且连通；
+- 精简运行加载的 Linear 服务可用：名字正好是 `linear-server`（Codex：`linear`），网址正好是 `https://mcp.linear.app/mcp`，并且连通；Codex 的那一行还要显示 `OAuth` 登录（精简运行不读用户配置里的 token，2026-10-21）；
 - 精简时也已登录，并且登录方式与平常相同：Claude 在 IssueRelay 数据目录的空目录 `lean-check/` 里另跑 `claude --setting-sources project,local auth status`，`authMethod` 与 `apiProvider` 都要与平常那次相同；Codex 另跑 `codex -c cli_auth_credentials_store=file login status`，登录方式相同，并且 `config.toml` 没有设自定义的 `model_provider`。
 
 任何一项不满足，相关绑定就显示「执行者未就绪」，并给出修复按钮（见第 8 节）；精简的两项不满足时给出原因和要运行的命令。需求列表里的等待原因在执行者平常就绪、只差精简两项时写「精简运行未就绪」（2026-10-21）。
