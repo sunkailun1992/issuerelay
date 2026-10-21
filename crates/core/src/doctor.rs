@@ -1247,6 +1247,11 @@ pub struct BindingReport {
     pub executor: ExecutorKind,
     /// Ready for the binding's runs: lean ones when `lean` applies, else usual ones.
     pub executor_ready: bool,
+    /// Not ready only because of the lean checks: the binding's runs are lean, and the executor
+    /// is ready for usual runs. Its issues wait with `WaitReason::LeanNotReady`. A host from before
+    /// the field sends none, which reads as `false`.
+    #[serde(default)]
+    pub lean_not_ready: bool,
     /// Whether the binding's runs are lean, or why not.
     pub lean: LeanStatus,
     /// The reasoning effort IssueRelay passes to its runs: its own, else the settings' default;
@@ -1270,6 +1275,7 @@ pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> V
                 directory_exists: b.directory.is_dir(),
                 executor,
                 executor_ready: ready.ready(executor, lean),
+                lean_not_ready: ready.held_back_by_lean(executor, lean),
                 lean,
                 effort: cfg.effort_for(b),
             }
@@ -2744,6 +2750,73 @@ mod tests {
         // Neither set: the executor's own setting applies, and the report names no level.
         cfg.settings.default_effort = None;
         assert_eq!(effort(&cfg, 1), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_binding_held_back_only_by_the_lean_checks_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        for (project, executor, lean) in [
+            ("proj-1", ExecutorKind::Codex, true),
+            ("proj-2", ExecutorKind::Codex, false),
+            ("proj-3", ExecutorKind::Claude, true),
+        ] {
+            cfg.bindings.push(crate::config::Binding {
+                id: project.into(),
+                project_id: project.into(),
+                project_name: "Demo Project".into(),
+                directory: dir.path().to_path_buf(),
+                executor: Some(executor),
+                permission: None,
+                model: None,
+                prompt_override: None,
+                lean,
+                effort: None,
+            });
+        }
+        // What the command line and the panel read: `executor_ready`, and `lean_not_ready`.
+        let seen = |ready: &Readiness| -> Vec<(serde_json::Value, serde_json::Value)> {
+            check_bindings(&cfg, ready, None)
+                .iter()
+                .map(|report| {
+                    let json = serde_json::to_value(report).unwrap();
+                    (
+                        json["executor_ready"].clone(),
+                        json["lean_not_ready"].clone(),
+                    )
+                })
+                .collect()
+        };
+        let (yes, no) = (serde_json::json!(true), serde_json::json!(false));
+        // Codex passes its usual checks but not the lean ones; Claude passes both. Only the lean
+        // binding of Codex waits, and only for the lean checks.
+        let lean_missing = Readiness {
+            full: [ExecutorKind::Claude, ExecutorKind::Codex]
+                .into_iter()
+                .collect(),
+            lean: [ExecutorKind::Claude].into_iter().collect(),
+        };
+        assert_eq!(
+            seen(&lean_missing),
+            [
+                (no.clone(), yes.clone()),
+                (yes.clone(), no.clone()),
+                (yes.clone(), no.clone())
+            ]
+        );
+        // Codex fails its usual checks too: then it is not only the lean checks.
+        let codex_down = Readiness {
+            full: [ExecutorKind::Claude].into_iter().collect(),
+            lean: [ExecutorKind::Claude].into_iter().collect(),
+        };
+        assert_eq!(
+            seen(&codex_down),
+            [
+                (no.clone(), no.clone()),
+                (no.clone(), no.clone()),
+                (yes, no)
+            ]
+        );
     }
 
     /// The lean checks of the tests: a folder in `dir` (the check makes it; the fake runner never

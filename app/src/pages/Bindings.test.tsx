@@ -494,6 +494,21 @@ test("a folder that is missing and an executor that is not ready come with the w
   expect(screen.getByTestId("where")).toHaveTextContent("/doctor");
 });
 
+test("a binding held back only by the lean checks says so and points to the environment check", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.doctor = vi.fn().mockResolvedValue({
+    ...DEMO_DOCTOR,
+    bindings: [DEMO_DOCTOR.bindings[0], { ...DEMO_DOCTOR.bindings[1], lean: "on", executor_ready: false, lean_not_ready: true }],
+  });
+  await renderWithProviders(<Bindings />, { backend });
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  await userEvent.click(within(mobile).getByRole("button", { name: "Check again" }));
+  expect(await within(mobile).findByText("Codex is not ready for lean runs")).toBeInTheDocument();
+  expect(within(mobile).queryByText("Codex is not ready")).not.toBeInTheDocument();
+  expect(within(mobile).getByText("Codex is not ready for lean runs").closest("li")!.querySelector("svg")).toHaveClass("text-state-failed");
+  expect(within(mobile).getByRole("link", { name: "Open the environment check" })).toHaveAttribute("href", "/doctor");
+});
+
 test("the check and the removal go by the binding's own id, which need not be its project's", async () => {
   const odd: Binding = { ...DEMO_BINDINGS[0], id: "binding-from-before" };
   const backend = backendWithBindings([odd]);

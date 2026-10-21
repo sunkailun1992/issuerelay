@@ -535,6 +535,17 @@ test("each binding says whether its folder exists and its executor is ready", as
   expect(within(mobile).getByText("Codex is not ready")).toBeInTheDocument();
 });
 
+test("a binding held back only by the lean checks says so", async () => {
+  const backend = await demoWith((report) => {
+    report.bindings[1] = { ...report.bindings[1], lean: "on", executor_ready: false, lean_not_ready: true };
+  });
+  await renderWithProviders(<Doctor />, { backend });
+  const mobile = await screen.findByRole("region", { name: "Demo Mobile" });
+  expect(within(mobile).getByText("Codex is not ready for lean runs")).toBeInTheDocument();
+  expect(within(mobile).queryByText("Codex is not ready")).not.toBeInTheDocument();
+  expect(symbolOf(mobile, "Codex is not ready for lean runs")).toContain("text-state-failed");
+});
+
 test("a check that passed has a green symbol, one that failed a red one", async () => {
   await renderWithProviders(<Doctor />);
   const project = await screen.findByRole("region", { name: "Demo Project" });

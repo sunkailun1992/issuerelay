@@ -82,6 +82,12 @@ impl Readiness {
             self.full.contains(&kind)
         }
     }
+
+    /// Whether only the lean checks keep `kind` from the runs of a binding whose lean status is
+    /// `lean`: the runs are lean, and the executor is ready for usual runs but not for lean ones.
+    pub fn held_back_by_lean(&self, kind: ExecutorKind, lean: LeanStatus) -> bool {
+        lean.applies() && !self.lean.contains(&kind) && self.full.contains(&kind)
+    }
 }
 
 /// The outcome of `evaluate`.
@@ -132,9 +138,9 @@ pub fn evaluate(
         return Eligibility::Waiting(WaitReason::DirectoryMissing(binding.directory.clone()));
     }
     let kind = cfg.executor_for(binding);
-    if !ready.ready(kind, cfg.lean_for(binding, home)) {
-        // Ready for usual runs, so only the lean checks hold this binding's runs back.
-        let reason = if ready.full.contains(&kind) {
+    let lean = cfg.lean_for(binding, home);
+    if !ready.ready(kind, lean) {
+        let reason = if ready.held_back_by_lean(kind, lean) {
             WaitReason::LeanNotReady(kind)
         } else {
             WaitReason::ExecutorNotReady(kind)

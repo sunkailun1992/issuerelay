@@ -13,6 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { WorkspaceCheck } from "@/components/WorkspaceCheck";
 import { useDoctor } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
+import { executorVerdict } from "@/lib/binding-labels";
 import { maskCredentials } from "@/lib/mask";
 import type { BindingReport, DoctorReport, ExecEnv } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -124,11 +125,7 @@ function BindingCheck({ report }: { report: BindingReport }) {
               <span>{report.directory_exists ? t("bindings.directory_ok") : t("bindings.directory_missing")}</span>
             </CheckRow>
             <CheckRow ok={report.executor_ready}>
-              <span>
-                {t(report.executor_ready ? "bindings.executor_ready" : "bindings.executor_not_ready", {
-                  executor: t(`executor.${report.executor}`),
-                })}
-              </span>
+              <span>{executorVerdict(t, report)}</span>
             </CheckRow>
           </ul>
         </CardContent>

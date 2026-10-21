@@ -239,7 +239,13 @@ fn doctor(v: &Value) -> String {
             wrong.push("directory missing");
         }
         if b["executor_ready"] != true {
-            wrong.push("executor not ready");
+            // As the binding's issues say when they wait. A host from before `lean_not_ready`
+            // sends none, and then the general words stay.
+            wrong.push(if b["lean_not_ready"] == true {
+                "executor not ready for lean runs"
+            } else {
+                "executor not ready"
+            });
         }
         let verdict = if wrong.is_empty() {
             "ok".to_string()
@@ -729,6 +735,34 @@ mod tests {
         assert_eq!(
             line(false, false),
             "Binding Demo Project -> claude: directory missing, executor not ready"
+        );
+    }
+
+    #[test]
+    fn a_binding_held_back_only_by_the_lean_checks_says_so() {
+        let line = |lean_not_ready: Option<bool>| {
+            let mut binding = json!({"binding_id": "p", "project_name": "Demo Project",
+                "directory_exists": true, "executor": "codex", "executor_ready": false,
+                "lean": "on"});
+            if let Some(value) = lean_not_ready {
+                binding["lean_not_ready"] = json!(value);
+            }
+            let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+                "workspace": null, "bindings": [binding]});
+            human("doctor", &report).lines().last().unwrap().to_string()
+        };
+        assert_eq!(
+            line(Some(true)),
+            "Binding Demo Project -> codex (lean): executor not ready for lean runs"
+        );
+        assert_eq!(
+            line(Some(false)),
+            "Binding Demo Project -> codex (lean): executor not ready"
+        );
+        // A host from before the field says nothing about it: the general words.
+        assert_eq!(
+            line(None),
+            "Binding Demo Project -> codex (lean): executor not ready"
         );
     }
 

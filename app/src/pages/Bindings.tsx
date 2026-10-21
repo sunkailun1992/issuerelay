@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { queryKeys, useBindings, useDoctor, useRemoveBinding, useSettings } from "@/hooks/queries";
-import { type BindingLabels, bindingLabels } from "@/lib/binding-labels";
+import { type BindingLabels, bindingLabels, executorVerdict } from "@/lib/binding-labels";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { describeError } from "@/lib/errors";
 import type { Binding, BindingReport, DoctorReport } from "@/lib/types";
@@ -113,9 +113,7 @@ function CheckResult({ check, report, describedBy }: { check: LastCheck; report:
     <div className="flex flex-col items-start gap-1.5">
       <ul className="flex flex-col gap-1">
         <Verdict ok={report.directory_exists}>{report.directory_exists ? t("bindings.directory_ok") : t("bindings.directory_missing")}</Verdict>
-        <Verdict ok={report.executor_ready}>
-          {t(report.executor_ready ? "bindings.executor_ready" : "bindings.executor_not_ready", { executor: t(`executor.${report.executor}`) })}
-        </Verdict>
+        <Verdict ok={report.executor_ready}>{executorVerdict(t, report)}</Verdict>
       </ul>
       {(!report.directory_exists || !report.executor_ready) && (
         <Link to="/doctor" className="rounded-sm text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50">

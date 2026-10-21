@@ -375,6 +375,7 @@
     "directory_missing": "資料夾不存在",
     "executor_ready": "{{executor}} 已就緒",
     "executor_not_ready": "{{executor}} 尚未就緒",
+    "executor_lean_not_ready": "{{executor}} 的精簡執行尚未就緒",
     "open_doctor": "開啟環境檢查",
     "settings_failed": "無法讀取設定",
     "full_access_title": "完全放開不設任何限制",
