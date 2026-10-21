@@ -344,8 +344,9 @@ fn bindings(v: &Value) -> String {
                     .unwrap_or("default"),
             )];
             // Only what differs from the defaults: the permission profile and the effort from
-            // the settings, lean runs on. A personal binding is never lean, so its profile also
-            // tells it apart from a lean one.
+            // the settings, lean runs on. A binding that sets the personal profile itself (never
+            // lean) shows it here; one that follows a personal default, or binds the home folder,
+            // looks like a lean one, and `doctor` says whether its runs are lean.
             if let Some(permission) = b.get("permission").and_then(Value::as_str) {
                 tags.push(format!("permission {}", clean(permission)));
             }
@@ -772,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_lines_name_lean_off_and_effort() {
+    fn binding_lines_name_the_permission_lean_off_and_effort() {
         let line = |fields: &[(&str, Value)]| {
             let mut binding = json!({"id": "p1", "project_name": "Demo Project",
                 "directory": "demo", "executor": "claude"});

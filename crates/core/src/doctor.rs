@@ -4084,7 +4084,8 @@ mod tests {
             fell.starts_with(r#"WARN executor no longer ready executor="claude" problems="#),
             "{fell}"
         );
-        assert!(fell.contains("Linear MCP"), "{fell}");
+        // The usual problem, not the lean one ("the Linear MCP server `linear-server` in …").
+        assert!(fell.contains("Linear MCP in claude"), "{fell}");
         assert!(
             back.starts_with(r#"INFO executor ready now executor="claude""#),
             "{back}"
