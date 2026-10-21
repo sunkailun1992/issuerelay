@@ -947,7 +947,8 @@ fn server_and_target(kind: ExecutorKind, line: &str) -> Option<(&str, &str)> {
 
 /// The lean problem when `mcp list` ran without showing the Linear server lean runs load
 /// usable: it is missing, or its name points elsewhere (then adding it would fail, so only the
-/// reason is given), or what its line says.
+/// reason is given), or Codex's line shows a sign-in lean runs cannot use (with what to do about
+/// it), or what its line says.
 fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
     let name = kind.program_name();
     let server = lean_server_name(kind);
@@ -971,15 +972,31 @@ fn lean_linear_problem(kind: ExecutorKind, output: &CmdOutput) -> String {
         // Usable for usual runs, which read the configuration that holds a token, but not for
         // lean ones.
         Some((_, line)) if kind == ExecutorKind::Codex && line_usable(kind, line) => {
-            let shown = match clean(&codex_sign_in(line)) {
-                sign_in if sign_in.is_empty() => "no sign-in".to_string(),
-                sign_in => format!("`{sign_in}` as its sign-in"),
-            };
-            format!(
-                "the Linear MCP server `{server}` in {name} shows {shown}, but lean runs leave \
-                 out {name}'s configuration and can only use a stored OAuth sign-in; sign in \
-                 with `{name} mcp login {server}`, or turn lean runs off for this binding"
-            )
+            match clean(&codex_sign_in(line)) {
+                // Signing in alone would not change the column: codex-cli 0.159.2 says `Bearer
+                // token` whenever the configuration sets a token, before it looks for a stored
+                // sign-in, and `mcp login` stores one all the same (its source, read 2026-10-21).
+                sign_in if sign_in == "Bearer token" => format!(
+                    "the Linear MCP server `{server}` in {name} signs in with a token from \
+                     {name}'s configuration (`Bearer token`), which lean runs leave out; to use \
+                     lean runs, remove the token from its entry (`bearer_token_env_var` or an \
+                     `Authorization` header) and sign in with `{name} mcp login {server}`, or \
+                     turn lean runs off for this binding"
+                ),
+                sign_in => {
+                    let shown = if sign_in.is_empty() {
+                        "no sign-in".to_string()
+                    } else {
+                        format!("`{sign_in}` as its sign-in")
+                    };
+                    format!(
+                        "the Linear MCP server `{server}` in {name} shows {shown}, but lean runs \
+                         leave out {name}'s configuration and can only use a stored OAuth \
+                         sign-in; sign in with `{name} mcp login {server}`, or turn lean runs off \
+                         for this binding"
+                    )
+                }
+            }
         }
         Some((_, line)) => match clean(&line_status(kind, line)) {
             status if status.is_empty() => {
@@ -2696,8 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_reports_carry_the_effort_their_runs_get() {
-        use crate::config::Effort;
+    fn binding_reports_carry_the_effort_issuerelay_passes() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.settings.default_effort = Some(Effort::High);
@@ -2823,6 +2839,8 @@ mod tests {
             ("-", "Bearer token"),
             ("-", "Unsupported"),
             ("-", "Unknown"),
+            // A column after it: the sign-in is no longer the whole of what follows the status.
+            ("-", "OAuth  extra"),
         ] {
             let listed = table(token, auth);
             assert!(
@@ -2854,10 +2872,30 @@ mod tests {
             complete && report.ready() && !report.ready_lean(),
             "{report:?}"
         );
+        // Signing in alone would not do: the column says `Bearer token` while the configuration
+        // sets a token, stored sign-in or not.
         assert_eq!(
             report.lean_problems,
             [
-                "the Linear MCP server `linear` in codex shows `Bearer token` as its sign-in, but \
+                "the Linear MCP server `linear` in codex signs in with a token from codex's \
+                 configuration (`Bearer token`), which lean runs leave out; to use lean runs, \
+                 remove the token from its entry (`bearer_token_env_var` or an `Authorization` \
+                 header) and sign in with `codex mcp login linear`, or turn lean runs off for \
+                 this binding"
+            ]
+        );
+        replies[3] = (
+            "mcp list",
+            out(
+                0,
+                "linear  https://mcp.linear.app/mcp  -  enabled  Unsupported",
+            ),
+        );
+        let (report, _) = lean_detailed(ExecutorKind::Codex, &replies, &lean_paths(&dir)).await;
+        assert_eq!(
+            report.lean_problems,
+            [
+                "the Linear MCP server `linear` in codex shows `Unsupported` as its sign-in, but \
                  lean runs leave out codex's configuration and can only use a stored OAuth \
                  sign-in; sign in with `codex mcp login linear`, or turn lean runs off for this \
                  binding"
