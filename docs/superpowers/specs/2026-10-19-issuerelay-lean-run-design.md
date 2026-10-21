@@ -248,8 +248,8 @@
 ### 6.2 命令行
 
 - `issuerelay bind add` 加两个选项：一个关掉精简运行（省略时为开），一个设推理力度（省略时跟随设置）。选项的写法由实现者定。
-- `issuerelay bind list` 列的是绑定本身，看不出「按个人设置」与主目录这两种「不适用」：一行只写与默认不同的设定，即关掉的精简运行（`lean off`）与绑定自己的推理力度（`effort <值>`）；`--json` 是绑定本身：`lean` 只在关掉时出现（`false`），`effort` 只在绑定设了时出现。
-- `issuerelay doctor` 的绑定一行写明精简运行的生效值（`(lean)`；不精简时写 `(full configuration)`，按个人设置或主目录时另写原因）与 IssueRelay 传给执行者的推理力度（绑定自己的，否则设置的默认值；都没设时不写；不精简的 Claude 运行里，用户设置 `env` 的 `CLAUDE_CODE_EFFORT_LEVEL` 会盖过它，见第 5.6 节）；`--json` 的绑定报告有 `lean` 与 `effort`。原先写的是两条命令都写生效值与推理力度，`bind list` 做不到，改成照实现写，`doctor` 补上推理力度（所有者定，2026-10-21）。
+- `issuerelay bind list` 列的是绑定本身，看不出主目录这种「不适用」：一行只写与默认不同的设定，即绑定自己的权限档（`permission <值>`）、关掉的精简运行（`lean off`）与绑定自己的推理力度（`effort <值>`）；`--json` 是绑定本身：`permission` 与 `effort` 只在绑定设了时出现，`lean` 只在关掉时出现（`false`）。权限档是 2026-10-21 加的（v0.2.2 验收 O4，随 v0.2.3）：此前「按个人设置」的绑定列出来与精简的一样。
+- `issuerelay doctor` 的绑定一行写明精简运行的生效值（`(lean)`；不精简时写 `(full configuration)`，按个人设置或主目录时另写原因）与 IssueRelay 传给执行者的推理力度（绑定自己的，否则设置的默认值；都没设时不写；不精简的 Claude 运行里，用户设置 `env` 的 `CLAUDE_CODE_EFFORT_LEVEL` 会盖过它，见第 5.6 节）；`--json` 的绑定报告有 `lean` 与 `effort`。执行者平常就绪、只差精简检查时，这一行写 `executor not ready for lean runs`（`--json` 的 `lean_not_ready`），与需求的等待原因同一说法；此前写通用的 `executor not ready`（v0.2.2 验收 O1，随 v0.2.3）。原先写的是两条命令都写生效值与推理力度，`bind list` 做不到，改成照实现写，`doctor` 补上推理力度（所有者定，2026-10-21）。
 - MCP 控制服务与 IPC 方法表不变：没有新方法，绑定数据多一个字段。
 
 ### 6.3 面板
