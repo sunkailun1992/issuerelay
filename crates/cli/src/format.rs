@@ -343,7 +343,12 @@ fn bindings(v: &Value) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or("default"),
             )];
-            // Only what differs from the defaults: lean runs on, the effort from the settings.
+            // Only what differs from the defaults: the permission profile and the effort from
+            // the settings, lean runs on. A personal binding is never lean, so its profile also
+            // tells it apart from a lean one.
+            if let Some(permission) = b.get("permission").and_then(Value::as_str) {
+                tags.push(format!("permission {}", clean(permission)));
+            }
             if b["lean"] == false {
                 tags.push("lean off".into());
             }
@@ -789,10 +794,28 @@ mod tests {
             line(&[("effort", json!("low"))]),
             "p1  Demo Project  ->  demo  [claude, effort low]"
         );
+        // The binding's own permission profile, so a personal binding (never lean) does not
+        // look like a lean one.
+        assert_eq!(
+            line(&[("permission", json!("personal"))]),
+            "p1  Demo Project  ->  demo  [claude, permission personal]"
+        );
+        assert_eq!(
+            line(&[
+                ("permission", json!("auto")),
+                ("lean", json!(false)),
+                ("effort", json!("max"))
+            ]),
+            "p1  Demo Project  ->  demo  [claude, permission auto, lean off, effort max]"
+        );
         // What the host sends is cleaned like everything else.
         assert_eq!(
             line(&[("effort", json!("m\u{1b}ax"))]),
             "p1  Demo Project  ->  demo  [claude, effort m ax]"
+        );
+        assert_eq!(
+            line(&[("permission", json!("pers\u{9b}onal"))]),
+            "p1  Demo Project  ->  demo  [claude, permission pers onal]"
         );
     }
 
