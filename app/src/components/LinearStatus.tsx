@@ -1,9 +1,9 @@
 import { CircleCheck, LoaderCircle, LogIn, LogOut, RefreshCw, TriangleAlert, Unplug, type LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { useLinearLogin, useLinearLoginWaiting, useLinearLogout, useLinearReconnect, useStatus } from "@/hooks/queries";
+import { useAppInfo, useLinearLogin, useLinearLoginWaiting, useLinearLogout, useLinearReconnect, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { formatRelative } from "@/lib/format";
@@ -12,6 +12,40 @@ import { DetailLine, ErrorState, LoadingState } from "./states";
 
 /** How often "5 minutes ago" is worked out again. */
 const CLOCK_MS = 30_000;
+
+/** How long the first connection may take before the card says what it may be waiting for. */
+const SLOW_CONNECTION_MS = 30_000;
+
+/**
+ * Under a first connection that has gone on for `SLOW_CONNECTION_MS` on macOS: a new build's first
+ * read of the saved login waits while the keychain asks whether that build may use it, and the
+ * dialog can be behind other windows (v0.2.3 acceptance P1; core's log says so after a minute,
+ * `noting_a_slow_attempt` in `host.rs`). The status region is there from the start and filled in
+ * later, so that screen readers announce the line when it appears.
+ */
+function KeychainHint() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), SLOW_CONNECTION_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <p role="status" className="text-xs text-muted-foreground">
+      {slow && <KeychainHintText />}
+    </p>
+  );
+}
+
+/**
+ * The hint's words, on macOS only; the platform is asked for once they are due. Windows has no
+ * such dialog to point at: the login is read with `CredReadW`, which shows no prompt
+ * (windows-native-keyring-store 1.1.0, read 2026-10-22).
+ */
+function KeychainHintText() {
+  const { t } = useTranslation();
+  const info = useAppInfo();
+  return info.data?.platform === "macos" ? t("linear.keychain_hint") : null;
+}
 
 /** The look of a connection: a round icon in the colour of how it stands. */
 type Tone = "good" | "bad" | "neutral" | "busy";
@@ -111,6 +145,7 @@ export function LinearStatus({
       return (
         <Layout icon={LoaderCircle} tone="busy" spin>
           <p className="font-medium">{labels?.connecting ?? t("linear.connecting")}</p>
+          <KeychainHint />
         </Layout>
       );
     case "not_configured":

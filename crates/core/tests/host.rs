@@ -747,6 +747,137 @@ async fn start_does_not_wait_for_linear() {
     .await;
 }
 
+/// The messages of the `WARN` and `ERROR` events logged on the thread where it is the default
+/// subscriber (the test runtime runs every task there).
+#[derive(Clone, Default)]
+struct Warnings(Arc<Mutex<Vec<String>>>);
+
+impl Warnings {
+    /// How many of the messages start with `start`.
+    fn starting_with(&self, start: &str) -> usize {
+        let messages = self.0.lock().unwrap();
+        messages.iter().filter(|m| m.starts_with(start)).count()
+    }
+}
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+
+        impl tracing::field::Visit for Message {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.0 = value.to_string();
+                }
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        self.0.lock().unwrap().push(message.0);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Logs the current thread's warnings into the returned `Warnings` until the guard is dropped.
+fn record_warnings() -> (
+    Warnings,
+    tracing::subscriber::DefaultGuard,
+    tracing::Dispatch,
+) {
+    // As in the test of a dead engine below: with a second, idle subscriber registered, tracing
+    // asks every registered one whether a log call is wanted, instead of the default of whichever
+    // parallel test's thread reaches the call first.
+    let idle = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let warnings = Warnings::default();
+    let guard = tracing::subscriber::set_default(warnings.clone());
+    (warnings, guard, idle)
+}
+
+const STILL_CONNECTING: &str = "still connecting to Linear";
+
+// A new build's first read of the stored sign-in waits while macOS asks whether it may use the
+// keychain item, and nobody may be there to answer (v0.2.3 acceptance P1). The host's log then
+// says once, at the limit, that the connection is still under way; it does not repeat it.
+#[tokio::test]
+async fn a_first_connection_still_under_way_at_the_limit_is_noted_once_in_the_log() {
+    bounded(async {
+        let (warnings, _guard, _idle) = record_warnings();
+        let gate = Arc::new(Semaphore::new(0));
+        let linear = FakeLinear::new("user-1");
+        let connector = FakeConnector::new(vec![Stored::After(
+            gate.clone(),
+            Box::new(Stored::Works(linear, AuthMethod::OAuth)),
+        )]);
+        let root = tempfile::tempdir().unwrap();
+        let slow = HostParts {
+            slow_connection: Some(Duration::from_millis(100)),
+            ..parts(None)
+        };
+        let host = start_unsettled(root.path(), connector, slow).await.unwrap();
+        eventually("the slow connection was never noted", || {
+            warnings.starting_with(STILL_CONNECTING) == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(warnings.starting_with(STILL_CONNECTING), 1);
+
+        gate.add_permits(1);
+        settled(&host).await;
+        assert_eq!(
+            host.linear_setup(),
+            LinearSetup::Connected {
+                method: AuthMethod::OAuth
+            }
+        );
+        assert_eq!(warnings.starting_with(STILL_CONNECTING), 1);
+        stop_now(&host).await;
+    })
+    .await;
+}
+
+// The limit only counts while the attempt is under way: one that ended in time leaves no line,
+// however long the host runs afterwards.
+#[tokio::test]
+async fn a_first_connection_that_ends_within_the_limit_is_not_noted() {
+    bounded(async {
+        let (warnings, _guard, _idle) = record_warnings();
+        let linear = FakeLinear::new("user-1");
+        let connector = FakeConnector::new(vec![Stored::Works(linear, AuthMethod::OAuth)]);
+        let root = tempfile::tempdir().unwrap();
+        let slow = HostParts {
+            slow_connection: Some(Duration::from_millis(100)),
+            ..parts(None)
+        };
+        let host = start(root.path(), connector, slow).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(warnings.starting_with(STILL_CONNECTING), 0);
+        stop_now(&host).await;
+    })
+    .await;
+}
+
 // A login or a key the user gives while the first connection is still going wins over it.
 #[tokio::test]
 async fn a_key_given_during_the_first_connection_wins() {

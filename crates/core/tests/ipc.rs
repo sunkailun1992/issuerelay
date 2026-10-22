@@ -171,6 +171,33 @@ async fn jobs_and_logs_over_ipc() {
     token.cancel();
 }
 
+// `issuerelay logs` asks for the last lines without Claude's thinking-token progress, which once
+// pushed a run's first lines out of its default 50 (v0.2.3 acceptance P3). The panel reads the raw
+// tail through a command of its own.
+#[tokio::test]
+async fn logs_over_ipc_leave_out_claudes_thinking_token_progress() {
+    let h = Harness::new(2, false);
+    let (endpoint, token) = start(&h).await;
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    let thinking = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50}"#;
+    let init = r#"{"type":"system","subtype":"init"}"#;
+    let result = r#"{"type":"result"}"#;
+    std::fs::write(
+        job.log_path.as_ref().unwrap(),
+        format!("{init}\n{thinking}\n{thinking}\n{result}\n"),
+    )
+    .unwrap();
+    let logs = client::call(&endpoint, "logs", json!({"job_id": job.id, "lines": 2}))
+        .await
+        .unwrap();
+    assert_eq!(logs, json!([init, result]));
+    token.cancel();
+}
+
 // Which requests are answered at all: the method table decides, not the dispatcher.
 
 #[tokio::test]

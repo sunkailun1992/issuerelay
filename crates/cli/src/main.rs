@@ -50,7 +50,7 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u64,
     },
-    /// Show the last lines of a run's log.
+    /// Show the last lines of a run's log, without Claude's thinking-token progress events.
     Logs {
         /// The run's number, as in the `#` column of `issuerelay jobs`.
         job_id: i64,
