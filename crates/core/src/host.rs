@@ -8,7 +8,8 @@
 //! engine has a `Disconnected` stand-in ("connecting to Linear") and the setup reads
 //! `Connecting`. Without credentials, with a failed connection or with changed Linear tools the
 //! stand-in stays and its checks fail with the reason (design section 13); a failed connection is
-//! retried every minute.
+//! retried every minute. An attempt still under way after a minute says so once in the log, since
+//! the checks' "connecting to Linear" does not tell a slow network from an unanswered prompt.
 //!
 //! The connection has two kinds of writers. The user's changes (login, API key, logout) are
 //! serialized, one at a time, so that the keychain and the host end with the same login. The
@@ -53,6 +54,14 @@ const READINESS_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// How often a failed connection is tried again.
 const RETRY_EVERY: Duration = Duration::from_secs(60);
+
+/// How long an attempt to connect with the stored credentials may go on before the host's log says
+/// it is still under way. Reading the stored sign-in has no time limit, and on macOS a new build's
+/// first read waits while the keychain asks whether that build may use it, with nobody answering
+/// when nobody is at the Mac (2026-10-22: five minutes of only "connecting to Linear", v0.2.3
+/// acceptance P1). The handshake that follows gives up after 30 s, so a minute is well past a
+/// normal start.
+const SLOW_CONNECTION: Duration = Duration::from_secs(60);
 
 /// How long `stop` waits for the runs to end after the engine's task died. Stopping a run takes a
 /// few seconds (the executor gets five to end the processes it started) and recording it one
@@ -206,6 +215,9 @@ pub struct HostParts {
     pub job_runner: Option<Arc<dyn JobRunner>>,
     /// How often a failed connection is retried; `RETRY_EVERY` by default.
     pub retry_every: Option<Duration>,
+    /// How long an attempt to connect with the stored credentials goes on before the log says so;
+    /// `SLOW_CONNECTION` by default.
+    pub slow_connection: Option<Duration>,
     /// How long `stop` waits for the runs to end after the engine's task died; `DEAD_ENGINE_WAIT`
     /// by default.
     pub dead_engine_wait: Option<Duration>,
@@ -461,10 +473,10 @@ impl Host {
                 dead_engine_wait: parts.dead_engine_wait.unwrap_or(DEAD_ENGINE_WAIT),
             }),
         };
-        tokio::spawn(
-            host.clone()
-                .connect_in_the_background(parts.retry_every.unwrap_or(RETRY_EVERY)),
-        );
+        tokio::spawn(host.clone().connect_in_the_background(
+            parts.retry_every.unwrap_or(RETRY_EVERY),
+            parts.slow_connection.unwrap_or(SLOW_CONNECTION),
+        ));
         Ok(host)
     }
 
@@ -734,8 +746,9 @@ impl Host {
     ///
     /// The stop is looked at first, every time (`biased`): an attempt reads the stored
     /// credentials from the keychain, which on macOS can wait for a prompt nobody answers, so a
-    /// stop that came right after the start, before the first attempt, must not begin one.
-    async fn connect_in_the_background(self, every: Duration) {
+    /// stop that came right after the start, before the first attempt, must not begin one. An
+    /// attempt still under way after `slow` is noted once in the log (`noting_a_slow_attempt`).
+    async fn connect_in_the_background(self, every: Duration, slow: Duration) {
         let shutdown = &self.inner.engine_shutdown;
         let mut first = true;
         loop {
@@ -744,7 +757,7 @@ impl Host {
                 let setup = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => return,
-                    setup = self.reconnect() => setup,
+                    setup = noting_a_slow_attempt(slow, self.reconnect()) => setup,
                 };
                 if let LinearSetup::ConnectFailed { message } = &setup {
                     tracing::debug!(%message, "could not connect to Linear");
@@ -757,6 +770,23 @@ impl Host {
             }
         }
     }
+}
+
+/// Waits for `attempt`, writing one warning into the host's log once it has gone on for `limit`
+/// (`SLOW_CONNECTION`). The attempt is not cut short: the keychain's question can still be
+/// answered, and the connection then goes ahead.
+async fn noting_a_slow_attempt<T>(limit: Duration, attempt: impl Future<Output = T>) -> T {
+    let mut attempt = std::pin::pin!(attempt);
+    tokio::select! {
+        biased;
+        done = &mut attempt => return done,
+        _ = tokio::time::sleep(limit) => tracing::warn!(
+            waited = ?limit,
+            "still connecting to Linear; reading the stored sign-in may be waiting for an answer \
+             to a system prompt (on macOS, a keychain dialog asking whether IssueRelay may use it)"
+        ),
+    }
+    attempt.await
 }
 
 #[cfg(test)]
