@@ -18,26 +18,33 @@ const SLOW_CONNECTION_MS = 30_000;
 
 /**
  * Under a first connection that has gone on for `SLOW_CONNECTION_MS` on macOS: a new build's first
- * read of the saved sign-in waits while the keychain asks whether that build may use it, and the
+ * read of the saved login waits while the keychain asks whether that build may use it, and the
  * dialog can be behind other windows (v0.2.3 acceptance P1; core's log says so after a minute,
- * `noting_a_slow_attempt` in `host.rs`). Windows keeps the sign-in in the Credential Manager,
- * which does not ask, and a handshake there gives up after 30 s and shows as failed, so there is
- * nothing to point at.
+ * `noting_a_slow_attempt` in `host.rs`). The status region is there from the start and filled in
+ * later, so that screen readers announce the line when it appears.
  */
 function KeychainHint() {
-  const { t } = useTranslation();
-  const info = useAppInfo();
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => setSlow(true), SLOW_CONNECTION_MS);
     return () => clearTimeout(timer);
   }, []);
-  if (!slow || info.data?.platform !== "macos") return null;
   return (
     <p role="status" className="text-xs text-muted-foreground">
-      {t("linear.keychain_hint")}
+      {slow && <KeychainHintText />}
     </p>
   );
+}
+
+/**
+ * The hint's words, on macOS only; the platform is asked for once they are due. Windows has no
+ * such dialog to point at: the login is read with `CredReadW`, which shows no prompt
+ * (windows-native-keyring-store 1.1.0, read 2026-10-22).
+ */
+function KeychainHintText() {
+  const { t } = useTranslation();
+  const info = useAppInfo();
+  return info.data?.platform === "macos" ? t("linear.keychain_hint") : null;
 }
 
 /** The look of a connection: a round icon in the colour of how it stands. */

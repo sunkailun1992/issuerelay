@@ -108,19 +108,25 @@ test("while the first connection is under way the card says so and offers nothin
   expect(screen.queryAllByRole("button")).toHaveLength(0);
 });
 
-const KEYCHAIN_HINT = /macOS may be waiting for you to let it use its saved Linear sign-in/;
+const KEYCHAIN_HINT = /macOS may be waiting for you to let it use its saved Linear login/;
 
-// A new build's first read of the saved sign-in waits while macOS asks whether that build may use
-// the keychain item, and the card said only "Connecting…" for as long as nobody answered (v0.2.3
-// acceptance P1).
+// A new build's first read of the saved login waits while macOS asks whether that build may use the
+// keychain item, and the card said only "Connecting…" for as long as nobody answered (v0.2.3
+// acceptance P1). The line goes into a status region that is there from the start, so that a
+// screen reader announces it when it appears.
 test("on macOS a first connection still under way after half a minute says the keychain may be asking", async () => {
   // Every timer is the test's: the mock answers from one, and so does the hint.
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   try {
     await renderWithProviders(<LinearStatus />, { backend: createMockBackend("connecting", { latencyMs: 0 }) });
     await advanceUntil(() => screen.queryByText("Connecting to Linear…") !== null);
+    expect(screen.getByRole("status")).toBeEmptyDOMElement();
     const hint = () => screen.queryByText(KEYCHAIN_HINT) !== null;
-    expect(await advanceUntil(hint, { step: 1000, limit: 60_000 })).toBe(30_000);
+    // Not before half a minute; the platform is asked for then, which the mock answers from a timer
+    // (in the app the sidebar has read it long before).
+    const waited = await advanceUntil(hint, { step: 1000, limit: 60_000 });
+    expect(waited).toBeGreaterThanOrEqual(30_000);
+    expect(waited).toBeLessThanOrEqual(31_000);
     expect(screen.getByRole("status")).toHaveTextContent(KEYCHAIN_HINT);
     expect(screen.getByText("Connecting to Linear…")).toBeInTheDocument();
   } finally {
