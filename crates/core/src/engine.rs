@@ -415,6 +415,16 @@ fn display_workspace(report: WorkspaceReport) -> WorkspaceReport {
     }
 }
 
+/// Whether a log line is one of Claude's `thinking_tokens` events: an estimate of the tokens spent
+/// thinking so far, without any content. A lean run on 2026-10-22 (Claude Code 2.1.285) logged 112
+/// of them in its 171 lines. Only a line that mentions the word is parsed, and only that event
+/// matches: a result whose usage names it is kept.
+fn is_thinking_progress(line: &str) -> bool {
+    line.contains("thinking_tokens")
+        && serde_json::from_str::<serde_json::Value>(line)
+            .is_ok_and(|event| event["type"] == "system" && event["subtype"] == "thinking_tokens")
+}
+
 /// Maps a finished run to a job state. Only a clean exit whose issue reached the testing
 /// status counts as success; the AI's own report alone never does.
 pub fn decide(
@@ -763,6 +773,9 @@ impl Engine {
     /// The last `lines` lines of the job's log; empty while it has none, and also once the log
     /// is gone: a log deleted by the cleanup reads as empty. Reads at most the last
     /// `LOG_TAIL_WINDOW` bytes of the file, so a long log is cheap to ask for again and again.
+    /// Claude's `thinking_tokens` progress events are left out before the lines are counted
+    /// (`is_thinking_progress`), so they cannot push the start of a run out of a short tail; the
+    /// file keeps them.
     pub fn log_tail(&self, job_id: i64, lines: usize) -> Result<Vec<String>> {
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
@@ -789,7 +802,10 @@ impl Engine {
             // The read began inside the file, so its first line is partial: drop it.
             text = text.split_once('\n').map_or("", |(_, rest)| rest);
         }
-        let all: Vec<&str> = text.lines().collect();
+        let all: Vec<&str> = text
+            .lines()
+            .filter(|line| !is_thinking_progress(line))
+            .collect();
         Ok(all[all.len().saturating_sub(lines)..]
             .iter()
             .map(|line| line.to_string())

@@ -805,6 +805,36 @@ async fn log_tail_returns_last_lines() {
     );
 }
 
+// A lean Claude run on 2026-10-22 (v0.2.3 acceptance P3) logged 112 `thinking_tokens` events in
+// its 171 lines: progress estimates without any content, which pushed the run's first lines out
+// of the 50 that `issuerelay logs` shows. A line that only mentions the word stays.
+#[tokio::test]
+async fn log_tail_leaves_out_claudes_thinking_token_progress() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    let thinking = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50,"estimated_tokens_delta":50,"session_id":"00000000-0000-0000-0000-000000000000"}"#;
+    let kept = [
+        r#"{"stream":"runner","text":"lean run: started with only the Linear MCP server"}"#,
+        r#"{"type":"system","subtype":"init","session_id":"00000000-0000-0000-0000-000000000000"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking_tokens"}]}}"#,
+        "thinking_tokens, but not JSON",
+        r#"{"type":"system","subtype":"vcs_state_changed"}"#,
+        r#"{"type":"result","subtype":"success","usage":{"thinking_tokens":50}}"#,
+    ];
+    let text = format!(
+        "{}\n{}\n{thinking}\n{thinking}\n{}\n{}\n{thinking}\n{}\n{}\n",
+        kept[0], kept[1], kept[2], kept[3], kept[4], kept[5]
+    );
+    std::fs::write(job.log_path.as_ref().unwrap(), text).unwrap();
+    assert_eq!(h.engine.log_tail(job.id, 50).unwrap(), kept);
+    // The lines asked for are counted among the ones that are kept.
+    assert_eq!(h.engine.log_tail(job.id, 3).unwrap(), &kept[3..]);
+}
+
 #[tokio::test]
 async fn log_tail_reads_only_the_end_of_a_large_log() {
     let h = Harness::new(2, false);
