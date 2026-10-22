@@ -59,8 +59,9 @@ const RETRY_EVERY: Duration = Duration::from_secs(60);
 /// it is still under way. Reading the stored sign-in has no time limit, and on macOS a new build's
 /// first read waits while the keychain asks whether that build may use it, with nobody answering
 /// when nobody is at the Mac (2026-10-22: five minutes of only "connecting to Linear", v0.2.3
-/// acceptance P1). The handshake that follows gives up after 30 s, so a minute is well past a
-/// normal start.
+/// acceptance P1). A normal start takes seconds, so a minute is well past it; a slow network can
+/// take that long too, since each request after the read may take up to 30 s (`auth.rs`,
+/// `mcp.rs`), and the log line names both.
 const SLOW_CONNECTION: Duration = Duration::from_secs(60);
 
 /// How long `stop` waits for the runs to end after the engine's task died. Stopping a run takes a
@@ -782,8 +783,8 @@ async fn noting_a_slow_attempt<T>(limit: Duration, attempt: impl Future<Output =
         done = &mut attempt => return done,
         _ = tokio::time::sleep(limit) => tracing::warn!(
             waited = ?limit,
-            "still connecting to Linear; reading the stored sign-in may be waiting for an answer \
-             to a system prompt (on macOS, a keychain dialog asking whether IssueRelay may use it)"
+            "still connecting to Linear: the network may be slow, or on macOS a keychain dialog may \
+             be waiting for an answer about IssueRelay's saved sign-in"
         ),
     }
     attempt.await
