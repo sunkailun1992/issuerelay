@@ -108,6 +108,6 @@
 ## 未闭环
 
 - Windows（第 7 项）全部待实机，清单见设计第 5.5 节与计划的遗留项。
-- N1 的重读在实机上没有走到：DEMO-40 没有遇到旧快照。
+- N1 的重读在实机上没有走到：DEMO-40 没有遇到旧快照。之后在 2026-10-21 的 DEMO-46 走到过一次（需求确实没变，三次再读后照样判失败，与 Linear 一致），见 `2026-10-22-v0.2.4-release.md`「N1 的实机核对」。
 - `~/.claude` 是符号链接时的排除：本机不是符号链接，没有测。
 - 沙箱里的测试需求保持原样：DEMO-31、DEMO-33、DEMO-39、DEMO-40 待验收；DEMO-32 在 Linear 是 In Testing，记录是失败（N1）；DEMO-34、DEMO-35 是 Todo；DEMO-36、DEMO-38 停在 In Progress；DEMO-37 是 Todo，`ai-ready` 已被 AI 去掉。
