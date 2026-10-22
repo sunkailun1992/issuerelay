@@ -94,9 +94,11 @@ async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value
         "bindings.remove" => {
             json!({"removed": engine.remove_binding(string_param(params, "id")?)?})
         }
+        // What `issuerelay logs` shows: a short tail, so Claude's thinking-token progress is left
+        // out before the lines are counted. The panel reads the raw tail with its own command.
         "logs" => {
             let job_id = job_id_param(params)?;
-            serde_json::to_value(engine.log_tail(job_id, log_lines(params)?)?)?
+            serde_json::to_value(engine.log_tail_without_progress(job_id, log_lines(params)?)?)?
         }
         // Only reached when `METHODS` lists a method that has no arm above; a test dispatches
         // every listed method, so the table and this match stay in step.

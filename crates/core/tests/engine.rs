@@ -807,9 +807,11 @@ async fn log_tail_returns_last_lines() {
 
 // A lean Claude run on 2026-10-22 (v0.2.3 acceptance P3) logged 112 `thinking_tokens` events in
 // its 171 lines: progress estimates without any content, which pushed the run's first lines out
-// of the 50 that `issuerelay logs` shows. A line that only mentions the word stays.
+// of the 50 that `issuerelay logs` shows. A line that only mentions the word stays. The panel's
+// raw log (`log_tail`) keeps every line: it is copied whole into bug reports.
 #[tokio::test]
-async fn log_tail_leaves_out_claudes_thinking_token_progress() {
+async fn the_tail_without_progress_leaves_out_claudes_thinking_tokens_and_the_raw_tail_keeps_them()
+{
     let h = Harness::new(2, false);
     h.bind("proj-1", "a");
     h.linear.upsert(issue("1", "proj-1"));
@@ -829,10 +831,18 @@ async fn log_tail_leaves_out_claudes_thinking_token_progress() {
         "{}\n{}\n{thinking}\n{thinking}\n{}\n{}\n{thinking}\n{}\n{}\n",
         kept[0], kept[1], kept[2], kept[3], kept[4], kept[5]
     );
-    std::fs::write(job.log_path.as_ref().unwrap(), text).unwrap();
-    assert_eq!(h.engine.log_tail(job.id, 50).unwrap(), kept);
+    std::fs::write(job.log_path.as_ref().unwrap(), &text).unwrap();
+    assert_eq!(
+        h.engine.log_tail_without_progress(job.id, 50).unwrap(),
+        kept
+    );
     // The lines asked for are counted among the ones that are kept.
-    assert_eq!(h.engine.log_tail(job.id, 3).unwrap(), &kept[3..]);
+    assert_eq!(
+        h.engine.log_tail_without_progress(job.id, 3).unwrap(),
+        &kept[3..]
+    );
+    let raw: Vec<&str> = text.lines().collect();
+    assert_eq!(h.engine.log_tail(job.id, 50).unwrap(), raw);
 }
 
 #[tokio::test]

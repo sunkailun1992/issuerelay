@@ -773,10 +773,25 @@ impl Engine {
     /// The last `lines` lines of the job's log; empty while it has none, and also once the log
     /// is gone: a log deleted by the cleanup reads as empty. Reads at most the last
     /// `LOG_TAIL_WINDOW` bytes of the file, so a long log is cheap to ask for again and again.
-    /// Claude's `thinking_tokens` progress events are left out before the lines are counted
-    /// (`is_thinking_progress`), so they cannot push the start of a run out of a short tail; the
-    /// file keeps them.
+    /// Every line is kept: the panel's raw log shows this, and copies it whole.
     pub fn log_tail(&self, job_id: i64, lines: usize) -> Result<Vec<String>> {
+        self.tail_of_log(job_id, lines, |_| true)
+    }
+
+    /// `log_tail` without Claude's `thinking_tokens` progress events, left out before the lines
+    /// are counted (`is_thinking_progress`), so that they cannot push the start of a run out of a
+    /// short tail: what `issuerelay logs` shows. The file keeps them.
+    pub fn log_tail_without_progress(&self, job_id: i64, lines: usize) -> Result<Vec<String>> {
+        self.tail_of_log(job_id, lines, |line| !is_thinking_progress(line))
+    }
+
+    /// The last `lines` lines of the job's log among those `keep` accepts (see `log_tail`).
+    fn tail_of_log(
+        &self,
+        job_id: i64,
+        lines: usize,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<Vec<String>> {
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
         let Some(path) = job.log_path else {
@@ -802,10 +817,7 @@ impl Engine {
             // The read began inside the file, so its first line is partial: drop it.
             text = text.split_once('\n').map_or("", |(_, rest)| rest);
         }
-        let all: Vec<&str> = text
-            .lines()
-            .filter(|line| !is_thinking_progress(line))
-            .collect();
+        let all: Vec<&str> = text.lines().filter(|line| keep(line)).collect();
         Ok(all[all.len().saturating_sub(lines)..]
             .iter()
             .map(|line| line.to_string())
