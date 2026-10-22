@@ -254,6 +254,7 @@
   },
   "linear": {
     "connecting": "Connecting to Linear…",
+    "keychain_hint": "This is taking longer than usual. If IssueRelay was just updated, macOS may be waiting for you to let it use its saved Linear sign-in: look for a keychain dialog (it can be behind other windows) and choose Always Allow.",
     "not_configured": "Not logged in to Linear",
     "log_in": "Log in to Linear",
     "connect_failed": "Could not connect to Linear",

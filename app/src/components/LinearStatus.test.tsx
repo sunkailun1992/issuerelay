@@ -5,8 +5,10 @@ import { useLinearLogin } from "@/hooks/queries";
 import { type Backend, BackendError } from "@/lib/backend";
 import { MOCK_NOW, setFixedClock } from "@/lib/clock";
 import { createMockBackend } from "@/lib/mock";
+import { DEMO_APP_INFO } from "@/lib/mock-fixtures";
 import type { LinearSetup, StatusSnapshot, StatusView, Viewer } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
+import { advanceUntil } from "@/test/time";
 import { LinearStatus } from "./LinearStatus";
 
 // core takes one change of the login at a time, and a login waits for the browser for up to ten
@@ -104,6 +106,44 @@ test("while the first connection is under way the card says so and offers nothin
   await renderWithProviders(<LinearStatus />, { backend: createMockBackend("connecting", { latencyMs: 0 }) });
   expect(await screen.findByText("Connecting to Linear…")).toBeInTheDocument();
   expect(screen.queryAllByRole("button")).toHaveLength(0);
+});
+
+const KEYCHAIN_HINT = /macOS may be waiting for you to let it use its saved Linear sign-in/;
+
+// A new build's first read of the saved sign-in waits while macOS asks whether that build may use
+// the keychain item, and the card said only "Connecting…" for as long as nobody answered (v0.2.3
+// acceptance P1).
+test("on macOS a first connection still under way after half a minute says the keychain may be asking", async () => {
+  // Every timer is the test's: the mock answers from one, and so does the hint.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  try {
+    await renderWithProviders(<LinearStatus />, { backend: createMockBackend("connecting", { latencyMs: 0 }) });
+    await advanceUntil(() => screen.queryByText("Connecting to Linear…") !== null);
+    const hint = () => screen.queryByText(KEYCHAIN_HINT) !== null;
+    expect(await advanceUntil(hint, { step: 1000, limit: 60_000 })).toBe(30_000);
+    expect(screen.getByRole("status")).toHaveTextContent(KEYCHAIN_HINT);
+    expect(screen.getByText("Connecting to Linear…")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// Windows keeps the sign-in in the Credential Manager, which does not ask, so the hint would point
+// at a dialog that is not there.
+test("on Windows a slow first connection shows no keychain hint", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  try {
+    const backend = createMockBackend("connecting", { latencyMs: 0 });
+    backend.appInfo = vi.fn().mockResolvedValue({ ...DEMO_APP_INFO, platform: "windows" });
+    await renderWithProviders(<LinearStatus />, { backend });
+    await advanceUntil(() => screen.queryByText("Connecting to Linear…") !== null);
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(backend.appInfo).toHaveBeenCalled();
+    expect(screen.queryByText(KEYCHAIN_HINT)).not.toBeInTheDocument();
+    expect(screen.getByText("Connecting to Linear…")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("a first run offers the login, and logging in shows the connection", async () => {

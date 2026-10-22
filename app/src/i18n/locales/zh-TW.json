@@ -254,6 +254,7 @@
   },
   "linear": {
     "connecting": "正在連線至 Linear…",
+    "keychain_hint": "連線比平常久。IssueRelay 剛更新的話，macOS 可能在等你允許它使用鑰匙圈裡存的 Linear 登入：請找一下鑰匙圈的對話框（可能在其他視窗後面），選「永遠允許」。",
     "not_configured": "尚未登入 Linear",
     "log_in": "登入 Linear",
     "connect_failed": "無法連線至 Linear",
