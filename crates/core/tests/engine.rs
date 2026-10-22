@@ -833,15 +833,36 @@ async fn log_tail_reads_only_the_end_of_a_large_log() {
 // Everything below pins behavior that the brief and the review notes require but the tests
 // above do not exercise.
 
-/// Lets the other tasks of the single-threaded test runtime run until `done` holds.
+/// Lets the other tasks of the single-threaded test runtime run until `done` holds, giving up
+/// after ten seconds of real time. Only yields, so a paused clock does not move meanwhile; the
+/// limit is in real time because work on the blocking pool (the loop's log cleanup) is not moved
+/// along by yielding, and a slow machine needs longer for it.
 async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
-    for _ in 0..10_000 {
-        if done() {
-            return;
-        }
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "gave up waiting for {what}"
+        );
         tokio::task::yield_now().await;
     }
-    panic!("gave up waiting for {what}");
+}
+
+// Every test that starts the loop waits for its first cycle with `eventually`, and the loop
+// begins with a log cleanup on the blocking pool: on a slow CI machine (Windows, 2026-10-22,
+// `retrying_a_run_wakes_the_loop`) the yields ran out before that cleanup had finished.
+#[tokio::test(start_paused = true)]
+async fn eventually_outlasts_work_on_the_blocking_pool() {
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    tokio::task::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        flag.store(true, Ordering::SeqCst);
+    });
+    eventually("the work on the blocking pool", || {
+        done.load(Ordering::SeqCst)
+    })
+    .await;
 }
 
 /// Lets every ready task run until it waits again, without moving the paused clock.
@@ -3226,19 +3247,6 @@ fn age_file(path: &Path, hours: u64) {
         .unwrap();
 }
 
-/// Waits until `done` holds, letting the other tasks run in between. The wait is in real time:
-/// the cleanup runs on the blocking pool, which a paused clock does not move along.
-async fn eventually_on_the_blocking_pool(what: &str, mut done: impl FnMut() -> bool) {
-    let give_up = std::time::Instant::now() + Duration::from_secs(10);
-    while !done() {
-        assert!(
-            std::time::Instant::now() < give_up,
-            "gave up waiting for {what}"
-        );
-        tokio::task::yield_now().await;
-    }
-}
-
 /// Lets the blocking pool finish what it was given, for a test that checks that nothing was
 /// deleted: a cleanup started now would be done within this time.
 async fn let_the_blocking_pool_run() {
@@ -3388,10 +3396,10 @@ async fn the_loop_cleans_old_logs_when_it_starts() {
     age_file(&old, 40 * 24);
     let shutdown = CancellationToken::new();
     let worker = spawn_loop(&h.engine, &shutdown);
-    eventually_on_the_blocking_pool("the cleanup at start", || !old.exists()).await;
+    eventually("the cleanup at start", || !old.exists()).await;
     // The file goes before the cleanup's task has returned: wait for the first check, which
     // comes after it, so that the loop is idle and `stop_loop`'s yields are enough.
-    eventually_on_the_blocking_pool("the first check", || {
+    eventually("the first check", || {
         h.engine.status().last_poll_at.is_some()
     })
     .await;
@@ -3407,7 +3415,7 @@ async fn the_loop_cleans_old_logs_every_six_hours() {
     let worker = spawn_loop(&h.engine, &shutdown);
     // The first check comes after the cleanup at start, so a log that is old only now is left for
     // the timer.
-    eventually_on_the_blocking_pool("the first check", || {
+    eventually("the first check", || {
         h.engine.status().last_poll_at.is_some()
     })
     .await;
@@ -3418,11 +3426,11 @@ async fn the_loop_cleans_old_logs_every_six_hours() {
     age_file(&old, 40 * 24);
     let checked = h.engine.status().last_poll_at;
     tokio::time::advance(Duration::from_secs(6 * 3600 - 60)).await;
-    eventually_on_the_blocking_pool("a check", || h.engine.status().last_poll_at != checked).await;
+    eventually("a check", || h.engine.status().last_poll_at != checked).await;
     let_the_blocking_pool_run().await;
     assert!(old.exists(), "cleaned before six hours were over");
     tokio::time::advance(Duration::from_secs(60)).await;
-    eventually_on_the_blocking_pool("the cleanup after six hours", || !old.exists()).await;
+    eventually("the cleanup after six hours", || !old.exists()).await;
     let_the_blocking_pool_run().await;
     // The next one is six hours after this one, not at the next check.
     let again = logs.join("23.jsonl");
@@ -3430,7 +3438,7 @@ async fn the_loop_cleans_old_logs_every_six_hours() {
     age_file(&again, 40 * 24);
     let checked = h.engine.status().last_poll_at;
     tokio::time::advance(Duration::from_secs(60)).await;
-    eventually_on_the_blocking_pool("a check", || h.engine.status().last_poll_at != checked).await;
+    eventually("a check", || h.engine.status().last_poll_at != checked).await;
     let_the_blocking_pool_run().await;
     assert!(again.exists(), "cleaned again at the next check");
     stop_loop(&shutdown, worker).await;
