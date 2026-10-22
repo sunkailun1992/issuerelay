@@ -876,7 +876,8 @@ async fn log_tail_reads_only_the_end_of_a_large_log() {
 /// Lets the other tasks of the single-threaded test runtime run until `done` holds, giving up
 /// after ten seconds of real time. Only yields, so a paused clock does not move meanwhile; the
 /// limit is in real time because work on the blocking pool (the loop's log cleanup) is not moved
-/// along by yielding, and a slow machine needs longer for it.
+/// along by yielding, and a slow machine needs longer for it. The thread gives way to the others
+/// each round too, so the wait does not take the CPU from the very work it waits for.
 async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let give_up = std::time::Instant::now() + Duration::from_secs(10);
     while !done() {
@@ -884,6 +885,7 @@ async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
             std::time::Instant::now() < give_up,
             "gave up waiting for {what}"
         );
+        std::thread::yield_now();
         tokio::task::yield_now().await;
     }
 }
