@@ -126,7 +126,7 @@ IssueRelay 是每个开发者装一份的托盘程序：监听 Linear 上指派�
 - 另有三处写着对 `issuerelay-core` 的版本要求：`crates/cli`、`crates/devhost`、`app/src-tauri` 的 `Cargo.toml`（现在是 `"0.2.0"`，按 Cargo 的规则即 `^0.2.0`）。新版本不再满足它时（0.x 阶段升次版本号，或升主版本号），这三处一起改，否则 Cargo 解析不了；`Cargo.lock` 随之更新、一起提交。
 - 版本号只由维护者在发布时升。外部贡献者的 PR 不改任何版本号（`Cargo.toml`、`Cargo.lock` 里本仓库 crate 的版本、`app/package.json`）。
 - 发布时，上次发布以来有运行行为变化才升版本，一次发布只升一次；只改了文档、测试、规范不升。
-- 升版本的提交同样经 PR 进 `main`。推送前按 `origin/main` 的最新值顺延，开工时算的号不作数；PR 里的号在合入前都是暂定，合入时已被占用就再顺延，并同步改 PR 标题、提交信息和文档里写到的版本号。PR 里写明旧版本、新版本和这次发布包含的行为变化。
+- 升版本的提交照 `MAINTAINERS.md`「决策与合并」合入 `main`（维护者一侧可以直接合并，也可以开 PR）。推送前按 `origin/main` 的最新值顺延，开工时算的号不作数；合入前的号都是暂定，合入时已被占用就再顺延，并同步改提交信息（开了 PR 的话连同 PR 标题）和文档里写到的版本号。提交说明（开了 PR 就写在 PR 里）写明旧版本、新版本和这次发布包含的行为变化。
 - 版本号只用 `X.Y.Z` 三段数字，不带 `-rc.1` 这类预发布后缀（M3 起打的 Windows MSI 安装包不接受）。
 - M3 起推送 `vX.Y.Z` 标签触发发布（`.github/workflows/release.yml`）：标签必须等于工作区版本、标签提交必须在 `origin/main` 上（`scripts/release-checks.mjs`，试打包同样检查），工作流只建草稿，步骤见 `MAINTAINERS.md`「发布」。
 

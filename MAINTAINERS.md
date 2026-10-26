@@ -5,11 +5,12 @@
 - Current maintainer: @sunkailun1992 (admin and repository owner, project founder), responsible for everything.
 - Roles: contributor (anyone who opened an issue or PR), maintainer (a collaborator invited with write access: reviews and merges PRs, triages issues, approves workflow runs for first-time contributors) and admin (the repository owner: settings, rulesets, secrets, releases).
 - The repository belongs to a personal account, so GitHub offers only two levels: the owner (admin rights) and collaborators with write access. Maintain and admin-style roles for others become available only if the project moves to a GitHub organization, and this file is updated then.
-- A maintainer other than the author approves a PR before it is squash-merged. Changes in the Critical (极高风险) areas need two maintainers once there are two; until then the admin reviews and writes the reason in the PR. The admin has the final say.
-- `main` is protected by a ruleset: PRs only, one approval, resolved conversations, squash merge only, and the checks `test (macos-latest)`, `test (windows-latest)` and `secrets` must pass.
-- The admin can bypass the ruleset in two cases only: the founder's direct commits during M0–M1 (stopped when M1 closed; since then every change reaches `main` through a PR), and merging the admin's own PRs after CI is green while there is a single maintainer (see "分支保护"). An AI tool working in the admin's own session acts with the admin's rights: it may merge the admin's own PRs in that way, but it never approves anyone else's PR and never merges one that a maintainer has not reviewed and approved. Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
+- The maintainer and the maintainer's own local Claude/Codex sessions (on the maintainer's account) may merge to `main` directly: run the verification commands locally first, then watch CI on `main` and fix a red run at once. Cloud sessions push `claude/…` branches only, which the maintainer or a local session merges.
+- Everyone else opens a PR: it is squash-merged after CI is green, a maintainer other than the author has reviewed and approved it, and every review conversation is resolved. Changes in the Critical (极高风险) areas need two maintainers once there are two; until then the admin reviews them. The admin has the final say.
+- `main` is protected by a ruleset: no deletion or force push; PRs with one approval and resolved conversations, squash merge only; the checks `test (macos-latest)`, `test (windows-latest)` and `secrets` must pass. The admin role bypasses it always, and the bypass is used only for the maintainer's direct merges, never for force pushes, deleting `main` or skipping the review of anyone else's change (see "分支保护").
+- AI tools never approve anyone else's PR and never merge one that a maintainer has not reviewed and approved; agents never change the ruleset or repository permissions. A direct merge only skips the PR: verification, acceptance reports and the owner's decisions still apply. Milestones: M0 verification, M1 engine and CLI, M2 desktop app, M3 installers and releases (design section 17).
 - To become a maintainer: contribute steadily, get nominated by a maintainer and accepted by the admin, then be invited as a collaborator with write access. Maintainers inactive for 6 months become emeritus.
-- Releases start at M3: a maintainer bumps the version in a PR, runs the release workflow by hand on `main` (a dry run that can use the signing key, which a pull request cannot) and waits for it to pass, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets. Anyone with write access can read those secrets through a workflow they changed (a manual run, or a pull request from a branch of this repository), so changes to the workflows and to the scripts they run are reviewed as if they could.
+- Releases start at M3: a maintainer bumps the version (merged like any other change), runs the release workflow by hand on `main` (a dry run that can use the signing key, which a pull request cannot) and waits for it to pass, then pushes a `vX.Y.Z` tag on main; the workflow builds the installers into one draft release, and a maintainer publishes it by hand. Contributors never bump the version. The update-signing key lives only on the maintainer's machine and in GitHub Actions secrets. Anyone with write access can read those secrets through a workflow they changed (a manual run, or a pull request from a branch of this repository), so changes to the workflows and to the scripts they run are reviewed as if they could.
 
 ## 当前维护者
 
@@ -44,12 +45,14 @@
 
 ## 决策与合并
 
-- **日常改动**：由作者以外的一名维护者批准即可合并。
-- **只有一名维护者期间**：管理员自己的 PR 在 CI 全绿后经绕过合并，并在 PR 里写明理由。
-- **AI 工具**：管理员在自己的会话里让 AI 工具代为操作时，AI 用的是管理员的权限：可以照上一条合并管理员自己的 PR（同样要 CI 全绿、在 PR 里写明），但不得批准其他任何人的 PR，也不得在维护者本人评审批准之前合并它们。替外部贡献者工作的 AI 只能推贡献者自己的 fork（见 [AGENTS.md](AGENTS.md)「贡献流程」）。
-- **极高风险范围**（见 [CONTRIBUTING.md](CONTRIBUTING.md) 的「开始之前」）：维护者达到两名后，需要两名维护者批准。只有一名维护者时，由管理员评审，并在 PR 里写明理由。GitHub 规则集只强制 1 人批准，第二个批准由维护者自己把关。
-- **squash 合并**：合并前确认 PR 标题符合英文 Conventional Commits，它就是 `main` 上的提交标题。再把提交正文精简成英文摘要，删掉模板里的中文标题、注释和未勾选项。
-- **设计变更**：先改 `docs/superpowers/specs/` 里的设计文档，并在 PR 里讨论。
+- **维护者一侧直接合并**（所有者 2026-10-26 定、2026-10-27 重申，与同一账号的 tradingview-capture-mcp 一致）：维护者本人，以及维护者本机用维护者账号运行的 Claude / Codex 会话，可以直接合并到 `main`：合并前本机验证命令全过（[AGENTS.md](AGENTS.md)「验证命令」），合并后看 `main` 上的 CI，红了马上修。照旧开 PR 也可以。
+- **云端会话**：只推 `claude/<主题>` 分支，由维护者或本机会话审过后合并。
+- **其他人的改动**：经 PR，CI 三项全绿、作者以外的一名维护者审核确认是有益的改动并批准、评审对话全部解决之后，由维护者 squash 合并；批准后再有新推送，需要重新批准。
+- **AI 工具**：维护者本机的会话用的是维护者的账号，可以照第一条直接合并；但不得批准其他任何人的 PR，也不得在维护者本人评审批准之前合并它们。替外部贡献者工作的 AI 只能推贡献者自己的 fork（见 [AGENTS.md](AGENTS.md)「贡献流程」）。任何代理都不得修改规则集或仓库权限。
+- **直接合并只省掉 PR 这一步**：验证、实机验收报告和要所有者决定的事都照旧；极高风险范围的改动仍先取得所有者的决定。
+- **极高风险范围**（见 [CONTRIBUTING.md](CONTRIBUTING.md) 的「开始之前」）：维护者达到两名后，需要两名维护者批准。只有一名维护者时，由管理员评审，并在 PR 或提交说明里写明理由。GitHub 规则集只强制 1 人批准，第二个批准由维护者自己把关。
+- **squash 合并**：合并前确认 PR 标题符合英文 Conventional Commits，它就是 `main` 上的提交标题。再把提交正文精简成英文摘要，删掉模板里的中文标题、注释和未勾选项。直接合并时一次推一个提交（相当于 squash），标题和正文同样用英文。
+- **设计变更**：先改 `docs/superpowers/specs/` 里的设计文档，并在 PR 或 issue 里讨论。
 - **意见分歧**：由管理员最终决定。
 
 ## 分支保护
@@ -60,28 +63,25 @@
 |---|---|
 | 规则集 | `main`，作用于默认分支 |
 | 删除与强推 | 禁止 |
-| 合并方式 | 必须经 PR，只允许 squash |
+| 合并方式 | 其他人必须经 PR；只允许 squash |
 | 批准 | 至少 1 人批准；批准后再有新推送，需要重新批准 |
 | 评审对话 | 必须全部解决 |
 | 必需检查 | `test (macos-latest)`、`test (windows-latest)`、`secrets`（含 actionlint 检查工作流）（GitHub Actions，见 `.github/workflows/ci.yml`） |
 | 代码所有者 | `.github/CODEOWNERS` 自动请求评审，不强制代码所有者批准 |
-| 绕过 | 仓库管理员可以绕过 |
+| 绕过 | 仓库管理员角色「始终绕过」（`bypass_mode: always`），供维护者一侧直接合并 |
 | 仓库合并设置 | 只允许 squash 合并；提交标题取 PR 标题，正文取 PR 描述；合并后自动删除分支 |
 | 安全功能 | 已开启：私密漏洞报告、Dependabot 安全更新、密钥扫描与推送拦截 |
 | Discussions | 未开启 |
 
-「仓库管理员可以绕过」只用于两种情况：
+「始终绕过」只用于维护者一侧的直接合并（见「决策与合并」），不用于强推、删除 `main` 或跳过他人改动的审核。
 
-1. M0–M1 期间，项目发起人直接提交开发进度。已在 M1 收尾时停止，此后所有改动都经 PR 进 `main`。
-2. 只有一名维护者期间，CI 全绿后合并管理员自己的 PR（含管理员让 AI 工具代为合并的，见「决策与合并」）。
-
-除此之外不使用绕过。
+沿革：M0–M1 期间项目发起人直接提交开发进度；M1 收尾后改为所有改动都经 PR，只有一名维护者期间经绕过合并管理员自己的 PR；2026-10-26 起（所有者定，10-27 重申）维护者一侧可以直接合并。
 
 ## 发布
 
 M3 起由维护者发布；外部贡献者的 PR 不改版本号。工作流 `.github/workflows/release.yml`（打包在 `bundle.yml`），门禁 `scripts/release-checks.mjs`，安装说明 `docs/install.md`，更新签名密钥 `docs/release/updater-key.md`。
 
-1. **升版本号**：开一个普通的 PR，把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本，再运行 `cargo update -w`（只更新本仓库 crate 在 `Cargo.lock` 里的版本），两个文件一起提交；0.x 阶段升次版本号时，`crates/cli`、`crates/devhost`、`app/src-tauri` 对 `issuerelay-core` 的版本要求一起改（`AI_CODING_GUIDE.md` 第 10 节）。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；CI 全绿后合入 `main`。不在本地临时改版本号再改回。
+1. **升版本号**：把工作区 `Cargo.toml` 的 `[workspace.package] version` 改成新版本，再运行 `cargo update -w`（只更新本仓库 crate 在 `Cargo.lock` 里的版本），两个文件一起提交；0.x 阶段升次版本号时，`crates/cli`、`crates/devhost`、`app/src-tauri` 对 `issuerelay-core` 的版本要求一起改（`AI_CODING_GUIDE.md` 第 10 节）。只用 `X.Y.Z`（MSI 不接受 `-rc.1` 这类非纯数字的预发布后缀），推送前按 `origin/main` 的最新值顺延；照「决策与合并」合入 `main`（直接合并前在本机跑完验证命令，开 PR 的话等 CI 全绿）。不在本地临时改版本号再改回。
 2. **在 `main` 上手动试打包**（推标签之前）：在 GitHub 的 Actions 页面选 release 工作流，点「Run workflow」并选 `main`（或运行 `gh workflow run release.yml --ref main`），等所有任务全绿：`verify` 输出 `updater=true`（更新签名私钥可用），两个打包任务的「Check the update signatures against the committed public key」步骤各打出 `verified …`，`verify-dry-run` 通过（建草稿的 `create-release`、`bundle-release`、`verify-release` 在手动运行里跳过，不会产生 Release）。拉取请求的试打包拿不到私钥，所以 `tauri.updater.conf.json`、更新包的签名、签名核对脚本和由产物得出的 `latest.json`，只有这一步能在打标签之前跑一遍；跳过它，这些检查第一次运行就在正式标签上，一旦失败就得删草稿、删标签、重推。
 3. **推标签**（本地会话）：
 

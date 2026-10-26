@@ -8,7 +8,7 @@
 - Run the six checks in the section "提交前检查" before you push: `cargo fmt`, `cargo clippy`, `cargo test`, `pnpm --dir app lint`, `pnpm --dir app test` and `bash scripts/check-secrets.sh --strict`. Build the panel with `pnpm --dir app build` before any cargo command (a `tauri build`, that is a build with the `custom-protocol` feature, embeds `app/dist`); the panel needs Node.js 22.22.2+, 24.15+ or 26+ (`engines` in `app/package.json`) and pnpm. On Windows the scan needs Git Bash or WSL.
 - Write commit messages and PR titles as English Conventional Commits, for example `fix(runner): kill the whole process tree on timeout`. Do not change version numbers; maintainers do that when they release.
 - Changes to the desktop panel (`app/`) follow section 12 of [AI_CODING_GUIDE.md](docs/ai-coding/AI_CODING_GUIDE.md): every text goes through the five translation files, colours and sizes come from the design tokens, every page has loading, empty and error states, and every action stays reachable in the smallest window (900×600).
-- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts. AI tools never approve a contributor's PR, and never merge one that a maintainer has not approved.
+- A maintainer squash-merges the PR after CI is green, one maintainer has approved and every review conversation is resolved. For a first contribution, a maintainer must approve the CI run before it starts. AI tools never approve a contributor's PR, and never merge one that a maintainer has not approved. Only the maintainer and the maintainer's own local Claude/Codex sessions may merge to `main` without a PR (see [MAINTAINERS.md](MAINTAINERS.md)).
 - This repository is public. Never post tokens, company information or real Linear content in issues, PRs, logs or screenshots.
 - Report security problems privately from the Security tab, never in a public issue. Contributions are licensed under Apache-2.0.
 
@@ -78,7 +78,7 @@ bash scripts/check-secrets.sh --strict
 - **分支**：fork 后从最新 `main` 切分支，建议命名 `feat/<主题>`、`fix/<主题>`。一个 PR 只做一件事，目标分支选 `main`。
 - **提交信息和 PR 标题**：用英文 Conventional Commits。类型取 `feat`、`fix`、`docs`、`test`、`refactor`、`chore`、`ci`，可带范围，如 `fix(runner): ...`。squash 合并后，PR 标题就是 `main` 上的提交标题，所以 PR 标题也要按这个格式写。
 - **PR 描述**：按[模板](.github/pull_request_template.md)填，中文或英文都可以。草稿 PR 可以提前开。
-- **合并条件**：CI 三项全绿（首次贡献者的 CI 要先由维护者批准运行）、至少一名维护者批准、评审对话全部解决。批准之后你再推送新提交，需要重新批准。由维护者 squash 合并，合并时把提交正文精简成英文摘要。
+- **合并条件**：CI 三项全绿（首次贡献者的 CI 要先由维护者批准运行）、至少一名维护者批准、评审对话全部解决。批准之后你再推送新提交，需要重新批准。由维护者 squash 合并，合并时把提交正文精简成英文摘要。不经 PR 直接合并到 `main` 只限维护者本人与维护者本机的 AI 会话，规则见 [MAINTAINERS.md](MAINTAINERS.md)「决策与合并」。
 - **已推送的分支不要 rebase 或强推**（[AGENTS.md](AGENTS.md) 禁止强推）；还没推送的本地提交可以 rebase。需要更新就追加提交；要同步 `main`，就把 `main` 合并进你的分支。最终会 squash 成一个提交，分支历史不重要。
 - **版本号**：外部贡献者不改版本号。维护者在发布时升版本号（M3 起，随 `vX.Y.Z` 标签）。
 
