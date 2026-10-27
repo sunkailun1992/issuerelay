@@ -1,0 +1,16 @@
+{
+  "overlap": [
+    {"a": [], "b": [], "overlap": true, "note": "both are the project's default binding"},
+    {"a": [], "b": ["Frontend"], "overlap": false, "note": "the default binding takes what no labelled one takes"},
+    {"a": ["Frontend"], "b": ["Backend"], "overlap": false},
+    {"a": ["Frontend", "Docs"], "b": ["Backend", "Docs"], "overlap": true, "note": "one shared label is enough"},
+    {"a": ["Frontend"], "b": ["  frontend "], "overlap": true, "note": "compared as same_name: the blanks around a name and ASCII case aside"},
+    {"a": ["É"], "b": ["é"], "overlap": false, "note": "only ASCII letters are compared without their case"},
+    {"a": ["front end"], "b": ["front-end"], "overlap": false}
+  ],
+  "ids": [
+    {"project": "proj-1", "labels": [], "id": "proj-1"},
+    {"project": "proj-1", "labels": ["Frontend", "Docs"], "id": "proj-1#Frontend", "note": "the first routing label names it"},
+    {"project": "proj-1", "labels": [" Frontend "], "id": "proj-1#Frontend", "note": "without the blanks around the label"}
+  ]
+}

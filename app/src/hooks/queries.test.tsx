@@ -25,6 +25,7 @@ import {
   useJob,
   useJobLog,
   useJobs,
+  useLabels,
   useLinearApiKey,
   useLinearLogin,
   useLinearLoginWaiting,
@@ -132,21 +133,24 @@ describe("reading", () => {
     expect(list.mock.calls.map(([limit]) => limit).sort((a, b) => a - b)).toEqual([5, 200]);
   });
 
-  test("projects, the environment check and a server's name are read only when asked for", async () => {
+  test("projects, labels, the environment check and a server's name are read only when asked for", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const projects = vi.spyOn(backend, "projects");
+    const labels = vi.spyOn(backend, "labels");
     const doctor = vi.spyOn(backend, "doctor");
     const named = vi.spyOn(backend, "linearServerNamed");
     function Off() {
       // A read that is not switched off: when it has been answered, so would the others have been.
       const status = useStatus();
       useProjects(false);
+      useLabels(false);
       useDoctor(false);
       useLinearServerNamed("claude", false);
       return <p>{status.data ? "status read" : "reading"}</p>;
     }
     function On() {
       useProjects(true);
+      useLabels(true);
       useDoctor(true);
       useLinearServerNamed("codex", true);
       return null;
@@ -154,12 +158,14 @@ describe("reading", () => {
     const off = await renderWithProviders(<Off />, { backend });
     expect(await screen.findByText("status read")).toBeInTheDocument();
     expect(projects).not.toHaveBeenCalled();
+    expect(labels).not.toHaveBeenCalled();
     expect(doctor).not.toHaveBeenCalled();
     expect(named).not.toHaveBeenCalled();
     off.unmount();
     await renderWithProviders(<On />, { backend });
     await waitFor(() => expect(named).toHaveBeenCalledWith("codex"));
     expect(projects).toHaveBeenCalledTimes(1);
+    expect(labels).toHaveBeenCalledTimes(1);
     expect(doctor).toHaveBeenCalledTimes(1);
   });
 
@@ -344,9 +350,9 @@ describe("acting", () => {
       ["save binding", [key("bindings"), key("issues"), key("doctor"), key("status")]],
       ["remove binding", [key("bindings"), key("issues"), key("doctor"), key("status")]],
       ["save settings", [key("settings"), key("status"), key("issues"), key("doctor")]],
-      ["api key", [key("status"), key("issues"), key("projects"), key("doctor")]],
-      ["log out", [key("status"), key("issues"), key("projects"), key("doctor")]],
-      ["reconnect", [key("status"), key("issues"), key("projects"), key("doctor")]],
+      ["api key", [key("status"), key("issues"), key("projects"), key("labels"), key("doctor")]],
+      ["log out", [key("status"), key("issues"), key("projects"), key("labels"), key("doctor")]],
+      ["reconnect", [key("status"), key("issues"), key("projects"), key("labels"), key("doctor")]],
       ["setup", [key("doctor"), key("controlServers"), key("linearServerNamed")]],
       ["autostart", [key("autostart")]],
       ["put the CLI on PATH", [key("cliPath")]],
@@ -699,7 +705,7 @@ describe("the Linear login", () => {
     expect(await screen.findByText("waiting for the browser")).toBeInTheDocument();
     await act(async () => finish());
     expect(await screen.findByText("not waiting")).toBeInTheDocument();
-    for (const expected of [["status"], ["issues"], ["projects"], ["doctor"]]) {
+    for (const expected of [["status"], ["issues"], ["projects"], ["labels"], ["doctor"]]) {
       expect(invalidated(spy)).toContain(JSON.stringify(expected));
     }
   });

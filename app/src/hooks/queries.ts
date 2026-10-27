@@ -20,6 +20,7 @@ export const queryKeys = {
   issues: ["issues"] as const,
   bindings: ["bindings"] as const,
   projects: ["projects"] as const,
+  labels: ["labels"] as const,
   settings: ["settings"] as const,
   doctor: ["doctor"] as const,
   controlServers: ["controlServers"] as const,
@@ -101,6 +102,12 @@ export function useBindings() {
 export function useProjects(enabled = true) {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.projects, queryFn: () => backend.projects(), enabled });
+}
+
+/** Linear's labels, which a binding's routing labels are chosen from. Asks Linear, so only when `enabled`. */
+export function useLabels(enabled = true) {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.labels, queryFn: () => backend.labels(), enabled });
 }
 
 export function useSettings() {
@@ -219,7 +226,7 @@ const jobChange = (id: number): readonly QueryKey[] => [
   queryKeys.status, queryKeys.jobs, queryKeys.job(id), queryKeys.log(id), queryKeys.issues,
 ];
 /** What a change of the Linear connection touches. */
-const linearChange: readonly QueryKey[] = [queryKeys.status, queryKeys.issues, queryKeys.projects, queryKeys.doctor];
+const linearChange: readonly QueryKey[] = [queryKeys.status, queryKeys.issues, queryKeys.projects, queryKeys.labels, queryKeys.doctor];
 
 export function usePause() {
   return useAction<void, void>((backend) => backend.pause(), [queryKeys.status, queryKeys.settings], "actions.failed.pause");

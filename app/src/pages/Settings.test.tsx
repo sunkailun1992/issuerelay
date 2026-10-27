@@ -643,6 +643,7 @@ test("the label and the statuses are saved, without the blanks around them", asy
     in_progress: "Doing",
     in_testing: "In Review",
     done: "Shipped",
+    plan_label: "ai-plan",
   });
   // What the form shows afterwards is what was saved: the blanks are gone, and nothing is left to save.
   await waitFor(() => expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument());
@@ -651,6 +652,7 @@ test("the label and the statuses are saved, without the blanks around them", asy
 
 test.each([
   ["Trigger label"],
+  ["Plan label"],
   ["Status that triggers a run"],
   ["Status while the AI works"],
   ["Status when ready for testing"],
@@ -670,6 +672,32 @@ test("a name with a quote in it is refused, as the engine refuses it", async () 
   await userEvent.type(input, '"');
   expect(screen.getByText("Use a name on one line, without quotes")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+});
+
+test("the plan label is saved without the blanks around it", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const plan = await screen.findByRole("textbox", { name: "Plan label" });
+  expect(plan).toHaveValue("ai-plan");
+  await retype(plan, " plan-first ");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).trigger.plan_label).toBe("plan-first");
+});
+
+test("the plan label cannot be the trigger label, in any case, as the engine refuses it", async () => {
+  await renderWithProviders(<Settings />);
+  const plan = await screen.findByRole("textbox", { name: "Plan label" });
+  await retype(plan, " AI-Ready ");
+  expect(screen.getByText("Use a name other than the trigger label")).toBeInTheDocument();
+  expect(plan).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("textbox", { name: "Trigger label" })).toHaveAttribute("aria-invalid", "false");
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  // Changing the trigger label instead clears it as well.
+  await retype(screen.getByRole("textbox", { name: "Trigger label" }), "ready-for-ai");
+  expect(screen.queryByText("Use a name other than the trigger label")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
 });
 
 test("only the name that is wrong says so", async () => {
@@ -754,6 +782,22 @@ test("the Dock icon is saved with the page, like the notifications, not at once 
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect(lastSaved(save).show_in_dock).toBe(true);
+});
+
+test("continuing earlier sessions is on by default, and turning it off is saved with the page", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const resume = await screen.findByRole("switch", { name: "Continue the earlier session when an issue comes back" });
+  expect(resume).toBeChecked();
+  expect(resume).toHaveAccessibleDescription(
+    "The AI picks up where it left off, with what it already read. A run started again by hand always starts afresh.",
+  );
+  await userEvent.click(resume);
+  expect(save).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).resume_sessions).toBe(false);
 });
 
 test("a save of something else keeps the Dock icon as it is saved", async () => {

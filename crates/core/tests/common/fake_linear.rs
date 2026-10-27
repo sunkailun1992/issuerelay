@@ -31,8 +31,12 @@ struct State {
     teams: Vec<Team>,
     /// What `projects()` lists after `set_projects`; empty means the default project.
     projects: Vec<Project>,
+    /// What `labels()` lists after `set_labels`; empty means the default labels.
+    labels: Vec<String>,
     /// The statuses `set_team_statuses` gave single teams; the others have `statuses`.
     team_statuses: HashMap<String, Vec<String>>,
+    /// How many times `issue()` was called for each id it was given.
+    issue_reads: HashMap<String, usize>,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +78,15 @@ impl FakeLinear {
             .expect("unknown issue");
         change(issue);
         issue.updated_at += Duration::seconds(1);
+    }
+
+    /// Deletes the issue, as someone deleting it in Linear would: reads of it find nothing.
+    pub fn remove(&self, uuid: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .issues
+            .retain(|i| i.uuid != uuid && i.identifier != uuid);
     }
 
     pub fn get(&self, uuid: &str) -> Issue {
@@ -136,6 +149,11 @@ impl FakeLinear {
             .collect();
     }
 
+    /// Makes `labels()` list these names, as Linear sent them, instead of the default two.
+    pub fn set_labels(&self, labels: &[&str]) {
+        self.state.lock().unwrap().labels = labels.iter().map(|label| label.to_string()).collect();
+    }
+
     /// Makes `projects()` list these projects, as (uuid, name, ids of its teams), instead of
     /// the default `proj-1`.
     pub fn set_projects(&self, projects: &[(&str, &str, &[&str])]) {
@@ -158,6 +176,17 @@ impl FakeLinear {
         );
     }
 
+    /// How many times `issue()` was asked for `id` (a uuid or an identifier, as it was given).
+    pub fn issue_reads(&self, id: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .issue_reads
+            .get(id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn set_state_calls(&self) -> Vec<(String, String)> {
         self.state.lock().unwrap().set_state_calls.clone()
     }
@@ -173,6 +202,14 @@ impl FakeLinear {
             }
             None => Ok(()),
         }
+    }
+}
+
+/// An issue as a `list_issues` reply carries it: without relations, which only `get_issue` sends.
+fn without_relations(issue: &Issue) -> Issue {
+    Issue {
+        blocked_by: None,
+        ..issue.clone()
     }
 }
 
@@ -194,7 +231,7 @@ impl LinearApi for FakeLinear {
             .iter()
             .filter(|i| i.assignee_id.as_deref() == Some(s.me.as_str()))
             .filter(|i| i.labels.iter().any(|l| same_name(l, label)) && same_name(&i.state, state))
-            .cloned()
+            .map(without_relations)
             .collect())
     }
 
@@ -208,7 +245,7 @@ impl LinearApi for FakeLinear {
                 i.labels.iter().any(|l| same_name(l, label))
                     && i.assignee_id.as_deref() == Some(s.me.as_str())
             })
-            .cloned()
+            .map(without_relations)
             .collect();
         issues.sort_by_key(|i| std::cmp::Reverse(i.updated_at));
         issues.truncate(50);
@@ -218,11 +255,16 @@ impl LinearApi for FakeLinear {
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
         self.check_failure()?;
         let mut s = self.state.lock().unwrap();
+        *s.issue_reads.entry(id.to_string()).or_default() += 1;
+        // `get_issue` replies always carry the relations IssueRelay asks for.
         let found = s
             .issues
             .iter()
             .find(|i| i.uuid == id || i.identifier == id)
-            .cloned();
+            .map(|i| Issue {
+                blocked_by: Some(i.blocked_by.clone().unwrap_or_default()),
+                ..i.clone()
+            });
         // A read by identifier fails, or answers from an old snapshot, like a read by uuid.
         let uuid = found.as_ref().map_or(id, |i| i.uuid.as_str()).to_string();
         if s.failing_issue_reads.contains(&uuid) {
@@ -263,6 +305,10 @@ impl LinearApi for FakeLinear {
 
     async fn labels(&self) -> Result<Vec<String>> {
         self.check_failure()?;
+        let s = self.state.lock().unwrap();
+        if !s.labels.is_empty() {
+            return Ok(s.labels.clone());
+        }
         Ok(vec!["ai-ready".into(), "Bug".into()])
     }
 

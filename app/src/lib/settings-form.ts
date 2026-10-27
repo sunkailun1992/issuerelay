@@ -41,6 +41,8 @@ export interface Draft extends Record<CountField, string> {
   full_access_acknowledged: boolean;
   /** Whether the app keeps its icon in the macOS Dock; only the macOS page offers it, and on Windows it stays as it is saved. */
   show_in_dock: boolean;
+  /** An issue that comes back continues the executor session of its earlier run. */
+  resume_sessions: boolean;
 }
 
 export const COUNT_FIELDS = Object.keys(MINIMUM) as CountField[];
@@ -65,11 +67,15 @@ export function draftOf(settings: Settings): Draft {
     trigger: { ...settings.trigger },
     full_access_acknowledged: settings.full_access_acknowledged,
     show_in_dock: settings.show_in_dock,
+    resume_sessions: settings.resume_sessions,
   };
 }
 
-/** What is wrong with a value, as a code for the page to word. */
-export type Problem = { kind: "min"; min: number } | { kind: "whole" } | { kind: "name" };
+/**
+ * What is wrong with a value, as a code for the page to word. `same_as_label`: the plan label is the
+ * trigger label (core's `Settings::validate`), which would leave no way to ask for a plan.
+ */
+export type Problem = { kind: "min"; min: number } | { kind: "whole" } | { kind: "name" } | { kind: "same_as_label" };
 
 /**
  * Whether `text` can be a count of at least `min`. An empty field is below any limit; anything
@@ -95,6 +101,12 @@ export function nameProblem(name: string): Problem | null {
   return plain ? null : { kind: "name" };
 }
 
+/** Whether two names of Linear's are the same, as core's `same_name`: without the blanks around them, ASCII case aside. */
+export function sameName(a: string, b: string): boolean {
+  const fold = (name: string) => name.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return fold(a) === fold(b);
+}
+
 /** The problems of a draft by the field they belong to (`trigger.label` for the label); none for a good draft. */
 export function problemsOf(draft: Draft): Partial<Record<string, Problem>> {
   const problems: Partial<Record<string, Problem>> = {};
@@ -105,6 +117,9 @@ export function problemsOf(draft: Draft): Partial<Record<string, Problem>> {
   for (const [field, name] of Object.entries(draft.trigger)) {
     const problem = nameProblem(name);
     if (problem !== null) problems[`trigger.${field}`] = problem;
+  }
+  if (problems["trigger.plan_label"] === undefined && sameName(draft.trigger.plan_label, draft.trigger.label)) {
+    problems["trigger.plan_label"] = { kind: "same_as_label" };
   }
   return problems;
 }
@@ -137,9 +152,11 @@ export function settingsOf(base: Settings, draft: Draft): Settings | null {
       in_progress: draft.trigger.in_progress.trim(),
       in_testing: draft.trigger.in_testing.trim(),
       done: draft.trigger.done.trim(),
+      plan_label: draft.trigger.plan_label.trim(),
     },
     full_access_acknowledged: draft.full_access_acknowledged,
     show_in_dock: draft.show_in_dock,
+    resume_sessions: draft.resume_sessions,
   };
   if (draft.default_effort === null) delete settings.default_effort;
   else settings.default_effort = draft.default_effort;

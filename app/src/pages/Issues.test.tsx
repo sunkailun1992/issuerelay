@@ -208,6 +208,64 @@ test("the engine's codes are never shown as they are", async () => {
   expect(screen.queryByText(/directory_missing|project_not_bound|executor_not_ready|lean_not_ready/)).not.toBeInTheDocument();
 });
 
+test.each<[string, IssueStatus, string]>([
+  ["blocked_by", { kind: "waiting", reason: { code: "blocked_by", issues: ["DEMO-1", "DEMO-2"] } }, "Blocked by DEMO-1, DEMO-2, which are not done yet"],
+  [
+    "labels_match_several_bindings",
+    { kind: "waiting", reason: { code: "labels_match_several_bindings", labels: ["Frontend", "Docs"] } },
+    "Its labels Frontend, Docs match several bindings of the project; keep one",
+  ],
+  [
+    "no_binding_for_labels",
+    { kind: "waiting", reason: { code: "no_binding_for_labels" } },
+    "No binding of the project takes its labels: add a binding without labels, or one of its labels to a binding",
+  ],
+  ["plan_needs_lean", { kind: "waiting", reason: { code: "plan_needs_lean" } }, "A plan cannot be made in the home folder; bind another folder"],
+])("the reason %s is said in words", async (_code, status, text) => {
+  await renderWithProviders(<Issues />, { backend: backendWhereDemo4Is(status) });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-4")).getByText(text)).toBeInTheDocument();
+});
+
+test("the blockers and labels from Linear are cleaned in a reason", async () => {
+  const esc = String.fromCharCode(27);
+  const rlo = String.fromCharCode(0x202e);
+  await renderWithProviders(<Issues />, {
+    backend: backendWhereDemo4Is({ kind: "waiting", reason: { code: "blocked_by", issues: [`DEMO-1${esc}[2K`, `DEMO-2${rlo}`] } }),
+  });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-4")).getByText("Blocked by DEMO-1, DEMO-2, which are not done yet")).toBeInTheDocument();
+});
+
+test("an issue whose next run is a plan says so under its identifier, and a posted plan has its own badge", async () => {
+  const backend = backendWithIssues((views) =>
+    views.map((view) => {
+      switch (view.issue.identifier) {
+        case "DEMO-4":
+          // The plan label alone asks for a plan, in any case.
+          return { ...view, issue: { ...view.issue, labels: ["AI-Plan"] } };
+        case "DEMO-7":
+          // With the trigger label as well, the run is a usual one.
+          return { ...view, issue: { ...view.issue, labels: ["ai-ready", "ai-plan"] } };
+        case "DEMO-12":
+          // A run under way says what it is for, whatever the labels say now.
+          return view.job === null ? view : { ...view, job: { ...view.job, mode: "plan" } };
+        case "DEMO-10":
+          return view.job === null ? view : { ...view, job: { ...view.job, mode: "plan", state: "needs_info", report: "planned" } };
+        default:
+          return view;
+      }
+    }),
+  );
+  await renderWithProviders(<Issues />, { backend });
+  await screen.findByText("DEMO-4");
+  expect(within(rowOf("DEMO-4")).getByText("Plan only")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-7")).queryByText("Plan only")).not.toBeInTheDocument();
+  expect(within(rowOf("DEMO-12")).getByText("Plan only")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-10")).getByText("Plan posted")).toBeInTheDocument();
+  expect(within(rowOf("DEMO-10")).queryByText("Plan only")).not.toBeInTheDocument();
+});
+
 test("a folder name from the configuration is shown as text and cleaned", async () => {
   const esc = String.fromCharCode(27);
   const directory = `~/code/<b>odd</b>${esc}[0m`;
@@ -221,14 +279,14 @@ test("the reasons name the statuses the settings configure", async () => {
   const settings = await backend.settings();
   backend.settings = async () => ({ ...settings, trigger: { ...settings.trigger, todo: "Ready to build", label: "bot-ready" } });
   await renderWithProviders(<Issues />, { backend });
-  expect(await screen.findByText(/Issues assigned to you with the bot-ready label/)).toBeInTheDocument();
+  expect(await screen.findByText(/Issues assigned to you with the bot-ready or ai-plan label/)).toBeInTheDocument();
   expect(await screen.findByText("Its status is Backlog, not Ready to build")).toBeInTheDocument();
 });
 
 test("the header says which issues are listed", async () => {
   await renderWithProviders(<Issues />);
   expect(screen.getByRole("heading", { name: "Issues" })).toBeInTheDocument();
-  expect(await screen.findByText("Issues assigned to you with the ai-ready label, the 50 most recently updated")).toBeInTheDocument();
+  expect(await screen.findByText("Issues assigned to you with the ai-ready or ai-plan label, the 50 most recently updated")).toBeInTheDocument();
 });
 
 test("the refresh button reads the issues from Linear again", async () => {
@@ -305,5 +363,5 @@ test("the issue list reads in the interface language", async () => {
   expect(await screen.findByText("DEMO-4")).toBeInTheDocument();
   expect(screen.getByText("状态是 Backlog，不是 Todo")).toBeInTheDocument();
   expect(screen.getByText("项目还没有绑定本地目录")).toBeInTheDocument();
-  expect(screen.getByText("指派给你、带 ai-ready 标签的需求，最近更新的 50 条")).toBeInTheDocument();
+  expect(screen.getByText("指派给你、带 ai-ready 或 ai-plan 标签的需求，最近更新的 50 条")).toBeInTheDocument();
 });

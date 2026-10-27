@@ -68,12 +68,13 @@ pub const REQUIRED_ARGUMENTS: &[(&str, &[&str])] = &[
 
 /// The `fields` requested from `list_issues` and `get_issue`, so replies carry everything
 /// `parse::parse_issue` reads.
-pub const ISSUE_FIELDS: [&str; 13] = [
+pub const ISSUE_FIELDS: [&str; 14] = [
     "id",
     "uuid",
     "title",
     "url",
     "status",
+    "statusType",
     "labels",
     "project",
     "projectId",
@@ -84,6 +85,22 @@ pub const ISSUE_FIELDS: [&str; 13] = [
     "updatedAt",
 ];
 
+/// The `fields` requested from `get_issue`: `ISSUE_FIELDS` and the issue's `relations`, which only
+/// `get_issue` offers (run-improvements design, section 4.1). A non-empty `fields` overrides
+/// `includeRelations`, so relations are asked for as a field.
+pub const ISSUE_DETAIL_FIELDS: [&str; ISSUE_FIELDS.len() + 1] = with_relations();
+
+const fn with_relations() -> [&'static str; ISSUE_FIELDS.len() + 1] {
+    let mut fields = [""; ISSUE_FIELDS.len() + 1];
+    let mut i = 0;
+    while i < ISSUE_FIELDS.len() {
+        fields[i] = ISSUE_FIELDS[i];
+        i += 1;
+    }
+    fields[ISSUE_FIELDS.len()] = "relations";
+    fields
+}
+
 /// The `fields` requested from `list_projects`.
 pub const PROJECT_FIELDS: [&str; 4] = ["id", "uuid", "name", "teams"];
 
@@ -91,7 +108,7 @@ pub const PROJECT_FIELDS: [&str; 4] = ["id", "uuid", "name", "teams"];
 /// tool's `fields` enum, so a field Linear stopped offering fails at connect time.
 pub const REQUIRED_FIELDS: &[(&str, &[&str])] = &[
     ("list_issues", &ISSUE_FIELDS),
-    ("get_issue", &ISSUE_FIELDS),
+    ("get_issue", &ISSUE_DETAIL_FIELDS),
     ("list_projects", &PROJECT_FIELDS),
 ];
 
@@ -108,8 +125,9 @@ pub trait LinearApi: Send + Sync {
     /// The 50 most recently updated issues assigned to the authorized user with `label`, in any
     /// status: the panel's issue list. Fails if any issue cannot be read.
     async fn labeled_issues(&self, label: &str) -> Result<Vec<Issue>>;
-    /// One issue by identifier or uuid. `None` only when Linear reports that the issue does
-    /// not exist; a reply that cannot be read is an error.
+    /// One issue by identifier or uuid, with the issues that block it (`Issue::blocked_by`).
+    /// `None` only when Linear reports that the issue does not exist; a reply that cannot be read
+    /// is an error.
     async fn issue(&self, id: &str) -> Result<Option<Issue>>;
     /// Moves the issue to the status named `state`; an error when Linear rejects the change.
     async fn set_state(&self, id: &str, state: &str) -> Result<()>;

@@ -9,18 +9,18 @@
 
 ## 安装 / Install
 
-从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次（macOS 15 及以后：系统设置 → 隐私与安全性 → 仍要打开；Windows：更多信息 → 仍要运行）；经过公证、签名的版本通常没有这一步。通知由系统显示：macOS 上一条都看不到时，到「系统设置 → 通知 → IssueRelay」打开「允许通知」，它关着时 IssueRelay 自己看不出来。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。
+从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次（macOS 15 及以后：系统设置 → 隐私与安全性 → 仍要打开；Windows：更多信息 → 仍要运行）；经过公证、签名的版本通常没有这一步。通知由系统显示：macOS 上一条都看不到时，到「系统设置 → 通知 → IssueRelay」打开「允许通知」，它关着时 IssueRelay 自己看不出来。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。退回 v0.2.4 及以前的版本前，先删掉带分流标签的绑定（旧版本不认识分流标签，同一项目有两个绑定时启动不了），见安装说明的「退回旧版本」。
 
-Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
+Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling. Before going back to v0.2.4 or earlier, remove the bindings that have routing labels: an older version does not know them and does not start with two bindings of one project.
 
 ## 它怎么工作
 
 ```text
-Linear（指派给你 · 带 ai-ready · 状态 Todo）
+Linear（指派给你 · 带 ai-ready 或 ai-plan · 状态 Todo）
    │  每 30 秒查一次（Linear 官方 MCP，OAuth 授权）
    ▼
 IssueRelay（你电脑上的托盘程序）
-   │  按「Linear 项目 → 本地目录」的绑定找到工作目录；同一目录一次只跑一条
+   │  按「Linear 项目（及分流标签）→ 本地目录」的绑定找到工作目录；同一目录一次只跑一条
    ▼
 Claude Code / Codex（无人值守运行，用你自己的登录；默认精简：只带 Linear 和仓库自己的规则）
    │  读需求 → 改代码 → 推测试分支 → 把状态改成 In Testing，并留言（以「🤖 IssueRelay」开头）
@@ -31,15 +31,25 @@ Claude Code / Codex（无人值守运行，用你自己的登录；默认精简�
 ## 一条需求要被自动处理，必须同时满足
 
 1. 指派给你；
-2. 带标签 `ai-ready`；
+2. 带标签 `ai-ready`（只要方案、先不动代码时改用 `ai-plan`）；
 3. 状态是 `Todo`；
-4. 所属 Linear 项目已在 IssueRelay 里绑定了本地目录。
+4. 所属 Linear 项目已在 IssueRelay 里绑定了本地目录（同一项目绑了几个目录时，按需求带的分流标签选）。
+
+Linear 上被还没完成的需求挡住（blocked by）的需求先等着，挡住它的需求完成或取消后再派；只出方案的不等。
+
+## 更多用法
+
+- **只出方案**：带 `ai-plan`（而不是 `ai-ready`）的需求，AI 读需求和代码，把方案写成一条评论；改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适就加上 `ai-ready`，那次运行接着出方案的会话动手。
+- **一个项目分到几个目录**：绑定可以带分流标签（从 Linear 的标签里选），只接带其中任一标签的需求，用自己的目录和队列；不带标签的绑定接其余的需求。
+- **Linear 上的改动会停掉运行**：正在运行的需求在 Linear 上被取消、完成、改派或删除时，下一次检查就停掉运行（结束整棵进程树），运行记录写明原因。暂停监控时不查。
+- **重做时接续会话**：需求退回重做，或出完方案再加 `ai-ready` 时，接着上一次的会话继续（7 天内、同一执行者和目录；「自动审查」的 Codex 运行除外），可以在设置里关掉。手动「重新运行」总是从头开始。
+- **用量**：运行详情显示用了多少 token，Claude 的还有按 API 价格估算的花费；用订阅登录 Claude Code 时，这不是实际扣费。命令行 `issuerelay jobs` 也有花费一栏。
 
 ## 界面预览 / Screenshots
 
-桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个 Linear 项目对应的本地目录、执行者、权限档位、精简运行与推理力度）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
+桌面面板的两个页面：需求列表（每条需求在 Linear 上的状态、本地的状态、为什么没被接走，以及能做的操作），和项目绑定（每个绑定的本地目录、分流标签、执行者、权限档位、精简运行与推理力度）。截图只用内置假后端的虚构数据（`DEMO-N`、`Demo Project`、`Jane Doe`）；两种语言、浅色与深色共 48 张比对用的截图都在 [docs/gates/screenshots/m2](docs/gates/screenshots/m2/)。
 
-*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, executor, permission level, lean runs and reasoning effort of each Linear project). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
+*Two pages of the desktop panel: the issues (each one's status in Linear, its local state, why it was not picked up, and what can be done) and the project bindings (the folder, routing labels, executor, permission level, lean runs and reasoning effort of each binding). The screenshots show only the fictional data of the built-in mock backend; all 48 that the comparison uses (two languages, light and dark) are in [docs/gates/screenshots/m2](docs/gates/screenshots/m2/).*
 
 **中文界面**
 
@@ -64,6 +74,7 @@ Claude Code / Codex（无人值守运行，用你自己的登录；默认精简�
   - 不精简的运行读你的用户设置：那里的 `env` 设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，以它为准，IssueRelay 设的推理力度不生效。
   - 管理员下发了 MCP 配置（`managed-mcp.json`）的电脑上，Claude 的精简运行会在启动时失败，运行记录里有 Claude 的原文；关掉精简运行即可。
   - 要用别的 MCP 服务、仓库的 `.codex/` 配置、用户设置里的拒绝规则或自定义模型服务的绑定，在面板里关掉精简运行。关掉精简运行才加载全部配置：你本机 Claude Code / Codex 的用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效；「按个人设置」档位和绑定到主目录的绑定也总是这样。
+- **只出方案的运行**（`ai-plan`）同样无人值守、以你的身份运行。Claude 的内置工具只剩读文件的 Read、Grep、Glob，Codex 用只读沙箱；Linear 的工具只留读取、评论和修改这条需求本身的，关掉其余 29 个（例如合并、审批需求关联的拉取请求，删除评论；Codex 只在精简运行时能关）。除「按个人设置」的绑定外，它总是精简运行（只带 Linear 一个 MCP 服务），不看绑定的精简开关，所以绑定到主目录的绑定出不了方案。它仍能读你能读的文件，并把方案写进 Linear 的评论，能看到这条需求的人都看得到。「按个人设置」的绑定沿用你自己的设置与 MCP 服务，Linear 的工具要在你的设置里允许过，否则留不下方案。
 - 无人值守运行里，需求要求「先等一会儿」的步骤可能失败：放到后台的命令会让运行提前结束，单独的长时间 `sleep` 会被 Claude Code 拦下。这类需求请写成可以直接检查的条件。
 - Linear 令牌只存在系统钥匙串（macOS 钥匙串、Windows 凭据管理器）。IssueRelay 不上传任何数据，也没有遥测。
 
@@ -100,6 +111,7 @@ Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING
 | 文档 | 内容 |
 |---|---|
 | [设计](docs/superpowers/specs/2026-10-10-issuerelay-design.md) | 目标、关键决定、整体结构、需求的生命周期 |
+| [运行改进设计](docs/superpowers/specs/2026-10-27-issuerelay-run-improvements-design.md) | 只出方案、按标签分流、被挡住先不派、Linear 上停掉运行、接续会话、用量 |
 | [实施计划](docs/superpowers/plans/2026-10-10-issuerelay-m0-m1.md) | M0–M1 的分步任务 |
 | [验收报告](docs/gates/) | 每次实机验收的结果 |
 | [AI 编码规范](docs/ai-coding/README.md) | 分层、目录、注释、设计模式、门禁、安全、测试、流程 |

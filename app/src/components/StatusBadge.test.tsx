@@ -1,7 +1,7 @@
 import { screen } from "@testing-library/react";
 import { JOB_STATES } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
-import { StatusBadge, STATE_STYLE } from "./StatusBadge";
+import { PLANNED_STYLE, StatusBadge, STATE_STYLE } from "./StatusBadge";
 
 test("every state has its own label, colour and icon", async () => {
   await renderWithProviders(<>{JOB_STATES.map((s) => <StatusBadge key={s} state={s} />)}</>, { lang: "zh-CN" });
@@ -34,4 +34,18 @@ test("only a running job's icon spins", async () => {
 test("the badge reads in the interface language", async () => {
   await renderWithProviders(<StatusBadge state="awaiting_acceptance" />, { lang: "ja" });
   expect(screen.getByText("確認待ち")).toBeInTheDocument();
+});
+
+test("a posted plan has its own name and icon, in the colour of a run that waits for the user", async () => {
+  const { container } = await renderWithProviders(<StatusBadge state="needs_info" planned />, { lang: "zh-TW" });
+  expect(screen.getByText("方案已出")).toBeInTheDocument();
+  expect(PLANNED_STYLE.className).toBe(STATE_STYLE.needs_info.className);
+  expect(new Set(JOB_STATES.map((s) => STATE_STYLE[s].icon)).has(PLANNED_STYLE.icon)).toBe(false);
+  expect(container.querySelector("[data-slot=badge]")).toHaveClass(...STATE_STYLE.needs_info.className.split(" "));
+});
+
+test("only a run that waits for the user can show a posted plan", async () => {
+  await renderWithProviders(<StatusBadge state="failed" planned />);
+  expect(screen.getByText("Failed")).toBeInTheDocument();
+  expect(screen.queryByText("Plan posted")).not.toBeInTheDocument();
 });

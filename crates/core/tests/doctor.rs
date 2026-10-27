@@ -209,6 +209,7 @@ fn binding_to(project_id: &str) -> Binding {
         prompt_override: None,
         lean: true,
         effort: None,
+        labels: Vec::new(),
     }
 }
 

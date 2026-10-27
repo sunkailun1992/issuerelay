@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { DEFAULT_SETTINGS } from "./mock-fixtures";
-import { countProblem, draftOf, MINIMUM, nameProblem, problemsOf, sameDraft, settingsOf, unsaved } from "./settings-form";
+import { countProblem, draftOf, MINIMUM, nameProblem, problemsOf, sameDraft, sameName, settingsOf, unsaved } from "./settings-form";
 import type { Settings } from "./types";
 
 const ESC = String.fromCharCode(27);
@@ -59,7 +59,7 @@ test("every field the form edits reaches the settings", () => {
     full_access_acknowledged: true,
     show_in_dock: false,
     notifications: { run_started: false, awaiting_acceptance: false, needs_info: false, failed: false },
-    trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" },
+    trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped", plan_label: "ready-to-plan" },
   });
   expect(settingsOf(DEFAULT_SETTINGS, draft)).toEqual({
     ...DEFAULT_SETTINGS,
@@ -79,7 +79,7 @@ test("every field the form edits reaches the settings", () => {
     full_access_acknowledged: true,
     show_in_dock: false,
     notifications: { run_started: false, awaiting_acceptance: false, needs_info: false, failed: false },
-    trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" },
+    trigger: { label: "ready", todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped", plan_label: "ready-to-plan" },
   });
 });
 
@@ -108,10 +108,10 @@ test("the Dock switch is part of the draft: it comes from the settings and a dra
 
 test("names are saved without the blanks around them, the template as it was typed", () => {
   const draft = draftOf(DEFAULT_SETTINGS);
-  draft.trigger = { label: " a ", todo: "  Todo  ", in_progress: "\tc", in_testing: "d  ", done: " e " };
+  draft.trigger = { label: " a ", todo: "  Todo  ", in_progress: "\tc", in_testing: "d  ", done: " e ", plan_label: " f\t" };
   draft.prompt_template = "  keep my indentation\n";
   const settings = settingsOf(DEFAULT_SETTINGS, draft);
-  expect(settings?.trigger).toEqual({ label: "a", todo: "Todo", in_progress: "c", in_testing: "d", done: "e" });
+  expect(settings?.trigger).toEqual({ label: "a", todo: "Todo", in_progress: "c", in_testing: "d", done: "e", plan_label: "f" });
   expect(settings?.prompt_template).toBe("  keep my indentation\n");
 });
 
@@ -217,4 +217,28 @@ test("what a save already carried is no longer an edit, and what was typed meanw
     notifications: { ...saved.notifications, needs_info: false },
   });
   expect(unsaved({}, saved)).toEqual({});
+});
+
+test("names are the same without the blanks around them and ASCII case aside, as core's same_name has it", () => {
+  expect(sameName("  AI-Ready ", "ai-ready")).toBe(true);
+  expect(sameName("In Testing", " in testing ")).toBe(true);
+  expect(sameName("É", "é")).toBe(false);
+  expect(sameName("ai-ready", "ai ready")).toBe(false);
+});
+
+test("the plan label may not be the trigger label, and a name that is no name says that first", () => {
+  const draft = draftOf(DEFAULT_SETTINGS);
+  draft.trigger = { ...draft.trigger, plan_label: " AI-READY " };
+  expect(problemsOf(draft)).toEqual({ "trigger.plan_label": { kind: "same_as_label" } });
+  draft.trigger.plan_label = "ai-réady";
+  expect(problemsOf(draft)).toEqual({});
+  draft.trigger.plan_label = "";
+  expect(problemsOf(draft)).toEqual({ "trigger.plan_label": { kind: "name" } });
+});
+
+test("whether earlier sessions are continued goes from the settings to the form and back", () => {
+  const draft = draftOf({ ...DEFAULT_SETTINGS, resume_sessions: false });
+  expect(draft.resume_sessions).toBe(false);
+  expect(settingsOf(DEFAULT_SETTINGS, { ...draft, resume_sessions: true })?.resume_sessions).toBe(true);
+  expect(settingsOf(DEFAULT_SETTINGS, draft)?.resume_sessions).toBe(false);
 });

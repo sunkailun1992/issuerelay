@@ -15,6 +15,7 @@
     "running": "运行中",
     "awaiting_acceptance": "待验收",
     "needs_info": "待补充信息",
+    "planned": "方案已出",
     "done": "已完成",
     "failed": "失败",
     "canceled": "已取消",
@@ -70,6 +71,7 @@
     "run_started": "已开始运行。",
     "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
     "needs_info": "AI 在需求下提了问题。补充信息后，请重新加上 ai-ready 标签。",
+    "plan_ready": "方案已写在需求下。要照方案动手，请加上 ai-ready 标签。",
     "failed": "运行失败，原因见面板。",
     "update_available": "IssueRelay {{version}} 已发布",
     "update_available_body": "打开面板即可安装。"
@@ -225,7 +227,7 @@
     "bind_project": "绑定项目"
   },
   "issues": {
-    "description": "指派给你、带 {{label}} 标签的需求，最近更新的 50 条",
+    "description": "指派给你、带 {{label}} 或 {{plan_label}} 标签的需求，最近更新的 50 条",
     "empty_title": "还没有带 {{label}} 标签的需求",
     "empty_description": "需求指派给你、带有 {{label}} 标签且状态为 {{todo}} 时，IssueRelay 才会接手处理。",
     "open_help": "了解工作方式",
@@ -246,7 +248,11 @@
       "project_not_bound": "项目还没有绑定本地目录",
       "directory_missing": "绑定的目录 {{directory}} 不存在",
       "executor_not_ready": "{{executor}} 还没有就绪，请看环境检查",
-      "lean_not_ready": "{{executor}} 的精简运行还没有就绪，请看环境检查"
+      "lean_not_ready": "{{executor}} 的精简运行还没有就绪，请看环境检查",
+      "blocked_by": "被 {{issues}} 挡住，它们还没完成",
+      "labels_match_several_bindings": "标签 {{labels}} 对上了项目的多个绑定，请只留一个",
+      "no_binding_for_labels": "项目里没有绑定接它的标签：请加一个不带标签的绑定，或把它的某个标签加给一个绑定",
+      "plan_needs_lean": "方案不能在主目录里出，请绑定别的目录"
     },
     "load_failed": "无法从 Linear 读取需求",
     "open_guide": "打开引导",
@@ -282,7 +288,24 @@
       "directory": "目录",
       "created": "创建时间",
       "finished": "结束时间",
-      "summary": "摘要"
+      "summary": "摘要",
+      "mode": "运行用途",
+      "resumed": "接续",
+      "usage": "用量"
+    },
+    "mode": {
+      "plan": "只出方案"
+    },
+    "resumed_from": "运行 #{{id}} 的会话",
+    "usage": {
+      "cost": "{{cost}}（估算）",
+      "tokens": "输入 {{input}}、输出 {{output}} token",
+      "cache": "缓存读取 {{read}}、写入 {{write}}",
+      "cache_read": "缓存读取 {{read}}",
+      "turns_one": "{{count}} 轮",
+      "turns_other": "{{count}} 轮",
+      "cost_note": "花费是 Claude Code 按 API 价格自己估算的；用订阅登录 Claude Code 时，它不是实际扣费。",
+      "codex_note": "Codex 只报 token；它的输入数已包含缓存读取的部分。"
     },
     "empty": "还没有运行记录",
     "empty_description": "IssueRelay 开始处理需求后，运行会显示在这里。",
@@ -297,6 +320,10 @@
       "failed": "这次运行失败了",
       "canceled": "这次运行已取消",
       "waiting_binding": "这次运行在等待绑定",
+      "linear_deleted": "需求在 Linear 上被删除，已停止运行",
+      "linear_canceled": "需求在 Linear 上被取消，已停止运行",
+      "linear_completed": "需求在 Linear 上已被设为完成，已停止运行",
+      "linear_reassigned": "需求在 Linear 上已不再指派给你，已停止运行",
       "other": "IssueRelay 的说明"
     },
     "timeline": "时间线",
@@ -339,6 +366,15 @@
     "project": "Linear 项目",
     "project_placeholder": "选择项目",
     "project_bound": "{{name}}（已绑定）",
+    "labels": "分流标签",
+    "labels_hint": "选填。这个绑定只接项目里带其中任一标签的需求，在自己的目录里跑；不选就接项目的其余需求。",
+    "labels_failed": "无法从 Linear 读取标签",
+    "no_labels": "Linear 里还没有可用于分流的标签。请先在 Linear 创建。",
+    "label_taken_option": "{{name}}（另一个绑定已用）",
+    "label_gone_option": "{{name}}（Linear 里已没有）",
+    "labels_needed": "这个项目已有不带标签的绑定：要再绑一个目录，请选分流标签",
+    "labels_taken": "这个项目的另一个绑定已用了其中的标签",
+    "labels_none": "无：项目的其余需求",
     "projects_failed": "无法从 Linear 读取项目",
     "no_projects": "Linear 里还没有可绑定的项目。请先在 Linear 创建一个。",
     "project_missing": "你选的项目已经不在 Linear 的项目列表里了，请重新选择。",
@@ -485,6 +521,8 @@
     "autostart_failed": "无法读取是否开机自启",
     "show_in_dock": "在程序坞显示图标",
     "show_in_dock_note": "关闭后，只有面板打开时才显示图标；菜单栏图标始终保留。",
+    "resume_sessions": "需求退回时接续上一次的会话",
+    "resume_sessions_note": "AI 接着上次读过、做过的继续。手动「重新运行」总是从头开始。",
     "cli": {
       "title": "把命令行加入 PATH",
       "description": "之后在终端里可以直接输入 {{command}}，不需要管理员权限。",
@@ -514,6 +552,8 @@
     "check_again": "重新检查",
     "trigger_names": "触发用的名字",
     "label_name": "触发标签",
+    "plan_label_name": "方案标签",
+    "plan_label_same": "请用与触发标签不同的名字",
     "state_todo": "触发运行的状态",
     "state_in_progress": "AI 工作时的状态",
     "state_in_testing": "待测试时的状态",
@@ -554,6 +594,7 @@
       "running": "执行者正在处理。",
       "awaiting_acceptance": "运行顺利结束，需求已在测试中。验收后请在面板上标记完成。",
       "needs_info": "AI 觉得需求写得不清楚，已在需求下提问并去掉了标签。补充细节后重新加上标签。",
+      "planned": "只出方案的运行已在需求下留了方案。加上 {{label}} 就照方案动手。",
       "done": "你已标记完成。",
       "failed": "运行出错、超时或长时间没有输出，或者需求没有到达测试状态。看完日志后可以重新运行。",
       "canceled": "你停止了这次运行。"
@@ -573,6 +614,21 @@
     "lean_body": "精简运行只带 Linear 的 MCP 服务和仓库自己的规则与设置，不带你的其他 MCP 服务、插件、钩子、自动记忆和用户级 CLAUDE.md。Codex 仍会读 ~/.codex/AGENTS.md，仓库的 .codex/ 配置也不生效。绑定默认精简运行，除非你把它关掉；「按个人设置」的绑定和绑定到主目录的绑定总是用你的全部配置。",
     "lean_off": "要用别的 MCP 服务、仓库的 .codex/ 配置、你用户设置里的拒绝规则或自定义模型服务的绑定，请关掉精简运行。",
     "lean_effort": "精简运行不读你自己设置里的推理力度：在设置里设一个默认推理力度，或给每个绑定单独设。",
+    "more_title": "更多用法",
+    "more": {
+      "plan_q": "能先让 AI 出方案，再动手吗？",
+      "plan_a": "给需求加 {{plan_label}}（而不是 {{label}}）：AI 读需求和代码，把方案写成一条评论。改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适就加上 {{label}}，那次运行会接着出方案的会话。",
+      "routing_q": "一个 Linear 项目能分到几个目录吗？",
+      "routing_a": "给绑定选上分流标签：它只接项目里带其中任一标签的需求，用自己的目录和队列。不带标签的绑定接其余的需求。",
+      "blocked_q": "被别的需求挡住的需求怎么办？",
+      "blocked_a": "Linear 上标了被另一条需求挡住、而那条还没完成的需求会等着，等那条完成或取消后再派。只出方案的运行照常派。",
+      "linear_stop_q": "AI 正在做的时候，我在 Linear 上取消了需求会怎样？",
+      "linear_stop_a": "在 Linear 上取消、完成、改派或删除需求，下一次检查时就会停掉它的运行，运行记录写明原因。暂停监控时不会。",
+      "resume_q": "需求退回后，AI 会从头来吗？",
+      "resume_a": "不会：它接着之前的会话，记得读过、做过的；除非那个会话结束已超过 7 天，或用的是别的执行者、别的目录。「自动审查」的 Codex 运行总是从头开始。可以在设置里关掉。",
+      "usage_q": "一次运行用了多少？",
+      "usage_a": "运行详情显示用了多少 token，Claude 的还有按 API 价格估算的花费；用订阅登录 Claude Code 时，它不是实际扣费。"
+    },
     "faq_title": "常见问题",
     "faq": {
       "not_picked_q": "为什么我的需求没被接走？",

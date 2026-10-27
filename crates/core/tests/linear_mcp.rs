@@ -46,6 +46,8 @@ fn expected_issue(n: u32) -> Issue {
         priority: json["priority"]["value"].as_u64().unwrap() as u8,
         created_at: time("createdAt"),
         updated_at: time("updatedAt"),
+        state_type: Some(text("statusType")),
+        blocked_by: None,
     }
 }
 

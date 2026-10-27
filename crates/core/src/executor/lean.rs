@@ -206,6 +206,13 @@ impl LeanCheck {
 
     fn claude(&mut self, event: &Value) -> Option<String> {
         let kind = event["type"].as_str().unwrap_or("unknown");
+        // A `result` before any init ends a session that never started: a resume of a session that
+        // is gone ends that way (run-improvements design, section 4.2). Nothing ran, so nothing ran
+        // with the wrong configuration; the run ends with the executor's exit code. Any event after
+        // it is still checked.
+        if kind == "result" {
+            return None;
+        }
         if kind != "system" {
             return Some(format!("a `{kind}` event came before the init event"));
         }
@@ -474,14 +481,25 @@ mod tests {
         assert!(detail.contains("`unknown`"), "{detail}");
     }
 
+    // What Claude Code 2.1.285 printed for a resume of a session that is gone (2026-10-27): the
+    // session never started, so nothing ran with the wrong configuration.
     #[test]
-    fn a_result_before_init_is_a_violation() {
+    fn a_result_before_init_ends_a_session_that_never_started() {
+        let lines = [
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"00000000-0000-4000-8000-000000000000","num_turns":0}"#,
+        ];
+        assert_eq!(first_violation(ExecutorKind::Claude, &lines), None);
+    }
+
+    #[test]
+    fn work_after_a_result_before_init_is_still_a_violation() {
         let lines = [
             r#"{"type":"result","subtype":"success","result":"done"}"#,
+            r#"{"type":"assistant","message":{}}"#,
             LINEAR_ONLY_INIT,
         ];
         let detail = first_violation(ExecutorKind::Claude, &lines).unwrap();
-        assert!(detail.contains("`result`"), "{detail}");
+        assert!(detail.contains("`assistant`"), "{detail}");
     }
 
     #[test]

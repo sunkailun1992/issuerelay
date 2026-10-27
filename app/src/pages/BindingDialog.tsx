@@ -1,4 +1,4 @@
-import { CircleAlert, FolderOpen, LoaderCircle } from "lucide-react";
+import { ChevronDown, CircleAlert, FolderOpen, LoaderCircle } from "lucide-react";
 import { type FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Field, Hint } from "@/components/FormField";
@@ -7,19 +7,24 @@ import { ErrorState, LinearConnecting, LoadingState } from "@/components/states"
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useBindings, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
+import { useBindings, useLabels, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
 import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useBackend } from "@/lib/backend-context";
 import { bindingLabels } from "@/lib/binding-labels";
+import { cleanDisplayText } from "@/lib/clean";
 import { reportFailure } from "@/lib/errors";
 import { isValidModelName } from "@/lib/model-name";
+import { bindingIdFor, bindingsOverlap, uniqueBindingId } from "@/lib/routing";
+import { nameProblem, sameName } from "@/lib/settings-form";
 import { type Binding, EFFORTS, type Effort, type ExecutorKind, type PermissionProfile, type Settings } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 /** The entry of the executor, permission and effort lists that names none: the binding follows the settings. */
 const DEFAULT = "default";
@@ -51,6 +56,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const creating = initial === undefined;
   // Only a new binding picks its project; Linear is not asked for the projects otherwise.
   const projects = useProjects(creating);
+  const linearLabels = useLabels();
   const connecting = useStatus().data?.linear.kind === "connecting";
   const bindings = useBindings();
   // The form shows a failed save itself, so the hook does not also toast it.
@@ -69,6 +75,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const [lean, setLean] = useState(initial?.lean ?? true);
   const [effort, setEffort] = useState<Effort | typeof DEFAULT>(initial?.effort ?? DEFAULT);
   const [prompt, setPrompt] = useState(initial?.prompt_override ?? "");
+  const [routing, setRouting] = useState<string[]>(initial?.labels ?? []);
   const [warning, setWarning] = useState(false);
   // The project that was chosen is not among the projects any more by the time it is saved.
   const [missing, setMissing] = useState(false);
@@ -80,8 +87,13 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   const leanApplies = effectivePermission !== "personal";
   const needsWarning = effectivePermission === "full" && !settings.full_access_acknowledged;
   const busy = save.isPending || saveSettings.isPending;
-  const canSave = (creating ? projectId !== "" : true) && directory !== "" && !modelInvalid && !busy;
-  // A project that has a binding already cannot be bound again: saving would replace that binding.
+  // A new binding, or an edited one, must not take the same issues as another binding of its
+  // project: saving would replace that one (`Engine::add_binding`).
+  const chosenProject = initial?.project_id ?? projectId;
+  const others = (bindings.data ?? []).filter((binding) => binding.project_id === chosenProject && binding.id !== initial?.id);
+  const overlap = others.find((binding) => bindingsOverlap(binding, { project_id: chosenProject, labels: routing }));
+  const canSave = (creating ? projectId !== "" : true) && directory !== "" && !modelInvalid && overlap === undefined && !busy;
+  // A project that has a binding already can be bound again only with routing labels.
   const bound = new Set(bindings.data?.map((binding) => binding.project_id));
 
   // A failure of the save is only shown here: a dialog around the form must not close while it is awaited.
@@ -158,12 +170,90 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
           </SelectTrigger>
           <SelectContent>
             {projects.data.map((project) => (
-              <SelectItem key={project.id} value={project.id} disabled={bound.has(project.id)}>
+              <SelectItem key={project.id} value={project.id}>
                 {bound.has(project.id) ? t("bindings.project_bound", { name: project.name }) : project.name}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
+      ),
+    };
+  };
+
+  /**
+   * What stands for the routing labels (run-improvements design, 9.3): a menu of Linear's labels to
+   * tick, so that each is a name issues can carry; none makes the binding its project's default
+   * one. Left out are the trigger and the plan label (every issue IssueRelay takes has one of them)
+   * and names a binding cannot hold. A label of the binding that Linear no longer has stays,
+   * marked, so that it can be taken off; one that another binding of the project has is marked and
+   * cannot be ticked. Until Linear answers, why there is no menu (`control` as for the project);
+   * the first connection to Linear is told once, by the project field when there is a list of them.
+   */
+  const labelField = (): { control: boolean; node: ReactNode } => {
+    const loading = { control: false, node: <Skeleton role="status" aria-label={t("common.loading")} className="h-9 w-full" /> };
+    if (connecting) return creating ? loading : { control: false, node: <LinearConnecting /> };
+    if (linearLabels.isError && !linearLabels.isFetching) {
+      return {
+        control: false,
+        node: <ErrorState error={linearLabels.error} headline="bindings.labels_failed" onRetry={() => void linearLabels.refetch()} />,
+      };
+    }
+    if (linearLabels.data === undefined) return loading;
+    const has = (list: readonly string[], label: string) => list.some((entry) => sameName(entry, label));
+    const reserved = [settings.trigger.label, settings.trigger.plan_label];
+    const offered = linearLabels.data.filter((label) => nameProblem(label) === null && !has(reserved, label));
+    const gone = routing.filter((label) => !has(offered, label));
+    if (offered.length === 0 && gone.length === 0) {
+      return { control: false, node: <p className="text-muted-foreground">{t("bindings.no_labels")}</p> };
+    }
+    const taken = others.flatMap((binding) => binding.labels ?? []);
+    const shown = routing.map((label) => cleanDisplayText(label).trim()).join(", ");
+    return {
+      control: true,
+      node: (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              id={id("labels")}
+              type="button"
+              variant="outline"
+              aria-invalid={overlap !== undefined}
+              aria-describedby={`${id("labels-value")} ${id("labels-hint")}`}
+              className="w-full justify-between font-normal"
+            >
+              <span id={id("labels-value")} className={cn("truncate", routing.length === 0 && "text-muted-foreground")}>
+                {routing.length === 0 ? t("bindings.labels_none") : shown}
+              </span>
+              <ChevronDown aria-hidden className="opacity-50" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent>
+            {[...offered, ...gone].map((label) => {
+              const chosen = has(routing, label);
+              const elsewhere = !chosen && has(taken, label);
+              const name = cleanDisplayText(label).trim();
+              return (
+                <DropdownMenuCheckboxItem
+                  key={label}
+                  checked={chosen}
+                  disabled={elsewhere}
+                  // Several labels are ticked in one go: the menu stays open.
+                  onSelect={(event) => event.preventDefault()}
+                  onCheckedChange={(on) => {
+                    edited();
+                    setRouting(on === true ? [...routing, label] : routing.filter((entry) => !sameName(entry, label)));
+                  }}
+                >
+                  {elsewhere
+                    ? t("bindings.label_taken_option", { name })
+                    : has(gone, label)
+                      ? t("bindings.label_gone_option", { name })
+                      : name}
+                </DropdownMenuCheckboxItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
       ),
     };
   };
@@ -176,9 +266,13 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
     } else {
       const project = projects.data?.find((entry) => entry.id === projectId);
       if (project === undefined) return null;
-      named = { id: project.id, project_id: project.id, project_name: project.name };
+      // A binding whose labels changed keeps the id its first label gave it: a new one that would
+      // get that id again gets a number after it, or saving would replace that binding.
+      const id = uniqueBindingId(bindingIdFor(project.id, routing), (bindings.data ?? []).map((binding) => binding.id));
+      named = { id, project_id: project.id, project_name: project.name };
     }
     const binding: Binding = { ...named, directory };
+    if (routing.length > 0) binding.labels = routing;
     if (executor !== DEFAULT) binding.executor = executor;
     if (permission !== DEFAULT) binding.permission = permission;
     if (modelName !== "") binding.model = modelName;
@@ -235,6 +329,7 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   };
 
   const project = projectField();
+  const labelControl = labelField();
   return (
     <>
       <form onSubmit={submit} noValidate className="flex min-h-0 flex-col gap-4">
@@ -372,6 +467,17 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
               </SelectContent>
             </Select>
             <Hint id={id("effort-hint")}>{t("bindings.effort_hint")}</Hint>
+          </Field>
+
+          <Field label={t("bindings.labels")} htmlFor={labelControl.control ? id("labels") : undefined}>
+            {labelControl.node}
+            {overlap !== undefined ? (
+              <Hint id={id("labels-hint")} tone="error">
+                {(overlap.labels ?? []).length === 0 && routing.length === 0 ? t("bindings.labels_needed") : t("bindings.labels_taken")}
+              </Hint>
+            ) : (
+              <Hint id={id("labels-hint")}>{t("bindings.labels_hint")}</Hint>
+            )}
           </Field>
 
           <Field label={t("bindings.prompt")} htmlFor={id("prompt")}>

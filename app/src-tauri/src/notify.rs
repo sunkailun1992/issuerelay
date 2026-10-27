@@ -7,7 +7,7 @@
 use issuerelay_core::{
     config::NotificationSettings,
     host::Host,
-    model::{Job, JobState},
+    model::{Job, JobState, RunMode},
 };
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;
@@ -53,6 +53,13 @@ pub fn content(kind: NotificationKind, job: &Job, t: &Translator) -> (String, St
     let key = match kind {
         NotificationKind::RunStarted => "notify.run_started",
         NotificationKind::AwaitingAcceptance => "notify.awaiting_acceptance",
+        // A planning run that posted its plan waits for the user as well, for the next step: the
+        // `needs_info` switch covers it, with words of its own.
+        NotificationKind::NeedsInfo
+            if job.mode == RunMode::Plan && job.report.as_deref() == Some("planned") =>
+        {
+            "notify.plan_ready"
+        }
         NotificationKind::NeedsInfo => "notify.needs_info",
         NotificationKind::Failed => "notify.failed",
     };
@@ -135,6 +142,25 @@ mod tests {
                 "{quiet:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_finished_plan_has_its_own_text() {
+        let t = Translator::new("en");
+        let mut planned = job(JobState::NeedsInfo);
+        planned.mode = RunMode::Plan;
+        planned.report = Some("planned".into());
+        let (_, body) = content(NotificationKind::NeedsInfo, &planned, &t);
+        assert_eq!(
+            body,
+            "A plan is posted on the issue; add the ai-ready label to have it carried out."
+        );
+        // A planning run that asked questions instead says what any question says.
+        planned.report = Some("needs_info".into());
+        let (_, body) = content(NotificationKind::NeedsInfo, &planned, &t);
+        assert_eq!(body, t.t("notify.needs_info"));
+        let (_, body) = content(NotificationKind::NeedsInfo, &job(JobState::NeedsInfo), &t);
+        assert_eq!(body, t.t("notify.needs_info"));
     }
 
     #[test]

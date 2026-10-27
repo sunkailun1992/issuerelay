@@ -1,0 +1,30 @@
+{
+  "request": {
+    "tool": "get_issue",
+    "arguments": {
+      "id": "DEMO-45",
+      "fields": [
+        "id",
+        "status",
+        "statusType",
+        "relations"
+      ]
+    }
+  },
+  "reply": {
+    "id": "DEMO-45",
+    "status": "Todo",
+    "statusType": "unstarted",
+    "relations": {
+      "blocks": [],
+      "blockedBy": [
+        {
+          "id": "DEMO-44",
+          "title": "Demo blocking issue"
+        }
+      ],
+      "relatedTo": [],
+      "duplicateOf": null
+    }
+  }
+}

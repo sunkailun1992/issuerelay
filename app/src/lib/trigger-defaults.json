@@ -3,5 +3,6 @@
   "todo": "Todo",
   "in_progress": "In Progress",
   "in_testing": "In Testing",
-  "done": "Done"
+  "done": "Done",
+  "plan_label": "ai-plan"
 }

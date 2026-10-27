@@ -45,6 +45,25 @@ function LeanRuns() {
   );
 }
 
+/** The parts of the run-improvements design a user meets: what each does, in a sentence or two. */
+const MORE_WAYS = ["plan", "routing", "blocked", "linear_stop", "resume", "usage"] as const;
+
+/** Planning runs, routing labels, blockers, stops from Linear, continued sessions and usage. */
+function MoreWays({ names }: { names: TriggerNames }) {
+  const { t } = useTranslation();
+  return (
+    <Section title={t("help.more_title")}>
+      <div className="flex flex-col gap-5">
+        {MORE_WAYS.map((way) => (
+          <Question key={way} question={t(`help.more.${way}_q`)}>
+            <p className="text-muted-foreground">{t(`help.more.${way}_a`, { label: names.label, plan_label: names.plan_label })}</p>
+          </Question>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
 /** A question and what answers it. */
 function Question({ question, children }: { question: string; children: ReactNode }) {
   return (
@@ -108,6 +127,7 @@ export default function Help() {
         <IssueFlow names={names} />
         <Examples names={names} />
         <LeanRuns />
+        <MoreWays names={names} />
         <Questions names={names} />
       </div>
     </>

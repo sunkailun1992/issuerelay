@@ -3,7 +3,7 @@ import { act, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { vi } from "vitest";
 import { EngineEventsBridge } from "@/components/EngineEventsBridge";
-import { queryKeys, useDoctor, useIssues, useJob, useJobs, useProjects, useStatus } from "@/hooks/queries";
+import { queryKeys, useDoctor, useIssues, useJob, useJobs, useLabels, useProjects, useStatus } from "@/hooks/queries";
 import { createMockBackend } from "@/lib/mock";
 import type { EngineEvent, UpdateStatus } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
@@ -212,15 +212,17 @@ test("React's double mount in development leaves exactly one subscription", asyn
 });
 
 describe("when the connection to Linear changes", () => {
-  /** What needs a connection to Linear, as three lines of text: the answer or why there is none. */
+  /** What needs a connection to Linear, as four lines of text: the answer or why there is none. */
   function Dependent() {
     const issues = useIssues();
     const projects = useProjects();
+    const labels = useLabels();
     const doctor = useDoctor();
     return (
       <>
         <p>issues: {issues.error ? issues.error.message : (issues.data?.length ?? "reading")}</p>
         <p>projects: {projects.error ? projects.error.message : (projects.data?.length ?? "reading")}</p>
+        <p>labels: {labels.error ? labels.error.message : (labels.data?.length ?? "reading")}</p>
         <p>doctor: {doctor.data ? (doctor.data.viewer?.name ?? doctor.data.linear_error) : "reading"}</p>
       </>
     );
@@ -237,11 +239,13 @@ describe("when the connection to Linear changes", () => {
     );
     expect(await screen.findByText("issues: still connecting to Linear")).toBeInTheDocument();
     expect(await screen.findByText("projects: still connecting to Linear")).toBeInTheDocument();
+    expect(await screen.findByText("labels: still connecting to Linear")).toBeInTheDocument();
     expect(await screen.findByText("doctor: still connecting to Linear")).toBeInTheDocument();
     // The first connection ends; the app announces a changed setup, the status says "connected".
     await act(() => backend.linearReconnect());
     expect(await screen.findByText("issues: 9")).toBeInTheDocument();
     expect(await screen.findByText("projects: 3")).toBeInTheDocument();
+    expect(await screen.findByText("labels: 6")).toBeInTheDocument();
     expect(await screen.findByText("doctor: Jane Doe")).toBeInTheDocument();
   });
 
@@ -258,6 +262,7 @@ describe("when the connection to Linear changes", () => {
     await act(() => backend.linearLogout());
     expect(await screen.findByText("issues: not connected to Linear: log in first")).toBeInTheDocument();
     expect(await screen.findByText("projects: not connected to Linear: log in first")).toBeInTheDocument();
+    expect(await screen.findByText("labels: not connected to Linear: log in first")).toBeInTheDocument();
   });
 
   test("React's double run of an effect in development is no change of the connection", async () => {
@@ -286,6 +291,7 @@ describe("when the connection to Linear changes", () => {
     backend.status = async () => ({ ...view, status: { ...view.status, queued: ++reads } });
     const issues = vi.spyOn(backend, "issues");
     const projects = vi.spyOn(backend, "projects");
+    const labels = vi.spyOn(backend, "labels");
     const doctor = vi.spyOn(backend, "doctor");
     function Queue() {
       return <p>queued: {useStatus().data?.status.queued}</p>;
@@ -305,6 +311,7 @@ describe("when the connection to Linear changes", () => {
     await screen.findByText("queued: 2");
     expect(issues).toHaveBeenCalledTimes(1);
     expect(projects).toHaveBeenCalledTimes(1);
+    expect(labels).toHaveBeenCalledTimes(1);
     expect(doctor).toHaveBeenCalledTimes(1);
   });
 });

@@ -995,6 +995,7 @@ async fn run_a_job(host: &Host, root: &Path, linear: &FakeLinear) {
             prompt_override: None,
             lean: true,
             effort: None,
+            labels: Vec::new(),
         })
         .unwrap();
     linear.upsert(issue("1", "proj-1"));
@@ -1188,10 +1189,7 @@ impl JobRunner for LingeringRunner {
         cancel.cancelled().await;
         self.told_to_stop.add_permits(1);
         self.release.acquire().await.expect("closed").forget();
-        RunOutput {
-            exit: ExitKind::Canceled,
-            final_text: None,
-        }
+        RunOutput::ended(ExitKind::Canceled, None)
     }
 }
 

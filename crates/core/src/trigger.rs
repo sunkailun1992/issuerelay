@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Binding, Config, ExecutorKind, LeanStatus, TriggerNames};
-use crate::model::{Issue, Job};
+use crate::config::{
+    Binding, Config, ExecutorKind, LeanStatus, PermissionProfile, Route, TriggerNames, same_folder,
+};
+use crate::model::{Issue, Job, RunMode};
 
 /// Why an issue that looks eligible has to wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +18,14 @@ pub enum WaitReason {
     ExecutorNotReady(ExecutorKind),
     /// The executor takes usual runs, but the binding's runs are lean and the lean checks fail.
     LeanNotReady(ExecutorKind),
+    /// Issues that block this one in Linear and are neither completed nor canceled, by identifier.
+    BlockedBy(Vec<String>),
+    /// The issue carries the routing labels of several bindings of its project: these labels.
+    LabelsMatchSeveralBindings(Vec<String>),
+    /// The project's bindings all have routing labels, and the issue carries none of them.
+    NoBindingForLabels,
+    /// A planning run is always lean, which a binding of the home folder cannot be.
+    PlanNeedsLean,
 }
 
 impl WaitReason {
@@ -32,6 +42,19 @@ impl WaitReason {
             WaitReason::LeanNotReady(kind) => {
                 format!("executor {} is not ready for lean runs", kind.as_str())
             }
+            WaitReason::BlockedBy(issues) => {
+                format!("blocked by {}, which are not done yet", issues.join(", "))
+            }
+            WaitReason::LabelsMatchSeveralBindings(labels) => format!(
+                "the labels {} match several bindings of the project",
+                labels.join(", ")
+            ),
+            WaitReason::NoBindingForLabels => {
+                "no binding of the project takes the issue's labels".into()
+            }
+            WaitReason::PlanNeedsLean => {
+                "planning runs need a bound folder other than the home folder".into()
+            }
         }
     }
 }
@@ -45,6 +68,10 @@ pub enum WaitReasonView {
     DirectoryMissing { directory: String },
     ExecutorNotReady { executor: ExecutorKind },
     LeanNotReady { executor: ExecutorKind },
+    BlockedBy { issues: Vec<String> },
+    LabelsMatchSeveralBindings { labels: Vec<String> },
+    NoBindingForLabels,
+    PlanNeedsLean,
 }
 
 impl WaitReason {
@@ -59,6 +86,16 @@ impl WaitReason {
                 WaitReasonView::ExecutorNotReady { executor: *kind }
             }
             WaitReason::LeanNotReady(kind) => WaitReasonView::LeanNotReady { executor: *kind },
+            WaitReason::BlockedBy(issues) => WaitReasonView::BlockedBy {
+                issues: issues.clone(),
+            },
+            WaitReason::LabelsMatchSeveralBindings(labels) => {
+                WaitReasonView::LabelsMatchSeveralBindings {
+                    labels: labels.clone(),
+                }
+            }
+            WaitReason::NoBindingForLabels => WaitReasonView::NoBindingForLabels,
+            WaitReason::PlanNeedsLean => WaitReasonView::PlanNeedsLean,
         }
     }
 }
@@ -103,42 +140,70 @@ pub fn same_name(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
 
-/// Assigned to `me`, carries the trigger label, and is in the Todo state.
+/// What a run of `issue` would be for, when it is a candidate at all: assigned to `me` and in the
+/// Todo state, a usual run when it carries the trigger label, a planning run when it carries the
+/// plan label instead (run-improvements design, section 10.1).
+pub fn candidate_mode(issue: &Issue, names: &TriggerNames, me: &str) -> Option<RunMode> {
+    if issue.assignee_id.as_deref() != Some(me) || !same_name(&issue.state, &names.todo) {
+        return None;
+    }
+    let carries = |wanted: &str| issue.labels.iter().any(|label| same_name(label, wanted));
+    if carries(&names.label) {
+        Some(RunMode::Implement)
+    } else if carries(&names.plan_label) {
+        Some(RunMode::Plan)
+    } else {
+        None
+    }
+}
+
+/// Assigned to `me`, in the Todo state, and carries the trigger label or the plan label.
 pub fn is_candidate(issue: &Issue, names: &TriggerNames, me: &str) -> bool {
-    issue.assignee_id.as_deref() == Some(me)
-        && issue
-            .labels
-            .iter()
-            .any(|label| same_name(label, &names.label))
-        && same_name(&issue.state, &names.todo)
+    candidate_mode(issue, names, me).is_some()
 }
 
 /// Checks the binding, that its directory exists (the only filesystem access in this
-/// module, besides comparing that directory with `home` for its lean status) and that the
-/// executor is ready for the binding's runs, lean or not. `home` is the user's home folder;
-/// `None` when it is not known.
+/// module, besides comparing that directory with `home` for its lean status), that the
+/// executor is ready for the binding's runs, lean or not, and last that nothing blocks the issue:
+/// `blockers` are the issues that block it and are not done yet, as the engine found them. A
+/// planning run is always lean (it waits in the home folder, which cannot be) and is never held
+/// back by blockers (run-improvements design, W8 and W9), except that a binding on personal
+/// settings keeps them. `home` is the user's home folder; `None` when it is not known.
 pub fn evaluate(
     issue: &Issue,
     cfg: &Config,
     me: &str,
     ready: &Readiness,
     home: Option<&Path>,
+    blockers: &[String],
 ) -> Eligibility {
-    if !is_candidate(issue, &cfg.settings.trigger, me) {
+    let Some(mode) = candidate_mode(issue, &cfg.settings.trigger, me) else {
         return Eligibility::NotCandidate;
-    }
-    let Some(binding) = issue
-        .project_id
-        .as_deref()
-        .and_then(|p| cfg.binding_for_project(p))
-    else {
-        return Eligibility::Waiting(WaitReason::ProjectNotBound);
+    };
+    let binding = match cfg.route(issue) {
+        Route::Bound(binding) => binding,
+        Route::NotBound => return Eligibility::Waiting(WaitReason::ProjectNotBound),
+        Route::SeveralMatch(labels) => {
+            return Eligibility::Waiting(WaitReason::LabelsMatchSeveralBindings(labels));
+        }
+        Route::NoMatch => return Eligibility::Waiting(WaitReason::NoBindingForLabels),
     };
     if !binding.directory.is_dir() {
         return Eligibility::Waiting(WaitReason::DirectoryMissing(binding.directory.clone()));
     }
     let kind = cfg.executor_for(binding);
-    let lean = cfg.lean_for(binding, home);
+    let lean = match mode {
+        RunMode::Implement => cfg.lean_for(binding, home),
+        // A binding on personal settings keeps them, also in a planning run: the user's own rules
+        // decide what the run may use besides reading.
+        RunMode::Plan if cfg.permission_for(binding) == PermissionProfile::Personal => {
+            LeanStatus::Personal
+        }
+        RunMode::Plan if home.is_some_and(|home| same_folder(&binding.directory, home)) => {
+            return Eligibility::Waiting(WaitReason::PlanNeedsLean);
+        }
+        RunMode::Plan => LeanStatus::On,
+    };
     if !ready.ready(kind, lean) {
         let reason = if ready.held_back_by_lean(kind, lean) {
             WaitReason::LeanNotReady(kind)
@@ -146,6 +211,9 @@ pub fn evaluate(
             WaitReason::ExecutorNotReady(kind)
         };
         return Eligibility::Waiting(reason);
+    }
+    if mode == RunMode::Implement && !blockers.is_empty() {
+        return Eligibility::Waiting(WaitReason::BlockedBy(blockers.to_vec()));
     }
     Eligibility::Eligible(binding.clone())
 }
@@ -168,7 +236,7 @@ pub fn should_enqueue(latest: Option<&Job>, issue: &Issue) -> bool {
 mod tests {
     use super::*;
     use crate::config::{Binding, Config, ExecutorKind, TriggerNames};
-    use crate::model::{Issue, Job, JobState};
+    use crate::model::{Issue, Job, JobState, RunMode};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use std::collections::HashSet;
     use std::path::Path;
@@ -192,6 +260,8 @@ mod tests {
             priority: 0,
             created_at: t0(),
             updated_at: t0(),
+            state_type: None,
+            blocked_by: None,
         }
     }
 
@@ -208,6 +278,7 @@ mod tests {
             prompt_override: None,
             lean: true,
             effort: None,
+            labels: Vec::new(),
         });
         cfg
     }
@@ -232,6 +303,11 @@ mod tests {
             finished_at: None,
             log_path: None,
             summary: None,
+            mode: RunMode::Implement,
+            report: None,
+            session_id: None,
+            resume_job_id: None,
+            usage: None,
         }
     }
 
@@ -279,11 +355,11 @@ mod tests {
     fn unbound_project_waits() {
         let cfg = Config::default();
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]),
             Eligibility::Waiting(WaitReason::ProjectNotBound)
         );
         assert_eq!(
-            evaluate(&issue(None), &cfg, "me", &all_ready(), None),
+            evaluate(&issue(None), &cfg, "me", &all_ready(), None, &[]),
             Eligibility::Waiting(WaitReason::ProjectNotBound)
         );
     }
@@ -294,7 +370,7 @@ mod tests {
         let missing = root.path().join("missing");
         let cfg = config_with("proj-1", &missing, None);
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]),
             Eligibility::Waiting(WaitReason::DirectoryMissing(missing))
         );
     }
@@ -308,7 +384,7 @@ mod tests {
             lean: [ExecutorKind::Claude].into_iter().collect(),
         };
         assert_eq!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &only_claude, None),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &only_claude, None, &[]),
             Eligibility::Waiting(WaitReason::ExecutorNotReady(ExecutorKind::Codex))
         );
     }
@@ -317,7 +393,7 @@ mod tests {
     fn bound_ready_issue_is_eligible() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with("proj-1", dir.path(), None);
-        match evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None) {
+        match evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]) {
             Eligibility::Eligible(binding) => assert_eq!(binding.project_id, "proj-1"),
             other => panic!("expected eligible, got {other:?}"),
         }
@@ -327,7 +403,7 @@ mod tests {
     fn non_candidate_is_not_evaluated_further() {
         let cfg = Config::default();
         assert_eq!(
-            evaluate(&issue(None), &cfg, "other", &all_ready(), None),
+            evaluate(&issue(None), &cfg, "other", &all_ready(), None, &[]),
             Eligibility::NotCandidate
         );
     }
@@ -500,6 +576,239 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_issue_waits_after_the_binding_checks() {
+        let blockers = ["DEMO-4".to_string(), "DEMO-5".to_string()];
+        // A problem with the setup is shown first: it needs the user, a blocker only time.
+        assert_eq!(
+            evaluate(
+                &issue(Some("proj-1")),
+                &Config::default(),
+                "me",
+                &all_ready(),
+                None,
+                &blockers
+            ),
+            Eligibility::Waiting(WaitReason::ProjectNotBound)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with("proj-1", dir.path(), None);
+        assert_eq!(
+            evaluate(
+                &issue(Some("proj-1")),
+                &cfg,
+                "me",
+                &all_ready(),
+                None,
+                &blockers
+            ),
+            Eligibility::Waiting(WaitReason::BlockedBy(blockers.to_vec()))
+        );
+        assert!(matches!(
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]),
+            Eligibility::Eligible(_)
+        ));
+    }
+
+    /// `cfg` with a binding of `proj-1` that takes the issues labeled `label` (to `dir`).
+    fn add_label_binding(cfg: &mut Config, label: &str, dir: &Path) {
+        cfg.bindings.push(Binding {
+            id: format!("proj-1#{label}"),
+            labels: vec![label.into()],
+            directory: dir.to_path_buf(),
+            ..cfg.bindings[0].clone()
+        });
+    }
+
+    #[test]
+    fn a_label_binding_takes_the_issues_with_its_label() {
+        let default_dir = tempfile::tempdir().unwrap();
+        let frontend_dir = tempfile::tempdir().unwrap();
+        let mut cfg = config_with("proj-1", default_dir.path(), None);
+        add_label_binding(&mut cfg, "Frontend", frontend_dir.path());
+        let mut labeled = issue(Some("proj-1"));
+        labeled.labels.push("frontend".into());
+        match evaluate(&labeled, &cfg, "me", &all_ready(), None, &[]) {
+            Eligibility::Eligible(binding) => assert_eq!(binding.id, "proj-1#Frontend"),
+            other => panic!("expected the label binding, got {other:?}"),
+        }
+        match evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]) {
+            Eligibility::Eligible(binding) => assert_eq!(binding.id, "proj-1"),
+            other => panic!("expected the default binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_matching_label_bindings_make_the_issue_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config_with("proj-1", dir.path(), None);
+        add_label_binding(&mut cfg, "Frontend", dir.path());
+        add_label_binding(&mut cfg, "Backend", dir.path());
+        let mut both = issue(Some("proj-1"));
+        both.labels
+            .extend(["Frontend".to_string(), "Backend".to_string()]);
+        assert_eq!(
+            evaluate(&both, &cfg, "me", &all_ready(), None, &[]),
+            Eligibility::Waiting(WaitReason::LabelsMatchSeveralBindings(vec![
+                "Frontend".into(),
+                "Backend".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn no_default_and_no_matching_label_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config_with("proj-1", dir.path(), None);
+        add_label_binding(&mut cfg, "Frontend", dir.path());
+        cfg.bindings.remove(0);
+        assert_eq!(
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]),
+            Eligibility::Waiting(WaitReason::NoBindingForLabels)
+        );
+    }
+
+    #[test]
+    fn routing_wait_reasons_have_codes_and_sentences() {
+        let several =
+            WaitReason::LabelsMatchSeveralBindings(vec!["Frontend".into(), "Backend".into()]);
+        assert_eq!(
+            several.describe(),
+            "the labels Frontend, Backend match several bindings of the project"
+        );
+        assert_eq!(
+            serde_json::to_value(several.view()).unwrap(),
+            serde_json::json!({"code": "labels_match_several_bindings", "labels": ["Frontend", "Backend"]})
+        );
+        assert_eq!(
+            WaitReason::NoBindingForLabels.describe(),
+            "no binding of the project takes the issue's labels"
+        );
+        assert_eq!(
+            serde_json::to_value(WaitReason::NoBindingForLabels.view()).unwrap(),
+            serde_json::json!({"code": "no_binding_for_labels"})
+        );
+    }
+
+    /// `issue(Some("proj-1"))` with the plan label instead of the trigger label.
+    fn plan_issue() -> Issue {
+        Issue {
+            labels: vec!["ai-plan".into()],
+            ..issue(Some("proj-1"))
+        }
+    }
+
+    #[test]
+    fn candidate_mode_prefers_a_usual_run_when_both_labels_are_there() {
+        let names = TriggerNames::default();
+        assert_eq!(
+            candidate_mode(&issue(None), &names, "me"),
+            Some(RunMode::Implement)
+        );
+        assert_eq!(
+            candidate_mode(&plan_issue(), &names, "me"),
+            Some(RunMode::Plan)
+        );
+        let mut both = plan_issue();
+        both.labels.push(" AI-Ready ".into());
+        assert_eq!(
+            candidate_mode(&both, &names, "me"),
+            Some(RunMode::Implement)
+        );
+        // Assigned to someone else, or not in Todo: no candidate whatever the labels.
+        assert_eq!(candidate_mode(&plan_issue(), &names, "other"), None);
+        let mut started = plan_issue();
+        started.state = "In Progress".into();
+        assert_eq!(candidate_mode(&started, &names, "me"), None);
+        assert!(is_candidate(&plan_issue(), &names, "me"));
+    }
+
+    #[test]
+    fn a_planning_run_is_lean_whatever_the_binding_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config_with("proj-1", dir.path(), None);
+        cfg.bindings[0].lean = false;
+        // Ready for usual runs only: a usual run of this binding (lean off) may start, a planning
+        // run needs the lean checks.
+        let ready = full_only(ExecutorKind::Claude);
+        assert!(matches!(
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &ready, None, &[]),
+            Eligibility::Eligible(_)
+        ));
+        assert_eq!(
+            evaluate(&plan_issue(), &cfg, "me", &ready, None, &[]),
+            Eligibility::Waiting(WaitReason::LeanNotReady(ExecutorKind::Claude))
+        );
+        assert!(matches!(
+            evaluate(&plan_issue(), &cfg, "me", &all_ready(), None, &[]),
+            Eligibility::Eligible(_)
+        ));
+    }
+
+    #[test]
+    fn a_planning_run_waits_in_the_home_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with("proj-1", dir.path(), None);
+        assert_eq!(
+            evaluate(
+                &plan_issue(),
+                &cfg,
+                "me",
+                &all_ready(),
+                Some(dir.path()),
+                &[]
+            ),
+            Eligibility::Waiting(WaitReason::PlanNeedsLean)
+        );
+        assert_eq!(
+            WaitReason::PlanNeedsLean.describe(),
+            "planning runs need a bound folder other than the home folder"
+        );
+        assert_eq!(
+            serde_json::to_value(WaitReason::PlanNeedsLean.view()).unwrap(),
+            serde_json::json!({"code": "plan_needs_lean"})
+        );
+    }
+
+    #[test]
+    fn a_planning_run_of_a_binding_on_personal_settings_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config_with("proj-1", dir.path(), None);
+        cfg.bindings[0].permission = Some(PermissionProfile::Personal);
+        // Not lean: the usual checks are enough, and the home folder is fine.
+        let ready = full_only(ExecutorKind::Claude);
+        assert!(matches!(
+            evaluate(&plan_issue(), &cfg, "me", &ready, Some(dir.path()), &[]),
+            Eligibility::Eligible(_)
+        ));
+    }
+
+    #[test]
+    fn blockers_do_not_hold_back_a_planning_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with("proj-1", dir.path(), None);
+        let blockers = ["DEMO-4".to_string()];
+        assert!(matches!(
+            evaluate(&plan_issue(), &cfg, "me", &all_ready(), None, &blockers),
+            Eligibility::Eligible(_)
+        ));
+    }
+
+    #[test]
+    fn blocked_by_has_a_code_and_a_sentence() {
+        let reason = WaitReason::BlockedBy(vec!["DEMO-4".into(), "DEMO-5".into()]);
+        assert_eq!(
+            reason.describe(),
+            "blocked by DEMO-4, DEMO-5, which are not done yet"
+        );
+        let json = serde_json::json!({"code": "blocked_by", "issues": ["DEMO-4", "DEMO-5"]});
+        assert_eq!(serde_json::to_value(reason.view()).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<WaitReasonView>(json).unwrap(),
+            reason.view()
+        );
+    }
+
+    #[test]
     fn lean_bindings_wait_for_the_lean_checks() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with("proj-1", dir.path(), None);
@@ -512,12 +821,13 @@ mod tests {
                 &cfg,
                 "me",
                 &full_only(ExecutorKind::Claude),
-                None
+                None,
+                &[]
             ),
             Eligibility::Waiting(WaitReason::LeanNotReady(ExecutorKind::Claude))
         );
         assert!(matches!(
-            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None),
+            evaluate(&issue(Some("proj-1")), &cfg, "me", &all_ready(), None, &[]),
             Eligibility::Eligible(_)
         ));
     }
@@ -534,7 +844,7 @@ mod tests {
         for (cfg, home) in [(personal, None), (off, None), (at_home, Some(dir.path()))] {
             assert!(
                 matches!(
-                    evaluate(&issue(Some("proj-1")), &cfg, "me", &ready, home),
+                    evaluate(&issue(Some("proj-1")), &cfg, "me", &ready, home, &[]),
                     Eligibility::Eligible(_)
                 ),
                 "{:?}",

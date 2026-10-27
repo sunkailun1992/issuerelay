@@ -6,6 +6,7 @@ import {
   Clock,
   LoaderCircle,
   MessageCircleQuestion,
+  NotebookPen,
   Unplug,
   type LucideIcon,
 } from "lucide-react";
@@ -30,14 +31,25 @@ export const STATE_STYLE: Record<JobState, { icon: LucideIcon; className: string
   canceled: { icon: CircleSlash, className: "text-state-canceled border-state-canceled/30 bg-state-canceled/10" },
 };
 
-/** A job's state as a coloured badge with its icon and its name in the interface language. */
-export function StatusBadge({ state }: { state: JobState }) {
+/**
+ * A planning run that posted its plan is `needs_info` for the engine: it waits for the user, in the
+ * same colour, but with a notebook and its own name.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- shared with the tests like `STATE_STYLE`.
+export const PLANNED_STYLE = { icon: NotebookPen, className: STATE_STYLE.needs_info.className };
+
+/**
+ * A job's state as a coloured badge with its icon and its name in the interface language.
+ * `planned`: the job is a planning run that posted its plan (`isPlanned`), shown as such.
+ */
+export function StatusBadge({ state, planned = false }: { state: JobState; planned?: boolean }) {
   const { t } = useTranslation();
-  const { icon: Icon, className } = STATE_STYLE[state];
+  const asPlanned = planned && state === "needs_info";
+  const { icon: Icon, className } = asPlanned ? PLANNED_STYLE : STATE_STYLE[state];
   return (
     <Badge variant="outline" className={className}>
       <Icon aria-hidden className={state === "running" ? "animate-spin" : undefined} />
-      {t(`state.${state}`)}
+      {asPlanned ? t("state.planned") : t(`state.${state}`)}
     </Badge>
   );
 }

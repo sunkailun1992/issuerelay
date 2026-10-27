@@ -1,12 +1,13 @@
 import { CircleAlert, Copy, Info, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
 import { RawLog } from "@/components/RawLog";
 import { RunDuration } from "@/components/RunDuration";
 import { RunTimeline } from "@/components/RunTimeline";
+import { RunUsageSummary } from "@/components/RunUsage";
 import { StatusBadge } from "@/components/StatusBadge";
 import { DetailLine, EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -18,7 +19,7 @@ import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
-import { isActive } from "@/lib/runs";
+import { isActive, isPlanned, isPlanRun } from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
 import type { Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -63,18 +64,31 @@ function InfoCard({ job }: { job: Job }) {
         {/* As many columns as the card has room for, down to the 900 px window's three. */}
         <dl className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-6 gap-y-3">
           <Field label={t("runs.field.state")}>
-            <StatusBadge state={job.state} />
+            <StatusBadge state={job.state} planned={isPlanned(job)} />
           </Field>
           <Field label={t("runs.field.executor")}>{job.executor === null ? NONE : t(`executor.${job.executor}`)}</Field>
+          {isPlanRun(job) && <Field label={t("runs.field.mode")}>{t("runs.mode.plan")}</Field>}
           <Field label={t("runs.field.created")}>{time(job.created_at)}</Field>
           <Field label={t("runs.field.started")}>{time(job.started_at)}</Field>
           <Field label={t("runs.field.finished")}>{time(job.finished_at)}</Field>
           <Field label={t("runs.field.duration")}>
             <RunDuration job={job} />
           </Field>
+          {job.resume_job_id != null && (
+            <Field label={t("runs.field.resumed")}>
+              <Link to={`/runs/${job.resume_job_id}`} className="text-primary underline-offset-4 hover:underline">
+                {t("runs.resumed_from", { id: job.resume_job_id })}
+              </Link>
+            </Field>
+          )}
           <Field label={t("runs.field.directory")} wide>
             {job.directory === null ? NONE : <Folder directory={job.directory} />}
           </Field>
+          {job.usage != null && (
+            <Field label={t("runs.field.usage")} wide>
+              <RunUsageSummary usage={job.usage} executor={job.executor} />
+            </Field>
+          )}
           <Field label={t("runs.field.summary")} wide>
             <span className="whitespace-pre-wrap">{summary === "" ? NONE : summary}</span>
           </Field>
@@ -84,8 +98,25 @@ function InfoCard({ job }: { job: Job }) {
   );
 }
 
-/** The states a reason has a headline of its own for; any other state's is a note from IssueRelay. */
-function reasonKind(job: Job): "failed" | "canceled" | "waiting_binding" | "other" {
+/**
+ * The engine's sentences for a run it stopped because of its issue in Linear (`LinearStop`,
+ * run-improvements design, section 6), each with a headline of its own.
+ */
+const LINEAR_STOPS = {
+  "the issue no longer exists in Linear": "linear_deleted",
+  "the issue was canceled in Linear": "linear_canceled",
+  "the issue was completed in Linear": "linear_completed",
+  "the issue was reassigned in Linear": "linear_reassigned",
+} as const;
+
+/**
+ * The states a reason has a headline of its own for, and the stops that came from Linear; any other
+ * state's is a note from IssueRelay.
+ */
+function reasonKind(job: Job): "failed" | "canceled" | "waiting_binding" | "other" | (typeof LINEAR_STOPS)[keyof typeof LINEAR_STOPS] {
+  if (job.state === "canceled" && job.reason !== null && Object.hasOwn(LINEAR_STOPS, job.reason)) {
+    return LINEAR_STOPS[job.reason as keyof typeof LINEAR_STOPS];
+  }
   return job.state === "failed" || job.state === "canceled" || job.state === "waiting_binding" ? job.state : "other";
 }
 

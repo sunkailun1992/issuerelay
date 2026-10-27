@@ -23,6 +23,7 @@
     "allow-save-binding",
     "allow-remove-binding",
     "allow-projects",
+    "allow-labels",
     "allow-settings",
     "allow-save-settings",
     "allow-doctor",

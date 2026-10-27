@@ -74,6 +74,7 @@ pub fn run() {
             commands::save_binding,
             commands::remove_binding,
             commands::projects,
+            commands::labels,
             commands::settings,
             commands::save_settings,
             commands::doctor,

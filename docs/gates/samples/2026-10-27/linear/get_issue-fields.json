@@ -1,0 +1,31 @@
+{
+  "request": {
+    "tool": "get_issue",
+    "arguments": {
+      "id": "DEMO-46",
+      "fields": [
+        "id",
+        "uuid",
+        "status",
+        "statusType",
+        "relations",
+        "assigneeId",
+        "updatedAt"
+      ]
+    }
+  },
+  "reply": {
+    "id": "DEMO-46",
+    "uuid": "00000000-0000-4000-8000-000000000101",
+    "status": "Todo",
+    "statusType": "unstarted",
+    "relations": {
+      "blocks": [],
+      "blockedBy": [],
+      "relatedTo": [],
+      "duplicateOf": null
+    },
+    "assigneeId": "00000000-0000-4000-8000-000000000102",
+    "updatedAt": "2026-10-21T09:35:43.224Z"
+  }
+}

@@ -20,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ExecutorKind;
 use crate::env::ExecEnv;
-use crate::executor::{CommandSpec, lean::LeanCheck, outcome::FinalTextTracker};
-use crate::model::ProcessTag;
+use crate::executor::{CommandSpec, lean::LeanCheck, outcome::OutputTracker};
+use crate::model::{ProcessTag, RunUsage};
 
 /// The time limits of one run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,22 @@ pub struct RunOutput {
     pub exit: ExitKind,
     /// The executor's final message, when it printed one.
     pub final_text: Option<String>,
+    /// The usage the executor reported (`outcome::OutputTracker`); `None` when it reported none.
+    pub usage: Option<RunUsage>,
+    /// The session the run started or continued, when the executor said so.
+    pub session_id: Option<String>,
+}
+
+impl RunOutput {
+    /// A run that ended as `exit` with `final_text` and nothing else to tell.
+    pub fn ended(exit: ExitKind, final_text: Option<String>) -> Self {
+        Self {
+            exit,
+            final_text,
+            usage: None,
+            session_id: None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -514,10 +530,7 @@ pub(crate) fn creation_flags() -> process_wrap::tokio::CreationFlags {
 }
 
 fn failed(message: String) -> RunOutput {
-    RunOutput {
-        exit: ExitKind::SpawnFailed(message),
-        final_text: None,
-    }
+    RunOutput::ended(ExitKind::SpawnFailed(message), None)
 }
 
 /// Ends a run that could not start. The log gets a line saying why, so it explains itself.
@@ -628,7 +641,7 @@ pub async fn run(
     }
     drop(tx);
 
-    let mut tracker = FinalTextTracker::new(kind);
+    let mut tracker = OutputTracker::new(kind);
     let mut lean_check = spec.lean.then(|| LeanCheck::new(kind));
     let mut log_failures = LogFailures::new(log_path);
     // Before the loop reads the first line, so the notes open the log.
@@ -715,9 +728,12 @@ pub async fn run(
     }
     // A tokio file reports a failed write with a later call, so the last one shows here.
     log_failures.note(log.flush().await);
+    let tracked = tracker.into_output();
     RunOutput {
         exit,
-        final_text: tracker.into_final_text(),
+        final_text: tracked.final_text,
+        usage: tracked.usage,
+        session_id: tracked.session_id,
     }
 }
 
@@ -864,7 +880,7 @@ fn note(stream: &str, text: &str) -> String {
 
 /// Writes one log line per call, in a single write so a live reader never sees half a line. The
 /// tracker sees the line first, so a log that cannot be written does not lose the final result.
-async fn record(log: &mut File, tracker: &mut FinalTextTracker, line: Line) -> std::io::Result<()> {
+async fn record(log: &mut File, tracker: &mut OutputTracker, line: Line) -> std::io::Result<()> {
     let entry = match line {
         Line::Out(mut text) => {
             tracker.observe(&text);
@@ -1494,7 +1510,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         // Opened for reading only, so that every write fails.
         let mut log = File::open(&path).await.unwrap();
-        let mut tracker = FinalTextTracker::new(ExecutorKind::Claude);
+        let mut tracker = OutputTracker::new(ExecutorKind::Claude);
         let mut failures = LogFailures::new(&path);
         let result = r#"{"type":"result","result":"done"}"#;
         let mut reported = 0;
@@ -1504,6 +1520,6 @@ mod tests {
         }
         reported += usize::from(failures.note(log.flush().await));
         assert_eq!(reported, 1, "later failures are not reported again");
-        assert_eq!(tracker.into_final_text().as_deref(), Some("done"));
+        assert_eq!(tracker.into_output().final_text.as_deref(), Some("done"));
     }
 }

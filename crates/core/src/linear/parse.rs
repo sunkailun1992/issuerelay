@@ -144,8 +144,30 @@ pub fn parse_issue(v: &Value) -> Result<Issue> {
         priority: priority(v),
         created_at,
         updated_at,
+        state_type: non_empty(v, "statusType").map(|kind| kind.to_ascii_lowercase()),
+        blocked_by: blocked_by(v),
         identifier,
     })
+}
+
+/// The identifiers in `relations.blockedBy` (design section 4.1: `{"id": "KEY-123", "title": …}`
+/// each); one that is not shaped like `KEY-123` is left out. `None` when the reply has no
+/// `relations`, which only `get_issue` sends.
+fn blocked_by(v: &Value) -> Option<Vec<String>> {
+    let relations = v.get("relations").filter(|r| r.is_object())?;
+    Some(
+        relations
+            .get("blockedBy")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| text(item, "id").or_else(|| text(item, "identifier")))
+                    .filter(|id| is_issue_identifier(id))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// The cursor for the next page. `hasNextPage: false` ends the list whatever else the reply
@@ -302,6 +324,46 @@ mod tests {
         assert_eq!(issue.parent_identifier.as_deref(), Some("DEMO-0"));
         assert_eq!(issue.priority, 2);
         assert_eq!(issue.updated_at.timestamp_subsec_millis(), 500);
+    }
+
+    #[test]
+    fn the_status_type_is_read_when_present() {
+        let mut v: serde_json::Value = serde_json::from_str(ISSUE).unwrap();
+        assert_eq!(parse_issue(&v).unwrap().state_type, None);
+        v["statusType"] = "Canceled".into();
+        assert_eq!(
+            parse_issue(&v).unwrap().state_type.as_deref(),
+            Some("canceled")
+        );
+        v["statusType"] = serde_json::Value::Null;
+        assert_eq!(parse_issue(&v).unwrap().state_type, None);
+    }
+
+    // The shape of `relations` as Linear's `get_issue` sent it on 2026-10-27 (design section 4.1).
+    #[test]
+    fn blocked_by_lists_the_blocking_identifiers() {
+        let mut v: serde_json::Value = serde_json::from_str(ISSUE).unwrap();
+        assert_eq!(
+            parse_issue(&v).unwrap().blocked_by,
+            None,
+            "no relations read"
+        );
+        v["relations"] = serde_json::json!({
+            "blocks": [], "relatedTo": [], "duplicateOf": null,
+            "blockedBy": [
+                {"id": "DEMO-4", "title": "Demo blocker"},
+                {"id": "not an issue", "title": "x"},
+                {"identifier": "DEMO-5"}
+            ]
+        });
+        assert_eq!(
+            parse_issue(&v).unwrap().blocked_by,
+            Some(vec!["DEMO-4".to_string(), "DEMO-5".to_string()])
+        );
+        v["relations"] = serde_json::json!({"blocks": [], "blockedBy": []});
+        assert_eq!(parse_issue(&v).unwrap().blocked_by, Some(Vec::new()));
+        v["relations"] = serde_json::Value::Null;
+        assert_eq!(parse_issue(&v).unwrap().blocked_by, None);
     }
 
     #[test]

@@ -78,6 +78,40 @@ test("each binding is a section named for its project, in the order of the confi
   expect(within(screen.getByRole("region", { name: "Demo Mobile" })).getByRole("heading", { level: 2, name: "Demo Mobile" })).toBeInTheDocument();
 });
 
+/** What a card says for one of its fields: the text next to the field's name. */
+const valueIn = (card: HTMLElement, name: string) => within(card).getByText(name, { selector: "dt" }).nextElementSibling?.textContent;
+
+test("a project bound to several folders has a card for each, told apart by their routing labels", async () => {
+  const docs: Binding = { id: "proj-1#Docs", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-docs", labels: ["Docs", "Guides"] };
+  await renderWithProviders(<Bindings />, { backend: backendWithBindings([DEMO_BINDINGS[0], docs]) });
+  await screen.findByRole("region", { name: "Demo Project" });
+  expect(cardNames()).toEqual(["Demo Project", "Demo Project · Docs, Guides"]);
+  expect(valueIn(screen.getByRole("region", { name: "Demo Project" }), "Routing labels")).toBe("None: the project's other issues");
+  expect(valueIn(screen.getByRole("region", { name: "Demo Project · Docs, Guides" }), "Routing labels")).toBe("Docs, Guides");
+});
+
+test("a routing label that Linear no longer has is marked, and Linear is asked only when a binding routes", async () => {
+  const plain = createMockBackend("demo", { latencyMs: 0 });
+  const unasked = vi.spyOn(plain, "labels");
+  const first = await renderWithProviders(<Bindings />, { backend: plain });
+  await screen.findByRole("region", { name: "Demo Project" });
+  expect(unasked).not.toHaveBeenCalled();
+  first.unmount();
+  const old: Binding = { id: "proj-1#Docs", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-docs", labels: ["Docs", "Old"] };
+  await renderWithProviders(<Bindings />, { backend: backendWithBindings([DEMO_BINDINGS[0], old]) });
+  // The title keeps the labels as the binding has them.
+  const card = await screen.findByRole("region", { name: "Demo Project · Docs, Old" });
+  await waitFor(() => expect(valueIn(card, "Routing labels")).toBe("Docs, Old (not in Linear)"));
+});
+
+test("routing labels are shown without escape sequences or invisible characters", async () => {
+  const esc = String.fromCharCode(27);
+  const labels = [`Do${esc}[31mcs`, `Guides${String.fromCharCode(0x202e)}`];
+  await renderWithProviders(<Bindings />, { backend: backendWithBindings([{ ...DEMO_BINDINGS[0], id: "proj-1#Docs", labels }]) });
+  const card = await screen.findByRole("region", { name: "Demo Project · Docs, Guides" });
+  expect(valueIn(card, "Routing labels")).toBe("Docs, Guides");
+});
+
 test("a card has the executor's own setting where the binding names no model, and no prompt override", async () => {
   await renderWithProviders(<Bindings />);
   const demo = await screen.findByRole("region", { name: "Demo Project" });

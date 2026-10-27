@@ -10,8 +10,8 @@ use rmcp::{
 use serde_json::{Value, json};
 
 use super::{
-    ISSUE_FIELDS, LinearApi, PROJECT_FIELDS, Project, REQUIRED_ARGUMENTS, REQUIRED_FIELDS,
-    REQUIRED_TOOLS, Team, Viewer, parse,
+    ISSUE_DETAIL_FIELDS, ISSUE_FIELDS, LinearApi, PROJECT_FIELDS, Project, REQUIRED_ARGUMENTS,
+    REQUIRED_FIELDS, REQUIRED_TOOLS, Team, Viewer, parse,
 };
 use crate::model::Issue;
 
@@ -236,7 +236,10 @@ impl LinearApi for McpLinear {
 
     async fn issue(&self, id: &str) -> Result<Option<Issue>> {
         match self
-            .call("get_issue", json!({"id": id, "fields": ISSUE_FIELDS}))
+            .call(
+                "get_issue",
+                json!({"id": id, "fields": ISSUE_DETAIL_FIELDS}),
+            )
             .await
         {
             Ok(text) => parse::parse_single_issue(&text).map(Some),
@@ -544,6 +547,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn only_get_issue_asks_for_relations() {
+        let fields_of = |tool: &str| {
+            REQUIRED_FIELDS
+                .iter()
+                .find(|(name, _)| *name == tool)
+                .map(|(_, fields)| *fields)
+                .unwrap()
+        };
+        assert!(fields_of("get_issue").contains(&"relations"));
+        assert!(!fields_of("list_issues").contains(&"relations"));
+        // Everything else a list reply carries, a single issue carries too.
+        for field in ISSUE_FIELDS {
+            assert!(fields_of("get_issue").contains(&field), "{field}");
+        }
+        assert!(ISSUE_FIELDS.contains(&"statusType"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { vi } from "vitest";
 import { queryKeys } from "@/hooks/queries";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import { DEMO_BINDINGS, DEMO_PROJECTS } from "@/lib/mock-fixtures";
+import { DEMO_BINDINGS, DEMO_LABELS, DEMO_PROJECTS } from "@/lib/mock-fixtures";
 import type { PermissionProfile, Project, Settings } from "@/lib/types";
 import { endFades, holdClosingDialogs } from "@/test/fade";
 import { renderWithProviders } from "@/test/render";
@@ -165,19 +165,170 @@ test("what is left at its default is not written into the binding", async () => 
   expect(Object.keys(saveBinding.mock.calls[0][0]).sort()).toEqual(["directory", "id", "project_id", "project_name"]);
 });
 
-test("the list of projects marks the ones that are bound already and does not let them be chosen", async () => {
-  await renderWithProviders(<BindingForm onSaved={() => {}} />);
+test("the list of projects marks the ones that are bound already, which are bound again only with routing labels", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
   await userEvent.click(await screen.findByRole("combobox", { name: "Linear project" }));
   const options = await screen.findAllByRole("option");
   expect(options.map((option) => option.textContent)).toEqual(["Demo Project (already bound)", "Demo Mobile (already bound)", "Docs Site"]);
-  const bound = options.filter((option) => option.getAttribute("aria-disabled") === "true");
-  expect(bound).toHaveLength(2);
-  // Choosing a project that is bound would replace its binding without anyone asking for that.
-  await userEvent.click(bound[0]);
-  // The list stays open, since nothing was chosen; close it.
-  await userEvent.keyboard("{Escape}");
+  expect(options.filter((option) => option.getAttribute("aria-disabled") === "true")).toHaveLength(0);
+  await userEvent.click(options[0]);
+  await userEvent.click(screen.getByRole("button", { name: "Choose…" }));
+  // Without routing labels the new binding would replace the project's binding, which nobody asked for.
+  const labels = await screen.findByRole("button", { name: "Routing labels" });
+  expect(labels).toHaveAttribute("aria-invalid", "true");
+  expect(labels).toHaveAccessibleDescription(
+    "None: the project's other issues The project has a binding without labels already: choose routing labels to bind another folder",
+  );
   expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-  expect(screen.getByRole("combobox", { name: "Linear project" })).toHaveTextContent("Choose a project");
+  await tick("Frontend", "Docs");
+  expect(labels).toHaveAttribute("aria-invalid", "false");
+  expect(labels).toHaveTextContent("Frontend, Docs");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding).toHaveBeenCalledWith({
+    id: "proj-1#Frontend",
+    project_id: "proj-1",
+    project_name: "Demo Project",
+    directory: "~/code/new-project",
+    labels: ["Frontend", "Docs"],
+  });
+  // The project's first binding stays: the two take different issues.
+  expect((await backend.bindings()).map((binding) => binding.id)).toEqual(["proj-1", "proj-2", "proj-1#Frontend"]);
+});
+
+/** Opens the menu of routing labels, ticks or unticks each of `labels` and closes the menu again. */
+async function tick(...labels: string[]) {
+  await userEvent.click(screen.getByRole("button", { name: "Routing labels" }));
+  for (const label of labels) await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
+  await userEvent.keyboard("{Escape}");
+}
+
+/** A demo backend in which Demo Project has a second binding, for the issues labelled Docs. */
+async function backendWithDocsBinding() {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const docs = { id: "proj-1#Docs", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-docs", labels: ["Docs"] };
+  await backend.saveBinding(docs);
+  return { backend, docs };
+}
+
+test("the labels to route by are Linear's, without the trigger and the plan label, and another binding's cannot be ticked", async () => {
+  const { backend } = await backendWithDocsBinding();
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials("Demo Project (already bound)");
+  await userEvent.click(await screen.findByRole("button", { name: "Routing labels" }));
+  const items = await screen.findAllByRole("menuitemcheckbox");
+  expect(items.map((item) => item.textContent)).toEqual(["Backend", "Bug", "Docs (another binding)", "Frontend"]);
+  expect(screen.getByRole("menuitemcheckbox", { name: "Docs (another binding)" })).toHaveAttribute("aria-disabled", "true");
+  // Ticking a label leaves the menu open for the next one.
+  await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Bug" }));
+  expect(screen.getByRole("menuitemcheckbox", { name: "Bug" })).toHaveAttribute("aria-checked", "true");
+  await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Backend" }));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("button", { name: "Routing labels" })).toHaveTextContent("Bug, Backend");
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+});
+
+test("a label ticked for one project that another binding of the next one has is refused until it is taken off", async () => {
+  const { backend } = await backendWithDocsBinding();
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials();
+  await tick("Docs");
+  await pick("Linear project", "Demo Project (already bound)");
+  const labels = screen.getByRole("button", { name: "Routing labels" });
+  expect(labels).toHaveAttribute("aria-invalid", "true");
+  expect(labels).toHaveAccessibleDescription("Docs Another binding of this project has one of these labels");
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  // It stays in the menu, ticked, so that it can be taken off.
+  await tick("Docs");
+  await tick("Bug");
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+});
+
+test("an existing binding shows its routing labels and keeps its id when they change", async () => {
+  const { backend, docs } = await backendWithDocsBinding();
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm initial={docs} onSaved={() => {}} />, { backend });
+  expect(await screen.findByRole("button", { name: "Routing labels" })).toHaveTextContent("Docs");
+  await tick("Frontend");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding).toHaveBeenCalledWith({ ...docs, labels: ["Docs", "Frontend"] });
+});
+
+test("an existing binding cannot drop its routing labels while the project has a binding without any", async () => {
+  const { backend, docs } = await backendWithDocsBinding();
+  await renderWithProviders(<BindingForm initial={docs} onSaved={() => {}} />, { backend });
+  await screen.findByRole("button", { name: "Routing labels" });
+  await tick("Docs");
+  expect(screen.getByRole("button", { name: "Routing labels" })).toHaveAccessibleDescription(
+    "None: the project's other issues The project has a binding without labels already: choose routing labels to bind another folder",
+  );
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+});
+
+test("a label of the binding that Linear no longer has is marked and can be taken off", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const old = { id: "proj-3#Old", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs", labels: ["Old"] };
+  await backend.saveBinding(old);
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  await renderWithProviders(<BindingForm initial={old} onSaved={() => {}} />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Routing labels" }));
+  const gone = await screen.findByRole("menuitemcheckbox", { name: "Old (not in Linear)" });
+  expect(gone).toHaveAttribute("aria-checked", "true");
+  await userEvent.click(gone);
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  // The project has no other binding: this one becomes its default binding, under its own id.
+  const { labels, ...rest } = old;
+  expect(labels).toEqual(["Old"]);
+  expect(saveBinding).toHaveBeenCalledWith(rest);
+});
+
+test("a new binding whose id another binding has already gets the next free number", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // Bindings whose labels changed after they were made keep the ids their labels gave them then.
+  await backend.saveBinding({ id: "proj-1#Docs", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-guides", labels: ["Guides"] });
+  await backend.saveBinding({ id: "proj-3", project_id: "proj-3", project_name: "Docs Site", directory: "~/code/docs", labels: ["Bug"] });
+  const saveBinding = vi.spyOn(backend, "saveBinding");
+  const first = await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials("Demo Project (already bound)");
+  await tick("Docs");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
+  expect(saveBinding.mock.calls[0][0].id).toBe("proj-1#Docs-2");
+  first.unmount();
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  await fillTheEssentials("Docs Site (already bound)");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(2));
+  expect(saveBinding.mock.calls[1][0]).toMatchObject({ id: "proj-3-2", project_id: "proj-3" });
+  expect(saveBinding.mock.calls[1][0]).not.toHaveProperty("labels");
+});
+
+test("when the labels cannot be read the field says so and tries again, and the rest of the form stays", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.labels = vi.fn().mockRejectedValueOnce(new BackendError("Linear did not answer")).mockResolvedValue(DEMO_LABELS);
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  expect(await screen.findByText("Could not read the labels from Linear")).toBeInTheDocument();
+  expect(screen.getByText("Linear did not answer")).toBeInTheDocument();
+  // A binding without labels can be made meanwhile.
+  await fillTheEssentials();
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByRole("button", { name: "Routing labels" })).toBeInTheDocument();
+  expect(screen.queryByText("Could not read the labels from Linear")).not.toBeInTheDocument();
+});
+
+test("a Linear without labels to route by says so", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // The trigger and the plan label route nothing.
+  backend.labels = vi.fn().mockResolvedValue(["ai-plan", "AI-Ready"]);
+  await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend });
+  expect(await screen.findByText("Linear has no labels to route by yet. Create them in Linear first.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Routing labels" })).not.toBeInTheDocument();
 });
 
 test("when the projects cannot be read the field says so and tries again", async () => {
@@ -444,8 +595,10 @@ test("an existing binding keeps its project and shows what it has", async () => 
 
 test("an existing binding is saved under its own id, which need not be its project's", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
-  const saveBinding = vi.spyOn(backend, "saveBinding");
   const odd = { ...DEMO_BINDINGS[1], id: "binding-from-before" };
+  // It is its project's only binding, as in a configuration from before the ids followed the project.
+  await backend.saveBinding(odd);
+  const saveBinding = vi.spyOn(backend, "saveBinding");
   await renderWithProviders(<BindingForm initial={odd} onSaved={() => {}} />, { backend });
   await userEvent.click(await screen.findByRole("button", { name: "Save" }));
   await waitFor(() => expect(saveBinding).toHaveBeenCalledTimes(1));
@@ -785,7 +938,7 @@ test("each label of the form names a control that is there, whatever state the p
   const slow = createMockBackend("demo", { latencyMs: 0 });
   slow.projects = vi.fn(() => new Promise<Project[]>(() => {}));
   const waiting = await renderWithProviders(<BindingForm onSaved={() => {}} />, { backend: slow });
-  await screen.findByRole("textbox", { name: "Model" });
+  await screen.findByRole("button", { name: "Routing labels" });
   expect(screen.getAllByRole("status", { name: "Loading…" })).toHaveLength(1);
   expectLabelsToNameSomething();
   waiting.unmount();
@@ -825,9 +978,20 @@ test("while the first connection to Linear is under way the project list says so
     await backend.linearReconnect();
     await client.invalidateQueries({ queryKey: queryKeys.status });
     await client.invalidateQueries({ queryKey: queryKeys.projects });
+    await client.invalidateQueries({ queryKey: queryKeys.labels });
   });
   expect(await screen.findByRole("combobox", { name: "Linear project" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Routing labels" })).toBeInTheDocument();
   expect(screen.queryByText("Connecting to Linear…")).not.toBeInTheDocument();
+  expect(screen.queryByText("Could not read the labels from Linear")).not.toBeInTheDocument();
+});
+
+test("an existing binding's labels wait for the first connection to Linear, and say so", async () => {
+  const backend = createMockBackend("connecting", { latencyMs: 0 });
+  await renderWithProviders(<BindingForm initial={DEMO_BINDINGS[0]} onSaved={() => {}} />, { backend });
+  // The project of an existing binding is no list: the labels are what waits for Linear.
+  expect(await screen.findByText("Connecting to Linear…")).toBeInTheDocument();
+  expect(screen.queryByText("Could not read the labels from Linear")).not.toBeInTheDocument();
 });
 
 // ---- lean runs and the reasoning effort --------------------------------------------------------

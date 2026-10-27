@@ -42,6 +42,9 @@ export const DEMO_PROJECTS: Project[] = [
   { id: "proj-3", name: "Docs Site", team_ids: ["team-2"] },
 ];
 
+/** Linear's labels as `Engine::labels` gives them: each once, in alphabetical order whatever the case. */
+export const DEMO_LABELS: string[] = ["ai-plan", "ai-ready", "Backend", "Bug", "Docs", "Frontend"];
+
 export const DEMO_BINDINGS: Binding[] = [
   { id: "proj-1", project_id: "proj-1", project_name: "Demo Project", directory: "~/code/demo-app", permission: "full" },
   {
@@ -77,6 +80,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onboarding_completed: false,
   full_access_acknowledged: false,
   show_in_dock: true,
+  resume_sessions: true,
 };
 
 /** A demo job: what every demo job shares, then `fields`. */
@@ -107,7 +111,27 @@ function job(fields: Pick<Job, "id" | "issue_identifier" | "title" | "state"> & 
 export const DEMO_JOBS: Job[] = [
   job({ id: 12, issue_identifier: "DEMO-12", title: "Add a health check endpoint", state: "running", started_at: "2026-10-12T08:57:37Z", log_path: "logs/12.jsonl" }),
   job({ id: 11, issue_identifier: "DEMO-11", title: "Translate the settings page", state: "queued", binding_id: "proj-2", directory: "~/code/demo-mobile", executor: "codex" }),
-  job({ id: 10, issue_identifier: "DEMO-10", title: "Add hello.txt", state: "awaiting_acceptance", started_at: ago(50), finished_at: ago(20), verified_updated_at: ago(20), log_path: "logs/10.jsonl", summary: "Added hello.txt, pushed it to the test branch and read the deployment back" }),
+  job({
+    id: 10,
+    issue_identifier: "DEMO-10",
+    title: "Add hello.txt",
+    state: "awaiting_acceptance",
+    started_at: ago(50),
+    finished_at: ago(20),
+    verified_updated_at: ago(20),
+    log_path: "logs/10.jsonl",
+    summary: "Added hello.txt, pushed it to the test branch and read the deployment back",
+    report: "in_testing",
+    usage: {
+      cost_micro_usd: 421_350,
+      session_cost_micro_usd: 421_350,
+      input_tokens: 1_204,
+      output_tokens: 3_872,
+      cache_read_tokens: 186_402,
+      cache_write_tokens: 21_390,
+      turns: 17,
+    },
+  }),
   job({ id: 9, issue_identifier: "DEMO-9", title: "Clarify the export format", state: "needs_info", started_at: ago(70), finished_at: ago(60), summary: "Asked on the issue which date format the export should use" }),
   job({ id: 8, issue_identifier: "DEMO-8", title: "Speed up the search index", state: "failed", reason: "run exceeded the time limit", started_at: ago(130), finished_at: ago(70) }),
   job({ id: 7, issue_identifier: "DEMO-7", title: "Fix the login redirect", state: "done", started_at: ago(240), finished_at: ago(200), summary: "Fixed the redirect after login and added a test" }),

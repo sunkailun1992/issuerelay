@@ -87,6 +87,13 @@ IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）
 - **Windows**（待 Windows 实机）：点「安装并重启」、下载并校验之后，IssueRelay 把更新交给安装程序（NSIS 或 MSI，与当初装它的方式一致），**马上退出**；安装程序装完，再把 IssueRelay 重新打开，其间会出现一个小的进度窗口，不需要操作（MSI 安装的要先确认管理员权限）。安装程序报错、或你拒绝了管理员确认时，IssueRelay 保持关闭，也没有任何提示：从开始菜单重新打开它，仍是原来的版本。安装更新前，请先退出正在使用 IssueRelay MCP 服务的 Claude Code、Codex 会话（它们运行着 `issuerelay mcp`，可能占着 `issuerelay.exe`，安装程序换不掉它），也关掉开着 `issuerelay` 的终端窗口。
 - 某个版本的发布说明写着「不含自动更新包」时，已安装的程序不会自动更新到它，需要手动下载安装：先退出 IssueRelay（macOS：菜单栏图标里的「退出 IssueRelay」；Windows：通知区域的图标），再照常装一遍新版的安装包即可，设置和数据都保留。
 
+## 退回旧版本
+
+- 设置、绑定和运行记录都留在原处：先退出 IssueRelay，再照常装一遍旧版本的安装包即可（从 Releases 下载）。
+- **退回 v0.2.4 及以前的版本前，先删掉带分流标签的绑定**：在「项目绑定」里移除它们，或在终端运行 `issuerelay bind list` 看是哪些、再 `issuerelay bind remove <id>`。旧版本不认识分流标签，同一个项目有两个绑定时它的检查不通过，启动不了。
+- 方案标签和「需求退回时接续上一次的会话」这两项设置，旧版本会提示不认识，下次保存设置时丢掉；不影响使用，再升级回来后按默认值（`ai-plan`、打开）。
+- 运行记录照常打开。旧版本看不到花费、token 与接续的信息，把「方案已出」的运行显示成「待补充信息」；再升级回来后照常显示。
+
 ## 卸载
 
 1. 先在面板里关掉「把命令行加入 PATH」和「开机自启」（都在「设置 → 系统」），并在「设置 → MCP 控制服务」里点「从 Claude Code 移除」「从 Codex 移除」，或在终端运行 `claude mcp remove --scope user issuerelay` 和 `codex mcp remove issuerelay`：不移除的话，卸载之后，每个 Claude Code、Codex 会话启动时都会去运行一个已不存在的程序并报错。

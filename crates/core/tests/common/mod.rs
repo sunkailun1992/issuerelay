@@ -24,5 +24,7 @@ pub fn issue(uuid: &str, project: &str) -> Issue {
         priority: 0,
         created_at: t,
         updated_at: t,
+        state_type: None,
+        blocked_by: None,
     }
 }

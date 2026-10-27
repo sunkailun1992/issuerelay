@@ -12,9 +12,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useIssues, useStatus } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
-import { isActive } from "@/lib/runs";
+import { isActive, isPlanned, isPlanRun } from "@/lib/runs";
+import { sameName } from "@/lib/settings-form";
 import type { IssueStatus, IssueView, TriggerNames } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+/** Whether an issue's labels ask for a planning run: the plan label without the trigger label (core's `candidate_mode`). */
+function asksForPlan(labels: readonly string[], names: TriggerNames): boolean {
+  const carries = (wanted: string) => labels.some((label) => sameName(label, wanted));
+  return carries(names.plan_label) && !carries(names.label);
+}
 
 /** The columns, by the key of their name in `issues.column`. */
 const COLUMNS = ["issue", "title", "linear_state", "local_state", "reason", "actions"] as const;
@@ -43,6 +50,16 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
           return t("issues.waiting.executor_not_ready", { executor: t(`executor.${status.reason.executor}`) });
         case "lean_not_ready":
           return t("issues.waiting.lean_not_ready", { executor: t(`executor.${status.reason.executor}`) });
+        case "blocked_by":
+          return t("issues.waiting.blocked_by", { issues: status.reason.issues.map((issue) => cleanDisplayText(issue).trim()).join(", ") });
+        case "labels_match_several_bindings":
+          return t("issues.waiting.labels_match_several_bindings", {
+            labels: status.reason.labels.map((label) => cleanDisplayText(label).trim()).join(", "),
+          });
+        case "no_binding_for_labels":
+          return t("issues.waiting.no_binding_for_labels");
+        case "plan_needs_lean":
+          return t("issues.waiting.plan_needs_lean");
       }
   }
 }
@@ -63,7 +80,14 @@ function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
   return (
     <TableRow>
       <TableCell>
-        <IssueLink identifier={issue.identifier} url={issue.url} />
+        {/* items-start: the link keeps its own width, as it had alone in the cell. */}
+        <div className="flex flex-col items-start gap-0.5">
+          <IssueLink identifier={issue.identifier} url={issue.url} />
+          {/* What the next run is for: the run in hand's, else what the labels ask for. */}
+          {(job !== null && isActive(job) ? isPlanRun(job) : asksForPlan(issue.labels, names)) && (
+            <span className="text-xs text-muted-foreground">{t("runs.mode.plan")}</span>
+          )}
+        </div>
       </TableCell>
       <TableCell>
         <div className="max-w-sm wrap-anywhere whitespace-normal">{issue.title}</div>
@@ -72,7 +96,9 @@ function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
         {/* A state name is a short word or two: it wraps between words, never inside one. */}
         <div className="whitespace-normal">{issue.state}</div>
       </TableCell>
-      <TableCell>{job === null ? <span className="text-muted-foreground">—</span> : <StatusBadge state={job.state} />}</TableCell>
+      <TableCell>
+        {job === null ? <span className="text-muted-foreground">—</span> : <StatusBadge state={job.state} planned={isPlanned(job)} />}
+      </TableCell>
       <TableCell>
         {reason !== null && <div className={cn("max-w-xs wrap-anywhere whitespace-normal", !pickedUp && "text-muted-foreground")}>{reason}</div>}
       </TableCell>
@@ -99,7 +125,7 @@ export default function Issues() {
   const header = (
     <PageHeader
       title={t("nav.issues")}
-      description={t("issues.description", { label: names.label })}
+      description={t("issues.description", { label: names.label, plan_label: names.plan_label })}
       actions={
         <Button variant="outline" size="sm" disabled={issues.isFetching} onClick={() => void issues.refetch()}>
           <RefreshCw aria-hidden className={cn(issues.isFetching && "animate-spin")} />

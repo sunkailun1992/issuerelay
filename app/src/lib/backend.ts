@@ -45,6 +45,8 @@ export interface Backend {
   saveBinding(binding: Binding): Promise<void>;
   removeBinding(id: string): Promise<boolean>;
   projects(): Promise<Project[]>;
+  /** Linear's label names, cleaned, each once, in alphabetical order: what routing labels are chosen from. */
+  labels(): Promise<string[]>;
   settings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
   doctor(): Promise<DoctorReport>;

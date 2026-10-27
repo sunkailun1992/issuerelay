@@ -32,7 +32,7 @@ test("without the settings the page still helps, with the default names", async 
 // ---- helpers ----------------------------------------------------------------------------------
 
 /** The demo backend whose trigger names are the ones given. */
-async function backendNaming(trigger: Partial<Record<"label" | "todo" | "in_progress" | "in_testing" | "done", string>>) {
+async function backendNaming(trigger: Partial<Record<"label" | "plan_label" | "todo" | "in_progress" | "in_testing" | "done", string>>) {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const settings = await backend.settings();
   backend.settings = vi.fn().mockResolvedValue({ ...settings, trigger: { ...settings.trigger, ...trigger } });
@@ -41,10 +41,10 @@ async function backendNaming(trigger: Partial<Record<"label" | "todo" | "in_prog
 
 // ---- the page ---------------------------------------------------------------------------------
 
-test("the page is five sections, each named by its heading", async () => {
+test("the page is six sections, each named by its heading", async () => {
   await renderWithProviders(<Help />);
   expect(await screen.findByRole("heading", { level: 1, name: "Help" })).toBeInTheDocument();
-  const names = ["Trigger conditions", "How an issue moves", "Writing an issue", "Lean runs", "Questions and answers"];
+  const names = ["Trigger conditions", "How an issue moves", "Writing an issue", "Lean runs", "More ways to work", "Questions and answers"];
   expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual(names);
   for (const name of names) expect(screen.getByRole("region", { name })).toBeInTheDocument();
 });
@@ -111,11 +111,12 @@ test("the default names are the ones the flow shows without settings", async () 
   ]);
 });
 
-test("the eight local statuses each have their badge and what it means", async () => {
-  await renderWithProviders(<Help />);
+test("the eight local statuses each have their badge and what it means, and so does a posted plan", async () => {
+  const backend = await backendNaming({ label: "ready-for-ai" });
+  await renderWithProviders(<Help />, { backend });
   const legend = await screen.findByRole("list", { name: "What the statuses in the panel mean" });
   const items = within(legend).getAllByRole("listitem");
-  expect(items).toHaveLength(JOB_STATES.length);
+  expect(items).toHaveLength(JOB_STATES.length + 1);
   const badges = ["Waiting for setup", "Queued", "Running", "Awaiting acceptance", "Needs information", "Done", "Failed", "Canceled"];
   JOB_STATES.forEach((_state, index) => {
     // The badge is the state's own, the sentence next to it says what it is.
@@ -123,6 +124,25 @@ test("the eight local statuses each have their badge and what it means", async (
     expect(within(items[index]).getAllByText(/.+/).length).toBeGreaterThan(1);
   });
   expect(items[0]).toHaveTextContent(/not bound|bound/);
+  // A planning run that posted its plan ends as "needs information" in the store, and shows its own badge.
+  const planned = items[JOB_STATES.length];
+  expect(within(planned).getByText("Plan posted")).toBeInTheDocument();
+  expect(await within(planned).findByText("A planning run posted its plan on the issue. Add ready-for-ai to have it carried out.")).toBeInTheDocument();
+});
+
+test("the more ways to work say what each does, with the labels the settings name", async () => {
+  const backend = await backendNaming({ label: "ready-for-ai", plan_label: "plan-first" });
+  await renderWithProviders(<Help />, { backend });
+  const more = await screen.findByRole("region", { name: "More ways to work" });
+  expect(within(more).getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+    "Can the AI make a plan first, before it changes anything?",
+    "One Linear project, several folders?",
+    "What about issues that wait for others?",
+    "What if I cancel an issue while the AI works on it?",
+    "Does the AI start from scratch when an issue comes back?",
+    "What does a run use?",
+  ]);
+  expect(await within(more).findByText(/^Label the issue plan-first instead of ready-for-ai: .* Add ready-for-ai once the plan suits you/)).toBeInTheDocument();
 });
 
 test("a clear issue and a vague one are shown side by side with the reason", async () => {

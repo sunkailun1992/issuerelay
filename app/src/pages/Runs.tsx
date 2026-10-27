@@ -12,8 +12,8 @@ import { RUN_LIST_LIMIT, useJobs, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
-import { formatRelative, formatTime } from "@/lib/format";
-import { parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
+import { formatCost, formatRelative, formatTime } from "@/lib/format";
+import { isPlanned, isPlanRun, parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
 import type { HeldJob, Job } from "@/lib/types";
 
 /** What stands where a run has no value (it has no executor yet, or has not started). */
@@ -69,7 +69,7 @@ function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
   return (
     <TableRow className="cursor-pointer" onClick={open}>
       <TableCell>
-        <StatusBadge state={job.state} />
+        <StatusBadge state={job.state} planned={isPlanned(job)} />
       </TableCell>
       <TableCell>
         <div className="flex flex-col gap-0.5">
@@ -79,7 +79,12 @@ function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
           >
             {job.issue_identifier}
           </Link>
-          {job.executor !== null && <span className="text-xs text-muted-foreground">{t(`executor.${job.executor}`)}</span>}
+          {job.executor !== null && (
+            <span className="text-xs text-muted-foreground">
+              {t(`executor.${job.executor}`)}
+              {isPlanRun(job) && ` · ${t("runs.mode.plan")}`}
+            </span>
+          )}
         </div>
       </TableCell>
       <TableCell>
@@ -93,6 +98,7 @@ function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
             <span>{formatRelative(job.started_at, lang)}</span>
             <span className="text-xs text-muted-foreground">
               <RunDuration job={job} />
+              {job.usage?.cost_micro_usd != null && ` · ${formatCost(job.usage.cost_micro_usd)}`}
             </span>
           </div>
         )}

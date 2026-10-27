@@ -52,6 +52,13 @@ export function IssueFlow({ names }: { names: TriggerNames }) {
             <p className="min-w-0 flex-1 text-muted-foreground">{t(`help.state_meaning.${state}`)}</p>
           </li>
         ))}
+        {/* What a planning run that posted its plan shows instead of "needs info". */}
+        <li className="flex items-start gap-3 px-4 py-3">
+          <div className="w-44 shrink-0">
+            <StatusBadge state="needs_info" planned />
+          </div>
+          <p className="min-w-0 flex-1 text-muted-foreground">{t("help.state_meaning.planned", { label: names.label })}</p>
+        </li>
       </ul>
     </Section>
   );

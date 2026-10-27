@@ -140,6 +140,38 @@ async fn exits_zero_captures_final_text_and_prompt() {
     );
 }
 
+// The run's output carries what the executor printed about its session and usage (run-improvements
+// design, section 7), in the shapes of the 2026-10-27 probes.
+#[tokio::test]
+async fn a_run_reports_the_session_and_usage_its_executor_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = r#"{"type":"system","subtype":"init","session_id":"b88d7053-d27f-4825-b81c-80f6fbf109d0","mcp_servers":[]}"#;
+    let result = r#"{"type":"result","subtype":"success","result":"ok","total_cost_usd":0.0551374,"num_turns":1,"usage":{"input_tokens":2,"output_tokens":4,"cache_read_input_tokens":18687,"cache_creation_input_tokens":6414}}"#;
+    let s = script(
+        dir.path(),
+        serde_json::json!([{"out": init}, {"out": result}, {"exit": 0}]),
+    );
+    let out = runner::run(
+        spec(agent(), dir.path(), &s, ""),
+        ExecutorKind::Claude,
+        &dir.path().join("1.jsonl"),
+        limits(30_000, 30_000),
+        CancellationToken::new(),
+        &ExecEnv::inherit(),
+        None,
+    )
+    .await;
+    assert_eq!(out.exit, ExitKind::Exited(Some(0)));
+    assert_eq!(
+        out.session_id.as_deref(),
+        Some("b88d7053-d27f-4825-b81c-80f6fbf109d0")
+    );
+    let usage = out.usage.expect("usage");
+    assert_eq!(usage.session_cost_micro_usd, Some(55_137));
+    assert_eq!(usage.cache_read_tokens, Some(18_687));
+    assert_eq!(usage.turns, Some(1));
+}
+
 #[tokio::test]
 async fn nonzero_exit_code_is_reported() {
     let dir = tempfile::tempdir().unwrap();

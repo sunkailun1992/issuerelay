@@ -173,6 +173,7 @@ pub fn issue_json(n: u32) -> Value {
         "title": format!("Demo task {n}"),
         "url": format!("https://linear.app/demo/issue/DEMO-{n}"),
         "status": "Todo",
+        "statusType": "unstarted",
         "labels": ["ai-ready"],
         "project": "Demo Project",
         "projectId": "proj-1",

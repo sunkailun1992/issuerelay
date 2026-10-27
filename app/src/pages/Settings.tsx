@@ -128,6 +128,8 @@ function problemText(t: ReturnType<typeof useTranslation>["t"], problem: Problem
       return t("settings.whole_number");
     case "name":
       return t("settings.name_invalid");
+    case "same_as_label":
+      return t("settings.plan_label_same");
   }
 }
 
@@ -494,6 +496,7 @@ const NOTIFICATIONS: { key: keyof NotificationSettings; label: string }[] = [
 /** The names of the label and the statuses, by the field of `TriggerNames` each is. */
 const TRIGGER_NAMES: { key: keyof TriggerNames; label: string }[] = [
   { key: "label", label: "settings.label_name" },
+  { key: "plan_label", label: "settings.plan_label_name" },
   { key: "todo", label: "settings.state_todo" },
   { key: "in_progress", label: "settings.state_in_progress" },
   { key: "in_testing", label: "settings.state_in_testing" },
@@ -660,6 +663,13 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             </Field>
           </div>
           <Hint id={id("permission-hint")}>{t(`permission.${draft.default_permission}_hint`)}</Hint>
+          <SwitchRow
+            id={id("resume-sessions")}
+            label={t("settings.resume_sessions")}
+            note={t("settings.resume_sessions_note")}
+            checked={draft.resume_sessions}
+            onChange={(on) => edit("resume_sessions", on)}
+          />
         </Group>
 
         <Group title={t("settings.group.prompt")}>

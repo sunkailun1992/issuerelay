@@ -28,7 +28,7 @@ test("the names are the default ones until the settings are read, then the confi
 test("the default names are the table that a Rust test holds against core's defaults", () => {
   // trigger-defaults.json is the only copy in the panel; the app crate's tests compare it with
   // `TriggerNames::default()`. The mock's default settings take their names from it too.
-  expect(Object.keys(defaults).sort()).toEqual(["done", "in_progress", "in_testing", "label", "todo"]);
+  expect(Object.keys(defaults).sort()).toEqual(["done", "in_progress", "in_testing", "label", "plan_label", "todo"]);
   expect(DEFAULT_SETTINGS.trigger).toEqual(defaults);
 });
 

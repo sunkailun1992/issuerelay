@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { Link, Route, Routes } from "react-router";
 import { vi } from "vitest";
 import { queryKeys } from "@/hooks/queries";
+import type { Lang } from "@/i18n";
 import { type Backend, BackendError } from "@/lib/backend";
 import { MOCK_NOW, setFixedClock } from "@/lib/clock";
 import { formatDateTime } from "@/lib/format";
@@ -75,8 +76,8 @@ function backendWithLog(lines: string[], backend = createMockBackend("demo", { l
 }
 
 /** Opens the page of run `id` and waits until the run itself has been read (the demo's issues are all DEMO-n). */
-async function openRun(id: number, backend: Backend = createMockBackend("demo", { latencyMs: 0 })) {
-  const view = await renderWithProviders(page, { backend, route: `/runs/${id}` });
+async function openRun(id: number, backend: Backend = createMockBackend("demo", { latencyMs: 0 }), lang?: Lang) {
+  const view = await renderWithProviders(page, { backend, route: `/runs/${id}`, lang });
   await screen.findByRole("heading", { level: 1, name: /^DEMO-/ });
   return view;
 }
@@ -141,6 +142,62 @@ test("a run that has not started has nothing to say for the fields it has no val
   expect(screen.queryByRole("button", { name: "Copy" })).not.toBeInTheDocument();
 });
 
+test("a Claude run's usage is its estimated cost, its tokens, its cache and its turns, with what the cost is", async () => {
+  await openRun(10);
+  expect(field("Usage")).toBe(
+    "$0.42 (estimate) · 1,204 tokens in, 3,872 out · cache 186,402 read, 21,390 written · 17 turns" +
+      "The cost is Claude Code's own estimate at API prices. When Claude Code is signed in with a subscription, it is not what you are charged.",
+  );
+});
+
+test("a Codex run's usage is its tokens, with a note that its input counts the cache", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const done = (await backend.job(7))!;
+  const usage = {
+    cost_micro_usd: null,
+    session_cost_micro_usd: null,
+    input_tokens: 45_290,
+    output_tokens: 18,
+    cache_read_tokens: 39_040,
+    cache_write_tokens: null,
+    turns: null,
+  };
+  backend.job = vi.fn().mockResolvedValue({ ...done, executor: "codex", usage });
+  await openRun(7, backend, "zh-CN");
+  expect(field("用量")).toBe("输入 45,290、输出 18 token · 缓存读取 39,040Codex 只报 token；它的输入数已包含缓存读取的部分。");
+});
+
+test("a run that reported no usage, or ran before usage was recorded, has no usage field", async () => {
+  await openRun(7);
+  expect(screen.queryByText("Usage", { selector: "dt" })).not.toBeInTheDocument();
+});
+
+test("a run that continues an earlier session links to that run", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const done = (await backend.job(7))!;
+  const read = backend.job.bind(backend);
+  backend.job = vi.fn(async (id: number) => (id === 7 ? { ...done, resume_job_id: 6 } : read(id)));
+  await openRun(7, backend);
+  const link = screen.getByRole("link", { name: "The session of run #6" });
+  expect(link).toHaveAttribute("href", "/runs/6");
+  expect(screen.getByText("Continues", { selector: "dt" })).toBeInTheDocument();
+});
+
+test("a planning run says what it was for, and one that posted its plan has its own badge", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const done = (await backend.job(9))!;
+  backend.job = vi.fn().mockResolvedValue({ ...done, mode: "plan", report: "planned", summary: "Posted a plan in three steps" });
+  await openRun(9, backend);
+  expect(field("Status")).toBe("Plan posted");
+  expect(field("Run for")).toBe("Plan only");
+});
+
+test("a usual run does not say what it was for", async () => {
+  await openRun(12);
+  expect(screen.queryByText("Run for", { selector: "dt" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Continues", { selector: "dt" })).not.toBeInTheDocument();
+});
+
 test("the folder of the run can be copied", async () => {
   const writeText = stubClipboard();
   await openRun(12);
@@ -203,6 +260,33 @@ test("a run without a reason has no headline for one", async () => {
   for (const headline of ["The run failed", "The run was canceled", "The run waits for setup", "A note from IssueRelay"]) {
     expect(screen.queryByText(headline), headline).not.toBeInTheDocument();
   }
+});
+
+test.each([
+  ["the issue no longer exists in Linear", "The issue was deleted in Linear, so the run was stopped"],
+  ["the issue was canceled in Linear", "The issue was canceled in Linear, so the run was stopped"],
+  ["the issue was completed in Linear", "The issue was completed in Linear, so the run was stopped"],
+  ["the issue was reassigned in Linear", "The issue is no longer assigned to you in Linear, so the run was stopped"],
+])("a run stopped because %s says so in the interface's words, the engine's sentence under it", async (reason, headline) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const stopped = (await backend.job(6))!;
+  backend.job = vi.fn().mockResolvedValue({ ...stopped, reason });
+  await openRun(6, backend);
+  // A note, not an alert: the user's own stop is one too.
+  const note = (await screen.findByText(headline)).closest<HTMLElement>('[role="status"]')!;
+  expect(within(note).getByText(reason)).toBeInTheDocument();
+});
+
+test("a stop from Linear reads in the interface language, and a stop by the user keeps its own headline", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const stopped = (await backend.job(6))!;
+  backend.job = vi.fn().mockResolvedValue({ ...stopped, reason: "the issue was canceled in Linear" });
+  const linear = await openRun(6, backend, "zh-TW");
+  expect(screen.getByText("需求在 Linear 上被取消，已停止執行")).toBeInTheDocument();
+  linear.unmount();
+  await openRun(6);
+  expect(screen.getByText("The run was canceled")).toBeInTheDocument();
+  expect(screen.getByText("stopped by the user")).toBeInTheDocument();
 });
 
 test("a failure is announced as an alert, the other notes as notices", async () => {

@@ -8,6 +8,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::model::Issue;
+use crate::trigger::same_name;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutorKind {
@@ -128,6 +131,9 @@ pub struct TriggerNames {
     pub in_progress: String,
     pub in_testing: String,
     pub done: String,
+    /// The label of issues that get a planning run instead (run-improvements design, section
+    /// 10). A file from before planning runs reads as the default.
+    pub plan_label: String,
 }
 
 impl Default for TriggerNames {
@@ -138,6 +144,7 @@ impl Default for TriggerNames {
             in_progress: "In Progress".into(),
             in_testing: "In Testing".into(),
             done: "Done".into(),
+            plan_label: "ai-plan".into(),
         }
     }
 }
@@ -205,6 +212,9 @@ pub struct Settings {
     /// executor's own settings (which lean runs do not read).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<Effort>,
+    /// An issue that comes back continues the executor session of its earlier run
+    /// (run-improvements design, section 11). A file from before the setting reads as on.
+    pub resume_sessions: bool,
 }
 
 impl Default for Settings {
@@ -229,6 +239,7 @@ impl Default for Settings {
             full_access_acknowledged: false,
             show_in_dock: true,
             default_effort: None,
+            resume_sessions: true,
         }
     }
 }
@@ -267,6 +278,7 @@ impl Settings {
             ("trigger.in_progress", &self.trigger.in_progress),
             ("trigger.in_testing", &self.trigger.in_testing),
             ("trigger.done", &self.trigger.done),
+            ("trigger.plan_label", &self.trigger.plan_label),
         ] {
             anyhow::ensure!(
                 is_plain_name(name),
@@ -274,6 +286,13 @@ impl Settings {
                  got {name:?}"
             );
         }
+        // An issue with both labels gets a usual run; the same name for both would make planning
+        // runs impossible to ask for.
+        anyhow::ensure!(
+            !same_name(&self.trigger.label, &self.trigger.plan_label),
+            "trigger.plan_label must differ from trigger.label, both are {:?}",
+            self.trigger.label
+        );
         // The comment language is written into the prompt, and so is the UI language while the
         // comment language follows it: a value that only looks like a language tag (`en` plus
         // U+2028, a zero-width space inside `zh-CN`) is refused.
@@ -359,6 +378,45 @@ pub struct Binding {
     /// This binding's reasoning effort; `None` follows `Settings::default_effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+    /// Routing labels (run-improvements design, section 9): the binding takes the project's issues
+    /// that carry any of them. A binding without any is the project's default binding, which takes
+    /// the issues no other binding of the project takes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+/// Which binding takes an issue (`Config::route`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route<'a> {
+    Bound(&'a Binding),
+    /// The issue has no project, or no binding takes its project.
+    NotBound,
+    /// The issue carries the routing labels of more than one binding of its project: these.
+    SeveralMatch(Vec<String>),
+    /// The project's bindings all have routing labels and the issue carries none of them.
+    NoMatch,
+}
+
+/// The id a new binding gets: the project's id for its default binding, the project's id and the
+/// first routing label for the others (`<project id>#<label>`).
+pub fn binding_id_for(project_id: &str, labels: &[String]) -> String {
+    match labels.first() {
+        Some(label) => format!("{project_id}#{}", label.trim()),
+        None => project_id.to_string(),
+    }
+}
+
+/// Whether two bindings of the same project would take the same issues: both are the project's
+/// default binding, or they share a routing label.
+pub fn bindings_overlap(a: &Binding, b: &Binding) -> bool {
+    a.project_id == b.project_id
+        && if a.labels.is_empty() || b.labels.is_empty() {
+            a.labels.is_empty() && b.labels.is_empty()
+        } else {
+            a.labels
+                .iter()
+                .any(|label| b.labels.iter().any(|other| same_name(label, other)))
+        }
 }
 
 fn lean_by_default() -> bool {
@@ -377,10 +435,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// Settings plus every binding: its folder, names and optional model name, and that no two
-    /// bindings share an `id` or a `project_id`. Runs on every load, and before the engine saves a
-    /// change, so a hand-edited file is held to the same rules as a binding added through the CLI
-    /// or the panel.
+    /// Settings plus every binding: its folder, names, optional model name and routing labels, that
+    /// no two bindings share an `id`, and that no two bindings of a project take the same issues
+    /// (`bindings_overlap`). Runs on every load, and before the engine saves a change, so a
+    /// hand-edited file is held to the same rules as a binding added through the CLI or the panel.
     pub fn validate(&self) -> Result<()> {
         self.settings.validate()?;
         for (i, binding) in self.bindings.iter().enumerate() {
@@ -414,8 +472,30 @@ impl Config {
                     "bindings[{i}].model is not a valid model name: {model:?}"
                 );
             }
-            // A second binding for a project would leave which folder and executor it runs with
-            // to the order of the file; a second one with the same id could not be told apart.
+            for (k, label) in binding.labels.iter().enumerate() {
+                anyhow::ensure!(
+                    is_plain_name(label),
+                    "bindings[{i}].labels[{k}] must be a non-empty single-line name without \
+                     quotes or invisible characters, got {label:?}"
+                );
+                // Every candidate issue carries the trigger or the plan label: routing by them
+                // routes nothing useful.
+                anyhow::ensure!(
+                    !same_name(label, &self.settings.trigger.label)
+                        && !same_name(label, &self.settings.trigger.plan_label),
+                    "bindings[{i}].labels[{k}] is the trigger label or the plan label {label:?}, \
+                     which the issues IssueRelay takes carry"
+                );
+                anyhow::ensure!(
+                    !binding.labels[..k]
+                        .iter()
+                        .any(|earlier| same_name(earlier, label)),
+                    "bindings[{i}].labels lists {label:?} twice"
+                );
+            }
+            // Two bindings that take the same issues would leave which folder and executor they
+            // run with to the order of the file; a second one with the same id could not be told
+            // apart.
             for (j, earlier) in self.bindings[..i].iter().enumerate() {
                 anyhow::ensure!(
                     earlier.id != binding.id,
@@ -423,9 +503,15 @@ impl Config {
                     binding.id
                 );
                 anyhow::ensure!(
-                    earlier.project_id != binding.project_id,
-                    "bindings[{j}] and bindings[{i}] have the same project_id {:?}",
-                    binding.project_id
+                    !bindings_overlap(earlier, binding),
+                    "bindings[{j}] and bindings[{i}] would take the same issues of project_id \
+                     {:?}: {}",
+                    binding.project_id,
+                    if binding.labels.is_empty() {
+                        "both are its default binding (neither has routing labels)".to_string()
+                    } else {
+                        "they share a routing label".to_string()
+                    }
                 );
             }
         }
@@ -476,8 +562,45 @@ impl Config {
         written
     }
 
-    pub fn binding_for_project(&self, project_id: &str) -> Option<&Binding> {
-        self.bindings.iter().find(|b| b.project_id == project_id)
+    /// The binding that takes `issue` (run-improvements design, section 9.2): among its project's
+    /// bindings the one whose routing labels the issue carries, else the project's default binding.
+    pub fn route(&self, issue: &Issue) -> Route<'_> {
+        let Some(project) = issue.project_id.as_deref() else {
+            return Route::NotBound;
+        };
+        let of_project: Vec<&Binding> = self
+            .bindings
+            .iter()
+            .filter(|b| b.project_id == project)
+            .collect();
+        if of_project.is_empty() {
+            return Route::NotBound;
+        }
+        let carries = |label: &String| issue.labels.iter().any(|l| same_name(l, label));
+        let matching: Vec<&Binding> = of_project
+            .iter()
+            .copied()
+            .filter(|b| b.labels.iter().any(carries))
+            .collect();
+        match matching.as_slice() {
+            [one] => Route::Bound(one),
+            [] => of_project
+                .into_iter()
+                .find(|b| b.labels.is_empty())
+                .map_or(Route::NoMatch, Route::Bound),
+            several => Route::SeveralMatch(
+                issue
+                    .labels
+                    .iter()
+                    .filter(|label| {
+                        several
+                            .iter()
+                            .any(|b| b.labels.iter().any(|l| same_name(l, label)))
+                    })
+                    .cloned()
+                    .collect(),
+            ),
+        }
     }
 
     pub fn executor_for(&self, binding: &Binding) -> ExecutorKind {
@@ -511,7 +634,7 @@ impl Config {
 
 /// Whether two paths name the same folder once symlinks and `.` / `..` are resolved; a path that
 /// cannot be resolved (it does not exist) is compared as written.
-fn same_folder(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     resolve(a) == resolve(b)
 }
@@ -545,6 +668,7 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
         prompt_override: Some("x".into()),
         lean: false,
         effort: Some(Effort::Max),
+        labels: vec!["x".into()],
     });
     let known = toml::Table::try_from(&sample).expect("the config serializes");
     let mut unknown = Vec::new();
@@ -656,6 +780,7 @@ mod tests {
             prompt_override: None,
             lean: true,
             effort: None,
+            labels: Vec::new(),
         }
     }
 
@@ -741,6 +866,155 @@ mod tests {
         assert!(Config::load(&path).is_err());
     }
 
+    /// An issue of `project` with the trigger label and `labels`.
+    fn issue_in(project: &str, labels: &[&str]) -> Issue {
+        let t = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 10, 1, 8, 0, 0).unwrap();
+        let mut all = vec!["ai-ready".to_string()];
+        all.extend(labels.iter().map(|label| label.to_string()));
+        Issue {
+            uuid: "u-1".into(),
+            identifier: "DEMO-1".into(),
+            title: "Demo".into(),
+            url: "https://linear.app/demo/issue/DEMO-1".into(),
+            state: "Todo".into(),
+            labels: all,
+            project_id: Some(project.into()),
+            project_name: Some("Demo Project".into()),
+            assignee_id: Some("me".into()),
+            parent_identifier: None,
+            priority: 0,
+            created_at: t,
+            updated_at: t,
+            state_type: None,
+            blocked_by: None,
+        }
+    }
+
+    /// A binding of `project` with the id `id` and the routing labels `labels`.
+    fn labeled(project: &str, id: &str, labels: &[&str]) -> Binding {
+        Binding {
+            id: id.into(),
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            ..binding(project, None)
+        }
+    }
+
+    fn validation_error(cfg: &Config) -> String {
+        format!(
+            "{:#}",
+            cfg.validate()
+                .expect_err("the configuration must be refused")
+        )
+    }
+
+    #[test]
+    fn route_picks_the_label_binding_then_the_default() {
+        let mut cfg = Config::default();
+        cfg.bindings.push(binding("proj-1", None));
+        cfg.bindings
+            .push(labeled("proj-1", "proj-1#Frontend", &["Frontend"]));
+        cfg.bindings
+            .push(labeled("proj-1", "proj-1#Backend", &["Backend", "API"]));
+        cfg.validate().unwrap();
+        let id = |labels: &[&str]| match cfg.route(&issue_in("proj-1", labels)) {
+            Route::Bound(binding) => binding.id.clone(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(id(&[]), "proj-1");
+        assert_eq!(id(&["frontend"]), "proj-1#Frontend");
+        assert_eq!(id(&["Bug", " api "]), "proj-1#Backend");
+        assert_eq!(
+            cfg.route(&issue_in("proj-1", &["Frontend", "Backend"])),
+            Route::SeveralMatch(vec!["Frontend".into(), "Backend".into()])
+        );
+        assert_eq!(cfg.route(&issue_in("proj-9", &[])), Route::NotBound);
+        // Without a default binding an issue without a routing label has none.
+        cfg.bindings.remove(0);
+        assert_eq!(cfg.route(&issue_in("proj-1", &["Bug"])), Route::NoMatch);
+    }
+
+    #[test]
+    fn two_bindings_of_a_project_must_not_take_the_same_issues() {
+        let mut two_defaults = Config::default();
+        two_defaults.bindings.push(binding("proj-1", None));
+        two_defaults.bindings.push(Binding {
+            id: "other".into(),
+            ..binding("proj-1", None)
+        });
+        let error = validation_error(&two_defaults);
+        assert!(error.contains("both are its default binding"), "{error}");
+        let mut shared = Config::default();
+        shared.bindings.push(labeled("proj-1", "a", &["Frontend"]));
+        shared
+            .bindings
+            .push(labeled("proj-1", "b", &["UI", " frontend "]));
+        let error = validation_error(&shared);
+        assert!(error.contains("they share a routing label"), "{error}");
+        // A default binding next to label bindings is fine, and so is a label of another project.
+        let mut fine = Config::default();
+        fine.bindings.push(binding("proj-1", None));
+        fine.bindings.push(labeled("proj-1", "a", &["Frontend"]));
+        fine.bindings.push(labeled("proj-2", "b", &["Frontend"]));
+        fine.validate().unwrap();
+    }
+
+    #[test]
+    fn routing_labels_must_be_plain_names_other_than_the_trigger_label() {
+        for bad in ["", " ", "a\"b", "line\nbreak", "zero\u{200b}width"] {
+            let mut cfg = Config::default();
+            cfg.bindings.push(labeled("proj-1", "a", &[bad]));
+            let error = validation_error(&cfg);
+            assert!(error.contains("bindings[0].labels[0]"), "{bad:?}: {error}");
+        }
+        let mut trigger = Config::default();
+        trigger
+            .bindings
+            .push(labeled("proj-1", "a", &[" AI-Ready "]));
+        assert!(validation_error(&trigger).contains("the trigger label"));
+        let mut twice = Config::default();
+        twice.bindings.push(labeled("proj-1", "a", &["UI", "ui"]));
+        assert!(validation_error(&twice).contains("twice"));
+    }
+
+    #[test]
+    fn plan_label_defaults_to_ai_plan_and_must_differ_from_the_trigger_label() {
+        assert_eq!(TriggerNames::default().plan_label, "ai-plan");
+        // A file from before planning runs.
+        let old: Config = toml::from_str("[settings.trigger]\nlabel = \"robot\"\n").unwrap();
+        assert_eq!(old.settings.trigger.plan_label, "ai-plan");
+        let mut same = Settings::default();
+        same.trigger.plan_label = " AI-READY ".into();
+        let error = format!("{:#}", same.validate().unwrap_err());
+        assert!(error.contains("must differ from trigger.label"), "{error}");
+        let mut blank = Settings::default();
+        blank.trigger.plan_label = " ".into();
+        assert!(blank.validate().is_err());
+        let mut routed = Config::default();
+        routed.bindings.push(labeled("proj-1", "a", &["AI-Plan"]));
+        assert!(validation_error(&routed).contains("the plan label"));
+    }
+
+    #[test]
+    fn binding_ids_follow_the_project_and_the_first_label() {
+        assert_eq!(binding_id_for("proj-1", &[]), "proj-1");
+        assert_eq!(
+            binding_id_for("proj-1", &[" Frontend ".into(), "UI".into()]),
+            "proj-1#Frontend"
+        );
+    }
+
+    #[test]
+    fn routing_labels_are_written_only_when_there_are_some() {
+        let mut cfg = Config::default();
+        cfg.bindings.push(binding("proj-1", None));
+        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("labels"));
+        cfg.bindings[0].labels = vec!["Frontend".into()];
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("labels = [\"Frontend\"]"), "{text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.bindings[0].labels, ["Frontend"]);
+    }
+
     #[test]
     fn binding_lookup_and_effective_choices() {
         let mut cfg = Config::default();
@@ -749,13 +1023,17 @@ mod tests {
             permission: Some(PermissionProfile::Auto),
             ..binding("proj-2", Some(ExecutorKind::Codex))
         });
-        let b1 = cfg.binding_for_project("proj-1").unwrap();
+        let bound = |project: &str| match cfg.route(&issue_in(project, &[])) {
+            Route::Bound(binding) => Some(binding),
+            _ => None,
+        };
+        let b1 = bound("proj-1").unwrap();
         assert_eq!(cfg.executor_for(b1), ExecutorKind::Claude);
         assert_eq!(cfg.permission_for(b1), PermissionProfile::Full);
-        let b2 = cfg.binding_for_project("proj-2").unwrap();
+        let b2 = bound("proj-2").unwrap();
         assert_eq!(cfg.executor_for(b2), ExecutorKind::Codex);
         assert_eq!(cfg.permission_for(b2), PermissionProfile::Auto);
-        assert!(cfg.binding_for_project("proj-3").is_none());
+        assert!(bound("proj-3").is_none());
     }
 
     #[test]
@@ -1180,6 +1458,7 @@ mod tests {
             prompt_override: Some("Be brief.".into()),
             lean: false,
             effort: Some(Effort::Max),
+            labels: Vec::new(),
         });
         let text = toml::to_string_pretty(&config).unwrap();
         for key in [
@@ -1542,7 +1821,10 @@ mod tests {
             ("project_id", "\"q\"".into()),
         ]));
         assert!(
-            same_project.contains("bindings[1] and bindings[2] have the same project_id \"q\""),
+            same_project.contains(
+                "bindings[1] and bindings[2] would take the same issues of project_id \"q\": \
+                 both are its default binding"
+            ),
             "{same_project}"
         );
         assert!(

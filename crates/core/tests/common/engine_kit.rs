@@ -1,6 +1,6 @@
 //! An Engine wired to fakes: in-memory Linear, scripted runs, always-ready executors.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -10,7 +10,7 @@ use issuerelay_core::{
     doctor::{ExecutorReport, ReadinessProbe},
     engine::{Engine, EngineDeps, JobRunner},
     executor::CommandSpec,
-    model::ProcessTag,
+    model::{ProcessTag, RunUsage},
     runner::{ExitKind, RunLimits, RunOutput, SpawnHook},
     store::Store,
 };
@@ -68,6 +68,9 @@ pub struct Script {
     pub final_text: Option<String>,
     /// Panics right after the status change, as a bug inside the run task would.
     pub panic: bool,
+    /// What the run reports about its usage and its session.
+    pub usage: Option<RunUsage>,
+    pub session_id: Option<String>,
 }
 
 impl Script {
@@ -77,6 +80,8 @@ impl Script {
             exit: ExitKind::Exited(Some(0)),
             final_text: Some(r#"{"result":"in_testing","summary":"pushed to test"}"#.into()),
             panic: false,
+            usage: None,
+            session_id: None,
         }
     }
 
@@ -86,6 +91,8 @@ impl Script {
             exit: ExitKind::Exited(Some(code)),
             final_text: None,
             panic: false,
+            usage: None,
+            session_id: None,
         }
     }
 
@@ -95,6 +102,8 @@ impl Script {
             exit: ExitKind::Exited(Some(0)),
             final_text: Some(r#"{"result":"needs_info","summary":"which page?"}"#.into()),
             panic: false,
+            usage: None,
+            session_id: None,
         }
     }
 }
@@ -102,6 +111,8 @@ impl Script {
 pub struct ScriptedRunner {
     pub linear: FakeLinear,
     pub scripts: Mutex<HashMap<String, Script>>,
+    /// Scripts for the next runs of an issue, one per run, used before `scripts`.
+    pub queued: Mutex<HashMap<String, VecDeque<Script>>>,
     pub started: Mutex<Vec<String>>,
     pub specs: Mutex<Vec<CommandSpec>>,
     /// The executor kind and the time limits of each run, in start order (like `specs`).
@@ -116,6 +127,7 @@ impl ScriptedRunner {
         Self {
             linear,
             scripts: Mutex::new(HashMap::new()),
+            queued: Mutex::new(HashMap::new()),
             started: Mutex::new(Vec::new()),
             specs: Mutex::new(Vec::new()),
             kinds: Mutex::new(Vec::new()),
@@ -129,6 +141,16 @@ impl ScriptedRunner {
             .lock()
             .unwrap()
             .insert(identifier.into(), script);
+    }
+
+    /// The next runs of `identifier` follow `scripts`, one each, before `script`'s one applies.
+    pub fn queue(&self, identifier: &str, scripts: Vec<Script>) {
+        self.queued
+            .lock()
+            .unwrap()
+            .entry(identifier.into())
+            .or_default()
+            .extend(scripts);
     }
 
     pub fn started(&self) -> Vec<String> {
@@ -170,13 +192,20 @@ impl JobRunner for ScriptedRunner {
         self.limits.lock().unwrap().push(limits);
         std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
         std::fs::write(&log_path, "{\"type\":\"result\"}\n").unwrap();
-        let script = self
-            .scripts
+        let next = self
+            .queued
             .lock()
             .unwrap()
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(Script::success);
+            .get_mut(&id)
+            .and_then(VecDeque::pop_front);
+        let script = next.unwrap_or_else(|| {
+            self.scripts
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(Script::success)
+        });
         if let Some(state) = script.set_state {
             self.linear.update(&id, |issue| issue.state = state.into());
         }
@@ -185,11 +214,13 @@ impl JobRunner for ScriptedRunner {
         }
         tokio::select! {
             permit = self.gate.acquire() => permit.expect("gate closed").forget(),
-            _ = cancel.cancelled() => return RunOutput { exit: ExitKind::Canceled, final_text: None },
+            _ = cancel.cancelled() => return RunOutput::ended(ExitKind::Canceled, None),
         }
         RunOutput {
             exit: script.exit,
             final_text: script.final_text,
+            usage: script.usage,
+            session_id: script.session_id,
         }
     }
 }
@@ -268,6 +299,7 @@ impl Harness {
                 prompt_override: None,
                 lean: true,
                 effort: None,
+                labels: Vec::new(),
             })
             .unwrap();
         dir

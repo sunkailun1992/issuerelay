@@ -20,10 +20,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { queryKeys, useBindings, useDoctor, useRemoveBinding, useSettings } from "@/hooks/queries";
+import { queryKeys, useBindings, useDoctor, useLabels, useRemoveBinding, useSettings } from "@/hooks/queries";
 import { type BindingLabels, bindingLabels, executorVerdict } from "@/lib/binding-labels";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { describeError } from "@/lib/errors";
+import { sameName } from "@/lib/settings-form";
 import type { Binding, BindingReport, DoctorReport } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { BindingDialog } from "./BindingDialog";
@@ -204,23 +205,54 @@ interface CardActions {
 }
 
 /**
- * One binding (design 9.2): its folder, executor, permission level, whether its runs are lean, model,
- * reasoning effort, prompt override and what the last check found.
+ * One binding (design 9.2): its folder, routing labels, executor, permission level, whether its runs
+ * are lean, model, reasoning effort, prompt override and what the last check found. A routing label
+ * that Linear's labels (`linear`, once read) no longer have is marked: no issue carries it, so the
+ * project's other binding takes its issues.
  * Edit, Remove and Check again are named for what they do and described by the project, which their
  * name leaves out (they are one in every card).
  */
-function BindingCard({ binding, labels, check, actions }: { binding: Binding; labels: BindingLabels; check: LastCheck; actions: CardActions }) {
+function BindingCard({
+  binding,
+  labels,
+  linear,
+  check,
+  actions,
+}: {
+  binding: Binding;
+  labels: BindingLabels;
+  linear: string[] | undefined;
+  check: LastCheck;
+  actions: CardActions;
+}) {
   const { t } = useTranslation();
   const titleId = useId();
   const promptId = useId();
   const report = check.report?.bindings.find((entry) => entry.binding_id === binding.id);
   const directory = cleanDisplayText(binding.directory);
+  const names = (binding.labels ?? []).map((label) => cleanDisplayText(label).trim());
+  const routing = names.join(", ");
+  const routingRow = (binding.labels ?? [])
+    .map((label, index) =>
+      linear !== undefined && !linear.some((name) => sameName(name, label))
+        ? t("bindings.label_gone_option", { name: names[index] })
+        : names[index],
+    )
+    .join(", ");
   return (
     <section aria-labelledby={titleId}>
       <Card size="sm">
         <div className="flex flex-wrap items-center justify-between gap-2 px-(--card-spacing)">
           <h2 id={titleId} className="min-w-0 text-base font-medium break-words">
             {binding.project_name}
+            {/* A project bound to several folders: its routing labels tell the bindings apart. The
+                blank stands outside the span, where the card's accessible name keeps it. */}
+            {routing !== "" && (
+              <>
+                {" "}
+                <span className="font-normal text-muted-foreground">· {routing}</span>
+              </>
+            )}
           </h2>
           <div className="flex shrink-0 items-center gap-2">
             <Button variant="outline" size="sm" aria-describedby={titleId} onClick={(event) => actions.onEdit(event.currentTarget)}>
@@ -236,6 +268,8 @@ function BindingCard({ binding, labels, check, actions }: { binding: Binding; la
             <dd className="min-w-0">
               <MiddleEllipsis text={directory} className="font-mono text-xs" />
             </dd>
+            <dt className="text-muted-foreground">{t("bindings.labels")}</dt>
+            <dd className={cn(routing === "" && "text-muted-foreground")}>{routing === "" ? t("bindings.labels_none") : routingRow}</dd>
             <dt className="text-muted-foreground">{t("bindings.executor")}</dt>
             <dd>{labels.executor(binding.executor)}</dd>
             <dt className="text-muted-foreground">{t("bindings.permission")}</dt>
@@ -276,6 +310,8 @@ export default function Bindings() {
   const settings = useSettings();
   const check = useLastCheck();
   const labels = bindingLabels(t, settings.data);
+  // Linear is asked for its labels only when a binding routes by them.
+  const linearLabels = useLabels(bindings.data?.some((binding) => (binding.labels ?? []).length > 0) ?? false);
   // The binding being edited stays while the dialog fades out, so that it does not turn into a new one.
   const [dialog, setDialog] = useState<{ open: boolean; binding?: Binding }>({ open: false });
   // The button that opened the dialog, taken from its click: in WebKit a mouse click does not
@@ -340,7 +376,14 @@ export default function Bindings() {
     body = (
       <div className="flex flex-col gap-4">
         {bindings.data.map((binding) => (
-          <BindingCard key={binding.id} binding={binding} labels={labels} check={check} actions={actionsOf(binding)} />
+          <BindingCard
+            key={binding.id}
+            binding={binding}
+            labels={labels}
+            linear={linearLabels.data}
+            check={check}
+            actions={actionsOf(binding)}
+          />
         ))}
       </div>
     );

@@ -1,9 +1,10 @@
 import { type Backend, BackendError } from "./backend";
 import { MOCK_NOW, now, setFixedClock } from "./clock";
 import {
-  DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LOGS,
+  DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LABELS, DEMO_LOGS,
   DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_UPDATES, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
+import { bindingsOverlap } from "./routing";
 import { isActive } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup,
@@ -206,10 +207,10 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     bindings: () => reply(() => structuredClone(bindings)),
     saveBinding: (binding) =>
       reply(() => {
-        // As `Engine::add_binding` does: it replaces every binding with its id or its project and
-        // takes the place of the first of them (so that editing one does not move it); a binding
-        // that replaces none goes last.
-        const replaced = (b: Binding) => b.project_id === binding.project_id || b.id === binding.id;
+        // As `Engine::add_binding` does: it replaces the binding with its id and every binding that
+        // would take the same issues, and takes the place of the first of them (so that editing one
+        // does not move it); a binding that replaces none goes last.
+        const replaced = (b: Binding) => b.id === binding.id || bindingsOverlap(b, binding);
         const place = bindings.findIndex(replaced);
         const next = bindings.filter((b) => !replaced(b));
         next.splice(place === -1 ? next.length : place, 0, binding);
@@ -229,6 +230,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         return bindings.length !== before;
       }),
     projects: () => reply(() => (connected() ? DEMO_PROJECTS : offline())),
+    labels: () => reply(() => (connected() ? [...DEMO_LABELS] : offline())),
     settings: () => reply(() => structuredClone(settings)),
     saveSettings: (next) =>
       reply(() => {

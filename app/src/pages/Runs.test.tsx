@@ -7,7 +7,7 @@ import { MOCK_NOW, setFixedClock } from "@/lib/clock";
 import { formatTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
 import { RUN_FILTERS, type RunFilter } from "@/lib/runs";
-import type { Job, JobState } from "@/lib/types";
+import type { Job, JobState, RunUsage } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import { advanceUntil } from "@/test/time";
 import Runs from "./Runs";
@@ -123,7 +123,8 @@ test("a row says the state, the issue and who ran it, the title, when and for ho
     ["Awaiting acceptance"],
     ["DEMO-10", "Claude Code"],
     ["Add hello.txt"],
-    ["50 minutes ago", "30 min 0 s"],
+    // Claude Code's estimate of the cost follows the duration.
+    ["50 minutes ago", "30 min 0 s", "· $0.42"],
     ["Added hello.txt, pushed it to the test branch and read the deployment back"],
   ]);
   expect(cellsOf(rowOfRun(8))).toEqual([
@@ -193,6 +194,45 @@ test("the note is the summary of a run that did something and the reason of one 
   // Only the first line: the whole text is on the run's page.
   expect(note(25)).toEqual(["first line"]);
   expect(note(24)).toEqual(["first"]);
+});
+
+test("a planning run says so after its executor, and one that posted its plan has its own badge", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const base = (await backend.listJobs(100)).find((job) => job.id === 8)!;
+  backend.listJobs = vi.fn().mockResolvedValue([
+    { ...base, id: 33, issue_identifier: "DEMO-33", mode: "plan", state: "running", finished_at: null, reason: null },
+    { ...base, id: 34, issue_identifier: "DEMO-34", mode: "plan", state: "needs_info", report: "planned", reason: null, summary: "Posted a plan in three steps" },
+    // A usual run that asked a question is not a plan.
+    { ...base, id: 35, issue_identifier: "DEMO-35", mode: "implement", state: "needs_info", report: "needs_info", reason: null, summary: "Asked which format" },
+  ]);
+  await renderWithProviders(<Runs />, { backend });
+  await screen.findByText("DEMO-33");
+  expect(cellsOf(rowOfRun(33)).slice(0, 2)).toEqual([["Running"], ["DEMO-33", "Claude Code", "· Plan only"]]);
+  expect(cellsOf(rowOfRun(34)).slice(0, 2)).toEqual([["Plan posted"], ["DEMO-34", "Claude Code", "· Plan only"]]);
+  expect(cellsOf(rowOfRun(35)).slice(0, 2)).toEqual([["Needs information"], ["DEMO-35", "Claude Code"]]);
+});
+
+test("a run without a cost shows none, and a cost under a cent is not shown as nothing", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const base = (await backend.listJobs(100)).find((job) => job.id === 8)!;
+  const usage: RunUsage = {
+    cost_micro_usd: null,
+    session_cost_micro_usd: null,
+    input_tokens: 10,
+    output_tokens: 20,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    turns: null,
+  };
+  backend.listJobs = vi.fn().mockResolvedValue([
+    { ...base, id: 36, issue_identifier: "DEMO-36", usage: { ...usage, cost_micro_usd: 4_000, session_cost_micro_usd: 4_000, turns: 3 } },
+    // Codex reports tokens only.
+    { ...base, id: 37, issue_identifier: "DEMO-37", executor: "codex", usage },
+  ]);
+  await renderWithProviders(<Runs />, { backend });
+  await screen.findByText("DEMO-36");
+  expect(cellsOf(rowOfRun(36))[3]).toEqual(["2 hours ago", "1 h 0 min", "· <$0.01"]);
+  expect(cellsOf(rowOfRun(37))[3]).toEqual(["2 hours ago", "1 h 0 min"]);
 });
 
 test("the AI's summary and the engine's reason are cleaned before they are shown", async () => {

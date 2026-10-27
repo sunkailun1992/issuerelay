@@ -389,6 +389,17 @@ test("the recent results are the finished runs, newest first, each leading to it
   expect(screen.getByTestId("where")).toHaveTextContent("/runs/9");
 });
 
+test("a planning run that posted its plan is listed with its own badge, a question as a question", async () => {
+  const backend = backendWithJobs((jobs) =>
+    jobs.map((job) => (job.id === 9 ? { ...job, mode: "plan" as const, report: "planned", summary: "Posted a plan in three steps" } : job)),
+  );
+  await renderWithProviders(<Overview />, { backend });
+  const recent = await screen.findByRole("region", { name: "Recent results" });
+  const planned = within(recent).getAllByRole("link").find((row) => row.getAttribute("href") === "/runs/9")!;
+  expect(planned).toHaveTextContent("Plan posted");
+  expect(planned).not.toHaveTextContent("Needs information");
+});
+
 test("at most eight finished runs are listed", async () => {
   const backend = backendWithJobs((jobs) => {
     const base = jobs.find((job) => job.state === "done")!;

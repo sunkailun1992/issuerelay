@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
-import { isActive, isNewestRun, newestRuns, parseRunFilter, RUN_FILTERS } from "./runs";
+import { isActive, isNewestRun, isPlanned, isPlanRun, newestRuns, parseRunFilter, RUN_FILTERS } from "./runs";
 import { JOB_STATES } from "./types";
 
 test("the newest run of an issue is the one with the greatest id", () => {
@@ -52,4 +52,21 @@ test("the filter an address asks for is one of those, and anything else is \"all
   for (const unknown of [null, "", "bogus", "FAILED", "failed ", "failed,done", "__proto__", "toString"]) {
     expect(parseRunFilter(unknown), String(unknown)).toBe("all");
   }
+});
+
+test("a run is a planning run by its mode, and one from before planning runs is a usual run", () => {
+  const run = DEMO_JOBS[0];
+  expect(isPlanRun({ ...run, mode: "plan" })).toBe(true);
+  expect(isPlanRun({ ...run, mode: "implement" })).toBe(false);
+  expect(isPlanRun({ ...run, mode: undefined })).toBe(false);
+});
+
+test("only a planning run that reported a plan and waits on the issue has posted its plan", () => {
+  const run = { ...DEMO_JOBS[0], mode: "plan" as const, state: "needs_info" as const, report: "planned" };
+  expect(isPlanned(run)).toBe(true);
+  // A planning run that asked a question instead, or that failed, has not.
+  expect(isPlanned({ ...run, report: "needs_info" })).toBe(false);
+  expect(isPlanned({ ...run, state: "failed" })).toBe(false);
+  // Nor has a usual run, whatever it reported.
+  expect(isPlanned({ ...run, mode: "implement" })).toBe(false);
 });

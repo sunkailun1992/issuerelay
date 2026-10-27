@@ -1,8 +1,10 @@
 //! Builds the command line for one executor run. The prompt always travels on stdin and the
 //! working directory is set on the process. The arguments are fixed strings except for a
-//! validated model name, a reasoning-effort level (a fixed set of words) and, in a lean Claude
-//! run, the path of the user-level `CLAUDE.md` that `lean::passable` checked (the third exception
-//! of the fixed-arguments rule); this keeps `claude.cmd` / `codex.cmd` safe on Windows.
+//! validated model name, a reasoning-effort level (a fixed set of words), the id of a session to
+//! resume (only one shaped like a UUID, from the executor's own output: `outcome::is_session_id`)
+//! and, in a lean Claude run, the path of the user-level `CLAUDE.md` that `lean::passable` checked
+//! (the third exception of the fixed-arguments rule); this keeps `claude.cmd` / `codex.cmd` safe on
+//! Windows.
 pub mod lean;
 pub mod outcome;
 
@@ -31,7 +33,7 @@ pub struct CommandSpec {
 }
 
 /// How one run starts: the permission profile, and the binding's model, reasoning effort and
-/// lean configuration, when it has them.
+/// lean configuration, when it has them; whether it is a planning run, and the session it resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions<'a> {
     pub profile: PermissionProfile,
@@ -39,6 +41,12 @@ pub struct RunOptions<'a> {
     pub effort: Option<Effort>,
     /// `Some` for a lean run.
     pub lean: Option<Lean<'a>>,
+    /// A planning run (run-improvements design, section 10.2): the executor can read and use
+    /// Linear's tools but not change files. Planning runs are always lean (the engine sees to it).
+    pub plan: bool,
+    /// The session this run continues (section 11.2); only a value `outcome::is_session_id`
+    /// accepts is passed.
+    pub resume: Option<&'a str>,
 }
 
 /// What a lean run needs besides the fixed arguments.
@@ -76,6 +84,44 @@ pub fn is_git_repo(dir: &Path) -> bool {
     dir.ancestors().any(|folder| folder.join(".git").exists())
 }
 
+/// The Linear tools a planning run may not use (run-improvements design, section 10.2): every one
+/// that writes, except `save_comment` (the plan, or a question) and `save_issue` (taking the plan
+/// label off). Linear's diff tools act on the pull request linked to an issue, so without this a
+/// planning run could approve or merge code that it was only to plan. The names are Linear's tools
+/// as its MCP server listed them on 2026-10-27 (`tests/fixtures/linear-tool-names.txt`); a tool
+/// Linear adds later is not on the list.
+pub const PLAN_DENIED_LINEAR_TOOLS: [&str; 29] = [
+    "create_attachment",
+    "create_attachment_from_upload",
+    "create_issue_label",
+    "delete_attachment",
+    "delete_comment",
+    "delete_diff_comment",
+    "delete_status_update",
+    "mark_notification",
+    "merge_diff",
+    "prepare_attachment_upload",
+    "prepare_file_upload",
+    "resolve_diff_thread",
+    "restore_issue_label",
+    "restore_project_label",
+    "retire_issue_label",
+    "retire_project_label",
+    "save_diff_comment",
+    "save_document",
+    "save_issue_label",
+    "save_milestone",
+    "save_project",
+    "save_project_label",
+    "save_release",
+    "save_release_note",
+    "save_status_update",
+    "share_issue",
+    "submit_diff_review",
+    "unshare_issue",
+    "update_diff",
+];
+
 /// Builds the command for one run. The arguments are fixed strings plus the model name (only
 /// when it passes `is_valid_model_name`), the effort level and, for a lean run, `lean`'s
 /// arguments; the prompt goes to stdin and `cwd` is set on the process, so neither ever appears
@@ -88,6 +134,21 @@ pub fn build(
     prompt: String,
 ) -> CommandSpec {
     let model = options.model.filter(|m| is_valid_model_name(m));
+    // `codex exec resume` has no `--approve-for-me`: a usual Codex run with automatic review never
+    // resumes. Nor has it `-s`: its read-only setting is a key the profile of the user's own
+    // configuration could override, so a Codex planning run on that configuration does not resume
+    // either. The engine does not ask for these.
+    let resume = options
+        .resume
+        .filter(|id| outcome::is_session_id(id))
+        .filter(|_| {
+            !(kind == ExecutorKind::Codex
+                && if options.plan {
+                    options.lean.is_none()
+                } else {
+                    options.profile == PermissionProfile::Auto
+                })
+        });
     let mut args: Vec<String> = Vec::new();
     let mut env = Vec::new();
     match kind {
@@ -108,10 +169,26 @@ pub fn build(
                 match options.profile {
                     PermissionProfile::Full => "bypassPermissions",
                     PermissionProfile::Auto => "auto",
+                    // Also in a planning run: the user's own rules decide (design W8).
                     PermissionProfile::Personal => "dontAsk",
                 }
                 .into(),
             );
+            if options.plan {
+                // One value each, then another option: both take any number of values. The names
+                // are those of the lean run's Linear server, which IssueRelay's setup also gives
+                // the user's own; a name no server has denies nothing.
+                args.extend(["--tools".to_string(), "Read,Grep,Glob".to_string()]);
+                args.extend([
+                    "--disallowedTools".to_string(),
+                    PLAN_DENIED_LINEAR_TOOLS
+                        .map(|tool| format!("mcp__{}__{tool}", lean::CLAUDE_LINEAR_SERVER))
+                        .join(","),
+                ]);
+            }
+            if let Some(id) = resume {
+                args.extend(["--resume".to_string(), id.to_string()]);
+            }
             if let Some(m) = model {
                 args.extend(["--model".to_string(), m.to_string()]);
             }
@@ -125,19 +202,54 @@ pub fn build(
             }
         }
         ExecutorKind::Codex => {
-            args.extend(["exec", "--json"].map(String::from));
-            match options.profile {
-                PermissionProfile::Full => {
-                    args.push("--dangerously-bypass-approvals-and-sandbox".into())
+            args.push("exec".into());
+            if resume.is_some() {
+                args.push("resume".into());
+            }
+            args.push("--json".into());
+            if options.plan {
+                // Read-only whatever the profile; `exec resume` takes it as a setting only.
+                if resume.is_some() {
+                    args.extend(["-c".to_string(), "sandbox_mode=read-only".to_string()]);
+                } else {
+                    args.extend(["-s".to_string(), "read-only".to_string()]);
                 }
-                PermissionProfile::Auto => args.push("--approve-for-me".into()),
-                PermissionProfile::Personal => {}
+            } else {
+                match options.profile {
+                    PermissionProfile::Full => {
+                        args.push("--dangerously-bypass-approvals-and-sandbox".into())
+                    }
+                    PermissionProfile::Auto => args.push("--approve-for-me".into()),
+                    PermissionProfile::Personal => {}
+                }
             }
             if !is_git_repo(cwd) {
                 args.push("--skip-git-repo-check".into());
             }
             if options.lean.is_some() {
                 args.extend(lean::codex_args());
+                if options.plan {
+                    // Outside the sandbox's bypass, Linear's tool calls need an approval that an
+                    // unattended run cannot give; this lets the lean run's own Linear server
+                    // through (design section 4.3), without the tools a planning run may not use.
+                    // Only the lean run's server is known to exist: naming a server the user's own
+                    // configuration lacks would leave Codex an incomplete one.
+                    args.extend([
+                        "-c".to_string(),
+                        format!(
+                            "mcp_servers.{}.default_tools_approval_mode=approve",
+                            lean::CODEX_LINEAR_SERVER
+                        ),
+                        "-c".to_string(),
+                        format!(
+                            "mcp_servers.{}.disabled_tools=[{}]",
+                            lean::CODEX_LINEAR_SERVER,
+                            PLAN_DENIED_LINEAR_TOOLS
+                                .map(|tool| format!("\"{tool}\""))
+                                .join(",")
+                        ),
+                    ]);
+                }
             }
             if let Some(m) = model {
                 args.extend(["-m".to_string(), m.to_string()]);
@@ -147,6 +259,9 @@ pub fn build(
                     "-c".to_string(),
                     format!("model_reasoning_effort={}", effort.as_str()),
                 ]);
+            }
+            if let Some(id) = resume {
+                args.push(id.to_string());
             }
             args.push("-".into());
         }
@@ -175,6 +290,8 @@ mod tests {
             model,
             effort: None,
             lean: None,
+            plan: false,
+            resume: None,
         }
     }
 
@@ -511,6 +628,279 @@ mod tests {
         repo
     }
 
+    const SESSION: &str = "01a17cd5-323b-7e51-8637-4bced9551eaa";
+
+    /// The arguments of a lean run of `kind` in a repository, with `change` applied to the options.
+    fn lean_args(kind: ExecutorKind, change: impl FnOnce(&mut RunOptions<'_>)) -> Vec<String> {
+        let repo = git_repo();
+        let mut options = RunOptions {
+            lean: lean(None),
+            ..opts(PermissionProfile::Full, None)
+        };
+        change(&mut options);
+        build(kind, PathBuf::from("x"), &options, repo.path(), "p".into()).args
+    }
+
+    /// Whether `args` hold `pair` next to each other, in this order.
+    fn has_pair(args: &[String], pair: [&str; 2]) -> bool {
+        args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+    }
+
+    /// The value of Claude's `--disallowedTools` in a planning run.
+    fn claude_denied() -> String {
+        PLAN_DENIED_LINEAR_TOOLS
+            .map(|tool| format!("mcp__linear-server__{tool}"))
+            .join(",")
+    }
+
+    /// The setting that keeps a lean Codex planning run off the same tools.
+    fn codex_denied() -> String {
+        format!(
+            "mcp_servers.linear.disabled_tools=[{}]",
+            PLAN_DENIED_LINEAR_TOOLS
+                .map(|tool| format!("\"{tool}\""))
+                .join(",")
+        )
+    }
+
+    /// Linear's tool names as its MCP server listed them on 2026-10-27.
+    fn linear_tool_names() -> Vec<&'static str> {
+        include_str!("../../tests/fixtures/linear-tool-names.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    #[test]
+    fn the_tools_a_planning_run_may_not_use_are_every_writing_tool_linear_listed() {
+        let listed = linear_tool_names();
+        assert_eq!(listed.len(), 69);
+        // Reading is what planning is; a comment and the issue's own fields are what it writes.
+        let reads = |name: &str| {
+            ["get_", "list_", "search_", "extract_"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        };
+        let mut writing: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|name| !reads(name) && *name != "save_comment" && *name != "save_issue")
+            .collect();
+        writing.sort_unstable();
+        let mut denied = PLAN_DENIED_LINEAR_TOOLS.to_vec();
+        denied.sort_unstable();
+        assert_eq!(denied, writing);
+    }
+
+    #[test]
+    fn claude_plan_run_limits_the_built_in_tools() {
+        let args = lean_args(ExecutorKind::Claude, |o| o.plan = true);
+        let at = args.iter().position(|a| a == "--permission-mode").unwrap();
+        assert_eq!(
+            &args[at..at + 4],
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--tools",
+                "Read,Grep,Glob"
+            ]
+        );
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        // A usual run has every tool.
+        assert!(!lean_args(ExecutorKind::Claude, |_| {}).contains(&"--tools".to_string()));
+    }
+
+    #[test]
+    fn claude_plan_run_cannot_use_linears_writing_tools_but_comments_and_the_issue() {
+        let args = lean_args(ExecutorKind::Claude, |o| o.plan = true);
+        let denied = claude_denied();
+        assert!(has_pair(&args, ["--disallowedTools", &denied]));
+        assert!(denied.contains("mcp__linear-server__merge_diff,"));
+        assert!(!denied.contains("save_comment") && !denied.contains("save_issue,"));
+        // Also on the user's own configuration, whose Linear server IssueRelay's setup names alike.
+        let personal = lean_args(ExecutorKind::Claude, |o| {
+            o.plan = true;
+            o.profile = PermissionProfile::Personal;
+            o.lean = None;
+        });
+        assert!(has_pair(&personal, ["--disallowedTools", &denied]));
+        // A usual run is not limited.
+        assert!(
+            !lean_args(ExecutorKind::Claude, |_| {}).contains(&"--disallowedTools".to_string())
+        );
+    }
+
+    // A binding on personal settings keeps them in a planning run too: its permission mode stays
+    // `dontAsk`, so nothing the user's rules do not allow becomes possible; only the built-in tools
+    // shrink further.
+    #[test]
+    fn a_planning_run_keeps_the_permission_mode_of_its_profile() {
+        let personal = lean_args(ExecutorKind::Claude, |o| {
+            o.plan = true;
+            o.profile = PermissionProfile::Personal;
+            o.lean = None;
+        });
+        let at = personal
+            .iter()
+            .position(|a| a == "--permission-mode")
+            .unwrap();
+        assert_eq!(
+            &personal[at..at + 4],
+            ["--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob"]
+        );
+        let auto = lean_args(ExecutorKind::Claude, |o| {
+            o.plan = true;
+            o.profile = PermissionProfile::Auto;
+        });
+        assert!(has_pair(&auto, ["--permission-mode", "auto"]));
+    }
+
+    #[test]
+    fn codex_plan_run_is_read_only_and_lets_linear_through() {
+        for profile in [
+            PermissionProfile::Full,
+            PermissionProfile::Auto,
+            PermissionProfile::Personal,
+        ] {
+            let args = lean_args(ExecutorKind::Codex, |o| {
+                o.plan = true;
+                o.profile = profile;
+            });
+            assert_eq!(
+                &args[..4],
+                ["exec", "--json", "-s", "read-only"],
+                "{profile:?}"
+            );
+            assert!(!args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+            assert!(!args.contains(&"--approve-for-me".to_string()));
+            assert!(has_pair(
+                &args,
+                [
+                    "-c",
+                    "mcp_servers.linear.default_tools_approval_mode=approve"
+                ]
+            ));
+            assert!(has_pair(&args, ["-c", &codex_denied()]), "{profile:?}");
+            assert_eq!(args.last().map(String::as_str), Some("-"));
+        }
+        // A usual run is not limited.
+        assert!(
+            !lean_args(ExecutorKind::Codex, |_| {})
+                .iter()
+                .any(|a| a.contains("disabled_tools"))
+        );
+    }
+
+    #[test]
+    fn codex_plan_run_adds_the_linear_approval_only_when_the_server_is_its_own() {
+        // Without the lean arguments `linear` is not a server this run defines.
+        let args = lean_args(ExecutorKind::Codex, |o| {
+            o.plan = true;
+            o.lean = None;
+        });
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("default_tools_approval_mode") || a.contains("disabled_tools"))
+        );
+    }
+
+    #[test]
+    fn a_codex_planning_run_on_the_users_own_configuration_starts_afresh() {
+        // `exec resume` takes read-only only as a key that a profile of that configuration could
+        // override; a new run takes `-s`, which nothing overrides.
+        let args = lean_args(ExecutorKind::Codex, |o| {
+            o.plan = true;
+            o.profile = PermissionProfile::Personal;
+            o.lean = None;
+            o.resume = Some(SESSION);
+        });
+        assert_eq!(&args[..4], ["exec", "--json", "-s", "read-only"]);
+        assert!(!args.contains(&SESSION.to_string()));
+        // Its usual runs still resume.
+        let usual = lean_args(ExecutorKind::Codex, |o| {
+            o.profile = PermissionProfile::Personal;
+            o.lean = None;
+            o.resume = Some(SESSION);
+        });
+        assert_eq!(&usual[usual.len() - 2..], [SESSION, "-"]);
+    }
+
+    #[test]
+    fn claude_resume_follows_the_permission_mode() {
+        let args = lean_args(ExecutorKind::Claude, |o| o.resume = Some(SESSION));
+        assert!(has_pair(&args, ["--permission-mode", "bypassPermissions"]));
+        assert!(has_pair(&args, ["--resume", SESSION]));
+        let plan = lean_args(ExecutorKind::Claude, |o| {
+            o.plan = true;
+            o.resume = Some(SESSION);
+        });
+        let at = plan.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(
+            &plan[at..at + 6],
+            [
+                "--tools",
+                "Read,Grep,Glob",
+                "--disallowedTools",
+                &claude_denied(),
+                "--resume",
+                SESSION
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_resume_puts_the_id_before_the_stdin_marker() {
+        let args = lean_args(ExecutorKind::Codex, |o| o.resume = Some(SESSION));
+        assert_eq!(
+            &args[..4],
+            [
+                "exec",
+                "resume",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox"
+            ]
+        );
+        assert!(args.contains(&"--ignore-user-config".to_string()));
+        assert_eq!(&args[args.len() - 2..], [SESSION, "-"]);
+    }
+
+    #[test]
+    fn codex_plan_resume_uses_the_sandbox_setting() {
+        let args = lean_args(ExecutorKind::Codex, |o| {
+            o.plan = true;
+            o.resume = Some(SESSION);
+        });
+        assert_eq!(
+            &args[..5],
+            ["exec", "resume", "--json", "-c", "sandbox_mode=read-only"]
+        );
+        assert!(!args.contains(&"-s".to_string()));
+        assert_eq!(&args[args.len() - 2..], [SESSION, "-"]);
+    }
+
+    #[test]
+    fn a_session_that_cannot_be_resumed_is_not_passed() {
+        for kind in [ExecutorKind::Claude, ExecutorKind::Codex] {
+            let args = lean_args(kind, |o| o.resume = Some("--dangerously-anything"));
+            assert!(
+                !args.contains(&"--dangerously-anything".to_string()),
+                "{kind:?}"
+            );
+            assert!(
+                !args.contains(&"resume".to_string()) && !args.contains(&"--resume".to_string())
+            );
+        }
+        // `codex exec resume` takes no `--approve-for-me`: automatic review starts afresh.
+        let auto = lean_args(ExecutorKind::Codex, |o| {
+            o.profile = PermissionProfile::Auto;
+            o.resume = Some(SESSION);
+        });
+        assert!(!auto.contains(&"resume".to_string()) && !auto.contains(&SESSION.to_string()));
+        assert!(auto.contains(&"--approve-for-me".to_string()));
+    }
+
     #[test]
     fn claude_lean_arguments_follow_the_design() {
         let options = RunOptions {
@@ -800,6 +1190,8 @@ mod tests {
                             lean: lean_run.then(|| Lean {
                                 user_instructions: Some(Path::new(DEMO_INSTRUCTIONS)),
                             }),
+                            plan: false,
+                            resume: None,
                         };
                         let case = format!("{profile:?} lean={lean_run} {model:?} {effort:?}");
 

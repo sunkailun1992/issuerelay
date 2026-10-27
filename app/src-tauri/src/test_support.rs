@@ -15,7 +15,7 @@ use issuerelay_core::{
     config::ExecutorKind,
     engine::StatusSnapshot,
     linear::Viewer,
-    model::{Job, JobState},
+    model::{Job, JobState, RunMode},
 };
 use tauri::{
     App, AppHandle, RunEvent,
@@ -80,6 +80,11 @@ pub fn job(state: JobState) -> Job {
         finished_at: None,
         log_path: None,
         summary: None,
+        mode: RunMode::Implement,
+        report: None,
+        session_id: None,
+        resume_job_id: None,
+        usage: None,
     }
 }
 

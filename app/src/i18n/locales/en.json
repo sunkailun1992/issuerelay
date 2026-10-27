@@ -15,6 +15,7 @@
     "running": "Running",
     "awaiting_acceptance": "Awaiting acceptance",
     "needs_info": "Needs information",
+    "planned": "Plan posted",
     "done": "Done",
     "failed": "Failed",
     "canceled": "Canceled",
@@ -70,6 +71,7 @@
     "run_started": "The run has started.",
     "awaiting_acceptance": "Ready for you to accept: it is in testing now.",
     "needs_info": "The AI asked a question on the issue; add the details and label it ai-ready again.",
+    "plan_ready": "A plan is posted on the issue; add the ai-ready label to have it carried out.",
     "failed": "The run failed. The panel shows why.",
     "update_available": "IssueRelay {{version}} is available",
     "update_available_body": "Open the panel to install it."
@@ -225,7 +227,7 @@
     "bind_project": "Bind a project"
   },
   "issues": {
-    "description": "Issues assigned to you with the {{label}} label, the 50 most recently updated",
+    "description": "Issues assigned to you with the {{label}} or {{plan_label}} label, the 50 most recently updated",
     "empty_title": "No issues with the {{label}} label yet",
     "empty_description": "IssueRelay picks up an issue that is assigned to you, has the {{label}} label and is in {{todo}}.",
     "open_help": "How it works",
@@ -246,7 +248,11 @@
       "project_not_bound": "Its project is not bound to a local folder",
       "directory_missing": "The bound folder {{directory}} does not exist",
       "executor_not_ready": "{{executor}} is not ready; see the environment check",
-      "lean_not_ready": "{{executor}} is not ready for lean runs; see the environment check"
+      "lean_not_ready": "{{executor}} is not ready for lean runs; see the environment check",
+      "blocked_by": "Blocked by {{issues}}, which are not done yet",
+      "labels_match_several_bindings": "Its labels {{labels}} match several bindings of the project; keep one",
+      "no_binding_for_labels": "No binding of the project takes its labels: add a binding without labels, or one of its labels to a binding",
+      "plan_needs_lean": "A plan cannot be made in the home folder; bind another folder"
     },
     "load_failed": "Could not read the issues from Linear",
     "open_guide": "Open the guide",
@@ -282,7 +288,24 @@
       "directory": "Folder",
       "created": "Created",
       "finished": "Finished",
-      "summary": "Summary"
+      "summary": "Summary",
+      "mode": "Run for",
+      "resumed": "Continues",
+      "usage": "Usage"
+    },
+    "mode": {
+      "plan": "Plan only"
+    },
+    "resumed_from": "The session of run #{{id}}",
+    "usage": {
+      "cost": "{{cost}} (estimate)",
+      "tokens": "{{input}} tokens in, {{output}} out",
+      "cache": "cache {{read}} read, {{write}} written",
+      "cache_read": "cache {{read}} read",
+      "turns_one": "{{count}} turn",
+      "turns_other": "{{count}} turns",
+      "cost_note": "The cost is Claude Code's own estimate at API prices. When Claude Code is signed in with a subscription, it is not what you are charged.",
+      "codex_note": "Codex reports tokens only; its input count includes the cached part."
     },
     "empty": "No runs yet",
     "empty_description": "A run shows up here when IssueRelay starts work on an issue.",
@@ -297,6 +320,10 @@
       "failed": "The run failed",
       "canceled": "The run was canceled",
       "waiting_binding": "The run waits for setup",
+      "linear_deleted": "The issue was deleted in Linear, so the run was stopped",
+      "linear_canceled": "The issue was canceled in Linear, so the run was stopped",
+      "linear_completed": "The issue was completed in Linear, so the run was stopped",
+      "linear_reassigned": "The issue is no longer assigned to you in Linear, so the run was stopped",
       "other": "A note from IssueRelay"
     },
     "timeline": "Timeline",
@@ -339,6 +366,15 @@
     "project": "Linear project",
     "project_placeholder": "Choose a project",
     "project_bound": "{{name}} (already bound)",
+    "labels": "Routing labels",
+    "labels_hint": "Optional. This binding takes the project's issues with any of these labels, in its own folder; without labels it takes the rest.",
+    "labels_failed": "Could not read the labels from Linear",
+    "no_labels": "Linear has no labels to route by yet. Create them in Linear first.",
+    "label_taken_option": "{{name}} (another binding)",
+    "label_gone_option": "{{name}} (not in Linear)",
+    "labels_needed": "The project has a binding without labels already: choose routing labels to bind another folder",
+    "labels_taken": "Another binding of this project has one of these labels",
+    "labels_none": "None: the project's other issues",
     "projects_failed": "Could not read the projects from Linear",
     "no_projects": "Linear has no projects to bind yet. Create one in Linear first.",
     "project_missing": "The project you chose is not in the list from Linear any more. Choose one again.",
@@ -485,6 +521,8 @@
     "autostart_failed": "Could not read whether IssueRelay starts at login",
     "show_in_dock": "Show in Dock",
     "show_in_dock_note": "Off: the icon shows only while the panel is open. The menu bar icon always stays.",
+    "resume_sessions": "Continue the earlier session when an issue comes back",
+    "resume_sessions_note": "The AI picks up where it left off, with what it already read. A run started again by hand always starts afresh.",
     "cli": {
       "title": "Command line on PATH",
       "description": "Lets you type {{command}} in a terminal. No administrator rights needed.",
@@ -514,6 +552,8 @@
     "check_again": "Check again",
     "trigger_names": "Trigger names",
     "label_name": "Trigger label",
+    "plan_label_name": "Plan label",
+    "plan_label_same": "Use a name other than the trigger label",
     "state_todo": "Status that triggers a run",
     "state_in_progress": "Status while the AI works",
     "state_in_testing": "Status when ready for testing",
@@ -554,6 +594,7 @@
       "running": "The executor is working on it.",
       "awaiting_acceptance": "The run ended well and the issue is in testing. Mark it done in the panel when you accept it.",
       "needs_info": "The AI found the issue unclear, asked on the issue and took the label off. Add the details and label it again.",
+      "planned": "A planning run posted its plan on the issue. Add {{label}} to have it carried out.",
       "done": "You marked it done.",
       "failed": "The run ended with an error, ran too long or went quiet, or the issue did not reach testing. Read the log and run it again.",
       "canceled": "You stopped the run."
@@ -573,6 +614,21 @@
     "lean_body": "A lean run loads only Linear's MCP server and the repository's own rules and settings: not your other MCP servers, plugins, hooks, auto memory or user-level CLAUDE.md. Codex still reads ~/.codex/AGENTS.md, and the repository's .codex/ configuration does not apply. Bindings run lean unless you turn it off; personal-settings bindings and a binding of your home folder always use your whole setup.",
     "lean_off": "Turn it off for a binding that needs other MCP servers, the repository's .codex/ configuration, deny rules from your user settings, or a custom model provider.",
     "lean_effort": "Lean runs do not read the reasoning effort from your own settings: set a default reasoning effort in Settings, or one for each binding.",
+    "more_title": "More ways to work",
+    "more": {
+      "plan_q": "Can the AI make a plan first, before it changes anything?",
+      "plan_a": "Label the issue {{plan_label}} instead of {{label}}: the AI reads the issue and the code and posts a plan as a comment. Its tools for changing files are turned off, and of Linear's tools it keeps only those that read, comment and update the issue itself. Add {{label}} once the plan suits you; that run continues the planning session.",
+      "routing_q": "One Linear project, several folders?",
+      "routing_a": "Give a binding routing labels: it takes the project's issues with any of them, in its own folder and queue. The binding without labels takes the rest.",
+      "blocked_q": "What about issues that wait for others?",
+      "blocked_a": "An issue that Linear shows as blocked by another one that is not done yet waits until that one is completed or canceled. Planning runs go ahead anyway.",
+      "linear_stop_q": "What if I cancel an issue while the AI works on it?",
+      "linear_stop_a": "Canceling, completing, reassigning or deleting the issue in Linear stops its run at the next check; the run says why. Not while monitoring is paused.",
+      "resume_q": "Does the AI start from scratch when an issue comes back?",
+      "resume_a": "No: it continues its earlier session, with what it already read and did, unless that session ended more than 7 days ago or ran with another executor or in another folder. Codex runs with automatic review always start afresh. You can turn this off in the settings.",
+      "usage_q": "What does a run use?",
+      "usage_a": "A run's page shows the tokens it used and, for Claude, its cost estimated at API prices; when Claude Code is signed in with a subscription, that is not what you are charged."
+    },
     "faq_title": "Questions and answers",
     "faq": {
       "not_picked_q": "Why was my issue not picked up?",

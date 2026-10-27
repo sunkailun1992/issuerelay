@@ -976,8 +976,8 @@ test("the first binding is made in the guide: the risk of full access is asked o
   const again = await screen.findByRole("heading", { level: 2, name: "Add another binding" });
   await waitFor(() => expect(again).toHaveFocus());
   await userEvent.click(await screen.findByRole("combobox", { name: "Linear project" }));
-  // A project that is bound cannot be bound twice.
-  expect(await screen.findByRole("option", { name: "Demo Project (already bound)" })).toHaveAttribute("aria-disabled", "true");
+  // A project that is bound says so: it is bound again only with routing labels.
+  expect(await screen.findByRole("option", { name: "Demo Project (already bound)" })).toBeInTheDocument();
   await userEvent.keyboard("{Escape}");
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   const add = await screen.findByRole("button", { name: "Add another" });
@@ -1121,7 +1121,8 @@ test("the last step tells the four conditions, one example, how an issue moves a
   expect(screen.queryByText("Make the app faster")).not.toBeInTheDocument();
   const flow = screen.getByRole("region", { name: "How an issue moves" });
   expect(within(flow).getByRole("list", { name: "The statuses of an issue in Linear" })).toBeInTheDocument();
-  expect(within(flow).getByRole("list", { name: "What the statuses in the panel mean" }).children).toHaveLength(8);
+  // The eight local statuses, and the badge of a posted plan.
+  expect(within(flow).getByRole("list", { name: "What the statuses in the panel mean" }).children).toHaveLength(9);
   expect(
     screen.getByText(
       "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs that are not lean load it too, and its tools can pause monitoring.",

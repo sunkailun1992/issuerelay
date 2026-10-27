@@ -47,6 +47,22 @@ export interface Issue {
   updated_at: string;
 }
 
+/** What a run is for (`model::RunMode`): carrying the issue out, or only writing a plan for it. */
+export type RunMode = "implement" | "plan";
+/**
+ * What a run used, as its executor reported it (`model::RunUsage`); `null` where it reported nothing.
+ * The cost is in millionths of a US dollar and only Claude reports one: under a subscription it is
+ * Claude Code's estimate at API prices, not a charge.
+ */
+export interface RunUsage {
+  cost_micro_usd: number | null;
+  session_cost_micro_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  turns: number | null;
+}
 export interface Job {
   id: number;
   issue_uuid: string;
@@ -66,6 +82,14 @@ export interface Job {
   finished_at: string | null;
   log_path: string | null;
   summary: string | null;
+  /** Absent from hosts before planning runs: a usual run. */
+  mode?: RunMode;
+  /** The `result` of the AI's last line of JSON (`in_testing`, `needs_info`, `failed`, `planned`). */
+  report?: string | null;
+  session_id?: string | null;
+  /** The earlier run whose session this one continues. */
+  resume_job_id?: number | null;
+  usage?: RunUsage | null;
 }
 
 /** A queued job passed over after a failed start, and when it is tried again. */
@@ -100,7 +124,15 @@ export type WaitReason =
   | { code: "directory_missing"; directory: string }
   | { code: "executor_not_ready"; executor: ExecutorKind }
   /** Ready for usual runs, but the binding's runs are lean and the lean checks fail. */
-  | { code: "lean_not_ready"; executor: ExecutorKind };
+  | { code: "lean_not_ready"; executor: ExecutorKind }
+  /** Issues that block it in Linear and are not done yet. */
+  | { code: "blocked_by"; issues: string[] }
+  /** It carries the routing labels of several bindings of its project. */
+  | { code: "labels_match_several_bindings"; labels: string[] }
+  /** Every binding of its project has routing labels, and it carries none of them. */
+  | { code: "no_binding_for_labels" }
+  /** A planning run is lean, which a binding of the home folder cannot be. */
+  | { code: "plan_needs_lean" };
 export type IssueStatus =
   /**
    * It meets every condition. `picked_up` is false only when its last run is over and Linear has not
@@ -113,7 +145,8 @@ export type IssueStatus =
   | { kind: "paused" };
 export interface IssueView { issue: Issue; job: Job | null; status: IssueStatus }
 
-export interface TriggerNames { label: string; todo: string; in_progress: string; in_testing: string; done: string }
+/** `plan_label`: issues with it get a planning run instead (run-improvements design, section 10). */
+export interface TriggerNames { label: string; todo: string; in_progress: string; in_testing: string; done: string; plan_label: string }
 export interface NotificationSettings { run_started: boolean; awaiting_acceptance: boolean; needs_info: boolean; failed: boolean }
 export interface Settings {
   language: string;
@@ -138,6 +171,8 @@ export interface Settings {
   full_access_acknowledged: boolean;
   /** Keep the app's icon in the macOS Dock while it runs; off, it shows only while the panel is open. Windows has no Dock. */
   show_in_dock: boolean;
+  /** An issue that comes back continues the executor session of its earlier run. */
+  resume_sessions: boolean;
 }
 
 export interface Binding {
@@ -153,6 +188,8 @@ export interface Binding {
   lean?: boolean;
   /** Absent: the default of the settings. */
   effort?: Effort;
+  /** Routing labels: the binding takes the project's issues with any of them. Absent: the project's default binding. */
+  labels?: string[];
 }
 export interface Project { id: string; name: string; team_ids: string[] }
 
@@ -197,6 +234,8 @@ export interface BindingReport {
    * neither sets one.
    */
   effort: Effort | null;
+  /** The binding's routing labels; empty or absent for the project's default binding. */
+  labels?: string[];
 }
 export interface DoctorReport {
   viewer: Viewer | null;

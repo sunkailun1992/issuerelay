@@ -17,7 +17,7 @@ import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatDuration, formatRelative, formatTime } from "@/lib/format";
 import { problemCause } from "@/lib/problem";
-import { newestRuns } from "@/lib/runs";
+import { isPlanned, newestRuns } from "@/lib/runs";
 import type { HeldJob, Job, JobState, LinearSetup, StatusView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { executorReady } from "./onboarding/check";
@@ -222,10 +222,10 @@ function RunningSection({ jobs }: { jobs: Job[] }) {
 }
 
 /** The room for a state's badge: the widest ("Awaiting acceptance") fits, so the numbers and titles of all rows line up. */
-function StateColumn({ state }: { state: JobState }) {
+function StateColumn({ job }: { job: Job }) {
   return (
     <div className="w-44 shrink-0">
-      <StatusBadge state={state} />
+      <StatusBadge state={job.state} planned={isPlanned(job)} />
     </div>
   );
 }
@@ -236,7 +236,7 @@ function QueueRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
   const lang = useLang();
   return (
     <li className="flex items-start gap-3 px-4 py-3">
-      <StateColumn state={job.state} />
+      <StateColumn job={job} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <p className="flex min-w-0 flex-wrap items-baseline gap-x-2">
           <span className="font-mono text-xs text-muted-foreground">{job.issue_identifier}</span>
@@ -296,7 +296,7 @@ function RecentRow({ job }: { job: Job }) {
         to={`/runs/${job.id}`}
         className="flex items-start gap-3 px-4 py-3 outline-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
       >
-        <StateColumn state={job.state} />
+        <StateColumn job={job} />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <p className="flex min-w-0 items-baseline gap-2">
             <span className="shrink-0 font-mono text-xs text-muted-foreground">{job.issue_identifier}</span>

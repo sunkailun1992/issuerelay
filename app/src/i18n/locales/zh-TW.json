@@ -15,6 +15,7 @@
     "running": "執行中",
     "awaiting_acceptance": "待驗收",
     "needs_info": "待補充資訊",
+    "planned": "方案已出",
     "done": "已完成",
     "failed": "失敗",
     "canceled": "已取消",
@@ -70,6 +71,7 @@
     "run_started": "已開始執行。",
     "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
     "needs_info": "AI 在需求下提出了問題。補充資訊後，請重新加上 ai-ready 標籤。",
+    "plan_ready": "方案已寫在需求下。要照方案動手，請加上 ai-ready 標籤。",
     "failed": "執行失敗，原因請見面板。",
     "update_available": "IssueRelay {{version}} 已發佈",
     "update_available_body": "開啟面板即可安裝。"
@@ -225,7 +227,7 @@
     "bind_project": "綁定專案"
   },
   "issues": {
-    "description": "指派給你、帶有 {{label}} 標籤的需求，最近更新的 50 項",
+    "description": "指派給你、帶有 {{label}} 或 {{plan_label}} 標籤的需求，最近更新的 50 項",
     "empty_title": "還沒有帶有 {{label}} 標籤的需求",
     "empty_description": "需求指派給你、帶有 {{label}} 標籤且狀態為 {{todo}} 時，IssueRelay 才會接手處理。",
     "open_help": "了解運作方式",
@@ -246,7 +248,11 @@
       "project_not_bound": "專案尚未綁定本機資料夾",
       "directory_missing": "綁定的資料夾 {{directory}} 不存在",
       "executor_not_ready": "{{executor}} 尚未就緒，請查看環境檢查",
-      "lean_not_ready": "{{executor}} 的精簡執行尚未就緒，請查看環境檢查"
+      "lean_not_ready": "{{executor}} 的精簡執行尚未就緒，請查看環境檢查",
+      "blocked_by": "被 {{issues}} 擋住，它們還沒完成",
+      "labels_match_several_bindings": "標籤 {{labels}} 對上了專案的多個綁定，請只留一個",
+      "no_binding_for_labels": "專案裡沒有綁定接它的標籤：請加一個不帶標籤的綁定，或把它的某個標籤加給一個綁定",
+      "plan_needs_lean": "方案不能在主目錄裡出，請綁定其他資料夾"
     },
     "load_failed": "無法從 Linear 讀取需求",
     "open_guide": "開啟引導",
@@ -282,7 +288,24 @@
       "directory": "資料夾",
       "created": "建立時間",
       "finished": "結束時間",
-      "summary": "摘要"
+      "summary": "摘要",
+      "mode": "執行用途",
+      "resumed": "接續",
+      "usage": "用量"
+    },
+    "mode": {
+      "plan": "只出方案"
+    },
+    "resumed_from": "執行 #{{id}} 的工作階段",
+    "usage": {
+      "cost": "{{cost}}（估算）",
+      "tokens": "輸入 {{input}}、輸出 {{output}} token",
+      "cache": "快取讀取 {{read}}、寫入 {{write}}",
+      "cache_read": "快取讀取 {{read}}",
+      "turns_one": "{{count}} 輪",
+      "turns_other": "{{count}} 輪",
+      "cost_note": "花費是 Claude Code 按 API 價格自行估算的；以訂閱登入 Claude Code 時，它不是實際扣費。",
+      "codex_note": "Codex 只回報 token；它的輸入數已包含快取讀取的部分。"
     },
     "empty": "還沒有執行紀錄",
     "empty_description": "IssueRelay 開始處理需求後，執行紀錄會顯示在這裡。",
@@ -297,6 +320,10 @@
       "failed": "這次執行失敗了",
       "canceled": "這次執行已取消",
       "waiting_binding": "這次執行正在等待綁定",
+      "linear_deleted": "需求在 Linear 上被刪除，已停止執行",
+      "linear_canceled": "需求在 Linear 上被取消，已停止執行",
+      "linear_completed": "需求在 Linear 上已被設為完成，已停止執行",
+      "linear_reassigned": "需求在 Linear 上已不再指派給你，已停止執行",
       "other": "IssueRelay 的說明"
     },
     "timeline": "時間軸",
@@ -339,6 +366,15 @@
     "project": "Linear 專案",
     "project_placeholder": "選擇專案",
     "project_bound": "{{name}}（已綁定）",
+    "labels": "分流標籤",
+    "labels_hint": "選填。這個綁定只接專案裡帶其中任一標籤的需求，在自己的資料夾裡執行；不選就接專案的其餘需求。",
+    "labels_failed": "無法從 Linear 讀取標籤",
+    "no_labels": "Linear 裡還沒有可用於分流的標籤。請先在 Linear 建立。",
+    "label_taken_option": "{{name}}（另一個綁定已用）",
+    "label_gone_option": "{{name}}（Linear 裡已沒有）",
+    "labels_needed": "這個專案已有不帶標籤的綁定：要再綁一個資料夾，請選分流標籤",
+    "labels_taken": "這個專案的另一個綁定已用了其中的標籤",
+    "labels_none": "無：專案的其餘需求",
     "projects_failed": "無法從 Linear 讀取專案",
     "no_projects": "Linear 裡還沒有可綁定的專案。請先在 Linear 建立一個。",
     "project_missing": "你選的專案已經不在 Linear 的專案清單裡了，請重新選擇。",
@@ -485,6 +521,8 @@
     "autostart_failed": "無法讀取是否開機自動啟動",
     "show_in_dock": "在程式塢顯示圖示",
     "show_in_dock_note": "關閉後，只有面板開啟時才顯示圖示；選單列圖示一律保留。",
+    "resume_sessions": "需求退回時接續上一次的工作階段",
+    "resume_sessions_note": "AI 接著上次讀過、做過的繼續。手動「重新執行」一律從頭開始。",
     "cli": {
       "title": "把命令列加入 PATH",
       "description": "之後在終端機裡可以直接輸入 {{command}}，不需要管理員權限。",
@@ -514,6 +552,8 @@
     "check_again": "重新檢查",
     "trigger_names": "觸發用的名稱",
     "label_name": "觸發標籤",
+    "plan_label_name": "方案標籤",
+    "plan_label_same": "請用與觸發標籤不同的名稱",
     "state_todo": "觸發執行的狀態",
     "state_in_progress": "AI 作業時的狀態",
     "state_in_testing": "待測試時的狀態",
@@ -554,6 +594,7 @@
       "running": "執行者正在處理。",
       "awaiting_acceptance": "執行順利結束，需求已在測試中。驗收後請在面板上標記完成。",
       "needs_info": "AI 覺得需求寫得不清楚，已在需求下提問並移除標籤。補充細節後重新加上標籤。",
+      "planned": "只出方案的執行已在需求下留了方案。加上 {{label}} 就照方案動手。",
       "done": "你已標記完成。",
       "failed": "執行出錯、逾時或長時間沒有輸出，或需求沒有到達測試狀態。看完日誌後可以重新執行。",
       "canceled": "你停止了這次執行。"
@@ -573,6 +614,21 @@
     "lean_body": "精簡執行只帶 Linear 的 MCP 服務和儲存庫自己的規則與設定，不帶你的其他 MCP 服務、外掛、鉤子、自動記憶和使用者層級的 CLAUDE.md。Codex 仍會讀 ~/.codex/AGENTS.md，儲存庫的 .codex/ 設定也不生效。綁定預設精簡執行，除非你把它關掉；「依個人設定」的綁定和綁定到主目錄的綁定一律用你的全部設定。",
     "lean_off": "要用別的 MCP 服務、儲存庫的 .codex/ 設定、你使用者設定裡的拒絕規則或自訂模型服務的綁定，請關掉精簡執行。",
     "lean_effort": "精簡執行不讀你自己設定裡的推理力度：在設定裡設一個預設推理力度，或為每個綁定單獨設。",
+    "more_title": "更多用法",
+    "more": {
+      "plan_q": "能先讓 AI 出方案，再動手嗎？",
+      "plan_a": "給需求加 {{plan_label}}（而不是 {{label}}）：AI 讀需求和程式碼，把方案寫成一則留言。修改檔案的工具都會關閉，Linear 的工具也只留讀取、留言和修改這項需求本身的。方案合適就加上 {{label}}，那次執行會接著出方案的工作階段。",
+      "routing_q": "一個 Linear 專案能分到幾個資料夾嗎？",
+      "routing_a": "給綁定選上分流標籤：它只接專案裡帶其中任一標籤的需求，用自己的資料夾和佇列。不帶標籤的綁定接其餘的需求。",
+      "blocked_q": "被別的需求擋住的需求怎麼辦？",
+      "blocked_a": "Linear 上標了被另一項需求擋住、而那項還沒完成的需求會等著，等那項完成或取消後再派。只出方案的執行照常派。",
+      "linear_stop_q": "AI 正在做的時候，我在 Linear 上取消了需求會怎樣？",
+      "linear_stop_a": "在 Linear 上取消、完成、改派或刪除需求，下一次檢查時就會停掉它的執行，執行紀錄寫明原因。暫停監控時不會。",
+      "resume_q": "需求退回後，AI 會從頭來嗎？",
+      "resume_a": "不會：它接著先前的工作階段，記得讀過、做過的；除非那個工作階段結束已超過 7 天，或用的是別的執行者、別的資料夾。「自動審查」的 Codex 執行一律從頭開始。可以在設定裡關閉。",
+      "usage_q": "一次執行用了多少？",
+      "usage_a": "執行詳情顯示用了多少 token，Claude 的還有按 API 價格估算的花費；以訂閱登入 Claude Code 時，它不是實際扣費。"
+    },
     "faq_title": "常見問題",
     "faq": {
       "not_picked_q": "為什麼我的需求沒被接走？",

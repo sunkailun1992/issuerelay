@@ -8,7 +8,7 @@ import { queryKeys, useStatus } from "./queries";
  * connecting, or before the login, holds an error (or the answer for another account) that no
  * event replaces, so it is read again whenever the connection changes.
  */
-const NEEDS_LINEAR = [queryKeys.issues, queryKeys.projects, queryKeys.doctor] as const;
+const NEEDS_LINEAR = [queryKeys.issues, queryKeys.projects, queryKeys.labels, queryKeys.doctor] as const;
 
 /**
  * Reads what needs Linear again when the connection to it changes: its kind in the status

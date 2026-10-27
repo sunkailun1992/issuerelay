@@ -407,6 +407,12 @@ pub async fn projects(state: State<'_, AppState>) -> CmdResult<Vec<Project>> {
     host(&state).await?.engine().projects().await.map_err(error)
 }
 
+/// Linear's label names, for choosing a binding's routing labels.
+#[tauri::command]
+pub async fn labels(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    host(&state).await?.engine().labels().await.map_err(error)
+}
+
 #[tauri::command]
 pub async fn settings(state: State<'_, AppState>) -> CmdResult<Settings> {
     Ok(host(&state).await?.engine().settings())
@@ -1171,6 +1177,68 @@ mod tests {
                 case.masked,
                 "{:?}",
                 case.value
+            );
+        }
+    }
+
+    /// app/src/lib/routing-cases.json, which the panel's routing test (app/src/lib/routing.test.ts)
+    /// reads as well; a row's `note` is for the reader only.
+    #[derive(Deserialize)]
+    struct RoutingCases {
+        overlap: Vec<OverlapCase>,
+        ids: Vec<IdCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct OverlapCase {
+        a: Vec<String>,
+        b: Vec<String>,
+        overlap: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct IdCase {
+        project: String,
+        labels: Vec<String>,
+        id: String,
+    }
+
+    #[test]
+    fn routing_cases_follow_core() {
+        let cases: RoutingCases =
+            serde_json::from_str(include_str!("../../src/lib/routing-cases.json"))
+                .expect("routing-cases.json is valid");
+        // The binding form refuses a binding that would take another one's issues, and names a new
+        // one; the engine replaces the bindings a saved one overlaps: the two must agree.
+        assert!(!cases.overlap.is_empty() && !cases.ids.is_empty());
+        let binding = |labels: &[String]| -> issuerelay_core::config::Binding {
+            serde_json::from_value(serde_json::json!({
+                "id": "proj-1",
+                "project_id": "proj-1",
+                "project_name": "Demo Project",
+                "directory": "/demo",
+                "labels": labels,
+            }))
+            .expect("a binding")
+        };
+        for case in cases.overlap {
+            let (a, b) = (binding(&case.a), binding(&case.b));
+            assert_eq!(
+                issuerelay_core::config::bindings_overlap(&a, &b),
+                case.overlap,
+                "{:?} {:?}",
+                case.a,
+                case.b
+            );
+            assert_eq!(
+                issuerelay_core::config::bindings_overlap(&b, &a),
+                case.overlap
+            );
+        }
+        for case in cases.ids {
+            assert_eq!(
+                issuerelay_core::config::binding_id_for(&case.project, &case.labels),
+                case.id
             );
         }
     }

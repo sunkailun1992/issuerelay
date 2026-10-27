@@ -28,6 +28,7 @@ const PANEL_COMMANDS: &[&str] = &[
     "save_binding",
     "remove_binding",
     "projects",
+    "labels",
     "settings",
     "save_settings",
     "doctor",

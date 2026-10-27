@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { initI18nOnce, LANGUAGES } from "@/i18n";
 import { setFixedClock } from "./clock";
-import { formatDateTime, formatDuration, formatRelative, formatTime } from "./format";
+import { formatCost, formatDateTime, formatDuration, formatRelative, formatTime, formatTokens } from "./format";
 
 test("relative times and durations read naturally in each language", async () => {
   // Explicitly started here: the strings come from our own translation keys.
@@ -72,4 +72,20 @@ test("a time that cannot be read says unknown instead of breaking the page", asy
   expect(formatTime("not a time", "en")).toBe("Unknown");
   expect(formatDuration("not a time", null, "en")).toBe("Unknown");
   expect(formatDuration("2026-10-12T08:00:00Z", "not a time", "en")).toBe("Unknown");
+});
+
+test("a cost is in dollars with two decimals, and one under a cent is not shown as nothing", () => {
+  expect(formatCost(421_350)).toBe("$0.42");
+  expect(formatCost(1_005_000)).toBe("$1.01");
+  expect(formatCost(10_000)).toBe("$0.01");
+  expect(formatCost(9_999)).toBe("<$0.01");
+  expect(formatCost(1)).toBe("<$0.01");
+  expect(formatCost(0)).toBe("$0.00");
+});
+
+test("a count of tokens is grouped as the language groups digits", () => {
+  expect(formatTokens(186_402, "en")).toBe("186,402");
+  expect(formatTokens(186_402, "zh-CN")).toBe("186,402");
+  expect(formatTokens(999, "ko")).toBe("999");
+  expect(formatTokens(0, "ja")).toBe("0");
 });

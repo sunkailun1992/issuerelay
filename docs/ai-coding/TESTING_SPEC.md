@@ -57,6 +57,7 @@ IssueRelay 驱动的是真实的 Linear 和真实的 AI。纯逻辑在单元测�
 | `app/src/lib/clean-cases.json` | `clean.test.ts`（`cleanDisplayText`） | `app/src-tauri/src/commands.rs` 的测试，对照 core 的 `clean_text`（`ansi: true` 的转义序列用例只在面板） |
 | `app/src/lib/model-name-cases.json` | `model-name.test.ts`（`isValidModelName`） | `commands.rs` 的测试，对照 `config::is_valid_model_name` |
 | `app/src/lib/mask-cases.json` | `mask.test.ts`（`maskCredentials`） | `commands.rs` 的测试，对照 `env::mask_credentials` |
+| `app/src/lib/routing-cases.json` | `routing.test.ts`（`bindingsOverlap`、`bindingIdFor`） | `commands.rs` 的测试，对照 `config::bindings_overlap`、`config::binding_id_for` |
 | `app/src/lib/problem-cases.json` | `problem.test.ts`（侧栏的「需要处理」） | `app/src-tauri/src/tray.rs` 的测试（托盘图标） |
 | `app/src/i18n/language-cases.json` | `i18n.test.ts`（`resolveLanguage`） | `app/src-tauri/src/i18n.rs` 的测试（`resolve_language`） |
 | `app/src/lib/trigger-defaults.json` | `useTriggerNames`、假后端的默认设置 | `commands.rs` 的测试，对照 `TriggerNames::default()` |

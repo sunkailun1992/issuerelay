@@ -66,3 +66,20 @@ export function formatDuration(fromIso: string, toIso: string | null, lang: Lang
   if (seconds < 3600) return t("format.duration_ms", { m: Math.floor(seconds / 60), s: seconds % 60 });
   return t("format.duration_hm", { h: Math.floor(seconds / 3600), m: Math.floor((seconds % 3600) / 60) });
 }
+
+/**
+ * A cost given in millionths of a US dollar, in dollars with two decimals ("$0.42"); a cost below
+ * one cent reads "<$0.01", none at all "$0.00". Written the same way in every language: it is what
+ * the executor reported, in its currency.
+ */
+export function formatCost(microUsd: number): string {
+  if (microUsd > 0 && microUsd < 10_000) return "<$0.01";
+  // Rounded in whole cents: `toFixed` on the dollars rounds 1.005 down, a binary fraction below it.
+  const cents = Math.round(microUsd / 10_000);
+  return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+/** A count of tokens with the language's digit grouping ("20,786"). */
+export function formatTokens(count: number, lang: Lang): string {
+  return new Intl.NumberFormat(lang).format(count);
+}

@@ -30,7 +30,7 @@ use issuerelay_core::{
     env::{EnvSource, ExecEnv},
     executor::CommandSpec,
     linear::{Disconnected, LinearApi, Project, Team, Viewer},
-    model::{Issue, Job, JobState},
+    model::{Issue, Job, JobState, RunMode, RunUsage},
     runner::{ExitKind, RunLimits},
     store::{NewJob, Store},
     trigger::WaitReasonView,
@@ -283,6 +283,843 @@ async fn cancel_running_job() {
     assert_eq!(h.latest("1").state, JobState::Canceled);
 }
 
+/// Starts DEMO-1 of `proj-1` and leaves it running: the harness must be gated. Returns once the
+/// scripted run has begun and moved the issue to In Progress, as a run in progress has. (In the
+/// testing status a run is ending, and nothing Linear shows stops it any more.)
+async fn start_and_hold(h: &Harness) -> Job {
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            set_state: Some("In Progress"),
+            ..Script::success()
+        },
+    );
+    h.engine.tick().await.unwrap();
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Running);
+    eventually("the run to begin", || !h.runner.started().is_empty()).await;
+    job
+}
+
+/// The next check sees `change` made in Linear while DEMO-1 runs; returns the job once its run is
+/// over (it is let go if the check did not stop it).
+async fn change_while_running(h: &Harness, change: impl FnOnce(&FakeLinear)) -> Job {
+    start_and_hold(h).await;
+    change(&h.linear);
+    h.engine.poll_once().await.unwrap();
+    h.settle().await;
+    h.latest("1")
+}
+
+#[tokio::test]
+async fn a_run_stops_when_its_issue_is_canceled_in_linear() {
+    let h = Harness::new(2, true);
+    let job = change_while_running(&h, |linear| {
+        linear.update("1", |i| {
+            i.state = "Canceled".into();
+            i.state_type = Some("canceled".into());
+        })
+    })
+    .await;
+    assert_eq!(job.state, JobState::Canceled);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the issue was canceled in Linear")
+    );
+}
+
+#[tokio::test]
+async fn a_run_stops_when_its_issue_is_completed_in_linear() {
+    let h = Harness::new(2, true);
+    let job = change_while_running(&h, |linear| {
+        linear.update("1", |i| {
+            i.state = "Released".into();
+            i.state_type = Some("completed".into());
+        })
+    })
+    .await;
+    assert_eq!(job.state, JobState::Canceled);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the issue was completed in Linear")
+    );
+}
+
+#[tokio::test]
+async fn a_run_stops_when_its_issue_is_reassigned() {
+    let h = Harness::new(2, true);
+    let job = change_while_running(&h, |linear| {
+        linear.update("1", |i| i.assignee_id = Some("user-2".into()))
+    })
+    .await;
+    assert_eq!(job.state, JobState::Canceled);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the issue was reassigned in Linear")
+    );
+}
+
+#[tokio::test]
+async fn a_run_stops_when_its_issue_is_deleted() {
+    let h = Harness::new(2, true);
+    let job = change_while_running(&h, |linear| linear.remove("1")).await;
+    assert_eq!(job.state, JobState::Canceled);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the issue no longer exists in Linear")
+    );
+}
+
+// The AI takes the label off and moves the issue back to Todo itself when it asks for
+// information or fails: that must not stop its run, which is about to end anyway.
+#[tokio::test]
+async fn a_run_keeps_going_when_the_ai_takes_the_label_off_and_moves_it_to_todo() {
+    let h = Harness::new(2, true);
+    start_and_hold(&h).await;
+    h.linear.update("1", |i| {
+        i.state = "Todo".into();
+        i.state_type = Some("unstarted".into());
+        i.labels.clear();
+    });
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.engine.status().running, 1);
+    assert_eq!(h.latest("1").state, JobState::Running);
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    assert_ne!(h.latest("1").state, JobState::Canceled);
+}
+
+// Team instructions may have the AI hand the issue to a reviewer once it is in testing: the run is
+// ending, and that does not stop it.
+#[tokio::test]
+async fn a_run_keeps_going_when_the_issue_is_handed_on_in_the_testing_status() {
+    let h = Harness::new(2, true);
+    start_and_hold(&h).await;
+    h.linear.update("1", |i| {
+        i.state = "In Testing".into();
+        i.state_type = Some("started".into());
+        i.assignee_id = Some("user-2".into());
+    });
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.engine.status().running, 1);
+    assert_eq!(h.latest("1").state, JobState::Running);
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    assert_ne!(h.latest("1").state, JobState::Canceled);
+}
+
+#[tokio::test]
+async fn a_failed_read_does_not_stop_a_run() {
+    let h = Harness::new(2, true);
+    start_and_hold(&h).await;
+    h.linear
+        .update("1", |i| i.state_type = Some("canceled".into()));
+    h.linear.fail_issue_reads("1");
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.engine.status().running, 1, "a failed read stops nothing");
+    h.linear.clear_issue_failures();
+    h.engine.poll_once().await.unwrap();
+    h.settle().await;
+    assert_eq!(
+        h.latest("1").reason.as_deref(),
+        Some("the issue was canceled in Linear"),
+        "the next check stops it"
+    );
+}
+
+#[tokio::test]
+async fn a_user_stop_is_still_stopped_by_the_user() {
+    let h = Harness::new(2, true);
+    let job = start_and_hold(&h).await;
+    h.engine.cancel_job(job.id).unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").reason.as_deref(), Some("stopped by the user"));
+}
+
+/// Creates `<root>/<dir_name>` and binds the issues of `proj-1` labeled `label` to it.
+fn bind_label(h: &Harness, label: &str, dir_name: &str) -> PathBuf {
+    let dir = h.root.path().join(dir_name);
+    std::fs::create_dir_all(&dir).unwrap();
+    h.engine
+        .add_binding(Binding {
+            id: format!("proj-1#{label}"),
+            project_id: "proj-1".into(),
+            project_name: "Demo Project".into(),
+            directory: dir.clone(),
+            executor: None,
+            permission: None,
+            model: None,
+            prompt_override: None,
+            lean: true,
+            effort: None,
+            labels: vec![label.into()],
+        })
+        .unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn two_label_bindings_run_in_their_own_folders_in_parallel() {
+    let h = Harness::new(2, true);
+    let frontend = bind_label(&h, "Frontend", "web");
+    let backend = bind_label(&h, "Backend", "api");
+    for (uuid, label) in [("1", "Frontend"), ("2", "Backend")] {
+        let mut labeled = issue(uuid, "proj-1");
+        labeled.labels.push(label.into());
+        h.linear.upsert(labeled);
+    }
+    h.engine.tick().await.unwrap();
+    assert_eq!(
+        h.engine.status().running,
+        2,
+        "two folders, two runs at once"
+    );
+    eventually("both runs to begin", || h.runner.started().len() == 2).await;
+    let folders: Vec<PathBuf> = h
+        .runner
+        .specs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|spec| spec.cwd.clone())
+        .collect();
+    assert!(
+        folders.contains(&frontend) && folders.contains(&backend),
+        "{folders:?}"
+    );
+    assert_eq!(h.latest("1").binding_id.as_deref(), Some("proj-1#Frontend"));
+    h.runner.gate.add_permits(2);
+    h.settle().await;
+}
+
+#[tokio::test]
+async fn an_issue_with_two_routing_labels_waits() {
+    let h = Harness::new(2, false);
+    bind_label(&h, "Frontend", "web");
+    bind_label(&h, "Backend", "api");
+    let mut both = issue("1", "proj-1");
+    both.labels
+        .extend(["Frontend".to_string(), "Backend".to_string()]);
+    h.linear.upsert(both);
+    h.engine.tick().await.unwrap();
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::WaitingBinding);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the labels Frontend, Backend match several bindings of the project")
+    );
+}
+
+#[tokio::test]
+async fn adding_bindings_replaces_only_those_that_take_the_same_issues() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    bind_label(&h, "Frontend", "web");
+    assert_eq!(
+        h.engine.bindings().len(),
+        2,
+        "a label binding sits next to the default"
+    );
+    // The default again: replaces the old default, keeps its place.
+    h.bind("proj-1", "b");
+    let ids: Vec<String> = h.engine.bindings().into_iter().map(|b| b.id).collect();
+    assert_eq!(ids, ["proj-1", "proj-1#Frontend"]);
+    assert_eq!(h.engine.bindings()[0].directory, h.root.path().join("b"));
+    // A label binding under another id that shares a label replaces the one with it.
+    h.engine
+        .add_binding(Binding {
+            id: "web-and-ui".into(),
+            labels: vec!["frontend".into(), "UI".into()],
+            ..h.engine.bindings()[1].clone()
+        })
+        .unwrap();
+    let ids: Vec<String> = h.engine.bindings().into_iter().map(|b| b.id).collect();
+    assert_eq!(ids, ["proj-1", "web-and-ui"]);
+}
+
+/// DEMO-`uuid` of `proj-1` with the plan label instead of the trigger label.
+fn plan_issue(uuid: &str) -> Issue {
+    Issue {
+        labels: vec!["ai-plan".into()],
+        ..issue(uuid, "proj-1")
+    }
+}
+
+/// A planning run that posts its plan: it leaves the status alone.
+fn plans() -> Script {
+    Script {
+        set_state: None,
+        final_text: Some(r#"{"result":"planned","summary":"three steps"}"#.into()),
+        ..Script::success()
+    }
+}
+
+#[tokio::test]
+async fn a_plan_labeled_issue_gets_a_planning_run() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    h.runner.script("DEMO-1", plans());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.mode, RunMode::Plan);
+    assert_eq!(job.state, JobState::NeedsInfo);
+    assert_eq!(job.report.as_deref(), Some("planned"));
+    assert_eq!(job.summary.as_deref(), Some("three steps"));
+    let spec = h.runner.specs.lock().unwrap()[0].clone();
+    assert!(
+        spec.stdin.contains("This is a planning run"),
+        "{}",
+        spec.stdin
+    );
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w == ["--tools", "Read,Grep,Glob"])
+    );
+    assert!(
+        spec.args.contains(&"--strict-mcp-config".to_string()),
+        "always lean"
+    );
+}
+
+// A binding on personal settings keeps them in a planning run: the user's own rules decide, and
+// only the built-in tools shrink to reading.
+#[tokio::test]
+async fn a_planning_run_of_a_personal_binding_keeps_the_users_settings() {
+    let h = Harness::new(2, false);
+    let dir = h.root.path().join("a");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.engine
+        .add_binding(Binding {
+            id: "proj-1".into(),
+            project_id: "proj-1".into(),
+            project_name: "Demo Project".into(),
+            directory: dir,
+            executor: None,
+            permission: Some(PermissionProfile::Personal),
+            model: None,
+            prompt_override: None,
+            lean: true,
+            effort: None,
+            labels: Vec::new(),
+        })
+        .unwrap();
+    h.linear.upsert(plan_issue("1"));
+    h.runner.script("DEMO-1", plans());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let spec = spec_of(&h, 0);
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "dontAsk"])
+    );
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w == ["--tools", "Read,Grep,Glob"])
+    );
+    assert!(
+        !spec.args.contains(&"--strict-mcp-config".to_string()),
+        "not lean"
+    );
+    assert!(!spec.args.contains(&"bypassPermissions".to_string()));
+}
+
+#[tokio::test]
+async fn a_planning_run_without_a_plan_fails() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            final_text: Some("I looked around.".into()),
+            ..plans()
+        },
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some("the planning run finished without a plan")
+    );
+}
+
+#[tokio::test]
+async fn adding_ai_ready_after_a_plan_runs_the_implementation() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    h.runner.script("DEMO-1", plans());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let plan = h.latest("1");
+    // The user reads the plan and asks for it to be carried out.
+    h.runner.script("DEMO-1", Script::success());
+    h.linear.update("1", |i| i.labels = vec!["ai-ready".into()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let implementation = h.latest("1");
+    assert_ne!(implementation.id, plan.id);
+    assert_eq!(implementation.mode, RunMode::Implement);
+    assert_eq!(implementation.state, JobState::AwaitingAcceptance);
+    let spec = h.runner.specs.lock().unwrap()[1].clone();
+    assert!(!spec.stdin.contains("This is a planning run"));
+    assert!(!spec.args.contains(&"--tools".to_string()));
+}
+
+#[tokio::test]
+async fn a_queued_planning_job_becomes_a_usual_one_when_ai_ready_is_added() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    // Recorded, not started yet.
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").mode, RunMode::Plan);
+    h.linear.update("1", |i| i.labels.push("ai-ready".into()));
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").mode, RunMode::Implement);
+    h.engine.dispatch().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.mode, RunMode::Implement);
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+}
+
+const FIRST_SESSION: &str = "b88d7053-d27f-4825-b81c-80f6fbf109d0";
+const SECOND_SESSION: &str = "01a17cd5-323b-7e51-8637-4bced9551eaa";
+
+/// `script` that also reports the session `session` and a session cost of `total` millionths.
+fn with_session(script: Script, session: &str, total: i64) -> Script {
+    Script {
+        session_id: Some(session.into()),
+        usage: Some(RunUsage {
+            session_cost_micro_usd: Some(total),
+            ..RunUsage::default()
+        }),
+        ..script
+    }
+}
+
+/// Runs DEMO-1 once to In Testing with `FIRST_SESSION`, then sends it back (Todo again, an edit
+/// in Linear) and checks once more: returns the first job and the new one.
+async fn first_run_then_rework(h: &Harness) -> (Job, Job) {
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![with_session(Script::success(), FIRST_SESSION, 55_137)],
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let first = h.latest("1");
+    assert_eq!(first.session_id.as_deref(), Some(FIRST_SESSION));
+    h.linear.update("1", |i| i.state = "Todo".into());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let second = h.latest("1");
+    assert_ne!(second.id, first.id);
+    (first, second)
+}
+
+/// The arguments and prompt of the `n`th run (from 0).
+fn spec_of(h: &Harness, n: usize) -> CommandSpec {
+    h.runner.specs.lock().unwrap()[n].clone()
+}
+
+#[tokio::test]
+async fn a_reworked_issue_resumes_the_previous_session() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.runner.script(
+        "DEMO-1",
+        with_session(Script::success(), FIRST_SESSION, 94_395),
+    );
+    let (first, second) = first_run_then_rework(&h).await;
+    assert_eq!(second.resume_job_id, Some(first.id));
+    let spec = spec_of(&h, 1);
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w == ["--resume", FIRST_SESSION]),
+        "{:?}",
+        spec.args
+    );
+    assert!(
+        spec.stdin
+            .contains("This continues your earlier session on DEMO-1")
+    );
+    assert!(
+        spec.notes
+            .iter()
+            .any(|note| note == &format!("this run continues the session of run {}", first.id))
+    );
+    // Claude's cost is the session's running total: the second run cost the difference.
+    assert_eq!(
+        second.usage.as_ref().and_then(|u| u.cost_micro_usd),
+        Some(94_395 - 55_137)
+    );
+}
+
+#[tokio::test]
+async fn a_manual_retry_starts_afresh() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script(
+        "DEMO-1",
+        with_session(Script::exit_code(2), FIRST_SESSION, 10),
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let failed = h.latest("1");
+    assert_eq!(failed.state, JobState::Failed);
+    h.engine.retry_job(failed.id).unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert!(!spec_of(&h, 1).args.contains(&"--resume".to_string()));
+}
+
+#[tokio::test]
+async fn resuming_is_skipped_when_it_is_off_or_the_folder_changed() {
+    // Off in the settings.
+    let mut cfg = Config::default();
+    cfg.settings.resume_sessions = false;
+    let off = Harness::with_config(cfg, false);
+    off.bind("proj-1", "a");
+    let (_, second) = first_run_then_rework(&off).await;
+    assert_eq!(second.resume_job_id, None);
+    assert!(!spec_of(&off, 1).args.contains(&"--resume".to_string()));
+    // The binding moved to another folder between the runs.
+    let moved = Harness::new(2, false);
+    moved.bind("proj-1", "a");
+    moved.linear.upsert(issue("1", "proj-1"));
+    moved.runner.queue(
+        "DEMO-1",
+        vec![with_session(Script::success(), FIRST_SESSION, 1)],
+    );
+    moved.engine.tick().await.unwrap();
+    moved.settle().await;
+    moved.bind("proj-1", "b");
+    moved.linear.update("1", |i| i.state = "Todo".into());
+    moved.engine.tick().await.unwrap();
+    moved.settle().await;
+    let spec = spec_of(&moved, 1);
+    assert!(!spec.args.contains(&"--resume".to_string()));
+    assert!(
+        spec.notes
+            .iter()
+            .any(|note| note == "this run starts afresh: the run to continue ran in another folder"),
+        "{:?}",
+        spec.notes
+    );
+    assert_eq!(moved.latest("1").resume_job_id, None);
+}
+
+#[tokio::test]
+async fn a_resume_that_cannot_start_runs_afresh_in_the_same_job() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    // The second job's first attempt finds no session to continue; its second attempt works.
+    h.runner.script("DEMO-1", Script::success());
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![
+            with_session(Script::success(), FIRST_SESSION, 1),
+            Script::exit_code(1),
+            with_session(Script::success(), SECOND_SESSION, 7),
+        ],
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    h.linear.update("1", |i| i.state = "Todo".into());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(h.runner.started().len(), 3, "the second job ran twice");
+    assert!(spec_of(&h, 1).args.contains(&"--resume".to_string()));
+    let fresh = spec_of(&h, 2);
+    assert!(!fresh.args.contains(&"--resume".to_string()));
+    assert!(!fresh.stdin.contains("This continues"));
+    assert_eq!(
+        fresh.notes[0],
+        "the earlier session could not be resumed (the executor exited with code 1); this run starts afresh"
+    );
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+    assert_eq!(job.resume_job_id, None);
+    assert_eq!(job.session_id.as_deref(), Some(SECOND_SESSION));
+    assert_eq!(
+        job.usage.as_ref().and_then(|u| u.cost_micro_usd),
+        Some(7),
+        "a fresh session's cost is its own"
+    );
+}
+
+#[tokio::test]
+async fn the_implementation_after_a_plan_continues_the_planning_session() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    h.runner
+        .queue("DEMO-1", vec![with_session(plans(), FIRST_SESSION, 1)]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    h.linear.update("1", |i| i.labels = vec!["ai-ready".into()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let spec = spec_of(&h, 1);
+    assert!(
+        spec.args
+            .windows(2)
+            .any(|w| w == ["--resume", FIRST_SESSION])
+    );
+    assert!(
+        !spec.args.contains(&"--tools".to_string()),
+        "every tool again"
+    );
+    assert!(
+        spec.stdin
+            .contains("This continues your planning session on DEMO-1")
+    );
+}
+
+#[tokio::test]
+async fn a_plan_after_a_usual_run_starts_afresh() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![with_session(Script::success(), FIRST_SESSION, 1), plans()],
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    h.linear.update("1", |i| {
+        i.state = "Todo".into();
+        i.labels = vec!["ai-plan".into()];
+    });
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let spec = spec_of(&h, 1);
+    assert!(spec.stdin.contains("This is a planning run"));
+    assert!(!spec.args.contains(&"--resume".to_string()));
+    assert!(spec.notes.iter().any(|note| note
+        == "this run starts afresh: a planning run does not continue the session of a usual run"));
+}
+
+#[tokio::test]
+async fn a_codex_planning_run_on_personal_settings_does_not_continue_a_session() {
+    let dirs = tempfile::tempdir().unwrap();
+    let dir = dirs.path().join("a");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cfg = Config::default();
+    cfg.bindings.push(Binding {
+        executor: Some(ExecutorKind::Codex),
+        permission: Some(PermissionProfile::Personal),
+        ..demo_binding("proj-1", &dir)
+    });
+    let h = Harness::with_config(cfg, false);
+    h.linear.upsert(plan_issue("1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![with_session(plans(), FIRST_SESSION, 1), plans()],
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    // The issue comes back for another plan.
+    h.linear.update("1", |i| i.labels = vec!["ai-plan".into()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let spec = spec_of(&h, 1);
+    assert!(spec.stdin.contains("This is a planning run"));
+    assert!(
+        !spec.args.contains(&"resume".to_string()),
+        "{:?}",
+        spec.args
+    );
+    assert!(spec.args.windows(2).any(|w| w == ["-s", "read-only"]));
+    assert!(spec.notes.iter().any(|note| note
+        == "this run starts afresh: a Codex planning run on personal settings starts afresh, to \
+            stay read-only"));
+    assert_eq!(h.latest("1").resume_job_id, None);
+}
+
+/// DEMO-1, blocked by DEMO-2, which is in progress and carries no trigger label.
+fn blocked_pair(h: &Harness) {
+    let mut blocked = issue("1", "proj-1");
+    blocked.blocked_by = Some(vec!["DEMO-2".into()]);
+    h.linear.upsert(blocked);
+    let mut blocker = issue("2", "proj-1");
+    blocker.labels.clear();
+    blocker.state = "In Progress".into();
+    blocker.state_type = Some("started".into());
+    h.linear.upsert(blocker);
+}
+
+#[tokio::test]
+async fn a_blocked_issue_waits_until_its_blocker_is_done() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    blocked_pair(&h);
+    h.engine.tick().await.unwrap();
+    let waiting = h.latest("1");
+    assert_eq!(waiting.state, JobState::WaitingBinding);
+    assert_eq!(
+        waiting.reason.as_deref(),
+        Some("blocked by DEMO-2, which are not done yet")
+    );
+    assert!(h.runner.started().is_empty());
+    h.linear.update("2", |i| {
+        i.state = "Done".into();
+        i.state_type = Some("completed".into());
+    });
+    h.engine.forget_blocker_checks();
+    h.engine.tick().await.unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+}
+
+#[tokio::test]
+async fn a_canceled_or_deleted_blocker_does_not_block() {
+    for change in ["canceled", "deleted"] {
+        let h = Harness::new(2, false);
+        h.bind("proj-1", "a");
+        blocked_pair(&h);
+        if change == "deleted" {
+            h.linear.remove("2");
+        } else {
+            h.linear
+                .update("2", |i| i.state_type = Some("canceled".into()));
+        }
+        h.engine.tick().await.unwrap();
+        h.settle().await;
+        assert_eq!(
+            h.latest("1").state,
+            JobState::AwaitingAcceptance,
+            "{change}"
+        );
+    }
+}
+
+// A new issue's blockers are read with the re-read before its start; a read that fails holds the
+// start back like any failed start.
+#[tokio::test]
+async fn a_failed_blocker_read_holds_the_start_back() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    blocked_pair(&h);
+    h.linear.fail_issue_reads("2");
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    assert!(h.runner.started().is_empty());
+    let error = h.engine.status().last_error.unwrap_or_default();
+    assert!(error.contains("could not start DEMO-1"), "{error}");
+}
+
+#[tokio::test]
+async fn a_blocker_that_cannot_be_read_holds_back_only_its_own_issue() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    blocked_pair(&h);
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    // DEMO-1 changes, so the next check looks at its blocker again, which Linear cannot read now.
+    h.linear
+        .update("1", |i| i.title = "Demo task 1, edited".into());
+    h.linear.fail_issue_reads("2");
+    h.linear.upsert(issue("3", "proj-1"));
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(
+        h.latest("1").state,
+        JobState::WaitingBinding,
+        "still held back"
+    );
+    assert_eq!(h.latest("3").state, JobState::Queued);
+}
+
+#[tokio::test]
+async fn blocker_checks_are_reused_while_the_issue_is_unchanged() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    blocked_pair(&h);
+    // The poll records the new issue without reading its relations; the start reads them.
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    assert_eq!(h.linear.issue_reads("DEMO-2"), 1);
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.linear.issue_reads("DEMO-2"), 1, "read again too soon");
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    // A change to the blocked issue itself is looked at at once.
+    h.linear
+        .update("1", |i| i.title = "Demo task 1, edited".into());
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.linear.issue_reads("DEMO-2"), 2);
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+}
+
+#[tokio::test]
+async fn a_finished_run_records_its_usage_session_and_report() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    let reported = RunUsage {
+        cost_micro_usd: None,
+        session_cost_micro_usd: Some(55_137),
+        input_tokens: Some(2),
+        output_tokens: Some(4),
+        cache_read_tokens: Some(18_687),
+        cache_write_tokens: Some(6_414),
+        turns: Some(1),
+    };
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            usage: Some(reported.clone()),
+            session_id: Some("b88d7053-d27f-4825-b81c-80f6fbf109d0".into()),
+            ..Script::success()
+        },
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::AwaitingAcceptance);
+    assert_eq!(job.report.as_deref(), Some("in_testing"));
+    assert_eq!(
+        job.session_id.as_deref(),
+        Some("b88d7053-d27f-4825-b81c-80f6fbf109d0")
+    );
+    assert_eq!(
+        job.usage,
+        Some(RunUsage {
+            cost_micro_usd: Some(55_137),
+            ..reported
+        }),
+        "a run that resumed nothing cost the session's whole total"
+    );
+}
+
+#[tokio::test]
+async fn a_run_without_a_report_or_usage_records_none() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::exit_code(2));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!((job.report, job.session_id, job.usage), (None, None, None));
+}
+
 #[tokio::test]
 async fn a_run_that_panics_is_recorded_as_failed_and_frees_its_slot() {
     let h = Harness::new(2, false);
@@ -495,6 +1332,8 @@ async fn interrupted_runs_fail_on_restart() {
                 executor: None,
                 state: JobState::Queued,
                 reason: None,
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap();
         store
@@ -537,6 +1376,7 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
         prompt_override: None,
         lean: true,
         effort: None,
+        labels: Vec::new(),
     });
     cfg.save(&config_path).unwrap();
     {
@@ -549,6 +1389,8 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
                 executor: None,
                 state: JobState::Queued,
                 reason: None,
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap();
         store
@@ -668,6 +1510,8 @@ fn record_interrupted_run(db: &Path, root: &Path, tag: &ProcessTag) -> i64 {
             executor: None,
             state: JobState::Queued,
             reason: None,
+            mode: RunMode::Implement,
+            resume_job_id: None,
         })
         .unwrap();
     assert!(store.mark_started(job.id, &root.join("1.jsonl")).unwrap());
@@ -948,6 +1792,7 @@ fn demo_binding(project: &str, directory: &Path) -> Binding {
         prompt_override: None,
         lean: true,
         effort: None,
+        labels: Vec::new(),
     }
 }
 
@@ -1587,6 +2432,7 @@ async fn custom_trigger_names_drive_polling_the_prompt_and_the_result() {
         in_progress: "Doing".into(),
         in_testing: "QA".into(),
         done: "Shipped".into(),
+        plan_label: "robot-plan".into(),
     };
     let h = Harness::with_config(cfg, false);
     h.bind("proj-1", "a");
@@ -1971,6 +2817,8 @@ async fn a_lean_violation_keeps_its_reason_when_linear_cannot_be_read() {
             exit: ExitKind::LeanNotApplied("auto memory is on".into()),
             final_text: None,
             panic: false,
+            usage: None,
+            session_id: None,
         },
     );
     h.engine.tick().await.unwrap();
@@ -2008,6 +2856,8 @@ fn a_lean_violation_whose_result_cannot_be_read_logs_why() {
                     exit: ExitKind::LeanNotApplied("auto memory is on".into()),
                     final_text: None,
                     panic: false,
+                    usage: None,
+                    session_id: None,
                 },
             );
             h.engine.tick().await.unwrap();
@@ -2048,6 +2898,24 @@ async fn a_result_that_cannot_be_verified_fails_the_job() {
     );
     assert_eq!(job.verified_updated_at, None);
     assert_eq!(job.summary.as_deref(), Some("pushed to test"));
+}
+
+// A planning run's result is its own report: Linear out of reach after the run fails nothing.
+#[tokio::test(start_paused = true)]
+async fn a_plan_that_was_posted_stands_when_linear_cannot_be_read_after_the_run() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(plan_issue("1"));
+    h.runner.script("DEMO-1", plans());
+    h.engine.tick().await.unwrap();
+    h.linear.fail_calls("Linear is down", 3);
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::NeedsInfo);
+    assert_eq!(job.report.as_deref(), Some("planned"));
+    assert_eq!(job.reason, None);
+    assert_eq!(job.verified_updated_at, None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -2172,6 +3040,47 @@ async fn a_result_read_from_before_the_run_is_read_again_until_linear_shows_the_
     assert_eq!(job.verified_updated_at, Some(h.linear.get("1").updated_at));
     // Read again 15 s and then 30 s later.
     assert_waited(waited, 45);
+}
+
+// A run whose executor has ended is being finished: a change in Linear seen meanwhile neither
+// stops it nor leaves a reason behind for a later run of the same job.
+#[tokio::test(start_paused = true)]
+async fn a_change_in_linear_while_a_result_is_read_again_stops_nothing() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .script("DEMO-1", leaving_the_issue_alone(Script::success()));
+    h.engine.tick().await.unwrap();
+    // The run ends, its result is read once, and the engine waits to read it again.
+    h.runner.gate.add_permits(1);
+    quiesce().await;
+    assert_eq!(h.latest("1").state, JobState::Running);
+    h.linear.update("1", |i| {
+        i.state = "Canceled".into();
+        i.state_type = Some("canceled".into());
+    });
+    h.engine.poll_once().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    assert_eq!(job.state, JobState::Failed);
+    assert_eq!(
+        job.reason.as_deref(),
+        Some(r#"run finished but the issue status is "Canceled", not "In Testing""#)
+    );
+    // Run again and stopped by hand, the job says so.
+    h.linear.update("1", |i| {
+        i.state = "Todo".into();
+        i.state_type = Some("unstarted".into());
+    });
+    h.engine.retry_job(job.id).unwrap();
+    h.engine.tick().await.unwrap();
+    eventually("the retry to start", || h.runner.started().len() == 2).await;
+    h.engine.cancel_job(job.id).unwrap();
+    h.settle().await;
+    let stopped = h.latest("1");
+    assert_eq!(stopped.state, JobState::Canceled);
+    assert_eq!(stopped.reason.as_deref(), Some("stopped by the user"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -3724,6 +4633,50 @@ async fn a_stop_during_the_start_reread_is_not_undone_by_a_missing_folder() {
         JobState::Canceled
     );
     assert!(runner.started().is_empty(), "a stopped job ran");
+}
+
+#[tokio::test]
+async fn a_stop_and_a_run_again_during_the_start_reread_start_the_job_afresh() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config_with_one_binding(root.path());
+    let fake = FakeLinear::new("user-1");
+    fake.upsert(issue("1", "proj-1"));
+    let spy = Arc::new(SpyLinear::new(fake.clone()));
+    let runner = Arc::new(ScriptedRunner::new(fake.clone(), false));
+    runner.queue(
+        "DEMO-1",
+        vec![with_session(Script::success(), FIRST_SESSION, 1)],
+    );
+    let engine = build_engine(
+        root.path(),
+        &cfg,
+        spy.clone(),
+        Arc::new(FakeReadiness),
+        runner.clone(),
+    );
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    // The issue comes back: its new job is to continue the first run's session.
+    fake.update("1", |i| i.state = "Todo".into());
+    engine.poll_once().await.unwrap();
+    let second = engine.list_jobs(10).unwrap().remove(0);
+    assert!(second.resume_job_id.is_some());
+    // While the dispatch re-reads the issue, the user stops the job and runs it again.
+    let user = engine.clone();
+    *spy.before_issue.lock().unwrap() = Some(Box::new(move || {
+        user.cancel_job(second.id).unwrap();
+        user.retry_job(second.id).unwrap();
+    }));
+    assert!(engine.dispatch().await.unwrap().is_empty());
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let specs = runner.specs.lock().unwrap().clone();
+    assert_eq!(specs.len(), 2);
+    assert!(
+        !specs[1].args.contains(&"--resume".to_string()),
+        "{:?}",
+        specs[1].args
+    );
 }
 
 /// Takes the issue out of every later poll, so rounds that share one harness stay independent.
@@ -5493,6 +6446,24 @@ async fn project_names_are_shown_clean() {
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].name, "Demo Project");
     assert_eq!(projects[0].id, hostile.id, "the id stays as Linear sent it");
+}
+
+#[tokio::test]
+async fn label_names_are_shown_clean_once_each_in_alphabetical_order() {
+    let h = Harness::new(1, false);
+    // Two teams can each have a label of the same name; a name of nothing but controls is none.
+    h.linear.set_labels(&[
+        "bug",
+        "Frontend",
+        "  Bug ",
+        "Docs\u{202e}",
+        "\u{1b}",
+        "ai-ready",
+    ]);
+    assert_eq!(
+        h.engine.labels().await.unwrap(),
+        ["ai-ready", "bug", "Docs", "Frontend"]
+    );
 }
 
 #[tokio::test(start_paused = true)]

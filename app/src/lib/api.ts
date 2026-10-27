@@ -35,6 +35,7 @@ export const tauriBackend: Backend = {
   saveBinding: (binding) => call("save_binding", { binding }),
   removeBinding: (id) => call("remove_binding", { id }),
   projects: () => call("projects"),
+  labels: () => call("labels"),
   settings: () => call("settings"),
   saveSettings: (settings) => call("save_settings", { settings }),
   doctor: () => call("doctor"),

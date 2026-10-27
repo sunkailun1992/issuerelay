@@ -46,8 +46,8 @@ use crate::executor::{
 };
 use crate::linear::{LinearApi, Project, Viewer};
 use crate::logs::{self, CleanupReport};
-use crate::model::{Issue, Job, JobState, ProcessTag};
-use crate::prompt::{self, PromptInput};
+use crate::model::{Issue, Job, JobState, ProcessTag, RunMode, RunUsage};
+use crate::prompt::{self, Continuation, PromptInput};
 use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
 use crate::store::{Leftover, NewJob, Store};
@@ -76,6 +76,21 @@ const STALE_REREAD_PAUSES: [Duration; 3] = [
 
 /// How many events wait for a slow subscriber before it lags.
 const EVENT_CAPACITY: usize = 256;
+
+/// How recent a run must be for a later run of its issue to continue its session (run-improvements
+/// design, section 11.1): the executors keep their sessions for a while, not for good.
+const RESUME_WITHIN_DAYS: i64 = 7;
+
+/// The earlier run whose session a run continues (`Engine::resume_target`).
+struct Resume {
+    job_id: i64,
+    session_id: String,
+    mode: RunMode,
+}
+
+/// How long what `unfinished_blockers` found about an issue stands while the issue itself does not
+/// change (a blocker that is done does not change the issue it blocked).
+const BLOCKER_CHECK_TTL: Duration = Duration::from_secs(2 * 60);
 
 /// How long a job whose start failed is passed over: doubled after each further failure, up to
 /// `START_RETRY_MAX`. Meanwhile the jobs behind it can start.
@@ -253,6 +268,16 @@ struct PollState {
 struct RunningJob {
     directory: PathBuf,
     cancel: CancellationToken,
+    /// The executor has ended and the result is being checked and recorded (`finish_job`): what
+    /// Linear shows about the issue no longer stops the run.
+    finishing: bool,
+}
+
+/// What `unfinished_blockers` found about one issue, and for which `updatedAt` of it.
+struct BlockerCheck {
+    updated_at: DateTime<Utc>,
+    at: tokio::time::Instant,
+    unfinished: Vec<String>,
 }
 
 /// A queued job whose start failed: how many times in a row, and until when it is passed over.
@@ -344,6 +369,12 @@ struct Inner {
     /// The queued jobs `dispatch` passes over after a failed start, and how often each queued job
     /// was retried (`Backoffs`).
     start_backoff: Mutex<Backoffs>,
+    /// Runs told to stop because of their issue in Linear (`watch_running`), by job id: the end of
+    /// the run records that reason instead of `stopped by the user`.
+    stop_causes: Mutex<HashMap<i64, LinearStop>>,
+    /// What the last look at each candidate issue's blockers found, by issue uuid
+    /// (`unfinished_blockers`).
+    blocker_checks: Mutex<HashMap<String, BlockerCheck>>,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -415,6 +446,115 @@ fn display_workspace(report: WorkspaceReport) -> WorkspaceReport {
     }
 }
 
+/// Why a run is stopped because of what Linear shows about its issue (run-improvements design,
+/// section 6.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinearStop {
+    Deleted,
+    Canceled,
+    Completed,
+    Reassigned,
+}
+
+impl LinearStop {
+    /// The reason stored on the run, in place of `stopped by the user`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            LinearStop::Deleted => "the issue no longer exists in Linear",
+            LinearStop::Canceled => "the issue was canceled in Linear",
+            LinearStop::Completed => "the issue was completed in Linear",
+            LinearStop::Reassigned => "the issue was reassigned in Linear",
+        }
+    }
+}
+
+/// Whether what Linear shows about the issue of a run in progress means the run has to stop: the
+/// issue is gone (`None`), its status is of the canceled or completed kind, or it is no longer
+/// assigned to `me`. The label and a status back to Todo do not count: the AI makes both changes
+/// itself on its way out, asking for information or failing. Nothing counts either once the issue
+/// is in the testing status: the AI took it there and the run is ending, and on the way team
+/// instructions may have it hand the issue to someone else, or a team may count that status as
+/// completed. Without a status kind (a reply from before Linear sent one) only the Done status
+/// counts as completed.
+pub fn linear_stop(issue: Option<&Issue>, me: &str, names: &TriggerNames) -> Option<LinearStop> {
+    let Some(issue) = issue else {
+        return Some(LinearStop::Deleted);
+    };
+    if same_name(&issue.state, &names.in_testing) {
+        return None;
+    }
+    match issue.state_type.as_deref() {
+        Some("canceled") => return Some(LinearStop::Canceled),
+        Some("completed") => return Some(LinearStop::Completed),
+        None if same_name(&issue.state, &names.done) => return Some(LinearStop::Completed),
+        _ => {}
+    }
+    (issue.assignee_id.as_deref() != Some(me)).then_some(LinearStop::Reassigned)
+}
+
+/// Runs `spec` in a task of its own: if the runner panics, the job must still be recorded as
+/// finished and give its slot back. Unwinding drops the runner's process-tree guard, which ends the
+/// executor's processes; the result is still checked against Linear.
+async fn run_once(
+    runner: Arc<dyn JobRunner>,
+    spec: CommandSpec,
+    kind: ExecutorKind,
+    log_path: PathBuf,
+    limits: RunLimits,
+    cancel: CancellationToken,
+    on_spawn: SpawnHook,
+) -> RunOutput {
+    let run = tokio::spawn(async move {
+        runner
+            .run(spec, kind, log_path, limits, cancel, on_spawn)
+            .await
+    });
+    match run.await {
+        Ok(output) => output,
+        Err(e) => RunOutput::ended(
+            ExitKind::SpawnFailed(format!("the run task ended unexpectedly: {e}")),
+            None,
+        ),
+    }
+}
+
+/// The issues assigned to the user in the Todo status that carry the trigger label or the plan
+/// label (run-improvements design, section 10.1), each once: an issue with both labels comes with
+/// the trigger label's list.
+async fn candidates(linear: &dyn LinearApi, names: &TriggerNames) -> Result<Vec<Issue>> {
+    let mut issues = linear.candidate_issues(&names.label, &names.todo).await?;
+    for issue in linear
+        .candidate_issues(&names.plan_label, &names.todo)
+        .await?
+    {
+        if !issues.iter().any(|known| known.uuid == issue.uuid) {
+            issues.push(issue);
+        }
+    }
+    Ok(issues)
+}
+
+/// Whether `issue` no longer blocks anything: its status is of the completed or canceled kind or,
+/// in a reply without status kinds, it is the Done status.
+fn is_done(issue: &Issue, done_name: &str) -> bool {
+    match issue.state_type.as_deref() {
+        Some(kind) => kind == "completed" || kind == "canceled",
+        None => same_name(&issue.state, done_name),
+    }
+}
+
+/// What a run cost itself (run-improvements design, section 7.2): Claude reports the running total
+/// of its session, which a resumed run carries on, so a resumed run's own cost is that total less
+/// the total the run it resumed recorded. `None` when a figure is missing or the difference would
+/// be negative.
+fn own_cost(session_total: Option<i64>, previous_total: Option<i64>, resumed: bool) -> Option<i64> {
+    if !resumed {
+        return session_total;
+    }
+    let own = session_total?.checked_sub(previous_total?)?;
+    (own >= 0).then_some(own)
+}
+
 /// Whether a log line is one of Claude's `thinking_tokens` events: an estimate of the tokens spent
 /// thinking so far, without any content. A lean run on 2026-10-22 (Claude Code 2.1.285) logged 112
 /// of them in its 171 lines. Only a line that mentions the word is parsed, and only that event
@@ -472,6 +612,27 @@ pub fn decide(
     }
 }
 
+/// Maps a finished planning run to a job state (run-improvements design, section 10.4). A clean exit
+/// with a plan, or with questions instead, is `NeedsInfo`: the issue waits for the user either way,
+/// and the run's report tells the two apart. Anything else ends as a usual run would.
+pub fn decide_plan(
+    exit: &ExitKind,
+    report: Option<&Report>,
+    names: &TriggerNames,
+) -> (JobState, Option<String>) {
+    match exit {
+        ExitKind::Exited(Some(0)) => match report {
+            Some(Report::Planned(_) | Report::NeedsInfo(_)) => (JobState::NeedsInfo, None),
+            _ => (
+                JobState::Failed,
+                Some("the planning run finished without a plan".into()),
+            ),
+        },
+        // What a usual run's end says does not depend on the issue for these.
+        _ => decide(exit, None, None, names),
+    }
+}
+
 impl Engine {
     /// Loads the configuration and marks the runs a previous shutdown interrupted as failed; the
     /// executors those runs left running, and any an earlier host did not finish sweeping, are
@@ -522,6 +683,8 @@ impl Engine {
                 events: broadcast::channel(EVENT_CAPACITY).0,
                 draining: AtomicBool::new(false),
                 start_backoff: Mutex::new(Backoffs::default()),
+                stop_causes: Mutex::new(HashMap::new()),
+                blocker_checks: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -730,7 +893,10 @@ impl Engine {
         self.config().bindings
     }
 
-    /// Adds the binding, replacing any existing one for the same project or id.
+    /// Adds the binding, replacing any existing one with the same id, and any of the same project
+    /// that would take the same issues (`config::bindings_overlap`: both are the project's default
+    /// binding, or they share a routing label). Adding a project's default binding again replaces
+    /// the old one, as before routing labels existed; a binding with routing labels sits next to it.
     ///
     /// A binding that replaces another takes its place in the list (the panel lists the bindings
     /// in this order, so editing one must not move it); one that replaces several stands where
@@ -740,7 +906,8 @@ impl Engine {
     /// non-blank ids, no control characters in names), and a refused binding changes nothing.
     pub fn add_binding(&self, binding: Binding) -> Result<()> {
         self.update_config(|c| {
-            let replaced = |b: &Binding| b.project_id == binding.project_id || b.id == binding.id;
+            let replaced =
+                |b: &Binding| b.id == binding.id || crate::config::bindings_overlap(b, &binding);
             let place = c.bindings.iter().position(replaced);
             c.bindings.retain(|b| !replaced(b));
             // Everything before `place` was kept, so it is still a valid place to insert at.
@@ -872,14 +1039,38 @@ impl Engine {
             .collect())
     }
 
-    /// The panel's issue list (spec 9.2): the issues assigned to the user with the trigger label,
-    /// each with its newest local run and whether it would be picked up now.
+    /// Linear's issue labels, for choosing routing labels (run-improvements design, section 9.3):
+    /// cleaned for display (`clean_text`) and without the blanks around them, each name once
+    /// (`same_name`: teams can each have a label of the same name), in alphabetical order whatever
+    /// the case.
+    pub async fn labels(&self) -> Result<Vec<String>> {
+        let mut labels: Vec<String> = Vec::new();
+        for label in self.linear().labels().await? {
+            let label = clean_text(&label).trim().to_string();
+            if !label.is_empty() && !labels.iter().any(|seen| same_name(seen, &label)) {
+                labels.push(label);
+            }
+        }
+        labels.sort_by_key(|label| label.to_ascii_lowercase());
+        Ok(labels)
+    }
+
+    /// The panel's issue list (spec 9.2): the issues assigned to the user with the trigger label or
+    /// the plan label, each with its newest local run and whether it would be picked up now.
     pub async fn issues(&self) -> Result<Vec<IssueView>> {
         let cfg = self.config();
         let names = &cfg.settings.trigger;
         let linear = self.linear();
         let me = self.viewer(&linear).await?;
-        let issues = linear.labeled_issues(&names.label).await?;
+        // The trigger label's and the plan label's, the most recently updated 50 of both.
+        let mut issues = linear.labeled_issues(&names.label).await?;
+        for issue in linear.labeled_issues(&names.plan_label).await? {
+            if !issues.iter().any(|known| known.uuid == issue.uuid) {
+                issues.push(issue);
+            }
+        }
+        issues.sort_by_key(|issue| std::cmp::Reverse(issue.updated_at));
+        issues.truncate(50);
         let (ready, _) = self.readiness().await;
         let mut views = Vec::with_capacity(issues.len());
         for issue in issues {
@@ -893,7 +1084,9 @@ impl Engine {
             } else if cfg.settings.paused {
                 IssueStatus::Paused
             } else {
-                match trigger::evaluate(&issue, &cfg, &me.id, &ready, self.home()) {
+                // What the checks last found about its blockers; the list reads nothing more.
+                let blockers = self.known_blockers(&issue.uuid);
+                match trigger::evaluate(&issue, &cfg, &me.id, &ready, self.home(), &blockers) {
                     Eligibility::Eligible(_) => IssueStatus::Eligible {
                         // What the poll does with such an issue (`reconcile`): a run in hand stays
                         // as it is, anything else is recorded anew only when `should_enqueue` says
@@ -977,16 +1170,259 @@ impl Engine {
         // and the issues it is compared with must come from the same one.
         let linear = self.linear();
         let me = self.viewer(&linear).await?;
-        let issues = linear.candidate_issues(&names.label, &names.todo).await?;
+        let issues = candidates(linear.as_ref(), names).await?;
         let (ready, _) = self.readiness().await;
+        let blockers = self
+            .blockers_for(linear.as_ref(), cfg, &me, &issues)
+            .await?;
         // The jobs this poll records or changes are announced once no store guard is held, also
         // when a store error ends the poll part way.
         let mut changed = Vec::new();
-        let result = self.reconcile(cfg, &me, &issues, &ready, &mut changed);
+        let result = self.reconcile(cfg, &me, &issues, &ready, &blockers, &mut changed);
         for id in changed {
             self.emit_job(id);
         }
+        self.watch_running(linear.as_ref(), &me.id, names).await;
         result
+    }
+
+    /// Reads the issue of every run in progress and tells the runs to stop whose issue Linear shows
+    /// canceled, completed, reassigned or deleted (`linear_stop`, run-improvements design section
+    /// 6). The reason is recorded before the stop, so that the end of the run finds it. A read that
+    /// fails leaves its run alone until the next check.
+    async fn watch_running(&self, linear: &dyn LinearApi, me: &str, names: &TriggerNames) {
+        let mut ids: Vec<i64> = self
+            .inner
+            .running
+            .lock()
+            .expect("running lock")
+            .keys()
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        for job_id in ids {
+            let job = match self.store().get(job_id) {
+                Ok(Some(job)) if job.state == JobState::Running => job,
+                _ => continue,
+            };
+            let issue = match linear.issue(&job.issue_uuid).await {
+                Ok(issue) => issue,
+                Err(e) => {
+                    tracing::warn!(
+                        job_id,
+                        issue = %job.issue_identifier,
+                        error = %format!("{e:#}"),
+                        "could not read the issue of a run in progress; trying again at the next check"
+                    );
+                    continue;
+                }
+            };
+            let Some(stop) = linear_stop(issue.as_ref(), me, names) else {
+                continue;
+            };
+            // Under the lock that `finish_job` takes to mark the run finishing: either the reason
+            // is recorded before the end of the run looks for it, or the run is left alone. A run
+            // whose executor ended while the issue was read is not stopped again.
+            let stopped = {
+                let running = self.inner.running.lock().expect("running lock");
+                match running.get(&job_id) {
+                    Some(run) if !run.finishing => {
+                        self.inner
+                            .stop_causes
+                            .lock()
+                            .expect("stop causes lock")
+                            .insert(job_id, stop);
+                        run.cancel.cancel();
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if stopped {
+                tracing::info!(
+                    job_id,
+                    issue = %job.issue_identifier,
+                    reason = stop.reason(),
+                    "stopping the run: its issue changed in Linear"
+                );
+            }
+        }
+    }
+
+    /// Marks the run of this job as finishing (`RunningJob::finishing`).
+    fn mark_finishing(&self, job_id: i64) {
+        if let Some(run) = self
+            .inner
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&job_id)
+        {
+            run.finishing = true;
+        }
+    }
+
+    /// The reason `watch_running` recorded for stopping this job's run, which it forgets.
+    fn take_stop_cause(&self, job_id: i64) -> Option<LinearStop> {
+        self.inner
+            .stop_causes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&job_id)
+    }
+
+    /// `unfinished_blockers` of each candidate issue the poll may record or reassess (a waiting or
+    /// queued one, or one whose finished run Linear has changed since, `should_enqueue`) and that
+    /// was looked at before. A new candidate is looked at by the re-read before its start
+    /// (`start_job`), which reads its relations anyway: no poll reads every new issue twice. A
+    /// running issue, and one the poll leaves alone, are not looked at. An issue whose blockers
+    /// cannot be read keeps what was found before, and the next poll reads them again: one
+    /// unreadable blocker holds back nothing else. What is remembered about issues that are no
+    /// longer candidates is forgotten.
+    async fn blockers_for(
+        &self,
+        linear: &dyn LinearApi,
+        cfg: &Config,
+        me: &Viewer,
+        issues: &[Issue],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let names = &cfg.settings.trigger;
+        let mut seen = HashMap::new();
+        let mut found = HashMap::new();
+        // Blockers hold back usual runs only (design W9).
+        for issue in issues
+            .iter()
+            .filter(|i| trigger::candidate_mode(i, names, &me.id) == Some(RunMode::Implement))
+        {
+            let known = self
+                .inner
+                .blocker_checks
+                .lock()
+                .expect("blocker checks lock")
+                .contains_key(&issue.uuid);
+            if !known {
+                continue;
+            }
+            let latest = self.store().latest_for_issue(&issue.uuid)?;
+            let looked_at = match &latest {
+                Some(job) if job.state == JobState::Running => false,
+                Some(job) if job.state.is_active() => true,
+                latest => trigger::should_enqueue(latest.as_ref(), issue),
+            };
+            if looked_at {
+                let unfinished = match self
+                    .unfinished_blockers(linear, issue, &names.done, &mut seen)
+                    .await
+                {
+                    Ok(unfinished) => unfinished,
+                    Err(e) => {
+                        tracing::warn!(
+                            issue = %issue.identifier,
+                            error = %format!("{e:#}"),
+                            "could not read what blocks the issue; keeping what was found before"
+                        );
+                        self.known_blockers(&issue.uuid)
+                    }
+                };
+                found.insert(issue.uuid.clone(), unfinished);
+            }
+        }
+        self.inner
+            .blocker_checks
+            .lock()
+            .expect("blocker checks lock")
+            .retain(|uuid, _| issues.iter().any(|issue| &issue.uuid == uuid));
+        Ok(found)
+    }
+
+    /// The issues that block `issue` and are not done yet, by identifier (run-improvements design,
+    /// section 8). The relations come from `issue` when it carries them (a `get_issue` reply) and
+    /// are read otherwise; then each blocker is read. A blocker Linear no longer has does not
+    /// block, and neither does one whose status kind is `completed` or `canceled` (without a kind:
+    /// whose status is `done_name`). `seen` holds what this round found about blockers, so that one
+    /// blocking several issues is read once. The answer stands for `BLOCKER_CHECK_TTL` while the
+    /// issue's `updatedAt` stays the same. A read that fails is an error.
+    async fn unfinished_blockers(
+        &self,
+        linear: &dyn LinearApi,
+        issue: &Issue,
+        done_name: &str,
+        seen: &mut HashMap<String, bool>,
+    ) -> Result<Vec<String>> {
+        {
+            let checks = self
+                .inner
+                .blocker_checks
+                .lock()
+                .expect("blocker checks lock");
+            if let Some(check) = checks.get(&issue.uuid)
+                && check.updated_at == issue.updated_at
+                && check.at.elapsed() < BLOCKER_CHECK_TTL
+            {
+                return Ok(check.unfinished.clone());
+            }
+        }
+        let blocked_by = match &issue.blocked_by {
+            Some(identifiers) => identifiers.clone(),
+            None => linear
+                .issue(&issue.uuid)
+                .await?
+                .and_then(|current| current.blocked_by)
+                .unwrap_or_default(),
+        };
+        let mut unfinished: Vec<String> = Vec::new();
+        for identifier in blocked_by {
+            let done = match seen.get(&identifier) {
+                Some(done) => *done,
+                None => {
+                    let done = linear
+                        .issue(&identifier)
+                        .await?
+                        .is_none_or(|blocker| is_done(&blocker, done_name));
+                    seen.insert(identifier.clone(), done);
+                    done
+                }
+            };
+            if !done && !unfinished.contains(&identifier) {
+                unfinished.push(identifier);
+            }
+        }
+        self.inner
+            .blocker_checks
+            .lock()
+            .expect("blocker checks lock")
+            .insert(
+                issue.uuid.clone(),
+                BlockerCheck {
+                    updated_at: issue.updated_at,
+                    at: tokio::time::Instant::now(),
+                    unfinished: unfinished.clone(),
+                },
+            );
+        Ok(unfinished)
+    }
+
+    /// What the last look at the issue's blockers found (`unfinished_blockers`), however long ago;
+    /// none when it was never looked at.
+    fn known_blockers(&self, uuid: &str) -> Vec<String> {
+        self.inner
+            .blocker_checks
+            .lock()
+            .expect("blocker checks lock")
+            .get(uuid)
+            .map(|check| check.unfinished.clone())
+            .unwrap_or_default()
+    }
+
+    /// Forgets what was found about blockers, so that the next check reads them again. For tests,
+    /// which cannot wait for `BLOCKER_CHECK_TTL`.
+    #[doc(hidden)]
+    pub fn forget_blocker_checks(&self) {
+        self.inner
+            .blocker_checks
+            .lock()
+            .expect("blocker checks lock")
+            .clear();
     }
 
     /// Brings the jobs in line with the candidate `issues`: new ones are recorded, queued and
@@ -998,6 +1434,7 @@ impl Engine {
         me: &Viewer,
         issues: &[Issue],
         ready: &Readiness,
+        blockers: &HashMap<String, Vec<String>>,
         changed: &mut Vec<i64>,
     ) -> Result<()> {
         let names = &cfg.settings.trigger;
@@ -1007,7 +1444,9 @@ impl Engine {
             .filter(|i| trigger::is_candidate(i, names, &me.id))
         {
             seen.insert(issue.uuid.clone());
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, self.home());
+            let mode = trigger::candidate_mode(issue, names, &me.id).unwrap_or_default();
+            let unfinished = blockers.get(&issue.uuid).map_or(&[][..], Vec::as_slice);
+            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, self.home(), unfinished);
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
@@ -1015,16 +1454,33 @@ impl Engine {
             let latest = store.latest_for_issue(&issue.uuid)?;
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
-                    if Self::reassess(&store, &job, cfg, eligibility)? {
+                    let mut moved = Self::reassess(&store, &job, cfg, eligibility)?;
+                    // The labels changed what the run is for (`ai-ready` added to a planning
+                    // candidate, say); the start decides it again in any case.
+                    if job.mode != mode {
+                        store.set_mode(job.id, mode)?;
+                        moved = true;
+                    }
+                    if moved {
                         changed.push(job.id);
                     }
                 }
                 Some(job) if job.state == JobState::Running => {}
                 latest => {
-                    if trigger::should_enqueue(latest.as_ref(), issue)
-                        && let Some(id) = Self::enqueue(&store, issue, cfg, eligibility)?
-                    {
-                        changed.push(id);
+                    if trigger::should_enqueue(latest.as_ref(), issue) {
+                        // An issue that comes back continues the session of its latest run that
+                        // had one, if the settings allow it; the start checks that it still can.
+                        let resume = match latest {
+                            Some(_) if cfg.settings.resume_sessions => store
+                                .latest_with_session(&issue.uuid)?
+                                .map(|previous| previous.id),
+                            _ => None,
+                        };
+                        if let Some(id) =
+                            Self::enqueue(&store, issue, cfg, eligibility, mode, resume)?
+                        {
+                            changed.push(id);
+                        }
                     }
                 }
             }
@@ -1049,12 +1505,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Records a job for the issue and returns its id; `None` when the issue is no candidate.
+    /// Records a job for the issue and returns its id; `None` when the issue is no candidate. `mode`
+    /// is what its labels ask for (`trigger::candidate_mode`), `resume` the earlier run whose
+    /// session it is to continue.
     fn enqueue(
         store: &Store,
         issue: &Issue,
         cfg: &Config,
         eligibility: Eligibility,
+        mode: RunMode,
+        resume: Option<i64>,
     ) -> Result<Option<i64>> {
         // The title is Linear's text and reaches the panel, the CLI and MCP; the prompt never
         // contains it. The store gets a cleaned copy of the issue.
@@ -1069,6 +1529,8 @@ impl Engine {
                 executor: Some(cfg.executor_for(binding)),
                 state: JobState::Queued,
                 reason: None,
+                mode,
+                resume_job_id: resume,
             },
             Eligibility::Waiting(reason) => NewJob {
                 issue,
@@ -1076,6 +1538,8 @@ impl Engine {
                 executor: None,
                 state: JobState::WaitingBinding,
                 reason: Some(reason.describe()),
+                mode,
+                resume_job_id: resume,
             },
             Eligibility::NotCandidate => return Ok(None),
         };
@@ -1351,7 +1815,16 @@ impl Engine {
             }
             return Ok(false);
         };
-        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, self.home()) {
+        // The re-read carries the issue's relations: what blocks it now decides as well.
+        let blockers = self
+            .unfinished_blockers(
+                linear,
+                &issue,
+                &cfg.settings.trigger.done,
+                &mut HashMap::new(),
+            )
+            .await?;
+        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, self.home(), &blockers) {
             Eligibility::Eligible(binding) => binding,
             Eligibility::Waiting(reason) => {
                 let waiting = self.assign_if_queued(
@@ -1401,6 +1874,22 @@ impl Engine {
             }
             return Ok(false);
         };
+        // What the labels ask for now; the re-read issue is a candidate, so it asks for something.
+        let mode =
+            trigger::candidate_mode(&issue, &cfg.settings.trigger, &me.id).unwrap_or_default();
+        // Whether the run continues an earlier session, now that the executor, the folder and the
+        // mode are known (run-improvements design, section 11.1).
+        let (resume, not_resumed) = match self.resume_target(cfg, &job, kind, &binding, mode) {
+            Ok(resume) => (resume, None),
+            Err(why) => (None, Some(why)),
+        };
+        let continuation = match &resume {
+            None => Continuation::None,
+            Some(previous) if previous.mode == RunMode::Plan && mode == RunMode::Implement => {
+                Continuation::AfterPlan
+            }
+            Some(_) => Continuation::Rework,
+        };
         let language = cfg.settings.resolved_comment_language();
         // A blank override falls back to the global template instead of silently dropping it.
         let template = binding
@@ -1408,19 +1897,34 @@ impl Engine {
             .clone()
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| cfg.settings.prompt_template.clone());
-        let prompt_text = prompt::render(&PromptInput {
-            identifier: &issue.identifier,
-            url: &issue.url,
-            names: &cfg.settings.trigger,
-            comment_language: &language,
-            template: &template,
-        });
+        let prompt_for = |continuation| {
+            let input = PromptInput {
+                identifier: &issue.identifier,
+                url: &issue.url,
+                names: &cfg.settings.trigger,
+                comment_language: &language,
+                template: &template,
+                continuation,
+            };
+            match mode {
+                RunMode::Implement => prompt::render(&input),
+                RunMode::Plan => prompt::render_plan(&input),
+            }
+        };
+        let prompt_text = prompt_for(continuation);
         // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
         // arguments is not passed, and the run log says so (lean-run design, section 5.1).
         let instructions =
             lean::user_instructions_path(self.home(), self.inner.claude_config_dir.as_deref());
         let passable = instructions.as_deref().filter(|path| lean::passable(path));
-        let lean_run = cfg.lean_for(&binding, self.home()).applies();
+        // A planning run is lean (design W8; `trigger::evaluate` kept it out of the home folder,
+        // where it cannot be), unless its binding is on personal settings, which it keeps.
+        let lean_run = match mode {
+            RunMode::Plan => {
+                cfg.permission_for(&binding) != crate::config::PermissionProfile::Personal
+            }
+            RunMode::Implement => cfg.lean_for(&binding, self.home()).applies(),
+        };
         let options = executor::RunOptions {
             profile: cfg.permission_for(&binding),
             model: binding.model.as_deref(),
@@ -1428,24 +1932,57 @@ impl Engine {
             lean: lean_run.then_some(executor::Lean {
                 user_instructions: passable,
             }),
+            plan: mode == RunMode::Plan,
+            resume: resume.as_ref().map(|previous| previous.session_id.as_str()),
         };
+        // The same run without the session, should resuming it fail (section 11.4).
+        let mut fresh = resume.is_some().then(|| {
+            let options = executor::RunOptions {
+                resume: None,
+                ..options
+            };
+            executor::build(
+                kind,
+                program.clone(),
+                &options,
+                &binding.directory,
+                prompt_for(Continuation::None),
+            )
+        });
         let mut spec = executor::build(kind, program, &options, &binding.directory, prompt_text);
-        if lean_run {
-            spec.notes.push(lean::log_note(kind).into());
+        if let Some(previous) = &resume {
+            spec.notes.push(format!(
+                "this run continues the session of run {}",
+                previous.job_id
+            ));
         }
-        if lean_run && kind == ExecutorKind::Claude && passable.is_none() {
-            spec.notes.push(if instructions.is_some() {
-                "the user-level CLAUDE.md path cannot be passed safely, so this lean run still \
-                 reads it"
-                    .into()
-            } else {
-                "could not tell where the user-level CLAUDE.md is, so this lean run may still \
-                 read it"
-                    .into()
-            });
+        if let Some(why) = not_resumed {
+            spec.notes.push(format!("this run starts afresh: {why}"));
+        }
+        for spec in std::iter::once(&mut spec).chain(fresh.as_mut()) {
+            if lean_run {
+                spec.notes.push(lean::log_note(kind).into());
+            }
+            if lean_run && kind == ExecutorKind::Claude && passable.is_none() {
+                spec.notes.push(if instructions.is_some() {
+                    "the user-level CLAUDE.md path cannot be passed safely, so this lean run \
+                     still reads it"
+                        .into()
+                } else {
+                    "could not tell where the user-level CLAUDE.md is, so this lean run may still \
+                     read it"
+                        .into()
+                });
+            }
         }
         // A manual retry reuses the row, so its log replaces the previous attempt's log.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
+        // A stop and a manual re-run while the issue was read cleared the session to continue
+        // (`requeue`: a re-run starts afresh, design W6); the row is queued again, so its start
+        // below would succeed. The next cycle starts the job from what its row says now.
+        if self.store().get(job.id)?.map(|now| now.resume_job_id) != Some(job.resume_job_id) {
+            return Ok(false);
+        }
         // Right before the run is registered: a pause or a changed binding that came while the
         // issue was being read means this start must not happen. The job stays queued and the
         // next cycle, which should not wait for the timer, starts it from the new configuration,
@@ -1476,8 +2013,17 @@ impl Engine {
                 RunningJob {
                     directory,
                     cancel: cancel.clone(),
+                    finishing: false,
                 },
             );
+        }
+        // The mode goes on the row first: the end of the run reads it to judge the result, and so
+        // does the run to continue (gone when it cannot be continued), from which the end works out
+        // this run's own cost. Written while the row is still queued; a stop that comes meanwhile
+        // leaves them on a canceled row.
+        self.store().set_mode(job.id, mode)?;
+        if resume.is_none() && job.resume_job_id.is_some() {
+            self.store().set_resume_job(job.id, None)?;
         }
         let started = self.store().mark_started(job.id, &log_path);
         if !matches!(started, Ok(true)) {
@@ -1508,30 +2054,44 @@ impl Engine {
         let issue_uuid = job.issue_uuid.clone();
         let identifier = job.issue_identifier.clone();
         let started_from = issue.updated_at;
-        // The executor's process goes on the row once it runs, so that a host started after a
-        // crash can end what this run left behind.
-        let recorder = self.clone();
-        let on_spawn: SpawnHook = Box::new(move |tag| {
-            if let Err(e) = recorder.store().set_process(job_id, &tag) {
-                tracing::warn!(job_id, error = %format!("{e:#}"), "could not record the executor process");
-            }
-        });
+        let on_spawn = self.process_recorder(job_id);
+        let fresh = fresh.map(|spec| (spec, self.process_recorder(job_id)));
         tokio::spawn(async move {
-            // The runner gets a task of its own: if it panics, the job must still be recorded as
-            // finished and give its slot back. Unwinding drops the runner's process-tree guard,
-            // which ends the executor's processes. The result is still checked against Linear.
-            let run = tokio::spawn(async move {
-                runner
-                    .run(spec, kind, log_path, limits, cancel, on_spawn)
-                    .await
-            });
-            let output = match run.await {
-                Ok(output) => output,
-                Err(e) => RunOutput {
-                    exit: ExitKind::SpawnFailed(format!("the run task ended unexpectedly: {e}")),
-                    final_text: None,
-                },
-            };
+            let mut output = run_once(
+                runner.clone(),
+                spec,
+                kind,
+                log_path.clone(),
+                limits,
+                cancel.clone(),
+                on_spawn,
+            )
+            .await;
+            // A resumed session that never started (gone from the executor, say: design section
+            // 11.4): the same job runs again from the start. No work was done the first time.
+            if let Some((mut spec, on_spawn)) = fresh
+                && let ExitKind::Exited(Some(code)) = output.exit
+                && code != 0
+                && output.session_id.is_none()
+            {
+                tracing::info!(
+                    job_id,
+                    issue = %identifier,
+                    code,
+                    "the earlier session could not be resumed; starting afresh"
+                );
+                if let Err(e) = engine.store().set_resume_job(job_id, None) {
+                    tracing::warn!(job_id, error = %format!("{e:#}"), "could not record the fresh start");
+                }
+                spec.notes.insert(
+                    0,
+                    format!(
+                        "the earlier session could not be resumed (the executor exited with code \
+                         {code}); this run starts afresh"
+                    ),
+                );
+                output = run_once(runner, spec, kind, log_path, limits, cancel, on_spawn).await;
+            }
             if let Err(e) = engine
                 .finish_job(
                     job_id,
@@ -1547,6 +2107,88 @@ impl Engine {
             }
         });
         Ok(true)
+    }
+
+    /// What records the executor's process on the job's row once it runs, so that a host started
+    /// after a crash can end what the run left behind.
+    fn process_recorder(&self, job_id: i64) -> SpawnHook {
+        let recorder = self.clone();
+        Box::new(move |tag| {
+            if let Err(e) = recorder.store().set_process(job_id, &tag) {
+                tracing::warn!(job_id, error = %format!("{e:#}"), "could not record the executor process");
+            }
+        })
+    }
+
+    /// The earlier run whose session the run of `job` continues (run-improvements design, section
+    /// 11.1): the one the poll recorded on the row, if it is still recorded with a session, ran
+    /// with this executor in this folder in the last `RESUME_WITHIN_DAYS` days, and its mode
+    /// allows it (a usual run's session is not continued by a planning run). `Ok(None)` when the
+    /// job is not to continue one; `Err` says why it cannot, for the run log.
+    fn resume_target(
+        &self,
+        cfg: &Config,
+        job: &Job,
+        kind: ExecutorKind,
+        binding: &Binding,
+        mode: RunMode,
+    ) -> std::result::Result<Option<Resume>, &'static str> {
+        let Some(previous_id) = job.resume_job_id else {
+            return Ok(None);
+        };
+        if !cfg.settings.resume_sessions {
+            return Err("continuing sessions is turned off in the settings");
+        }
+        let previous = self
+            .store()
+            .get(previous_id)
+            .ok()
+            .flatten()
+            .ok_or("the run to continue is no longer recorded")?;
+        let session_id = previous
+            .session_id
+            .clone()
+            .filter(|id| outcome::is_session_id(id))
+            .ok_or("the run to continue left no session")?;
+        if previous.executor != Some(kind) {
+            return Err("the run to continue used another executor");
+        }
+        if previous.directory.as_deref().map(canonical_dir)
+            != Some(canonical_dir(&binding.directory))
+        {
+            return Err("the run to continue ran in another folder");
+        }
+        let recent = previous.finished_at.is_some_and(|at| {
+            Utc::now().signed_duration_since(at) < chrono::Duration::days(RESUME_WITHIN_DAYS)
+        });
+        if !recent {
+            return Err("the run to continue ended more than 7 days ago");
+        }
+        if previous.mode == RunMode::Implement && mode == RunMode::Plan {
+            return Err("a planning run does not continue the session of a usual run");
+        }
+        if kind == ExecutorKind::Codex
+            && mode == RunMode::Implement
+            && cfg.permission_for(binding) == crate::config::PermissionProfile::Auto
+        {
+            return Err("Codex runs with automatic review cannot continue a session");
+        }
+        // A planning run on personal settings is not lean, and `codex exec resume` keeps it
+        // read-only only through a setting that a profile of the user's configuration could
+        // override (`executor::build`).
+        if kind == ExecutorKind::Codex
+            && mode == RunMode::Plan
+            && cfg.permission_for(binding) == crate::config::PermissionProfile::Personal
+        {
+            return Err(
+                "a Codex planning run on personal settings starts afresh, to stay read-only",
+            );
+        }
+        Ok(Some(Resume {
+            job_id: previous.id,
+            session_id,
+            mode: previous.mode,
+        }))
     }
 
     /// Sets the state, binding and reason of a job, but only while it is still queued, and says
@@ -1586,6 +2228,19 @@ impl Engine {
     ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
+        let mode = self
+            .store()
+            .get(job_id)
+            .ok()
+            .flatten()
+            .map(|job| job.mode)
+            .unwrap_or_default();
+        // A stop that came from Linear (`watch_running`) is recorded with its own reason. Taken in
+        // any case, so the table forgets the job; from here on none is recorded for it.
+        self.mark_finishing(job_id);
+        let linear_stop = self
+            .take_stop_cause(job_id)
+            .filter(|_| output.exit == ExitKind::Canceled);
         let mut rereads = STALE_REREAD_PAUSES.into_iter();
         let (state, reason, verified_at) = loop {
             let verified = self.verify_read(job_id, issue_uuid).await;
@@ -1593,13 +2248,28 @@ impl Engine {
                 matches!(&verified, Ok(Some(issue)) if issue.updated_at <= started_from);
             let result = match verified {
                 Ok(issue) => {
-                    let (state, reason) = decide(
-                        &output.exit,
-                        issue.as_ref().map(|i| i.state.as_str()),
-                        report.as_ref(),
-                        &names,
-                    );
+                    let (state, reason) = match mode {
+                        RunMode::Implement => decide(
+                            &output.exit,
+                            issue.as_ref().map(|i| i.state.as_str()),
+                            report.as_ref(),
+                            &names,
+                        ),
+                        RunMode::Plan => decide_plan(&output.exit, report.as_ref(), &names),
+                    };
                     (state, reason, issue.map(|i| i.updated_at))
+                }
+                // A planning run's result does not depend on the issue (`decide_plan`): a failed
+                // look at it after the run is only logged.
+                Err(e) if mode == RunMode::Plan => {
+                    tracing::warn!(
+                        job_id,
+                        issue = %identifier,
+                        error = %format!("{e:#}"),
+                        "could not read the issue after a planning run; its result is its own report"
+                    );
+                    let (state, reason) = decide_plan(&output.exit, report.as_ref(), &names);
+                    (state, reason, None)
                 }
                 Err(e) => {
                     let state = if output.exit == ExitKind::Canceled {
@@ -1626,7 +2296,9 @@ impl Engine {
             };
             // Only a failure is doubted. A question for the reporter is recorded at once: its
             // status is Todo, and an older snapshot shows Todo as well.
-            let doubtful = unchanged
+            // A planning run's result does not depend on what Linear shows.
+            let doubtful = mode == RunMode::Implement
+                && unchanged
                 && output.exit == ExitKind::Exited(Some(0))
                 && result.0 == JobState::Failed;
             if doubtful && let Some(pause) = rereads.next() {
@@ -1642,6 +2314,10 @@ impl Engine {
             }
             break result;
         };
+        let reason = match linear_stop {
+            Some(stop) => Some(stop.reason().to_string()),
+            None => reason,
+        };
         // These texts come from outside (the AI, Linear, the operating system) and reach the
         // panel, the CLI and MCP. The summary is the AI's own; without a report line it is the
         // last thing the AI said.
@@ -1651,13 +2327,29 @@ impl Engine {
             None => output.final_text.as_deref().map(clean_text),
         }
         .filter(|text| !text.is_empty());
-        let recorded = self.store().mark_finished(
-            job_id,
-            state,
-            reason.as_deref(),
-            summary.as_deref(),
-            verified_at,
-        );
+        let usage = output
+            .usage
+            .as_ref()
+            .map(|usage| self.with_own_cost(job_id, usage));
+        let recorded = {
+            let store = self.store();
+            store
+                .record_run(
+                    job_id,
+                    report.as_ref().map(Report::as_str),
+                    output.session_id.as_deref(),
+                    usage.as_ref(),
+                )
+                .and_then(|()| {
+                    store.mark_finished(
+                        job_id,
+                        state,
+                        reason.as_deref(),
+                        summary.as_deref(),
+                        verified_at,
+                    )
+                })
+        };
         if recorded.is_ok() {
             tracing::info!(job_id, issue = %identifier, state = state.as_str(), "job finished");
         }
@@ -1677,6 +2369,29 @@ impl Engine {
         slot.release();
         self.poll_now();
         recorded
+    }
+
+    /// `usage` with this run's own cost (`own_cost`): the session's running total, less the total
+    /// recorded by the run whose session this one resumed.
+    fn with_own_cost(&self, job_id: i64, usage: &RunUsage) -> RunUsage {
+        let store = self.store();
+        let resumed = store
+            .get(job_id)
+            .ok()
+            .flatten()
+            .and_then(|job| job.resume_job_id);
+        let previous_total = resumed
+            .and_then(|previous| store.get(previous).ok().flatten())
+            .and_then(|previous| previous.usage)
+            .and_then(|previous| previous.session_cost_micro_usd);
+        RunUsage {
+            cost_micro_usd: own_cost(
+                usage.session_cost_micro_usd,
+                previous_total,
+                resumed.is_some(),
+            ),
+            ..usage.clone()
+        }
     }
 
     /// Reads the issue of a finished run, up to three times: a read that fails is tried again
@@ -1735,6 +2450,7 @@ impl Engine {
     /// that folder. Runs from `RunSlot::drop`, so like `end_run` it must not panic: a store error
     /// is logged, and a poisoned lock is used as it is.
     fn abandon_run(&self, job_id: i64) {
+        self.take_stop_cause(job_id);
         {
             let store = self
                 .inner
@@ -2049,6 +2765,146 @@ mod tests {
 
     fn names() -> TriggerNames {
         TriggerNames::default()
+    }
+
+    /// An issue of a run in progress: started, assigned to `me`.
+    fn running_issue() -> Issue {
+        let t = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 1, 8, 0, 0).unwrap();
+        Issue {
+            uuid: "u-1".into(),
+            identifier: "DEMO-1".into(),
+            title: "Demo".into(),
+            url: "https://linear.app/demo/issue/DEMO-1".into(),
+            state: "In Progress".into(),
+            labels: vec!["ai-ready".into()],
+            project_id: Some("proj-1".into()),
+            project_name: Some("Demo Project".into()),
+            assignee_id: Some("me".into()),
+            parent_identifier: None,
+            priority: 0,
+            created_at: t,
+            updated_at: t,
+            state_type: Some("started".into()),
+            blocked_by: None,
+        }
+    }
+
+    #[test]
+    fn linear_stop_maps_each_case() {
+        let n = names();
+        let stop = |issue: &Issue| linear_stop(Some(issue), "me", &n);
+        assert_eq!(linear_stop(None, "me", &n), Some(LinearStop::Deleted));
+        let issue = running_issue();
+        assert_eq!(stop(&issue), None);
+        for (kind, expected) in [
+            ("canceled", LinearStop::Canceled),
+            ("completed", LinearStop::Completed),
+        ] {
+            let ended = Issue {
+                state_type: Some(kind.into()),
+                ..issue.clone()
+            };
+            assert_eq!(stop(&ended), Some(expected), "{kind}");
+        }
+        for assignee in [Some("someone-else".to_string()), None] {
+            let reassigned = Issue {
+                assignee_id: assignee.clone(),
+                ..issue.clone()
+            };
+            assert_eq!(
+                stop(&reassigned),
+                Some(LinearStop::Reassigned),
+                "{assignee:?}"
+            );
+        }
+        // What the AI does itself on its way out stops nothing.
+        let back_to_todo = Issue {
+            state: "Todo".into(),
+            state_type: Some("unstarted".into()),
+            labels: Vec::new(),
+            ..issue.clone()
+        };
+        assert_eq!(stop(&back_to_todo), None);
+        // Without a status kind only the Done status counts.
+        let unknown_kind = Issue {
+            state_type: None,
+            ..issue.clone()
+        };
+        assert_eq!(stop(&unknown_kind), None);
+        let done_by_name = Issue {
+            state: " done ".into(),
+            state_type: None,
+            ..issue.clone()
+        };
+        assert_eq!(stop(&done_by_name), Some(LinearStop::Completed));
+        // In the testing status the run is ending: handing the issue on, or a team whose testing
+        // status is of the completed kind, stops nothing.
+        for (assignee, kind) in [(Some("reviewer"), "started"), (Some("me"), "completed")] {
+            let in_testing = Issue {
+                state: "in testing".into(),
+                state_type: Some(kind.into()),
+                assignee_id: assignee.map(Into::into),
+                ..issue.clone()
+            };
+            assert_eq!(stop(&in_testing), None, "{assignee:?} {kind}");
+        }
+        assert_eq!(
+            LinearStop::Canceled.reason(),
+            "the issue was canceled in Linear"
+        );
+    }
+
+    #[test]
+    fn decide_plan_maps_outcomes() {
+        let n = names();
+        let clean = ExitKind::Exited(Some(0));
+        assert_eq!(
+            decide_plan(&clean, Some(&Report::Planned("three steps".into())), &n),
+            (JobState::NeedsInfo, None)
+        );
+        assert_eq!(
+            decide_plan(&clean, Some(&Report::NeedsInfo("which page?".into())), &n),
+            (JobState::NeedsInfo, None)
+        );
+        for report in [
+            None,
+            Some(Report::Failed("no".into())),
+            Some(Report::InTesting("?".into())),
+        ] {
+            assert_eq!(
+                decide_plan(&clean, report.as_ref(), &n),
+                (
+                    JobState::Failed,
+                    Some("the planning run finished without a plan".into())
+                ),
+                "{report:?}"
+            );
+        }
+        // The other ends are those of a usual run.
+        assert_eq!(
+            decide_plan(&ExitKind::Canceled, None, &n),
+            (JobState::Canceled, Some("stopped by the user".into()))
+        );
+        assert_eq!(
+            decide_plan(
+                &ExitKind::Exited(Some(3)),
+                Some(&Report::Planned(String::new())),
+                &n
+            )
+            .0,
+            JobState::Failed
+        );
+    }
+
+    #[test]
+    fn own_cost_subtracts_the_previous_total_only_when_resumed() {
+        assert_eq!(own_cost(Some(94_395), None, false), Some(94_395));
+        assert_eq!(own_cost(Some(94_395), Some(55_137), false), Some(94_395));
+        assert_eq!(own_cost(Some(94_395), Some(55_137), true), Some(39_258));
+        assert_eq!(own_cost(Some(10), Some(20), true), None);
+        assert_eq!(own_cost(Some(10), None, true), None);
+        assert_eq!(own_cost(None, Some(10), true), None);
+        assert_eq!(own_cost(None, None, false), None);
     }
 
     #[test]

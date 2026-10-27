@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use issuerelay_cli::{format, mcp};
 use issuerelay_core::{
-    config::{Binding, Effort, ExecutorKind, PermissionProfile},
+    config::{Binding, Effort, ExecutorKind, PermissionProfile, binding_id_for},
     ipc::client::{self, NotRunning},
     paths::AppPaths,
 };
@@ -71,7 +71,9 @@ enum Command {
 enum BindCommand {
     /// List the saved bindings.
     List,
-    /// Bind a Linear project to a local directory (replaces a binding with the same id).
+    /// Bind a Linear project to a local directory. Replaces a binding with the same id, and the
+    /// project's binding that would take the same issues: its default binding, or one with a
+    /// routing label this one has too.
     Add {
         /// The Linear project's uuid, not its `P-<TEAM>-N` identifier.
         #[arg(long)]
@@ -99,8 +101,17 @@ enum BindCommand {
         /// settings, or the executor's own when there is none.
         #[arg(long, value_parser = parse_effort)]
         effort: Option<Effort>,
+        /// A routing label (repeatable): the binding takes only the project's issues that carry
+        /// one of its labels, so that one project can run in several folders. Without any, the
+        /// binding is the project's default one, for the issues no label binding takes.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// The binding's id; by default the project id, followed by `#` and the first routing
+        /// label when there is one.
+        #[arg(long)]
+        id: Option<String>,
     },
-    /// Remove a binding by its id (the project id it was added with).
+    /// Remove a binding by its id, as `issuerelay bind list` shows it.
     Remove {
         /// The binding's id, as `issuerelay bind list` shows it.
         id: String,
@@ -170,12 +181,16 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
             permission,
             lean,
             effort,
+            labels,
+            id,
         }) => {
             // `normalize_folder` also checks that the folder exists: the engine does not look at
             // it when saving, so a typo here would otherwise give a binding whose jobs wait
             // forever for a missing directory.
             let binding = Binding {
-                id: project_id.clone(),
+                id: id
+                    .clone()
+                    .unwrap_or_else(|| binding_id_for(project_id, labels)),
                 project_id: project_id.clone(),
                 project_name: project_name.clone(),
                 directory: normalize_folder(dir)?,
@@ -185,6 +200,7 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
                 prompt_override: None,
                 lean: *lean,
                 effort: *effort,
+                labels: labels.clone(),
             };
             ("bindings.add", json!({"binding": binding}))
         }
@@ -387,6 +403,8 @@ mod tests {
             permission: None,
             lean: true,
             effort: None,
+            labels: Vec::new(),
+            id: None,
         })
     }
 
@@ -555,6 +573,46 @@ mod tests {
                 json!({"binding": {"id": "proj-1", "project_id": "proj-1",
                     "project_name": "Demo Project", "directory": root.path(),
                     "lean": false, "effort": "max"}})
+            )
+        );
+    }
+
+    #[test]
+    fn bind_add_sends_routing_labels_and_derives_the_id() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_str().unwrap();
+        let sent = |extra: &[&str]| {
+            let args: Vec<&str> = [
+                "bind",
+                "add",
+                "--project-id",
+                "proj-1",
+                "--project-name",
+                "Demo Project",
+                "--dir",
+                dir,
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .collect();
+            request(&parse(&args).command).unwrap()
+        };
+        assert_eq!(
+            sent(&["--label", "Frontend", "--label", "UI"]),
+            (
+                "bindings.add",
+                json!({"binding": {"id": "proj-1#Frontend", "project_id": "proj-1",
+                    "project_name": "Demo Project", "directory": root.path(),
+                    "labels": ["Frontend", "UI"]}})
+            )
+        );
+        assert_eq!(
+            sent(&["--label", "Frontend", "--id", "web"]),
+            (
+                "bindings.add",
+                json!({"binding": {"id": "web", "project_id": "proj-1",
+                    "project_name": "Demo Project", "directory": root.path(),
+                    "labels": ["Frontend"]}})
             )
         );
     }

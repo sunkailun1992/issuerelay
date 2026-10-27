@@ -1259,6 +1259,10 @@ pub struct BindingReport {
     /// not lean, `CLAUDE_CODE_EFFORT_LEVEL` in the user settings' `env` wins over it (lean-run
     /// design, section 5.6).
     pub effort: Option<Effort>,
+    /// The binding's routing labels; empty for the project's default binding. A host from before
+    /// routing labels sends none.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// One report per binding, in configuration order. `ready` is what `ready_set` gives; `home` is
@@ -1278,6 +1282,7 @@ pub fn check_bindings(cfg: &Config, ready: &Readiness, home: Option<&Path>) -> V
                 lean_not_ready: ready.held_back_by_lean(executor, lean),
                 lean,
                 effort: cfg.effort_for(b),
+                labels: b.labels.clone(),
             }
         })
         .collect()
@@ -2715,6 +2720,7 @@ mod tests {
                 prompt_override: None,
                 lean: true,
                 effort: None,
+                labels: Vec::new(),
             });
         }
         let claude: HashSet<_> = [ExecutorKind::Claude].into_iter().collect();
@@ -2752,6 +2758,7 @@ mod tests {
                 prompt_override: None,
                 lean: true,
                 effort: None,
+                labels: Vec::new(),
             });
         }
         let ready = Readiness {
@@ -2787,6 +2794,7 @@ mod tests {
                 prompt_override: None,
                 lean: true,
                 effort,
+                labels: Vec::new(),
             });
         }
         let effort = |cfg: &Config, index: usize| {
@@ -2822,6 +2830,7 @@ mod tests {
                 prompt_override: None,
                 lean,
                 effort: None,
+                labels: Vec::new(),
             });
         }
         // What the command line and the panel read: `executor_ready`, and `lean_not_ready`.

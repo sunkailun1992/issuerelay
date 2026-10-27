@@ -134,6 +134,22 @@ describe("mock backend", () => {
     expect(await ids()).toEqual(["proj-3", "proj-2", "proj-4"]);
   });
 
+  test("a binding with routing labels replaces only the bindings of its project that would take the same issues", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const ids = async () => (await backend.bindings()).map((b) => b.id);
+    const [first] = await backend.bindings();
+    // Another folder of the first project, for its issues labelled Docs: the project's binding stays.
+    const docs = { ...first, id: "proj-1#Docs", directory: "~/code/demo-docs", labels: ["Docs"] };
+    await backend.saveBinding(docs);
+    expect(await ids()).toEqual(["proj-1", "proj-2", "proj-1#Docs"]);
+    // One that shares a label with it, in another case, replaces it in its place.
+    await backend.saveBinding({ ...docs, id: "proj-1#Guides", labels: ["Guides", "docs"] });
+    expect(await ids()).toEqual(["proj-1", "proj-2", "proj-1#Guides"]);
+    // Another binding without labels replaces the project's default binding only.
+    await backend.saveBinding({ ...first, id: "bind-9" });
+    expect(await ids()).toEqual(["bind-9", "proj-2", "proj-1#Guides"]);
+  });
+
   test("a refused folder names the binding by the place it would have in the list", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const [first, second] = await backend.bindings();

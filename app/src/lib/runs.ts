@@ -8,6 +8,16 @@ export function isActive(job: Job): boolean {
   return ACTIVE_STATES.includes(job.state);
 }
 
+/** Whether the run was a planning run: it only wrote a plan (run-improvements design, section 10). */
+export function isPlanRun(job: Job): boolean {
+  return job.mode === "plan";
+}
+
+/** Whether the run is a planning run that posted its plan: it waits for the user to decide. */
+export function isPlanned(job: Job): boolean {
+  return isPlanRun(job) && job.state === "needs_info" && job.report === "planned";
+}
+
 /** The newest run (the greatest id) of each issue among `jobs`, whatever their order. */
 export function newestRuns(jobs: readonly Job[]): Job[] {
   const newest = new Map<string, Job>();

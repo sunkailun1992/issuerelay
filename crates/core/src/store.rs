@@ -1,4 +1,10 @@
 //! SQLite-backed run records.
+//!
+//! Versions: the schema version (`user_version`) goes up only for a change an older release cannot
+//! read, such as a new job state or a column whose meaning changed, because a release refuses a
+//! database with a higher version. A column that older releases may simply leave alone, nullable
+//! and read by name, is added where it is missing whatever the version (`ADDED_LATER`), so that a
+//! user can go back to the previous release and still open the run records.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +16,7 @@ use rusqlite::{
 };
 
 use crate::config::{Binding, ExecutorKind};
-use crate::model::{Issue, Job, JobState, ProcessTag};
+use crate::model::{Issue, Job, JobState, ProcessTag, RunMode, RunUsage};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS jobs (
@@ -45,9 +51,36 @@ const SCHEMA_VERSION: i64 = 2;
 const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
     [("process_pid", "INTEGER"), ("process_started", "TEXT")];
 
+/// Columns added after schema 2 without a new version (see the module doc): the run details of the
+/// run-improvements design (section 5). All are nullable; releases that do not know them leave
+/// them empty.
+const ADDED_LATER: [(&str, &str); 12] = [
+    ("mode", "TEXT"),
+    ("report", "TEXT"),
+    ("session_id", "TEXT"),
+    ("resume_job_id", "INTEGER"),
+    ("cost_micro_usd", "INTEGER"),
+    ("session_cost_micro_usd", "INTEGER"),
+    ("input_tokens", "INTEGER"),
+    ("output_tokens", "INTEGER"),
+    ("cache_read_tokens", "INTEGER"),
+    ("cache_write_tokens", "INTEGER"),
+    ("turns", "INTEGER"),
+    ("details_started_at", "TEXT"),
+];
+
 const COLUMNS: &str = "id, issue_uuid, issue_identifier, title, binding_id, directory, executor, \
     state, reason, priority, issue_created_at, discovered_updated_at, verified_updated_at, \
-    created_at, started_at, finished_at, log_path, summary";
+    created_at, started_at, finished_at, log_path, summary, mode, report, session_id, \
+    resume_job_id, cost_micro_usd, session_cost_micro_usd, input_tokens, output_tokens, \
+    cache_read_tokens, cache_write_tokens, turns, details_started_at";
+
+/// The part of an UPDATE's SET list that empties what a run reported: its report, session and
+/// usage, and the start they belong to.
+const RUN_DETAILS_CLEARED: &str = "report = NULL, session_id = NULL, cost_micro_usd = NULL, \
+    session_cost_micro_usd = NULL, input_tokens = NULL, output_tokens = NULL, \
+    cache_read_tokens = NULL, cache_write_tokens = NULL, turns = NULL, \
+    details_started_at = NULL";
 
 /// A run about to be recorded. `binding` and `executor` are `None` while it
 /// waits for a binding.
@@ -57,6 +90,11 @@ pub struct NewJob<'a> {
     pub executor: Option<ExecutorKind>,
     pub state: JobState,
     pub reason: Option<String>,
+    /// What the run is for, as the issue's labels said when it was recorded; the start decides it
+    /// again (`set_mode`).
+    pub mode: RunMode,
+    /// The earlier run whose session this one is to continue, if any.
+    pub resume_job_id: Option<i64>,
 }
 
 /// The run records in SQLite. One connection: callers serialize access.
@@ -100,10 +138,44 @@ fn opt_ts(column: usize, text: Option<String>) -> rusqlite::Result<Option<DateTi
     text.map(|t| ts(column, t)).transpose()
 }
 
+/// A count as SQLite stores it; one that does not fit an SQLite integer is left out.
+fn stored_count(count: Option<u64>) -> Option<i64> {
+    count.and_then(|n| i64::try_from(n).ok())
+}
+
+/// A stored count read back; a negative one (written by hand) counts as none.
+fn read_count(value: Option<i64>) -> Option<u64> {
+    value.and_then(|n| u64::try_from(n).ok())
+}
+
+/// The usage columns of a row (`COLUMNS` 22 to 28), or `None` when none holds a figure.
+fn row_to_usage(row: &Row<'_>) -> rusqlite::Result<Option<RunUsage>> {
+    let usage = RunUsage {
+        cost_micro_usd: row.get(22)?,
+        session_cost_micro_usd: row.get(23)?,
+        input_tokens: read_count(row.get(24)?),
+        output_tokens: read_count(row.get(25)?),
+        cache_read_tokens: read_count(row.get(26)?),
+        cache_write_tokens: read_count(row.get(27)?),
+        turns: row
+            .get::<_, Option<i64>>(28)?
+            .and_then(|n| u32::try_from(n).ok()),
+    };
+    Ok((!usage.is_empty()).then_some(usage))
+}
+
 fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
     let state: String = row.get(7)?;
     let executor: Option<String> = row.get(6)?;
     let priority: i64 = row.get(9)?;
+    let mode: Option<String> = row.get(18)?;
+    let details_started: Option<String> = row.get(29)?;
+    // What the run reported counts only for the start it was recorded for (`record_run`).
+    let current = details_started == row.get::<_, Option<String>>(14)?;
+    // An older release that re-runs the row (its `requeue` and its start) leaves this version's
+    // record of the last start: what that run was for and the session it continued were about
+    // that run, not about one the user asked for again, which starts afresh (design W6).
+    let rerun_by_older = details_started.is_some() && !current;
     Ok(Job {
         id: row.get(0)?,
         issue_uuid: row.get(1)?,
@@ -125,6 +197,15 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<Job> {
         finished_at: opt_ts(15, row.get(15)?)?,
         log_path: row.get::<_, Option<String>>(16)?.map(PathBuf::from),
         summary: row.get(17)?,
+        mode: if rerun_by_older {
+            RunMode::default()
+        } else {
+            RunMode::from_stored(mode.as_deref())
+        },
+        report: if current { row.get(19)? } else { None },
+        session_id: if current { row.get(20)? } else { None },
+        resume_job_id: if rerun_by_older { None } else { row.get(21)? },
+        usage: if current { row_to_usage(row)? } else { None },
     })
 }
 
@@ -160,22 +241,29 @@ impl Store {
         // One transaction: a migration that stops halfway must not leave a half-changed table.
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
+        let present: Vec<String> = tx
+            .prepare("SELECT name FROM pragma_table_info('jobs')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        // Column names in SQLite ignore ASCII case.
+        let missing = |column: &str| !present.iter().any(|name| name.eq_ignore_ascii_case(column));
         if version < SCHEMA_VERSION {
             // Below the current version the version does not tell which columns exist: an M1
             // database whose first start stopped before it recorded the version, and a database
             // restored from `sqlite3 .dump`, keep the table of their release under version 0.
             // So the columns of schema 2 are added where they are missing, whatever the version.
-            let present: Vec<String> = tx
-                .prepare("SELECT name FROM pragma_table_info('jobs')")?
-                .query_map([], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
             for (column, kind) in ADDED_IN_SCHEMA_2 {
-                // Column names in SQLite ignore ASCII case.
-                if !present.iter().any(|name| name.eq_ignore_ascii_case(column)) {
+                if missing(column) {
                     tx.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {column} {kind};"))?;
                 }
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        // At every version: these came without one (see the module doc).
+        for (column, kind) in ADDED_LATER {
+            if missing(column) {
+                tx.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {column} {kind};"))?;
+            }
         }
         tx.commit()?;
         Ok(Self { conn })
@@ -186,8 +274,9 @@ impl Store {
         let issue = new.issue;
         self.conn.execute(
             "INSERT INTO jobs (issue_uuid, issue_identifier, title, binding_id, directory, executor, \
-             state, reason, priority, issue_created_at, discovered_updated_at, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             state, reason, priority, issue_created_at, discovered_updated_at, created_at, mode, \
+             resume_job_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 issue.uuid,
                 issue.identifier,
@@ -201,6 +290,8 @@ impl Store {
                 fmt(issue.created_at),
                 fmt(issue.updated_at),
                 fmt(Utc::now()),
+                new.mode.stored(),
+                new.resume_job_id,
             ],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -224,6 +315,24 @@ impl Store {
             .conn
             .query_row(&sql, params![uuid], row_to_job)
             .optional()?)
+    }
+
+    /// The newest run of the issue with an executor session that still reads for it (see
+    /// `record_run`), or `None` when it has none. Not always the latest run: a run stopped while it
+    /// was queued never started a session.
+    pub fn latest_with_session(&self, uuid: &str) -> Result<Option<Job>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM jobs WHERE issue_uuid = ?1 AND session_id IS NOT NULL \
+             ORDER BY id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        for job in stmt.query_map(params![uuid], row_to_job)? {
+            let job = job?;
+            if job.session_id.is_some() {
+                return Ok(Some(job));
+            }
+        }
+        Ok(None)
     }
 
     /// Runs in the given states, oldest first (by id).
@@ -316,14 +425,17 @@ impl Store {
     }
 
     /// Moves a queued job to `running` and records its log file. A new run does not inherit the
-    /// executor process of a previous one: that record is cleared. Returns `false`, changing
-    /// nothing, when the job is no longer queued (for example the user stopped it while the
-    /// issue was being re-read); the engine then does not start the run.
+    /// executor process of a previous one, nor what that one reported (its report, session and
+    /// usage): those are cleared. The run to continue (`resume_job_id`) and the mode stay. Returns
+    /// `false`, changing nothing, when the job is no longer queued (for example the user stopped it
+    /// while the issue was being re-read); the engine then does not start the run.
     pub fn mark_started(&self, id: i64, log_path: &Path) -> Result<bool> {
         let changed = self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, log_path = ?4, \
-             process_pid = NULL, process_started = NULL \
-             WHERE id = ?1 AND state = ?5",
+            &format!(
+                "UPDATE jobs SET state = ?2, reason = NULL, started_at = ?3, finished_at = NULL, \
+                 log_path = ?4, process_pid = NULL, process_started = NULL, {RUN_DETAILS_CLEARED} \
+                 WHERE id = ?1 AND state = ?5"
+            ),
             params![
                 id,
                 JobState::Running.as_str(),
@@ -367,11 +479,66 @@ impl Store {
 
     /// Queues a finished run again for the manual re-run. Keeps the previous run's
     /// `verified_updated_at`, the most recent Linear time known for the issue; automatic
-    /// re-enqueueing inserts a new row instead.
+    /// re-enqueueing inserts a new row instead. A manual re-run starts afresh: what the previous
+    /// attempt reported and the session it was to continue are cleared.
     pub fn requeue(&self, id: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET state = ?2, reason = NULL, summary = NULL, started_at = NULL, finished_at = NULL WHERE id = ?1",
+            &format!(
+                "UPDATE jobs SET state = ?2, reason = NULL, summary = NULL, started_at = NULL, \
+                 finished_at = NULL, resume_job_id = NULL, {RUN_DETAILS_CLEARED} WHERE id = ?1"
+            ),
             params![id, JobState::Queued.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Records what the run is for (`RunMode::stored`).
+    pub fn set_mode(&self, id: i64, mode: RunMode) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET mode = ?2 WHERE id = ?1",
+            params![id, mode.stored()],
+        )?;
+        Ok(())
+    }
+
+    /// Records the earlier run whose session this one is to continue, or `None` for a fresh start.
+    pub fn set_resume_job(&self, id: i64, resume: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET resume_job_id = ?2 WHERE id = ?1",
+            params![id, resume],
+        )?;
+        Ok(())
+    }
+
+    /// Records what a run reported: the `result` of its last line of JSON, the executor's session
+    /// and its usage, for the start the row holds now (`details_started_at`: an older release that
+    /// re-runs the row moves `started_at` on without clearing these, and they then no longer read).
+    /// Each `None` clears its columns; a count too large for SQLite is left out.
+    pub fn record_run(
+        &self,
+        id: i64,
+        report: Option<&str>,
+        session_id: Option<&str>,
+        usage: Option<&RunUsage>,
+    ) -> Result<()> {
+        let usage = usage.cloned().unwrap_or_default();
+        self.conn.execute(
+            "UPDATE jobs SET report = ?2, session_id = ?3, cost_micro_usd = ?4, \
+             session_cost_micro_usd = ?5, input_tokens = ?6, output_tokens = ?7, \
+             cache_read_tokens = ?8, cache_write_tokens = ?9, turns = ?10, \
+             details_started_at = started_at WHERE id = ?1",
+            params![
+                id,
+                report,
+                session_id,
+                usage.cost_micro_usd,
+                usage.session_cost_micro_usd,
+                stored_count(usage.input_tokens),
+                stored_count(usage.output_tokens),
+                stored_count(usage.cache_read_tokens),
+                stored_count(usage.cache_write_tokens),
+                usage.turns,
+            ],
         )?;
         Ok(())
     }
@@ -458,7 +625,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::config::{Binding, ExecutorKind};
-    use crate::model::{Issue, JobState, ProcessTag};
+    use crate::model::{Issue, JobState, ProcessTag, RunMode, RunUsage};
     use chrono::{Duration, TimeZone, Utc};
     use std::path::{Path, PathBuf};
 
@@ -478,6 +645,8 @@ mod tests {
             priority: 2,
             created_at: t,
             updated_at: t + Duration::milliseconds(321),
+            state_type: None,
+            blocked_by: None,
         }
     }
 
@@ -493,6 +662,7 @@ mod tests {
             prompt_override: None,
             lean: true,
             effort: None,
+            labels: Vec::new(),
         }
     }
 
@@ -506,6 +676,8 @@ mod tests {
                 executor: Some(ExecutorKind::Claude),
                 state: JobState::Queued,
                 reason: None,
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap()
     }
@@ -608,6 +780,8 @@ mod tests {
                 executor: None,
                 state: JobState::WaitingBinding,
                 reason: Some("unbound".into()),
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap();
         assert_eq!(waiting.directory, None);
@@ -672,6 +846,8 @@ mod tests {
                 executor: None,
                 state: JobState::WaitingBinding,
                 reason: Some("unbound".into()),
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap();
         assert_eq!(job.issue_uuid, "7");
@@ -913,6 +1089,8 @@ mod tests {
                 executor: None,
                 state: JobState::Queued,
                 reason: None,
+                mode: RunMode::Implement,
+                resume_job_id: None,
             })
             .unwrap();
         assert_eq!(job.discovered_updated_at, i.updated_at);
@@ -1082,6 +1260,331 @@ mod tests {
         );
     }
 
+    /// The column list v0.2.4 reads and writes: `COLUMNS` before the run improvements.
+    const V0_2_4_COLUMNS: &str = "id, issue_uuid, issue_identifier, title, binding_id, directory, \
+        executor, state, reason, priority, issue_created_at, discovered_updated_at, \
+        verified_updated_at, created_at, started_at, finished_at, log_path, summary";
+
+    const RUN_DETAIL_COLUMNS: [&str; 12] = [
+        "mode",
+        "report",
+        "session_id",
+        "resume_job_id",
+        "cost_micro_usd",
+        "session_cost_micro_usd",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "turns",
+        "details_started_at",
+    ];
+
+    // v0.2.4, after a downgrade, re-runs a row without clearing what this version recorded: the
+    // start it was recorded for is gone, so neither the session nor the usage reads any more, and
+    // neither does what the run was for or the session it continued.
+    #[test]
+    fn what_an_earlier_start_reported_no_longer_reads() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        store.set_mode(job.id, RunMode::Plan).unwrap();
+        store.set_resume_job(job.id, Some(7)).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .record_run(job.id, Some("in_testing"), Some(SESSION), Some(&usage()))
+            .unwrap();
+        let recorded = store.get(job.id).unwrap().unwrap();
+        assert_eq!(recorded.session_id.as_deref(), Some(SESSION));
+        assert_eq!(
+            (recorded.mode, recorded.resume_job_id),
+            (RunMode::Plan, Some(7))
+        );
+        // What v0.2.4's `requeue` writes: the row waits for its start.
+        store
+            .conn
+            .execute(
+                "UPDATE jobs SET state = 'queued', reason = NULL, summary = NULL, \
+                 started_at = NULL, finished_at = NULL WHERE id = ?1",
+                params![job.id],
+            )
+            .unwrap();
+        let queued_again = store.get(job.id).unwrap().unwrap();
+        assert_eq!(
+            (queued_again.mode, queued_again.resume_job_id),
+            (RunMode::Implement, None)
+        );
+        // What v0.2.4's `mark_started` writes.
+        store
+            .conn
+            .execute(
+                "UPDATE jobs SET started_at = '2026-11-01T08:00:00Z' WHERE id = ?1",
+                params![job.id],
+            )
+            .unwrap();
+        let rerun = store.get(job.id).unwrap().unwrap();
+        assert_eq!(
+            (rerun.report, rerun.session_id, rerun.usage),
+            (None, None, None)
+        );
+        assert_eq!(
+            (rerun.mode, rerun.resume_job_id),
+            (RunMode::Implement, None)
+        );
+        assert!(store.latest_with_session("1").unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_with_session_skips_runs_without_one() {
+        let store = Store::open_in_memory().unwrap();
+        let with_session = queued(&store, "1");
+        assert!(
+            store
+                .mark_started(with_session.id, Path::new("1.jsonl"))
+                .unwrap()
+        );
+        store
+            .record_run(with_session.id, Some("in_testing"), Some(SESSION), None)
+            .unwrap();
+        store
+            .mark_finished(
+                with_session.id,
+                JobState::AwaitingAcceptance,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        // Stopped while it was queued: no session.
+        let never_started = queued(&store, "1");
+        store
+            .set_state(
+                never_started.id,
+                JobState::Canceled,
+                Some("stopped by the user"),
+            )
+            .unwrap();
+        queued(&store, "2");
+        let found = store.latest_with_session("1").unwrap().unwrap();
+        assert_eq!(found.id, with_session.id);
+        assert!(store.latest_with_session("2").unwrap().is_none());
+        assert!(store.latest_with_session("3").unwrap().is_none());
+    }
+
+    const SESSION: &str = "b88d7053-d27f-4825-b81c-80f6fbf109d0";
+
+    fn usage() -> RunUsage {
+        RunUsage {
+            cost_micro_usd: Some(39_258),
+            session_cost_micro_usd: Some(94_395),
+            input_tokens: Some(4),
+            output_tokens: Some(13),
+            cache_read_tokens: Some(20_786),
+            cache_write_tokens: Some(4_364),
+            turns: Some(3),
+        }
+    }
+
+    // A v0.2.4 database is at schema 2 already: the run details are added all the same, and the
+    // version stays 2 so that v0.2.4 can still open the database after a downgrade.
+    #[test]
+    fn new_columns_are_added_to_an_old_database_without_a_version_bump() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let v0_2_4 = SCHEMA_V1
+            .replacen(
+                "summary TEXT);",
+                "summary TEXT, process_pid INTEGER, process_started TEXT);",
+                1,
+            )
+            .replace("PRAGMA user_version = 1;", "PRAGMA user_version = 2;");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&v0_2_4)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(user_version(&store.conn), 2);
+        let columns = names(&store.conn, COLUMNS_SQL);
+        for column in RUN_DETAIL_COLUMNS {
+            assert!(columns.iter().any(|c| c == column), "{column}: {columns:?}");
+        }
+        let old = store.get(1).unwrap().unwrap();
+        assert_eq!(old.mode, RunMode::Implement);
+        assert_eq!(
+            (old.report, old.session_id, old.resume_job_id, old.usage),
+            (None, None, None, None)
+        );
+    }
+
+    // After a downgrade v0.2.4 writes and reads rows with its own statements; rows this version
+    // wrote must read in them too, with a state v0.2.4 knows.
+    #[test]
+    fn an_older_release_still_reads_and_writes_the_rows() {
+        let (_dir, path, store) = file_store();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store.set_mode(job.id, RunMode::Plan).unwrap();
+        store
+            .record_run(job.id, Some("planned"), Some(SESSION), Some(&usage()))
+            .unwrap();
+        store
+            .mark_finished(job.id, JobState::NeedsInfo, None, Some("plan posted"), None)
+            .unwrap();
+        drop(store);
+        let raw = Connection::open(&path).unwrap();
+        raw.execute(
+            "INSERT INTO jobs (issue_uuid, issue_identifier, title, binding_id, directory, \
+             executor, state, reason, priority, issue_created_at, discovered_updated_at, \
+             created_at) VALUES ('u-2', 'DEMO-2', 'Demo', NULL, NULL, NULL, 'queued', NULL, 0, \
+             '2026-10-01T08:00:00Z', '2026-10-01T08:00:00Z', '2026-10-01T08:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let states: Vec<String> = raw
+            .prepare(&format!("SELECT {V0_2_4_COLUMNS} FROM jobs ORDER BY id"))
+            .unwrap()
+            .query_map([], |row| row.get(7))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(states, ["needs_info", "queued"]);
+        assert!(states.iter().all(|state| JobState::parse(state).is_some()));
+        assert_eq!(user_version(&raw), 2);
+        drop(raw);
+        let store = Store::open(&path).unwrap();
+        let older = store.latest_for_issue("u-2").unwrap().unwrap();
+        assert_eq!(older.mode, RunMode::Implement);
+        assert_eq!(older.usage, None);
+    }
+
+    #[test]
+    fn a_finished_run_keeps_its_report_session_and_usage() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        store
+            .record_run(job.id, Some("in_testing"), Some(SESSION), Some(&usage()))
+            .unwrap();
+        store
+            .mark_finished(job.id, JobState::AwaitingAcceptance, None, None, None)
+            .unwrap();
+        let done = store.get(job.id).unwrap().unwrap();
+        assert_eq!(done.report.as_deref(), Some("in_testing"));
+        assert_eq!(done.session_id.as_deref(), Some(SESSION));
+        assert_eq!(done.usage, Some(usage()));
+        // A usage without a single figure reads as none.
+        store
+            .record_run(job.id, None, None, Some(&RunUsage::default()))
+            .unwrap();
+        let cleared = store.get(job.id).unwrap().unwrap();
+        assert_eq!(
+            (cleared.report, cleared.session_id, cleared.usage),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn requeue_and_start_clear_what_the_previous_attempt_reported() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        store.set_resume_job(job.id, Some(7)).unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        // A start keeps the session the row is to continue.
+        assert_eq!(store.get(job.id).unwrap().unwrap().resume_job_id, Some(7));
+        store.set_mode(job.id, RunMode::Plan).unwrap();
+        store
+            .record_run(job.id, Some("failed"), Some(SESSION), Some(&usage()))
+            .unwrap();
+        store
+            .mark_finished(job.id, JobState::Failed, Some("boom"), None, None)
+            .unwrap();
+        store.requeue(job.id).unwrap();
+        let again = store.get(job.id).unwrap().unwrap();
+        assert_eq!(
+            (
+                again.report,
+                again.session_id,
+                again.resume_job_id,
+                again.usage
+            ),
+            (None, None, None, None),
+            "a manual re-run starts afresh"
+        );
+        assert_eq!(
+            again.mode,
+            RunMode::Plan,
+            "the start decides the mode again"
+        );
+        store
+            .record_run(job.id, Some("failed"), Some(SESSION), Some(&usage()))
+            .unwrap();
+        assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
+        let started = store.get(job.id).unwrap().unwrap();
+        assert_eq!(
+            (started.report, started.session_id, started.usage),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn plan_mode_is_stored_as_plan_and_a_usual_run_as_null() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let stored = |store: &Store| -> Option<String> {
+            store
+                .conn
+                .query_row(
+                    "SELECT mode FROM jobs WHERE id = ?1",
+                    params![job.id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(stored(&store), None);
+        store.set_mode(job.id, RunMode::Plan).unwrap();
+        assert_eq!(stored(&store).as_deref(), Some("plan"));
+        assert_eq!(store.get(job.id).unwrap().unwrap().mode, RunMode::Plan);
+        store.set_mode(job.id, RunMode::Implement).unwrap();
+        assert_eq!(stored(&store), None);
+    }
+
+    #[test]
+    fn insert_stores_the_mode_and_the_run_to_continue() {
+        let store = Store::open_in_memory().unwrap();
+        let i = issue("1");
+        let job = store
+            .insert(NewJob {
+                issue: &i,
+                binding: None,
+                executor: None,
+                state: JobState::Queued,
+                reason: None,
+                mode: RunMode::Plan,
+                resume_job_id: Some(3),
+            })
+            .unwrap();
+        assert_eq!(job.mode, RunMode::Plan);
+        assert_eq!(job.resume_job_id, Some(3));
+        store.set_resume_job(job.id, None).unwrap();
+        assert_eq!(store.get(job.id).unwrap().unwrap().resume_job_id, None);
+    }
+
+    // Token counts are stored as SQLite integers; one too large for them is left out rather than
+    // wrapped.
+    #[test]
+    fn a_count_too_large_to_store_is_left_out() {
+        let store = Store::open_in_memory().unwrap();
+        let job = queued(&store, "1");
+        let huge = RunUsage {
+            input_tokens: Some(u64::MAX),
+            output_tokens: Some(5),
+            ..RunUsage::default()
+        };
+        store.record_run(job.id, None, None, Some(&huge)).unwrap();
+        let read = store.get(job.id).unwrap().unwrap().usage.unwrap();
+        assert_eq!(read.input_tokens, None);
+        assert_eq!(read.output_tokens, Some(5));
+    }
+
     // SQLite compares column names without regard to ASCII case, and so does the migration.
     #[test]
     fn a_column_of_schema_2_in_other_letter_case_is_not_added_again() {
@@ -1100,7 +1603,10 @@ mod tests {
             .unwrap();
         let store = Store::open(&path).unwrap();
         assert_eq!(user_version(&store.conn), 2);
-        assert_eq!(names(&store.conn, COLUMNS_SQL).len(), 20);
+        assert_eq!(
+            names(&store.conn, COLUMNS_SQL).len(),
+            20 + RUN_DETAIL_COLUMNS.len()
+        );
     }
 
     /// The most columns a table may have in this build of SQLite: 2000, unless SQLite was built

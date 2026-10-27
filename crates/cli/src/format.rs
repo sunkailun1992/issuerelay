@@ -143,10 +143,14 @@ fn jobs(v: &Value) -> String {
         .iter()
         .map(|j| {
             let mut line = format!(
-                "#{:<5} {:<12} {:<20} {}",
+                "#{:<5} {:<12} {:<20} {:<4} {:>6}  {}",
                 j["id"].as_i64().unwrap_or_default(),
                 text(j, "issue_identifier"),
                 text(j, "state"),
+                // A planning run (run-improvements design, section 10); a host from before them
+                // sends no mode, and its runs are usual ones.
+                if j["mode"] == "plan" { "plan" } else { "" },
+                cost(j),
                 text(j, "title")
             );
             let why = why(j);
@@ -157,6 +161,21 @@ fn jobs(v: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// What the run cost as its executor reported it, in dollars with two decimals, as the panel
+/// shows it (`<$0.01` below a cent); nothing when it reported no cost (Codex reports tokens only,
+/// and a host from before usage was recorded sends none).
+fn cost(job: &Value) -> String {
+    match job["usage"]["cost_micro_usd"].as_i64() {
+        Some(micro) if (1..10_000).contains(&micro) => "<$0.01".into(),
+        Some(micro) => {
+            // Whole cents, the half rounded up.
+            let cents = (micro.max(0) + 5_000) / 10_000;
+            format!("${}.{:02}", cents / 100, cents % 100)
+        }
+        None => String::new(),
+    }
 }
 
 /// Why a job is where it is: its reason, else its summary, cleaned and cut to `WHY_CHARS`
@@ -259,8 +278,15 @@ fn doctor(v: &Value) -> String {
             .and_then(Value::as_str)
             .map(|effort| format!(", effort {}", clean(effort)))
             .unwrap_or_default();
+        // The routing labels tell a project's bindings apart.
+        let labels = label_list(b);
+        let labels = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [labels {labels}]")
+        };
         out.push(format!(
-            "Binding {} -> {}{}{effort}: {verdict}",
+            "Binding {}{labels} -> {}{}{effort}: {verdict}",
             text(b, "project_name"),
             text(b, "executor"),
             lean_label(&b["lean"]),
@@ -330,6 +356,23 @@ fn source_label(value: &Value) -> &'static str {
     }
 }
 
+/// A binding's routing labels, cleaned and joined with commas; empty when it has none (or the host
+/// is from before routing labels).
+fn label_list(binding: &Value) -> String {
+    binding
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(Value::as_str)
+                .map(clean)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
+}
+
 fn bindings(v: &Value) -> String {
     let items = v.as_array().map(Vec::as_slice).unwrap_or_default();
     if items.is_empty() {
@@ -343,6 +386,10 @@ fn bindings(v: &Value) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or("default"),
             )];
+            let labels = label_list(b);
+            if !labels.is_empty() {
+                tags.push(format!("labels {labels}"));
+            }
             // Only what differs from the defaults: the permission profile and the effort from
             // the settings, lean runs on. A binding that sets the personal profile itself (never
             // lean) shows it here; one that follows a personal default, or binds the home folder,
@@ -466,8 +513,8 @@ mod tests {
         );
         assert_eq!(
             table,
-            "#3     DEMO-1       running              Demo task\n\
-             #2     DEMO-2       failed               Other task — run exceeded the time limit"
+            "#3     DEMO-1       running                           Demo task\n\
+             #2     DEMO-2       failed                            Other task — run exceeded the time limit"
         );
         let hostile = human(
             "list_jobs",
@@ -481,6 +528,34 @@ mod tests {
             &json!([{"id": 5, "issue_identifier": "DEMO-3", "state": "queued", "title": "x\u{202e}y\u{200b}z\u{feff}"}]),
         );
         assert!(spoofed.ends_with("xyz"), "{spoofed:?}");
+    }
+
+    #[test]
+    fn jobs_table_shows_mode_and_cost() {
+        let table = human(
+            "list_jobs",
+            &json!([
+                {"id": 12, "issue_identifier": "DEMO-12", "state": "needs_info", "title": "Plan it",
+                    "mode": "plan", "report": "planned", "usage": {"cost_micro_usd": 94_395}},
+                {"id": 11, "issue_identifier": "DEMO-11", "state": "done", "title": "Small",
+                    "mode": "implement", "usage": {"cost_micro_usd": 4_000}},
+                // Codex reports tokens only.
+                {"id": 10, "issue_identifier": "DEMO-10", "state": "done", "title": "Codex run",
+                    "mode": "implement", "usage": {"cost_micro_usd": null, "input_tokens": 20_786}},
+                {"id": 9, "issue_identifier": "DEMO-9", "state": "done", "title": "Dear",
+                    "usage": {"cost_micro_usd": 12_345_678}},
+                // From a host before planning runs and usage: a usual run, no cost.
+                {"id": 8, "issue_identifier": "DEMO-8", "state": "done", "title": "Older"}
+            ]),
+        );
+        assert_eq!(
+            table,
+            "#12    DEMO-12      needs_info           plan  $0.09  Plan it\n\
+             #11    DEMO-11      done                      <$0.01  Small\n\
+             #10    DEMO-10      done                              Codex run\n\
+             #9     DEMO-9       done                      $12.35  Dear\n\
+             #8     DEMO-8       done                              Older"
+        );
     }
 
     #[test]
@@ -784,6 +859,10 @@ mod tests {
         };
         assert_eq!(line(&[]), "p1  Demo Project  ->  demo  [claude]");
         assert_eq!(
+            line(&[("labels", json!(["Frontend", "U\u{1b}I"]))]),
+            "p1  Demo Project  ->  demo  [claude, labels Frontend, U I]"
+        );
+        assert_eq!(
             line(&[("lean", json!(true))]),
             "p1  Demo Project  ->  demo  [claude]"
         );
@@ -881,6 +960,19 @@ mod tests {
         assert_eq!(
             line(Some(json!("m\u{1b}ax"))),
             "Binding Demo Project -> claude (lean), effort m ax: ok"
+        );
+    }
+
+    #[test]
+    fn doctor_binding_lines_name_the_routing_labels() {
+        let binding = json!({"binding_id": "p#Frontend", "project_name": "Demo Project",
+            "directory_exists": true, "executor": "claude", "executor_ready": true,
+            "lean": "on", "labels": ["Frontend", "UI"]});
+        let report = json!({"viewer": null, "linear_error": "offline", "executors": [],
+            "workspace": null, "bindings": [binding]});
+        assert_eq!(
+            human("doctor", &report).lines().last().unwrap(),
+            "Binding Demo Project [labels Frontend, UI] -> claude (lean): ok"
         );
     }
 
