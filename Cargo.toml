@@ -4,7 +4,7 @@ members = ["crates/*", "app/src-tauri"]
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/sunkailun1992/issuerelay"
