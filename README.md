@@ -1,11 +1,91 @@
 # IssueRelay
 
-把 Linear 上指派给你的需求，自动交给你电脑上的 Claude Code 或 Codex 去完成。
+**连接 Linear 与本机 Codex / Claude Code 的桌面任务调度器。**
 
-*Hand the Linear issues assigned to you to Claude Code or Codex on your own machine.*
+你在 Linear 中准备需求并标记运行模式，IssueRelay 按项目绑定找到本地仓库，启动选定的编码 AI 在后台处理，并保存运行状态、摘要、日志和用量，供你跟进与验收。它适合已经使用 Linear 和本机编码 AI、希望把任务派发与运行跟踪集中起来的开发者。
 
-> **状态：开发中。** M0（实测验证）、M1（引擎与命令行）、M2（桌面面板）、M3（安装包与发布）已完成：桌面应用与安装包已在 macOS 实机验收，Windows 还没有在真机上验收。第一个版本是 v0.1.0。
-> *Status: under development. M0 to M3 are done: the desktop app and the installers have been accepted on a real Mac; Windows has not been tested on a real machine yet. The first version is v0.1.0.*
+*A desktop task scheduler connecting Linear to Codex or Claude Code on your own machine. Prepare an issue in Linear, choose a mode, and let IssueRelay dispatch it to the configured coding agent and track the run for your review.*
+
+初次了解产品，先看下方职责与流程；完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
+
+> **验证范围：** M0（实测验证）、M1（引擎与命令行）、M2（桌面面板）、M3（安装包与发布）已有交付：桌面应用与安装包经过 macOS 实机验收；Windows 尚未经过真机验收。具体版本的能力和验证结果见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
+> *Validation: the desktop app and installers have been tested on a real Mac. Windows has not been tested on a real machine. See the release notes and acceptance reports for each version.*
+
+## 谁负责什么
+
+| 角色 | 职责 |
+|---|---|
+| 你 | 明确目标与验收要求，选择项目、执行者和权限，检查结果并确认完成 |
+| Linear | 保存需求、指派、标签、依赖、状态和讨论 |
+| IssueRelay | 发现符合条件的需求，分流、排队、启动执行者，处理运行生命周期并保存记录 |
+| Codex / Claude Code | 读取需求与仓库，分析或修改代码，通过自己的工具操作 git、测试和 Linear |
+| Skills 与项目规则 | 给执行者提供工作方法与约束；实际加载范围取决于运行模式 |
+
+你可以在 Codex 或 Claude Code 中讨论和整理需求，也可以直接在 Linear 中编写。IssueRelay 按绑定选择一个执行者处理每次运行；它目前没有自动组织“一个 AI 开发、另一个 AI 独立验收”的完整协作流水线。
+
+## 它怎么工作
+
+```text
+你准备 Linear 需求
+  指派给自己 + Todo + ai-plan 或 ai-ready + 已绑定的项目
+       │
+       ▼
+IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选定的执行者
+       │                                  同一目录一次只跑一条
+       ├─ ai-plan  → AI 读需求和代码 → 把方案写回这条需求的评论
+       │
+       └─ ai-ready → AI 实现、验证并推测试分支 → 交到 In Testing
+                                                    │
+                                                    ▼
+                                        你验收后在面板标记完成
+```
+
+默认每 30 秒经 Linear 官方 MCP 检查一次，使用你授权的账户；触发名称可配置。只出方案与开发是两种运行模式，方案不会自动变成开发任务。开发模式的 AI 被要求遵守三条固定规则：不设 Done、不推主分支、不发正式环境；具体执行仍须符合目标仓库的规则和你的授权。
+
+## 一条需求要被自动处理，必须同时满足
+
+1. 指派给你；
+2. 带 `ai-ready`，或只要方案时带 `ai-plan`；
+3. 状态为 `Todo`；
+4. 所属 Linear 项目已绑定本地目录；同一项目有多个绑定时，按分流标签选择；
+5. 选定执行者已安装、登录，并通过对应运行模式的环境检查。
+
+开发需求被未完成的需求阻塞（blocked by）时先等待；方案模式不等这项依赖。准备普通聊天或项目资料，不会直接触发 IssueRelay；让需求满足接单条件并保持监控开启后，它才会进入自动处理流程。
+
+## Codex / Claude 怎样连接 IssueRelay
+
+这里有两条方向不同的 MCP 连接：
+
+- **IssueRelay → Linear MCP**：IssueRelay 发现需求，编码 AI 也需要自己的 Linear 连接来读取需求、写评论和更新状态。IssueRelay 的 Linear 登录与执行者的登录分别配置。
+- **Codex / Claude Code → IssueRelay MCP**：你在 AI 会话中查询 IssueRelay 的状态和近期运行，或者控制监控。这个控制服务通过本机通信访问正在运行的 IssueRelay。
+
+在面板的“设置 → MCP 控制服务”中注册，步骤见 [安装说明](docs/install.md#把命令行加入-path)。现有工具如下：
+
+| MCP 工具 | 用途 |
+|---|---|
+| `status` | 读取监控、连接、运行与等待状态 |
+| `list_jobs` | 读取近期运行记录 |
+| `pause` | 暂停监控与派发；已经在运行的任务继续 |
+| `resume` | 恢复监控，随后检查可处理的需求 |
+| `poll_now` | 请求立即检查；暂停时不执行轮询，也不解除暂停 |
+
+这里的 `resume` 指恢复监控。恢复某次 AI 会话受另一套续跑条件约束。MCP 不提供标记完成、重试或取消运行，也不提供任意读写运行数据库的接口；这些能力不能从“已连接 MCP”推导出来。宿主未运行时，控制服务会报错并提示打开 IssueRelay，不会替你启动应用。
+
+## 当前能力与范围
+
+| 能力 | 当前支持情况 |
+|---|---|
+| 方案与开发 | `ai-plan` 只出方案；`ai-ready` 执行开发流程 |
+| 多项目调度 | 按项目与分流标签绑定目录，支持依赖等待、目录互斥和总并发限制 |
+| 执行者选择 | 每次运行使用配置选定的 Codex 或 Claude Code |
+| 会话接续 | 满足执行器、目录、时间与模式条件时尝试接续同一执行器的会话 |
+| 用量记录 | 展示执行者报告的 token；Claude 的费用为估算，不等于订阅实际扣费 |
+| 额度耗尽后的接力 | 尚不支持专门的额度重置等待或自动切换到另一个执行器 |
+| 跨执行器会话恢复 | 不能用 Codex 直接恢复 Claude 的 session，反向也一样；人工接手可读取共同的需求、代码与验证记录 |
+| 独立审查流水线 | 尚未自动编排开发、另一执行者复核和业务验收的完整链路 |
+| 原生聊天界面接管 | 后台 CLI 运行不代表已接入 Codex 或 Claude 的原生交互聊天 |
+
+运行完成、测试通过、制品部署和业务验收是不同结果。请结合运行记录、Linear 评论、代码改动与实际验证判断是否完成；最终 Done 由你在面板确认。更多边界与常见问题见 [使用指南](docs/usage.md)。
 
 ## 安装 / Install
 
@@ -13,33 +93,9 @@
 
 Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling. Before going back to v0.2.4 or earlier, remove the bindings that have routing labels: an older version does not know them and does not start with two bindings of one project.
 
-## 它怎么工作
-
-```text
-Linear（指派给你 · 带 ai-ready 或 ai-plan · 状态 Todo）
-   │  每 30 秒查一次（Linear 官方 MCP，OAuth 授权）
-   ▼
-IssueRelay（你电脑上的托盘程序）
-   │  按「Linear 项目（及分流标签）→ 本地目录」的绑定找到工作目录；同一目录一次只跑一条
-   ▼
-Claude Code / Codex（无人值守运行，用你自己的登录；默认精简：只带 Linear 和仓库自己的规则）
-   │  读需求 → 改代码 → 推测试分支 → 把状态改成 In Testing，并留言（以「🤖 IssueRelay」开头）
-   ▼
-你验收后，在面板上点「标记完成」→ Linear 状态变为 Done
-```
-
-## 一条需求要被自动处理，必须同时满足
-
-1. 指派给你；
-2. 带标签 `ai-ready`（只要方案、先不动代码时改用 `ai-plan`）；
-3. 状态是 `Todo`；
-4. 所属 Linear 项目已在 IssueRelay 里绑定了本地目录（同一项目绑了几个目录时，按需求带的分流标签选）。
-
-Linear 上被还没完成的需求挡住（blocked by）的需求先等着，挡住它的需求完成或取消后再派；只出方案的不等。
-
 ## 更多用法
 
-- **只出方案**：带 `ai-plan`（而不是 `ai-ready`）的需求，AI 读需求和代码，把方案写成一条评论；改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适就加上 `ai-ready`，那次运行接着出方案的会话动手。
+- **只出方案**：带 `ai-plan`（而不是 `ai-ready`）的需求，AI 读需求和代码，把方案写成一条评论；改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适后由你改为 `ai-ready`；满足续跑条件时，那次运行会尝试接着方案会话动手。
 - **一个项目分到几个目录**：绑定可以带分流标签（从 Linear 的标签里选），只接带其中任一标签的需求，用自己的目录和队列；不带标签的绑定接其余的需求。
 - **Linear 上的改动会停掉运行**：正在运行的需求在 Linear 上被取消、完成、改派或删除时，下一次检查就停掉运行（结束整棵进程树），运行记录写明原因。暂停监控时不查。
 - **重做时接续会话**：需求退回重做，或出完方案再加 `ai-ready` 时，接着上一次的会话继续（7 天内、同一执行者和目录；「自动审查」的 Codex 运行除外），可以在设置里关掉。手动「重新运行」总是从头开始。
@@ -76,7 +132,7 @@ Linear 上被还没完成的需求挡住（blocked by）的需求先等着，挡
   - 要用别的 MCP 服务、仓库的 `.codex/` 配置、用户设置里的拒绝规则或自定义模型服务的绑定，在面板里关掉精简运行。关掉精简运行才加载全部配置：你本机 Claude Code / Codex 的用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效；「按个人设置」档位和绑定到主目录的绑定也总是这样。
 - **只出方案的运行**（`ai-plan`）同样无人值守、以你的身份运行。Claude 的内置工具只剩读文件的 Read、Grep、Glob，Codex 用只读沙箱；Linear 的工具只留读取、评论和修改这条需求本身的，关掉其余 29 个（例如合并、审批需求关联的拉取请求，删除评论；Codex 只在精简运行时能关）。除「按个人设置」的绑定外，它总是精简运行（只带 Linear 一个 MCP 服务），不看绑定的精简开关，所以绑定到主目录的绑定出不了方案。它仍能读你能读的文件，并把方案写进 Linear 的评论，能看到这条需求的人都看得到。「按个人设置」的绑定沿用你自己的设置与 MCP 服务，Linear 的工具要在你的设置里允许过，否则留不下方案。
 - 无人值守运行里，需求要求「先等一会儿」的步骤可能失败：放到后台的命令会让运行提前结束，单独的长时间 `sleep` 会被 Claude Code 拦下。这类需求请写成可以直接检查的条件。
-- Linear 令牌只存在系统钥匙串（macOS 钥匙串、Windows 凭据管理器）。IssueRelay 不上传任何数据，也没有遥测。
+- Linear 登录凭据由系统钥匙串保存（macOS 钥匙串、Windows 凭据管理器）。IssueRelay 没有遥测或自建云端任务中转服务；它会连接 Linear，编码 AI 也会按各自配置访问模型和工具服务。任务在本机调度不代表全程离线，需求与代码等输入的发送范围取决于实际执行者和工具配置。
 
 ## 开发
 
@@ -110,6 +166,8 @@ Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING
 
 | 文档 | 内容 |
 |---|---|
+| [使用指南](docs/usage.md) | 产品定位、职责分工、运行模式、MCP 控制、Skills、续跑与额度边界 |
+| [安装说明](docs/install.md) | 安装包、首次引导、执行者连接、MCP 注册、更新与卸载 |
 | [设计](docs/superpowers/specs/2026-10-10-issuerelay-design.md) | 目标、关键决定、整体结构、需求的生命周期 |
 | [运行改进设计](docs/superpowers/specs/2026-10-27-issuerelay-run-improvements-design.md) | 只出方案、按标签分流、被挡住先不派、Linear 上停掉运行、接续会话、用量 |
 | [实施计划](docs/superpowers/plans/2026-10-10-issuerelay-m0-m1.md) | M0–M1 的分步任务 |

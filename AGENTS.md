@@ -5,7 +5,7 @@
 ## 项目定位
 
 - 项目名称：IssueRelay（仓库与命令行 `issuerelay`，应用标识 `com.sunkailun.issuerelay`）
-- 项目类型：每个开发者装一份的桌面托盘程序（macOS、Windows）。监听 Linear 上指派给自己、带 `ai-ready` 标签、状态为 Todo 的需求，每条新起一次 Claude Code 或 Codex 无人值守运行去完成。
+- 项目类型：连接 Linear 与本机编码 AI 的桌面任务调度器（macOS、Windows），每个开发者装一份。按需求指派、标签、状态和项目绑定发现任务，排队并启动 Codex 或 Claude Code；`ai-plan` 只出方案，`ai-ready` 执行开发。程序维护运行生命周期和记录，实际分析、代码与工具操作由执行者完成。用户说明见 `README.md` 与 `docs/usage.md`。
 - 技术栈：Rust 1.99（edition 2024）、tokio、rmcp 3.5（MCP 客户端与服务端）、rusqlite、process-wrap、keyring、clap；桌面应用（M2）是 Tauri 2 外壳（`app/src-tauri`）加 React / TypeScript 面板（`app/src`）。
 - 外部系统：Linear 官方 MCP（`https://mcp.linear.app/mcp`，OAuth）；本机的 Claude Code 与 Codex 命令行（各自登录，各自配置 Linear MCP）。
 - 核心风险：AI 在「完全放开」权限下执行任意命令；Linear 需求内容是不可信输入，可能夹带指令；同一需求被重复派活；AI 把需求设成 Done 或推主分支；令牌、公司信息或本机路径进入这个公开仓库；macOS 与 Windows 行为不一致。

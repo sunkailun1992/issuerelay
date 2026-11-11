@@ -1,6 +1,6 @@
 # 安装 IssueRelay
 
-IssueRelay 是每个开发者自己装一份的托盘程序（macOS、Windows）。安装包在 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest)。
+IssueRelay 是连接 Linear 与本机编码 AI 的桌面任务调度器，每个开发者自己装一份（macOS、Windows）。安装包在 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest)。产品职责、运行模式和 MCP 能力范围先看[使用指南](usage.md)。
 
 文中的按钮、菜单和设置项的名字，按简体中文界面写；界面是别的语言时，到同一个位置找同一项（界面语言在「设置 → 常规 → 界面语言」里改）。
 
