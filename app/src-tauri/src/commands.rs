@@ -323,6 +323,62 @@ pub async fn job(state: State<'_, AppState>, id: i64) -> CmdResult<Option<Job>> 
 }
 
 #[tauri::command]
+pub async fn get_handoff(
+    state: State<'_, AppState>,
+    id: i64,
+) -> CmdResult<issuerelay_core::workflow::Handoff> {
+    host(&state).await?.engine().handoff(id).map_err(error)
+}
+
+#[tauri::command]
+pub async fn claim_handoff(
+    state: State<'_, AppState>,
+    id: i64,
+    executor: ExecutorKind,
+) -> CmdResult<issuerelay_core::workflow::Handoff> {
+    host(&state)
+        .await?
+        .engine()
+        .claim_handoff(id, executor)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn release_handoff(
+    state: State<'_, AppState>,
+    id: i64,
+    claim_id: String,
+) -> CmdResult<bool> {
+    host(&state)
+        .await?
+        .engine()
+        .release_handoff(id, &claim_id)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn model_catalog(
+    state: State<'_, AppState>,
+    executor: ExecutorKind,
+) -> CmdResult<issuerelay_core::model_catalog::ModelCatalog> {
+    use issuerelay_core::model_catalog as catalog;
+    if executor == ExecutorKind::Claude {
+        return Ok(catalog::builtin_catalog(executor));
+    }
+    let host = host(&state).await?;
+    let env = host.env();
+    let Ok(program) = issuerelay_core::executor::resolve_program_in(executor, env.path.as_deref())
+    else {
+        return Ok(catalog::builtin_catalog(executor));
+    };
+    Ok(catalog::discover_codex(&program, &env)
+        .await
+        .unwrap_or_else(|_| catalog::builtin_catalog(executor)))
+}
+
+#[tauri::command]
 pub async fn job_log(state: State<'_, AppState>, id: i64, lines: usize) -> CmdResult<Vec<String>> {
     host(&state)
         .await?

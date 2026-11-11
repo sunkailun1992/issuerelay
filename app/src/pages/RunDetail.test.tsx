@@ -10,6 +10,7 @@ import { formatDateTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
 import { ago } from "@/lib/mock-fixtures";
 import type { Job } from "@/lib/types";
+import type { Handoff } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { advanceUntil } from "@/test/time";
 import RunDetail from "./RunDetail";
@@ -98,6 +99,133 @@ function stubClipboard(writeText = vi.fn().mockResolvedValue(undefined)) {
 }
 afterEach(() => {
   Reflect.deleteProperty(navigator, "clipboard");
+});
+
+const handoffFixture: Handoff = {
+  job_id: 8,
+  issue_identifier: "DEMO-8",
+  executor: "claude",
+  active: false,
+  claimed_by: null,
+  claim_id: null,
+  prompt: "Continue from the saved index migration checkpoint.",
+  review_prompt: "Independently review the index migration and its verification.",
+  context: {
+    revision: 1,
+    origin_executor: "codex",
+    preferred_executor: "claude",
+    request: "Speed up the search index",
+    scope: "Change the demo repository only",
+    acceptance: ["The index returns the same results"],
+    source_refs: ["Wiki: Demo Index", "Local: search-index.md"],
+  },
+  memory: {
+    decision: { executor: "claude", source: "explicit" },
+    checkpoint: {
+      summary: "The index migration is in progress",
+      done: ["Added the migration"],
+      next: ["Verify the query plan"],
+      verification: ["Unit tests passed"],
+      blockers: ["The integration test remains"],
+    },
+    interruption: { code: "usage_limit_reached", reset_at: "2026-10-12T12:00:00Z" },
+    git: { head: "0123456789abcdef0123456789abcdef01234567", branch: "demo/search-index", changed: ["src/index.ts"] },
+    updated_at: "2026-10-12T09:00:00Z",
+  },
+};
+
+test("a run handoff explains the saved context and copies the independent review prompt", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.getHandoff = vi.fn().mockResolvedValue(handoffFixture);
+  const copy = stubClipboard();
+  await openRun(8, backend);
+  const handoff = within(await screen.findByRole("region", { name: "Run handoff" }));
+  expect(await handoff.findByText("Quota exhausted")).toBeInTheDocument();
+  expect(handoff.getByText(formatDateTime("2026-10-12T12:00:00Z", "en"))).toBeInTheDocument();
+  expect(handoff.getByText("Claude Code · Explicit choice")).toBeInTheDocument();
+  expect(handoff.getByText("Verify the query plan")).toBeInTheDocument();
+  expect(handoff.getByText("Wiki: Demo Index")).toBeInTheDocument();
+  expect(handoff.getByText("src/index.ts")).toBeInTheDocument();
+  await userEvent.click(handoff.getByRole("button", { name: "Copy independent review prompt" }));
+  expect(copy).toHaveBeenCalledWith("Independently review the index migration and its verification.");
+});
+
+test.each([false, true])("the Wiki archive card shows the recorded receipt when available (%s)", async (recorded) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.getHandoff = vi.fn().mockResolvedValue({
+    ...handoffFixture,
+    archive: {
+      root: "/demo/wiki",
+      prompt: "Archive the index migration in the configured Wiki.",
+      receipt: recorded ? {
+        page: "projects/index-migration.md",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        recorded_at: "2026-10-12T13:00:00Z",
+      } : null,
+    },
+  });
+  const copy = stubClipboard();
+  await openRun(8, backend);
+  const archive = within(await screen.findByRole("region", { name: "Wiki archive" }));
+  expect(archive.getByText("/demo/wiki")).toBeInTheDocument();
+  if (recorded) {
+    expect(archive.getByText("projects/index-migration.md")).toBeInTheDocument();
+    expect(archive.getByText("0123456789abcdef0123456789abcdef01234567")).toBeInTheDocument();
+  } else {
+    expect(archive.getByText("No archive receipt recorded yet.")).toBeInTheDocument();
+  }
+  await userEvent.click(archive.getByRole("button", { name: "Copy Wiki archive material" }));
+  expect(copy).toHaveBeenCalledWith("Archive the index migration in the configured Wiki.");
+});
+
+test("claiming a handoff requires choosing an executor and leaves the run's executor intact", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  // The other demo run uses the same folder. End it so this handoff can reserve the folder.
+  await backend.cancelJob(12);
+  const claimHandoff = vi.spyOn(backend, "claimHandoff");
+  const releaseHandoff = vi.spyOn(backend, "releaseHandoff");
+  await openRun(8, backend);
+  const card = within(await screen.findByRole("region", { name: "Run handoff" }));
+  const claim = await card.findByRole("button", { name: "Claim handoff" });
+  expect(claim).toBeDisabled();
+  await userEvent.click(card.getByRole("combobox", { name: "Takeover executor" }));
+  await userEvent.click(await screen.findByRole("option", { name: "Codex" }));
+  await userEvent.click(claim);
+  expect(await card.findByText("Claimed for Codex")).toBeInTheDocument();
+  expect(claimHandoff).toHaveBeenCalledWith(8, "codex");
+  expect(field("Executor")).toBe("Claude Code");
+  expect(field("Status")).toBe("Failed");
+  const claimId = (await backend.getHandoff(8)).claim_id;
+  expect(claimId).toEqual(expect.any(String));
+  await userEvent.click(card.getByRole("button", { name: "Release handoff" }));
+  expect(await card.findByRole("button", { name: "Claim handoff" })).toBeDisabled();
+  expect(releaseHandoff).toHaveBeenCalledWith(8, claimId);
+});
+
+test.each([
+  [12, true, "Wait for this run to finish before claiming its handoff."],
+  [7, false, "This run is done."],
+] as const)("run %s cannot be claimed", async (id, active, message) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.getHandoff = vi.fn().mockResolvedValue({ ...handoffFixture, job_id: id, active });
+  await openRun(id, backend);
+  const handoff = within(await screen.findByRole("region", { name: "Run handoff" }));
+  expect(await handoff.findByText(message)).toBeInTheDocument();
+  expect(handoff.queryByRole("button", { name: "Claim handoff" })).not.toBeInTheDocument();
+});
+
+test("a failed handoff read can be retried independently of the run", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  backend.getHandoff = vi.fn()
+    .mockRejectedValueOnce(new BackendError("handoff store unavailable"))
+    .mockResolvedValue(handoffFixture);
+  await openRun(8, backend);
+  const handoff = within(await screen.findByRole("region", { name: "Run handoff" }));
+  expect(await handoff.findByText("Could not read the handoff")).toBeInTheDocument();
+  expect(handoff.getByText("handoff store unavailable")).toBeInTheDocument();
+  expect(field("Executor")).toBe("Claude Code");
+  await userEvent.click(handoff.getByRole("button", { name: "Try again" }));
+  expect(await handoff.findByText("Verify the query plan")).toBeInTheDocument();
 });
 
 // ---- the head of the page ---------------------------------------------------------------------
@@ -630,7 +758,7 @@ test("while the log is being read the tabs show placeholders", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   backend.jobLog = vi.fn(() => new Promise<string[]>(() => {}));
   await openRun(12, backend);
-  expect(screen.getByRole("status", { name: "Loading…" })).toBeInTheDocument();
+  expect(within(screen.getByRole("tabpanel", { name: "Timeline" })).getByRole("status", { name: "Loading…" })).toBeInTheDocument();
   expect(screen.queryByText("Nothing to show yet")).not.toBeInTheDocument();
   // The rest of the page does not wait for the log.
   expect(field("Status")).toBe("Running");

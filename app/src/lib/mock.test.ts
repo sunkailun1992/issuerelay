@@ -48,6 +48,19 @@ describe("mock backend", () => {
     expect((await backend.job(8))?.state).toBe("queued");
   });
 
+  test("a delayed release leaves a replacement claim by the same executor in place", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    await backend.cancelJob(12);
+    const first = await backend.claimHandoff(8, "codex");
+    expect(first.claim_id).toEqual(expect.any(String));
+    await expect(backend.releaseHandoff(8, first.claim_id!)).resolves.toBe(true);
+    const second = await backend.claimHandoff(8, "codex");
+    expect(second.claim_id).toEqual(expect.any(String));
+    expect(second.claim_id).not.toBe(first.claim_id);
+    await expect(backend.releaseHandoff(8, first.claim_id!)).resolves.toBe(false);
+    expect(await backend.getHandoff(8)).toMatchObject({ claimed_by: "codex", claim_id: second.claim_id });
+  });
+
   test("a held job says when it is tried again", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     expect((await backend.status()).status.held).toEqual([{ job_id: 11, retry_at: "2026-10-12T09:02:00Z" }]);

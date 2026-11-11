@@ -289,6 +289,26 @@ test("a dialog opened for another binding does not keep what the last one had", 
   expect(screen.getByRole("textbox", { name: "Model" })).toHaveValue("");
 });
 
+test("the Codex model catalog removes Ultra from Luna's reasoning choices", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  Object.assign(backend, { modelCatalog: vi.fn().mockResolvedValue({
+    executor: "codex", source: "native", models: [
+      { id: "gpt-6.1-sol", label: "GPT-6.1 Sol", efforts: ["low", "max", "ultra"], default_effort: "low", recommended: true, is_default: true },
+      { id: "gpt-6-luna", label: "GPT-6 Luna", efforts: ["low", "max"], default_effort: "low", recommended: false, is_default: false },
+    ],
+  }) });
+  await renderWithProviders(<Bindings />, { backend });
+  const demo = await screen.findByRole("region", { name: "Demo Mobile" });
+  await userEvent.click(within(demo).getByRole("button", { name: "Edit" }));
+  await pick("Model choices", "GPT-6.1 Sol");
+  await pick("Reasoning effort", "Ultra");
+  await pick("Model choices", "GPT-6 Luna");
+  expect(screen.getByRole("textbox", { name: "Model" })).toHaveValue("gpt-6-luna");
+  await userEvent.click(screen.getByRole("combobox", { name: "Reasoning effort" }));
+  expect(await screen.findByRole("option", { name: "Max" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "Ultra" })).not.toBeInTheDocument();
+});
+
 test("cancelling the question keeps the binding", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const remove = vi.spyOn(backend, "removeBinding");

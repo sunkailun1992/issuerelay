@@ -4,12 +4,14 @@ import {
   DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LABELS, DEMO_LOGS,
   DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_UPDATES, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
+import type { ModelCatalog } from "./model-catalog";
 import { bindingsOverlap } from "./routing";
 import { isActive } from "./runs";
 import type {
-  Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, HeldJob, Issue, IssueView, Job, LinearSetup,
+  Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, HeldJob, Issue, IssueView, Job, LinearSetup,
   QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
+import type { Handoff } from "./workflow-types";
 
 export interface MockOptions {
   /** The delay of every call: 120 ms by default so loading states show in a browser; tests pass 0. */
@@ -26,6 +28,25 @@ export interface MockOptions {
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
 const CONNECTING = "still connecting to Linear";
+
+/** The model choices shown by the browser preview, without querying an installed CLI. */
+function mockCatalog(executor: ExecutorKind): ModelCatalog {
+  const entries = executor === "codex"
+    ? [["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-astra", "GPT-6 Astra"], ["gpt-6-luna", "GPT-6 Luna"]]
+    : [["fable", "Claude Fable"], ["opus", "Claude Opus"], ["sonnet", "Claude Sonnet"]];
+  return {
+    executor,
+    source: "builtin",
+    models: entries.map(([id, label], index) => ({
+      id,
+      label,
+      efforts: ["low", "medium", "high", "xhigh", "max", ...(executor === "codex" && index < 2 ? ["ultra"] : [])],
+      default_effort: null,
+      recommended: executor === "claude" || index < 2,
+      is_default: index === 0,
+    })),
+  };
+}
 
 /**
  * `https` on linear.app or one of its subdomains: close to `linear_url` in commands.rs, for the
@@ -67,6 +88,8 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   // "connecting" is the demo install starting up: its local data, Linear not connected yet.
   const demo = scenario !== "fresh";
   let jobs: Job[] = demo ? structuredClone(DEMO_JOBS) : [];
+  const claims = new Map<number, { id: string; executor: ExecutorKind }>();
+  let nextClaimId = 1;
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
   let settings: Settings = {
@@ -142,6 +165,23 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   });
   const newestRun = (issueUuid: string): Job | undefined =>
     jobs.filter((job) => job.issue_uuid === issueUuid).sort((a, b) => b.id - a.id)[0];
+  const handoff = (job: Job): Handoff => ({
+    job_id: job.id,
+    issue_identifier: job.issue_identifier,
+    executor: job.executor,
+    active: isActive(job),
+    context: null,
+    memory: null,
+    prompt: `Continue the work for ${job.issue_identifier} from run ${job.id}.`,
+    review_prompt: `Independently review the work for ${job.issue_identifier} from run ${job.id}.`,
+    claimed_by: claims.get(job.id)?.executor ?? null,
+    claim_id: claims.get(job.id)?.id ?? null,
+    archive: settings.wiki_root === undefined ? null : {
+      root: settings.wiki_root,
+      prompt: `Archive the work for ${job.issue_identifier} from run ${job.id} in the configured Wiki.`,
+      receipt: null,
+    },
+  });
   const issueViews = (): IssueView[] =>
     (demo ? DEMO_ISSUES : []).map(({ issue, status }) => {
       const job = newestRun(issue.uuid) ?? null;
@@ -167,6 +207,26 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         find(id);
         return (DEMO_LOGS[id] ?? []).slice(-lines);
       }),
+    getHandoff: (id) => reply(() => handoff(find(id))),
+    claimHandoff: (id, executor) => reply(() => {
+      const job = find(id);
+      if (isActive(job) || job.state === "done") fail("run is active or already done");
+      if (newestRun(job.issue_uuid)?.id !== id) fail("only the latest run can be claimed");
+      if (job.directory === null) fail("run has no working directory");
+      const sameWork = (other: Job) => other.issue_uuid === job.issue_uuid || other.directory === job.directory;
+      if (jobs.some((other) => other.state === "running" && sameWork(other))) fail("another writer is still running in the directory");
+      if (jobs.some((other) => claims.has(other.id) && sameWork(other))) fail("the run, issue or directory is already claimed");
+      claims.set(id, { id: `demo-claim-${nextClaimId++}`, executor });
+      emit({ kind: "job", job });
+      return handoff(job);
+    }),
+    releaseHandoff: (id, claimId) => reply(() => {
+      const claim = claims.get(id);
+      if (claim === undefined || claim.id !== claimId) return false;
+      claims.delete(id);
+      emit({ kind: "job", job: find(id) });
+      return true;
+    }),
     issues: () => reply(() => (connected() ? issueViews() : offline())),
     pause: () =>
       reply(() => {
@@ -277,6 +337,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         if (action.kind === "remove_control_server") controlServers[action.executor] = "not_registered";
       }),
     controlServers: () => reply(() => ({ ...controlServers })),
+    modelCatalog: (executor) => reply(() => mockCatalog(executor)),
     // The demo registered Linear under the names the one-click login uses.
     linearServerNamed: () => reply(() => true),
     openLinear: (url) =>

@@ -73,6 +73,23 @@ describe("backend selection", () => {
     expect((await (await loadBackend()).settings()).language).toBe("system");
   });
 
+  test("handoff commands send the run, executor for claims and reservation ID for releases", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(null);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    await tauriBackend.getHandoff(8);
+    await tauriBackend.claimHandoff(8, "codex");
+    await tauriBackend.releaseHandoff(8, "demo-claim-1");
+    await tauriBackend.modelCatalog("claude");
+    expect(invoke.mock.calls).toEqual([
+      ["get_handoff", { id: 8 }],
+      ["claim_handoff", { id: 8, executor: "codex" }],
+      ["release_handoff", { id: 8, claimId: "demo-claim-1" }],
+      ["model_catalog", { executor: "claude" }],
+    ]);
+  });
+
   test("command errors become BackendError with the backend's text, and codes are recognised", async () => {
     vi.resetModules();
     const invoke = vi

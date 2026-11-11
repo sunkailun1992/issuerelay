@@ -45,7 +45,8 @@ CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
-const SCHEMA_VERSION: i64 = 2;
+// An older scheduler would ignore the durable directory reservations.
+const SCHEMA_VERSION: i64 = 3;
 
 /// The columns schema 2 added to the M1 table, with their types.
 const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
@@ -241,6 +242,7 @@ impl Store {
         // One transaction: a migration that stops halfway must not leave a half-changed table.
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
+        crate::workflow_store::ensure_schema(&tx)?;
         let present: Vec<String> = tx
             .prepare("SELECT name FROM pragma_table_info('jobs')")?
             .query_map([], |row| row.get(0))?
@@ -267,6 +269,10 @@ impl Store {
         }
         tx.commit()?;
         Ok(Self { conn })
+    }
+
+    pub(crate) fn workflow_connection(&self) -> &Connection {
+        &self.conn
     }
 
     /// Records a run and returns the stored row.
@@ -1073,7 +1079,7 @@ mod tests {
         let version: i64 = raw
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -1172,7 +1178,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
         let interrupted = store.recover_interrupted().unwrap();
         assert_eq!(
             interrupted,
@@ -1216,7 +1222,7 @@ mod tests {
             .execute_batch(&unversioned)
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
         let columns = names(&store.conn, COLUMNS_SQL);
         for column in ["process_pid", "process_started"] {
             assert!(columns.iter().any(|c| c == column), "{columns:?}");
@@ -1250,7 +1256,7 @@ mod tests {
             .pragma_update(None, "user_version", 0)
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
         assert_eq!(
             store.recover_interrupted().unwrap(),
             vec![InterruptedRun {
@@ -1384,10 +1390,9 @@ mod tests {
         }
     }
 
-    // A v0.2.4 database is at schema 2 already: the run details are added all the same, and the
-    // version stays 2 so that v0.2.4 can still open the database after a downgrade.
+    // A v0.2.4 database upgrades from schema 2, including the additive run details.
     #[test]
-    fn new_columns_are_added_to_an_old_database_without_a_version_bump() {
+    fn upgrades_schema_two_to_workflow_reservations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
         let v0_2_4 = SCHEMA_V1
@@ -1402,7 +1407,7 @@ mod tests {
             .execute_batch(&v0_2_4)
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
         let columns = names(&store.conn, COLUMNS_SQL);
         for column in RUN_DETAIL_COLUMNS {
             assert!(columns.iter().any(|c| c == column), "{column}: {columns:?}");
@@ -1415,10 +1420,10 @@ mod tests {
         );
     }
 
-    // After a downgrade v0.2.4 writes and reads rows with its own statements; rows this version
-    // wrote must read in them too, with a state v0.2.4 knows.
+    // Legacy rows retain their column meanings through migration. This raw SQL test does not
+    // imply an older scheduler can safely open a version 3 database.
     #[test]
-    fn an_older_release_still_reads_and_writes_the_rows() {
+    fn legacy_row_columns_keep_their_meaning() {
         let (_dir, path, store) = file_store();
         let job = queued(&store, "1");
         assert!(store.mark_started(job.id, Path::new("1.jsonl")).unwrap());
@@ -1448,7 +1453,7 @@ mod tests {
             .unwrap();
         assert_eq!(states, ["needs_info", "queued"]);
         assert!(states.iter().all(|state| JobState::parse(state).is_some()));
-        assert_eq!(user_version(&raw), 2);
+        assert_eq!(user_version(&raw), SCHEMA_VERSION);
         drop(raw);
         let store = Store::open(&path).unwrap();
         let older = store.latest_for_issue("u-2").unwrap().unwrap();
@@ -1602,7 +1607,7 @@ mod tests {
             .execute_batch(&renamed)
             .unwrap();
         let store = Store::open(&path).unwrap();
-        assert_eq!(user_version(&store.conn), 2);
+        assert_eq!(user_version(&store.conn), SCHEMA_VERSION);
         assert_eq!(
             names(&store.conn, COLUMNS_SQL).len(),
             20 + RUN_DETAIL_COLUMNS.len()
@@ -1745,7 +1750,7 @@ mod tests {
         drop(store);
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .unwrap();
         let error = Store::open(&path)
             .err()

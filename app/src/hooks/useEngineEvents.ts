@@ -27,7 +27,7 @@ export function useEngineEvents(): void {
             refresh(queryKeys.status);
             break;
           case "job":
-            refresh(queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.issues);
+            refresh(queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.handoff(event.job.id), queryKeys.issues);
             break;
           case "config":
             refresh(queryKeys.settings, queryKeys.bindings, queryKeys.status);

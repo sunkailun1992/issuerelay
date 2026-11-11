@@ -1383,3 +1383,49 @@ test("the default reasoning effort can be chosen and cleared", async () => {
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect("default_effort" in lastSaved(save)).toBe(false);
 });
+
+test("a failed model refresh keeps the custom default available to save", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  Object.assign(backend, { modelCatalog: vi.fn().mockRejectedValue(new BackendError("catalog offline")) });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const field = await screen.findByRole("textbox", { name: "Default Codex model" });
+  await userEvent.type(field, "custom-model");
+  await userEvent.click(screen.getByRole("button", { name: "Refresh Default Codex model choices" }));
+  expect(field).toHaveValue("custom-model");
+  expect(await screen.findAllByText("Could not load model choices. You can still enter a model.")).not.toHaveLength(0);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  expect(lastSaved(save).default_codex_model).toBe("custom-model");
+});
+
+test("Claude Ultracode is saved independently of reasoning effort", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const ultracode = await screen.findByRole("switch", { name: "Claude Ultracode" });
+  await pick("Default reasoning effort", "Max");
+  await userEvent.click(ultracode);
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalled());
+  expect(lastSaved(save)).toMatchObject({ claude_ultracode: true, default_effort: "max" });
+});
+
+test("the Wiki folder can be set and cleared through settings", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  vi.spyOn(backend, "chooseDirectory").mockResolvedValue("/example/wiki");
+  const save = vi.spyOn(backend, "saveSettings");
+  await renderWithProviders(<Settings />, { backend });
+  const folder = await screen.findByRole("textbox", { name: "LLM-Wiki folder" });
+  expect(folder).toHaveValue("");
+  await userEvent.click(screen.getByRole("button", { name: "Choose Wiki folder" }));
+  expect(folder).toHaveValue("/example/wiki");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(lastSaved(save).wiki_root).toBe("/example/wiki");
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Clear Wiki folder" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(lastSaved(save)).not.toHaveProperty("wiki_root");
+});

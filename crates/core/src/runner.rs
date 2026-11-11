@@ -127,7 +127,7 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 ///
 /// `done` is set once `end` has killed and reaped the tree. After that the guard must not signal
 /// again: the process group id of a reaped tree may already belong to someone else.
-struct TreeGuard {
+pub(crate) struct TreeGuard {
     child: Box<dyn ChildWrapper>,
     done: bool,
     /// How long `end` waits for the executor after SIGTERM: `TERM_GRACE`, shorter in tests.
@@ -140,7 +140,7 @@ struct TreeGuard {
 }
 
 impl TreeGuard {
-    fn new(child: Box<dyn ChildWrapper>) -> Self {
+    pub(crate) fn new(child: Box<dyn ChildWrapper>) -> Self {
         Self {
             child,
             done: false,
@@ -176,7 +176,7 @@ impl TreeGuard {
 
     /// Ends the tree as described on the type and waits, for at most ten seconds, until it is
     /// reaped.
-    async fn end(&mut self) {
+    pub(crate) async fn end(&mut self) {
         #[cfg(unix)]
         {
             if self.leader().is_some() {
@@ -586,6 +586,43 @@ pub async fn run(
     env: &ExecEnv,
     on_spawn: Option<SpawnHook>,
 ) -> RunOutput {
+    run_with_output(
+        spec,
+        kind,
+        log_path,
+        limits,
+        cancel,
+        env,
+        RunHooks {
+            on_spawn,
+            on_stdout: None,
+        },
+    )
+    .await
+}
+
+/// Local progress callbacks. Raw lines are never used as shell arguments.
+pub type StdoutHook = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Default)]
+pub struct RunHooks {
+    pub on_spawn: Option<SpawnHook>,
+    pub on_stdout: Option<StdoutHook>,
+}
+
+pub async fn run_with_output(
+    spec: CommandSpec,
+    kind: ExecutorKind,
+    log_path: &Path,
+    limits: RunLimits,
+    cancel: CancellationToken,
+    env: &ExecEnv,
+    hooks: RunHooks,
+) -> RunOutput {
+    let RunHooks {
+        on_spawn,
+        on_stdout,
+    } = hooks;
     if let Some(dir) = log_path.parent()
         && let Err(e) = tokio::fs::create_dir_all(dir).await
     {
@@ -675,6 +712,9 @@ pub async fn run(
                             _ => None,
                         };
                         // The line goes into the log either way, so the log shows what was wrong.
+                        if let (Some(observe), Line::Out(text)) = (&on_stdout, &line) {
+                            observe(text);
+                        }
                         log_failures.note(record(&mut log, &mut tracker, line).await);
                         if let Some(detail) = violation {
                             let said = note(
@@ -705,6 +745,9 @@ pub async fn run(
             (Some(check), Line::Out(text), ExitKind::Exited(_)) => check.observe(text),
             _ => None,
         };
+        if let (Some(observe), Line::Out(text)) = (&on_stdout, &line) {
+            observe(text);
+        }
         log_failures.note(record(&mut log, &mut tracker, line).await);
         if let Some(detail) = violation {
             let said = note(

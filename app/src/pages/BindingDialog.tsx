@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, 
 import { useTranslation } from "react-i18next";
 import { Field, Hint } from "@/components/FormField";
 import { FullAccessWarning } from "@/components/FullAccessWarning";
+import { ModelCatalogField } from "@/components/ModelCatalogField";
 import { ErrorState, LinearConnecting, LoadingState } from "@/components/states";
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,12 +15,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { useBindings, useLabels, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
+import { useBindings, useLabels, useModelCatalog, useProjects, useSaveBinding, useSaveSettings, useSettings, useStatus } from "@/hooks/queries";
 import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useBackend } from "@/lib/backend-context";
 import { bindingLabels } from "@/lib/binding-labels";
 import { cleanDisplayText } from "@/lib/clean";
 import { reportFailure } from "@/lib/errors";
+import { modelEffortOptions } from "@/lib/model-catalog";
 import { isValidModelName } from "@/lib/model-name";
 import { bindingIdFor, bindingsOverlap, uniqueBindingId } from "@/lib/routing";
 import { nameProblem, sameName } from "@/lib/settings-form";
@@ -83,6 +85,15 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
   // A blank around a pasted name is not part of it.
   const modelName = model.trim();
   const modelInvalid = modelName !== "" && !isValidModelName(modelName);
+  const effectiveExecutor = executor === DEFAULT ? settings.default_executor : executor;
+  const modelCatalog = useModelCatalog(effectiveExecutor);
+  const configuredModel = effectiveExecutor === "codex" ? settings.default_codex_model : settings.default_claude_model;
+  const defaultModel = configuredModel || modelCatalog.data?.models.find((choice) => choice.is_default)?.id;
+  const effectiveEffort = effectiveExecutor === "claude" && effort === "ultra" ? DEFAULT : effort;
+  const effortOptions = modelEffortOptions(
+    modelCatalog.data, effectiveExecutor, modelName || defaultModel,
+    effectiveEffort === DEFAULT ? undefined : effectiveEffort, EFFORTS,
+  ).filter((level): level is Effort => EFFORTS.includes(level as Effort));
   const effectivePermission = permission === DEFAULT ? settings.default_permission : permission;
   const leanApplies = effectivePermission !== "personal";
   const needsWarning = effectivePermission === "full" && !settings.full_access_acknowledged;
@@ -370,6 +381,8 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
               value={executor}
               onValueChange={(value) => {
                 edited();
+                const nextExecutor = value === DEFAULT ? settings.default_executor : value;
+                if (nextExecutor === "claude" && effort === "ultra") setEffort(DEFAULT);
                 setExecutor(value as ExecutorKind | typeof DEFAULT);
               }}
             >
@@ -422,33 +435,24 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
             <Hint id={id("lean-hint")}>{leanApplies ? t("bindings.lean_hint") : t("bindings.lean_personal_hint")}</Hint>
           </div>
 
-          <Field label={t("bindings.model")} htmlFor={id("model")}>
-            <Input
-              id={id("model")}
-              value={model}
-              onChange={(event) => {
-                edited();
-                setModel(event.target.value);
-              }}
-              aria-invalid={modelInvalid}
-              aria-describedby={id("model-hint")}
-              autoComplete="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              className="font-mono"
-            />
-            {modelInvalid ? (
-              <Hint id={id("model-hint")} tone="error">
-                {t("bindings.model_invalid")}
-              </Hint>
-            ) : (
-              <Hint id={id("model-hint")}>{t("bindings.model_hint")}</Hint>
-            )}
-          </Field>
+          <ModelCatalogField
+            id={id("model")}
+            label={t("bindings.model")}
+            executor={effectiveExecutor}
+            value={model}
+            onChange={(value) => {
+              edited();
+              setModel(value);
+              const choices = modelEffortOptions(modelCatalog.data, effectiveExecutor, value.trim() || defaultModel, undefined, EFFORTS);
+              if (effort !== DEFAULT && !choices.includes(effort)) setEffort(DEFAULT);
+            }}
+            hint={t("bindings.model_hint")}
+            catalog={modelCatalog}
+          />
 
           <Field label={t("bindings.effort")} htmlFor={id("effort")}>
             <Select
-              value={effort}
+              value={effectiveEffort}
               onValueChange={(value) => {
                 edited();
                 setEffort(value as Effort | typeof DEFAULT);
@@ -458,8 +462,12 @@ function BindingFields({ initial, settings, onSaved, onCancel, onBusyChange }: F
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={DEFAULT}>{labels.effort(undefined)}</SelectItem>
-                {EFFORTS.map((level) => (
+                <SelectItem value={DEFAULT}>
+                  {effectiveExecutor === "claude" && settings.default_effort === "ultra"
+                    ? t("effort.default", { name: t("effort.executor") })
+                    : labels.effort(undefined)}
+                </SelectItem>
+                {effortOptions.map((level) => (
                   <SelectItem key={level} value={level}>
                     {labels.effort(level)}
                   </SelectItem>

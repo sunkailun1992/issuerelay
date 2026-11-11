@@ -1,4 +1,5 @@
 import { cleanDisplayText } from "./clean";
+import { isValidModelName } from "./model-name";
 import type { Effort, ExecutorKind, NotificationSettings, PermissionProfile, Settings, TriggerNames } from "./types";
 
 /** The settings that are counts: seconds, minutes, runs, days and megabytes. */
@@ -33,6 +34,10 @@ export interface Draft extends Record<CountField, string> {
   default_permission: PermissionProfile;
   /** `null`: no default, each executor uses its own setting. */
   default_effort: Effort | null;
+  default_codex_model: string;
+  default_claude_model: string;
+  claude_ultracode: boolean;
+  wiki_root: string;
   prompt_template: string;
   notifications: NotificationSettings;
   auto_update: boolean;
@@ -61,6 +66,10 @@ export function draftOf(settings: Settings): Draft {
     default_executor: settings.default_executor,
     default_permission: settings.default_permission,
     default_effort: settings.default_effort ?? null,
+    default_codex_model: settings.default_codex_model ?? "",
+    default_claude_model: settings.default_claude_model ?? "",
+    claude_ultracode: settings.claude_ultracode ?? false,
+    wiki_root: settings.wiki_root ?? "",
     prompt_template: settings.prompt_template,
     notifications: { ...settings.notifications },
     auto_update: settings.auto_update,
@@ -75,7 +84,7 @@ export function draftOf(settings: Settings): Draft {
  * What is wrong with a value, as a code for the page to word. `same_as_label`: the plan label is the
  * trigger label (core's `Settings::validate`), which would leave no way to ask for a plan.
  */
-export type Problem = { kind: "min"; min: number } | { kind: "whole" } | { kind: "name" } | { kind: "same_as_label" };
+export type Problem = { kind: "min"; min: number } | { kind: "whole" } | { kind: "name" } | { kind: "same_as_label" } | { kind: "model" };
 
 /**
  * Whether `text` can be a count of at least `min`. An empty field is below any limit; anything
@@ -121,6 +130,10 @@ export function problemsOf(draft: Draft): Partial<Record<string, Problem>> {
   if (problems["trigger.plan_label"] === undefined && sameName(draft.trigger.plan_label, draft.trigger.label)) {
     problems["trigger.plan_label"] = { kind: "same_as_label" };
   }
+  for (const field of ["default_codex_model", "default_claude_model"] as const) {
+    const name = draft[field].trim();
+    if (name !== "" && !isValidModelName(name)) problems[field] = { kind: "model" };
+  }
   return problems;
 }
 
@@ -160,6 +173,13 @@ export function settingsOf(base: Settings, draft: Draft): Settings | null {
   };
   if (draft.default_effort === null) delete settings.default_effort;
   else settings.default_effort = draft.default_effort;
+  for (const field of ["default_codex_model", "default_claude_model"] as const) {
+    const model = draft[field].trim();
+    if (model !== "" || base[field] !== undefined) settings[field] = model;
+  }
+  if (draft.claude_ultracode || base.claude_ultracode !== undefined) settings.claude_ultracode = draft.claude_ultracode;
+  if (draft.wiki_root === "") delete settings.wiki_root;
+  else settings.wiki_root = draft.wiki_root;
   return settings;
 }
 

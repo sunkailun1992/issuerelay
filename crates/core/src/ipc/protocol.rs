@@ -4,7 +4,7 @@ use serde_json::Value;
 
 /// Methods the engine answers over IPC. Marking an issue Done, retrying and cancelling are
 /// deliberately absent: only the desktop panel may do those (spec 5.6, 10.3).
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 17] = [
     "status",
     "pause",
     "resume",
@@ -15,6 +15,13 @@ pub const METHODS: [&str; 10] = [
     "bindings.add",
     "bindings.remove",
     "logs",
+    "workflow.run",
+    "workflow.context",
+    "workflow.set_context",
+    "workflow.handoff",
+    "workflow.claim",
+    "workflow.release",
+    "workflow.archive",
 ];
 
 /// The request line was not a valid request.

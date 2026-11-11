@@ -83,6 +83,69 @@ async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value
             json!({"ok": true})
         }
         "list_jobs" => serde_json::to_value(engine.list_jobs(jobs_limit(params)?)?)?,
+        "workflow.run" => {
+            engine
+                .workflow_run(
+                    params
+                        .get("id")
+                        .filter(|v| !v.is_null())
+                        .map(|v| v.as_i64().context("invalid run id"))
+                        .transpose()?,
+                    params
+                        .get("issue_identifier")
+                        .filter(|v| !v.is_null())
+                        .map(|v| v.as_str().context("invalid Linear issue identifier"))
+                        .transpose()?,
+                )
+                .await?
+        }
+        "workflow.context" => serde_json::to_value(
+            engine
+                .issue_context(string_param(params, "issue_identifier")?)
+                .await?,
+        )?,
+        "workflow.set_context" => {
+            let revision = params
+                .get("expected_revision")
+                .and_then(Value::as_u64)
+                .context("invalid expected_revision")?;
+            let raw = params.get("context").cloned().context("missing context")?;
+            let context = serde_json::from_value(raw).context("invalid issue context")?;
+            serde_json::to_value(
+                engine
+                    .set_issue_context(string_param(params, "issue_identifier")?, revision, context)
+                    .await?,
+            )?
+        }
+        "workflow.handoff" => serde_json::to_value(engine.handoff(job_id_param(params)?)?)?,
+        "workflow.claim" => {
+            let executor = crate::config::ExecutorKind::parse(string_param(params, "executor")?)
+                .context("invalid executor")?;
+            serde_json::to_value(
+                engine
+                    .claim_handoff(job_id_param(params)?, executor)
+                    .await?,
+            )?
+        }
+        "workflow.release" => serde_json::to_value(
+            engine
+                .release_handoff(job_id_param(params)?, string_param(params, "claim_id")?)
+                .await?,
+        )?,
+        "workflow.archive" => serde_json::to_value(
+            engine
+                .record_archive(
+                    job_id_param(params)?,
+                    string_param(params, "page")?.to_owned(),
+                    params
+                        .get("commit")
+                        .filter(|v| !v.is_null())
+                        .map(|v| v.as_str().context("invalid commit"))
+                        .transpose()?
+                        .map(str::to_owned),
+                )
+                .await?,
+        )?,
         "doctor" => serde_json::to_value(engine.doctor().await)?,
         "bindings.list" => serde_json::to_value(engine.bindings())?,
         "bindings.add" => {

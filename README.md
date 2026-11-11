@@ -8,8 +8,8 @@
 
 初次了解产品，先看下方职责与流程；完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
 
-> **验证范围：** M0（实测验证）、M1（引擎与命令行）、M2（桌面面板）、M3（安装包与发布）已有交付：桌面应用与安装包经过 macOS 实机验收；Windows 尚未经过真机验收。具体版本的能力和验证结果见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
-> *Validation: the desktop app and installers have been tested on a real Mac. Windows has not been tested on a real machine. See the release notes and acceptance reports for each version.*
+> **验证范围：** 既有桌面应用与安装包完成过 macOS 实机验收，Windows 仍待实机验收。本文的上下文登记、接力、复核与归档流程对应 0.4.0 源码。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
+> *Validation: earlier desktop builds and installers were tested on a real Mac. Windows acceptance is pending. See the release notes and acceptance reports for each version.*
 
 ## 谁负责什么
 
@@ -21,7 +21,7 @@
 | Codex / Claude Code | 读取需求与仓库，分析或修改代码，通过自己的工具操作 git、测试和 Linear |
 | Skills 与项目规则 | 给执行者提供工作方法与约束；实际加载范围取决于运行模式 |
 
-你可以在 Codex 或 Claude Code 中讨论和整理需求，也可以直接在 Linear 中编写。IssueRelay 按绑定选择一个执行者处理每次运行；它目前没有自动组织“一个 AI 开发、另一个 AI 独立验收”的完整协作流水线。
+你可以在 Codex 或 Claude Code 中整理需求，先用 IssueRelay MCP 登记范围与验收条件，再在 Linear 标记运行模式。每次运行使用一个执行者，依次采用需求显式选择、项目绑定、登记入口和全局默认。你也可以直接在 Linear 编写需求，继续按绑定与全局设置处理。
 
 ## 它怎么工作
 
@@ -37,7 +37,10 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
        └─ ai-ready → AI 实现、验证并推测试分支 → 交到 In Testing
                                                     │
                                                     ▼
-                                        你验收后在面板标记完成
+                                你验收 → 按需登记 Wiki 归档回执
+                                                    │
+                                                    ▼
+                                            在面板标记完成
 ```
 
 默认每 30 秒经 Linear 官方 MCP 检查一次，使用你授权的账户；触发名称可配置。只出方案与开发是两种运行模式，方案不会自动变成开发任务。开发模式的 AI 被要求遵守三条固定规则：不设 Done、不推主分支、不发正式环境；具体执行仍须符合目标仓库的规则和你的授权。
@@ -57,7 +60,7 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 这里有两条方向不同的 MCP 连接：
 
 - **IssueRelay → Linear MCP**：IssueRelay 发现需求，编码 AI 也需要自己的 Linear 连接来读取需求、写评论和更新状态。IssueRelay 的 Linear 登录与执行者的登录分别配置。
-- **Codex / Claude Code → IssueRelay MCP**：你在 AI 会话中查询 IssueRelay 的状态和近期运行，或者控制监控。这个控制服务通过本机通信访问正在运行的 IssueRelay。
+- **Codex / Claude Code → IssueRelay MCP**：你在 AI 会话中登记需求上下文、查看进度、读取交接与复核资料，或控制监控。这个控制服务通过本机通信访问正在运行的 IssueRelay。
 
 在面板的“设置 → MCP 控制服务”中注册，步骤见 [安装说明](docs/install.md#把命令行加入-path)。现有工具如下：
 
@@ -68,8 +71,13 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 | `pause` | 暂停监控与派发；已经在运行的任务继续 |
 | `resume` | 恢复监控，随后检查可处理的需求 |
 | `poll_now` | 请求立即检查；暂停时不执行轮询，也不解除暂停 |
+| `get_run` | 按运行 ID 或 Linear 需求编号读取运行详情 |
+| `get_issue_context` / `set_issue_context` | 读取或按修订号保存需求上下文。登记应在加运行标签之前完成 |
+| `get_handoff` | 读取运行交接、复核提示词与归档材料。当前保留的标识是 `claim_id` |
+| `claim_handoff` / `release_handoff` | 手动接手前保留目录。接手会话结束后，用 `job_id` 和自己取得的本次 `claim_id` 释放 |
+| `record_archive` | 为当前 Wiki 目录登记已写入的页面及提交回执 |
 
-这里的 `resume` 指恢复监控。恢复某次 AI 会话受另一套续跑条件约束。MCP 不提供标记完成、重试或取消运行，也不提供任意读写运行数据库的接口；这些能力不能从“已连接 MCP”推导出来。宿主未运行时，控制服务会报错并提示打开 IssueRelay，不会替你启动应用。
+`resume` 恢复监控。上下文、交接保留和归档回执只更新本机记录，仍通过 Linear 的正常条件触发派工。「标记完成」「重新运行」「停止」在面板操作。宿主未运行时，控制服务会提示打开 IssueRelay。参数与调用顺序见[使用指南](docs/usage.md#用-mcp-连接主控会话)。
 
 ## 当前能力与范围
 
@@ -77,21 +85,24 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 |---|---|
 | 方案与开发 | `ai-plan` 只出方案；`ai-ready` 执行开发流程 |
 | 多项目调度 | 按项目与分流标签绑定目录，支持依赖等待、目录互斥和总并发限制 |
-| 执行者选择 | 每次运行使用配置选定的 Codex 或 Claude Code |
+| 执行者与模型 | 需求显式选择 → 项目绑定 → 登记入口 → 全局默认。默认模型与绑定中的模型都可配置 |
 | 会话接续 | 满足执行器、目录、时间与模式条件时尝试接续同一执行器的会话 |
 | 用量记录 | 展示执行者报告的 token；Claude 的费用为估算，不等于订阅实际扣费 |
-| 额度耗尽后的接力 | 尚不支持专门的额度重置等待或自动切换到另一个执行器 |
-| 跨执行器会话恢复 | 不能用 Codex 直接恢复 Claude 的 session，反向也一样；人工接手可读取共同的需求、代码与验证记录 |
-| 独立审查流水线 | 尚未自动编排开发、另一执行者复核和业务验收的完整链路 |
-| 原生聊天界面接管 | 后台 CLI 运行不代表已接入 Codex 或 Claude 的原生交互聊天 |
+| 额度耗尽与手动接力 | 确认额度耗尽后停止自动重跑。你可以保留工作目录，把已保存的检查点交给新的 Codex 或 Claude 会话 |
+| 独立复核 | 从运行详情复制复核提示词，在新会话中核对 diff、测试和验收条件 |
+| Wiki 归档 | 配置 Wiki 目录后，可复制归档材料。回执绑定当前目录，换目录或页面失效后需要重新登记 |
 
 运行完成、测试通过、制品部署和业务验收是不同结果。请结合运行记录、Linear 评论、代码改动与实际验证判断是否完成；最终 Done 由你在面板确认。更多边界与常见问题见 [使用指南](docs/usage.md)。
 
 ## 安装 / Install
 
-从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次（macOS 15 及以后：系统设置 → 隐私与安全性 → 仍要打开；Windows：更多信息 → 仍要运行）；经过公证、签名的版本通常没有这一步。通知由系统显示：macOS 上一条都看不到时，到「系统设置 → 通知 → IssueRelay」打开「允许通知」，它关着时 IssueRelay 自己看不出来。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。退回 v0.2.4 及以前的版本前，先删掉带分流标签的绑定（旧版本不认识分流标签，同一项目有两个绑定时启动不了），见安装说明的「退回旧版本」。
+从 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest) 下载：Mac 用 `IssueRelay_<版本>_universal.dmg`，Windows 用 `IssueRelay_<版本>_x64-setup.exe`（不需要管理员权限）。需要 macOS 13.3 及以后。没有经过 Apple 公证或 Windows 代码签名的版本（每个版本的发布说明写明），第一次打开要放行一次（macOS 15 及以后：系统设置 → 隐私与安全性 → 仍要打开；Windows：更多信息 → 仍要运行）；经过公证、签名的版本通常没有这一步。通知由系统显示：macOS 上一条都看不到时，到「系统设置 → 通知 → IssueRelay」打开「允许通知」，它关着时 IssueRelay 自己看不出来。步骤、把命令行加入 PATH、自动更新与卸载见 [安装说明](docs/install.md)。
 
-Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling. Before going back to v0.2.4 or earlier, remove the bindings that have routing labels: an older version does not know them and does not start with two bindings of one project.
+Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
+
+升级到 0.4.0 前，正常退出 IssueRelay 并备份应用数据。新版会把数据库升级到 schema 3，旧版无法直接打开这份数据库。[升级与备份](docs/install.md#升级到-040-前备份数据)
+
+Before upgrading to 0.4.0, quit IssueRelay normally and back up its application data. The upgrade migrates the database to schema 3. Earlier releases cannot open that database directly. [Upgrade and backup instructions](docs/install.md#升级到-040-前备份数据)
 
 ## 更多用法
 
@@ -100,6 +111,7 @@ Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/rele
 - **Linear 上的改动会停掉运行**：正在运行的需求在 Linear 上被取消、完成、改派或删除时，下一次检查就停掉运行（结束整棵进程树），运行记录写明原因。暂停监控时不查。
 - **重做时接续会话**：需求退回重做，或出完方案再加 `ai-ready` 时，接着上一次的会话继续（7 天内、同一执行者和目录；「自动审查」的 Codex 运行除外），可以在设置里关掉。手动「重新运行」总是从头开始。
 - **用量**：运行详情显示用了多少 token，Claude 的还有按 API 价格估算的花费；用订阅登录 Claude Code 时，这不是实际扣费。命令行 `issuerelay jobs` 也有花费一栏。
+- **模型与推理**：在设置或绑定中选模型，也可以输入自定义模型。Codex 可刷新原生目录，支持的模型才提供 Ultra。Claude 的 Ultracode 是独立开关，可和推理力度一起使用。
 
 ## 界面预览 / Screenshots
 
@@ -127,7 +139,7 @@ Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/rele
   - Codex 仍读 `~/.codex/AGENTS.md`，仓库的 `.codex/` 配置也不生效。
   - 精简运行不读你的用户级设置，写在那里的拒绝规则（例如挡危险命令的规则）也不生效；靠它们的话，把规则放进项目的 `.claude/settings.json`，或关掉这个绑定的精简运行。推理力度同样不从那里读，在设置页或绑定里设。
   - 用户设置的 `env` 把 Claude Code 接到网关或代理（`ANTHROPIC_BASE_URL`、`HTTPS_PROXY` 等）时，精简运行会绕过它们，所以环境检查判 Claude 的精简运行不可用，并写明是哪个变量；这时请关掉这个绑定的精简运行。
-  - 不精简的运行读你的用户设置：那里的 `env` 设了 `CLAUDE_CODE_EFFORT_LEVEL` 时，以它为准，IssueRelay 设的推理力度不生效。
+  - IssueRelay 为 Claude 指定推理力度时，CLI 参数和该子进程的 `CLAUDE_CODE_EFFORT_LEVEL` 使用同一个值。未指定力度时，执行者沿用自己的环境和设置。IssueRelay 不改用户的全局配置。
   - 管理员下发了 MCP 配置（`managed-mcp.json`）的电脑上，Claude 的精简运行会在启动时失败，运行记录里有 Claude 的原文；关掉精简运行即可。
   - 要用别的 MCP 服务、仓库的 `.codex/` 配置、用户设置里的拒绝规则或自定义模型服务的绑定，在面板里关掉精简运行。关掉精简运行才加载全部配置：你本机 Claude Code / Codex 的用户级指令文件、插件、hooks 和所有 MCP 服务器都会生效；「按个人设置」档位和绑定到主目录的绑定也总是这样。
 - **只出方案的运行**（`ai-plan`）同样无人值守、以你的身份运行。Claude 的内置工具只剩读文件的 Read、Grep、Glob，Codex 用只读沙箱；Linear 的工具只留读取、评论和修改这条需求本身的，关掉其余 29 个（例如合并、审批需求关联的拉取请求，删除评论；Codex 只在精简运行时能关）。除「按个人设置」的绑定外，它总是精简运行（只带 Linear 一个 MCP 服务），不看绑定的精简开关，所以绑定到主目录的绑定出不了方案。它仍能读你能读的文件，并把方案写进 Linear 的评论，能看到这条需求的人都看得到。「按个人设置」的绑定沿用你自己的设置与 MCP 服务，Linear 的工具要在你的设置里允许过，否则留不下方案。
@@ -166,7 +178,7 @@ Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING
 
 | 文档 | 内容 |
 |---|---|
-| [使用指南](docs/usage.md) | 产品定位、职责分工、运行模式、MCP 控制、Skills、续跑与额度边界 |
+| [使用指南](docs/usage.md) | 运行模式、MCP 登记、模型、手动接力、独立复核与 Wiki 归档 |
 | [安装说明](docs/install.md) | 安装包、首次引导、执行者连接、MCP 注册、更新与卸载 |
 | [设计](docs/superpowers/specs/2026-10-10-issuerelay-design.md) | 目标、关键决定、整体结构、需求的生命周期 |
 | [运行改进设计](docs/superpowers/specs/2026-10-27-issuerelay-run-improvements-design.md) | 只出方案、按标签分流、被挡住先不派、Linear 上停掉运行、接续会话、用量 |

@@ -64,7 +64,7 @@ impl PermissionProfile {
 }
 
 /// How hard the executor reasons: Claude Code's `--effort`, Codex's `model_reasoning_effort`
-/// (lean-run design section 5.6). Both executors take these five names.
+/// (lean-run design section 5.6). Ultra is a Codex-only effort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Effort {
@@ -73,16 +73,18 @@ pub enum Effort {
     High,
     Xhigh,
     Max,
+    Ultra,
 }
 
 impl Effort {
     /// Every level, lowest first: the order the panel and the CLI list them in.
-    pub const ALL: [Effort; 5] = [
+    pub const ALL: [Effort; 6] = [
         Effort::Low,
         Effort::Medium,
         Effort::High,
         Effort::Xhigh,
         Effort::Max,
+        Effort::Ultra,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -92,6 +94,7 @@ impl Effort {
             Effort::High => "high",
             Effort::Xhigh => "xhigh",
             Effort::Max => "max",
+            Effort::Ultra => "ultra",
         }
     }
 
@@ -212,6 +215,14 @@ pub struct Settings {
     /// executor's own settings (which lean runs do not read).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<Effort>,
+    /// Optional provider-specific defaults. An absent model uses the executor's default.
+    pub default_codex_model: String,
+    pub default_claude_model: String,
+    /// Claude Code's workflow setting, separate from its reasoning effort.
+    pub claude_ultracode: bool,
+    /// Existing local Wiki selected by the user. Empty means archive is not required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wiki_root: Option<PathBuf>,
     /// An issue that comes back continues the executor session of its earlier run
     /// (run-improvements design, section 11). A file from before the setting reads as on.
     pub resume_sessions: bool,
@@ -239,6 +250,10 @@ impl Default for Settings {
             full_access_acknowledged: false,
             show_in_dock: true,
             default_effort: None,
+            default_codex_model: String::new(),
+            default_claude_model: "fable".into(),
+            claude_ultracode: false,
+            wiki_root: None,
             resume_sessions: true,
         }
     }
@@ -247,6 +262,15 @@ impl Default for Settings {
 impl Settings {
     /// Rejects values that would stall or spin the engine.
     pub fn validate(&self) -> Result<()> {
+        if let Some(root) = &self.wiki_root {
+            anyhow::ensure!(root.is_absolute(), "Wiki root must be an absolute path");
+        }
+        for model in [&self.default_codex_model, &self.default_claude_model] {
+            anyhow::ensure!(
+                model.is_empty() || is_valid_model_name(model),
+                "invalid default model name"
+            );
+        }
         anyhow::ensure!(
             self.poll_interval_secs >= 5,
             "poll_interval_secs must be at least 5, got {}",
@@ -617,6 +641,32 @@ impl Config {
         binding.effort.or(self.settings.default_effort)
     }
 
+    /// A binding's model belongs to its configured executor. An explicit cross-provider route
+    /// uses the new provider's default without changing the saved binding.
+    pub fn model_for<'a>(
+        &'a self,
+        binding: &'a Binding,
+        executor: ExecutorKind,
+    ) -> Option<&'a str> {
+        let local = (self.executor_for(binding) == executor)
+            .then_some(binding.model.as_deref())
+            .flatten();
+        let default = match executor {
+            ExecutorKind::Codex => self.settings.default_codex_model.as_str(),
+            ExecutorKind::Claude => self.settings.default_claude_model.as_str(),
+        };
+        local.or((!default.is_empty()).then_some(default))
+    }
+
+    pub fn effort_for_executor(&self, binding: &Binding, executor: ExecutorKind) -> Option<Effort> {
+        let local = (self.executor_for(binding) == executor)
+            .then_some(binding.effort)
+            .flatten();
+        local
+            .or(self.settings.default_effort)
+            .filter(|level| executor == ExecutorKind::Codex || *level != Effort::Ultra)
+    }
+
     /// Whether `binding`'s runs are lean. `home` is the user's home folder when it is known; a
     /// binding of that very folder cannot be lean (see `LeanStatus::HomeDirectory`).
     pub fn lean_for(&self, binding: &Binding, home: Option<&Path>) -> LeanStatus {
@@ -657,6 +707,9 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     // `lean` is written only when it is off, so the sample turns it off.
     let mut sample = Config::default();
     sample.settings.default_effort = Some(Effort::High);
+    sample.settings.default_codex_model = "gpt-6.1-sol".into();
+    sample.settings.default_claude_model = "fable".into();
+    sample.settings.wiki_root = Some(std::env::temp_dir().join("issuerelay-example-wiki"));
     sample.bindings.push(Binding {
         id: "x".into(),
         project_id: "x".into(),
@@ -1486,6 +1539,7 @@ mod tests {
             (Effort::High, "high"),
             (Effort::Xhigh, "xhigh"),
             (Effort::Max, "max"),
+            (Effort::Ultra, "ultra"),
         ];
         assert_eq!(Effort::ALL, levels.map(|(effort, _)| effort));
         for (effort, name) in levels {

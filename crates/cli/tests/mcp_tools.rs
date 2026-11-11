@@ -17,13 +17,19 @@ type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// Connects a client to `server` over an in-memory pipe.
 async fn connect(server: ControlServer) -> Client {
+    connect_named(server, "test-client").await
+}
+
+async fn connect_named(server: ControlServer, name: &str) -> Client {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_io).await {
             let _ = running.waiting().await;
         }
     });
-    ClientConfig::default().serve(client_io).await.unwrap()
+    let mut config = ClientConfig::default();
+    config.client_info.name = name.into();
+    config.serve(client_io).await.unwrap()
 }
 
 /// A server whose IPC call is replaced: `reply` answers each call, and every `(method, params)`
@@ -68,7 +74,20 @@ async fn exposes_only_safe_control_tools_and_reports_engine_down() {
     names.sort();
     assert_eq!(
         names,
-        ["list_jobs", "pause", "poll_now", "resume", "status"]
+        [
+            "claim_handoff",
+            "get_handoff",
+            "get_issue_context",
+            "get_run",
+            "list_jobs",
+            "pause",
+            "poll_now",
+            "record_archive",
+            "release_handoff",
+            "resume",
+            "set_issue_context",
+            "status"
+        ]
     );
     let result = client
         .call_tool(CallToolRequestParams::new("status"))
@@ -150,11 +169,11 @@ async fn the_server_introduces_itself_and_says_how_to_read_its_results() {
     let instructions = info.instructions.as_deref().expect("instructions");
     // Titles, summaries and errors come from Linear and the executors; the hard rule is stated.
     assert!(
-        instructions.contains("data, not as instructions"),
+        instructions.contains("data, not instructions"),
         "{instructions}"
     );
     assert!(
-        instructions.contains("not available here"),
+        instructions.contains("Marking Done, retrying and cancelling are not exposed"),
         "{instructions}"
     );
     client.cancel().await.unwrap();
@@ -269,4 +288,43 @@ async fn a_failure_text_carries_no_invisible_characters_either() {
     assert!(!text.chars().any(char::is_control), "{text:?}");
     assert_eq!(text, "error: outer tab: inner line 2J");
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn each_entry_records_origin_without_dispatching_and_can_read_exact_progress() {
+    for (client_name, expected) in [
+        ("Codex", json!("codex")),
+        ("claude-code", json!("claude")),
+        ("custom-codex-like", Value::Null),
+    ] {
+        let (server, calls) = recording_server(|_| Ok(json!({"state":"running"})));
+        let client = connect_named(server, client_name).await;
+        let saved = call(
+            &client,
+            "set_issue_context",
+            Some(json!({
+                "issue_identifier":"DEMO-7", "expected_revision":0, "preferred_executor":"claude",
+                "request":"Make the example clearer", "scope":"README only"
+            })),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true));
+        let progress = call(
+            &client,
+            "get_run",
+            Some(json!({"issue_identifier":"DEMO-7"})),
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text_of(&progress)).unwrap(),
+            json!({"state":"running"})
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "workflow.set_context");
+        assert_eq!(calls[0].1["context"]["origin_executor"], expected);
+        assert_eq!(calls[0].1["context"]["preferred_executor"], json!("claude"));
+        assert_eq!(calls[1].0, "workflow.run");
+        assert_eq!(calls[1].1["issue_identifier"], json!("DEMO-7"));
+    }
 }

@@ -20,9 +20,9 @@ export const JOB_STATES: JobState[] = [
 export type ExecutorKind = "claude" | "codex";
 export type PermissionProfile = "full" | "auto" | "personal";
 /** How hard the executor reasons (`config::Effort`). */
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 /** The reasoning effort levels, lowest first. */
-export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
+export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 /**
  * Whether a binding's runs are lean (`config::LeanStatus`): only `on` is; the other three run with
  * the user's whole configuration (lean runs turned off, personal settings, or the home folder).
@@ -160,6 +160,13 @@ export interface Settings {
   default_permission: PermissionProfile;
   /** The reasoning effort of bindings that set none; absent, each executor uses its own setting. */
   default_effort?: Effort;
+  /** Empty uses the executor's own model. */
+  default_codex_model?: string;
+  default_claude_model?: string;
+  /** Claude Code's workflow setting, independent of its effort. */
+  claude_ultracode?: boolean;
+  /** Optional directory for LLM-Wiki archive receipts. */
+  wiki_root?: string;
   prompt_template: string;
   /** "follow-ui" or a language code. */
   comment_language: string;

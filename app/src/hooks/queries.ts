@@ -5,6 +5,7 @@ import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
 import type { Binding, CliPathStatus, ExecutorKind, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
+import type { Handoff } from "@/lib/workflow-types";
 
 /**
  * Every query of the panel. The engine events (`useEngineEvents`) and the actions below refresh
@@ -17,11 +18,13 @@ export const queryKeys = {
   jobs: ["jobs"] as const,
   job: (id: number) => ["job", id] as const,
   log: (id: number) => ["log", id] as const,
+  handoff: (id: number) => ["handoff", id] as const,
   issues: ["issues"] as const,
   bindings: ["bindings"] as const,
   projects: ["projects"] as const,
   labels: ["labels"] as const,
   settings: ["settings"] as const,
+  modelCatalog: (executor: ExecutorKind) => ["modelCatalog", executor] as const,
   doctor: ["doctor"] as const,
   controlServers: ["controlServers"] as const,
   linearServerNamed: (executor: ExecutorKind) => ["linearServerNamed", executor] as const,
@@ -75,6 +78,18 @@ export function useJobs(limit = RUN_LIST_LIMIT) {
 export function useJob(id: number) {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.job(id), queryFn: () => backend.job(id) });
+}
+
+/** The saved context for reviewing or taking over a run. */
+export function useHandoff(id: number) {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.handoff(id), queryFn: () => backend.getHandoff(id) });
+}
+
+/** Model and effort choices for the currently selected executor. */
+export function useModelCatalog(executor: ExecutorKind, enabled = true) {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.modelCatalog(executor), queryFn: () => backend.modelCatalog(executor), enabled });
 }
 
 /** The tail of a run's log; read again every 1.5 seconds while the run is `live`. */
@@ -223,7 +238,7 @@ function useAction<Variables, Result>(
 
 /** What a change of a run touches: the counts, the lists, the run's own pages and the issues. */
 const jobChange = (id: number): readonly QueryKey[] => [
-  queryKeys.status, queryKeys.jobs, queryKeys.job(id), queryKeys.log(id), queryKeys.issues,
+  queryKeys.status, queryKeys.jobs, queryKeys.job(id), queryKeys.log(id), queryKeys.handoff(id), queryKeys.issues,
 ];
 /** What a change of the Linear connection touches. */
 const linearChange: readonly QueryKey[] = [queryKeys.status, queryKeys.issues, queryKeys.projects, queryKeys.labels, queryKeys.doctor];
@@ -254,6 +269,24 @@ export function useRetryJob() {
 
 export function useMarkDone() {
   return useAction<number, void>((backend, id) => backend.markDone(id), jobChange, "actions.failed.mark_done");
+}
+
+export function useClaimHandoff(id: number) {
+  return useAction<ExecutorKind, Handoff>(
+    (backend, executor) => backend.claimHandoff(id, executor),
+    [],
+    "handoff.claim_failed",
+    { reread: [queryKeys.handoff(id)] },
+  );
+}
+
+export function useReleaseHandoff(id: number) {
+  return useAction<string, boolean>(
+    (backend, claimId) => backend.releaseHandoff(id, claimId),
+    [],
+    "handoff.release_failed",
+    { reread: [queryKeys.handoff(id)] },
+  );
 }
 
 /**

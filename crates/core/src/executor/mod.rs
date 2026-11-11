@@ -122,6 +122,23 @@ pub const PLAN_DENIED_LINEAR_TOOLS: [&str; 29] = [
     "update_diff",
 ];
 
+/// Adds the Claude workflow setting to the fixed inline settings object. The lean user's
+/// instruction exclusion is preserved; no project or user configuration file is changed.
+pub fn enable_claude_ultracode(spec: &mut CommandSpec) -> Result<()> {
+    if let Some(index) = spec.args.iter().position(|arg| arg == "--settings") {
+        let mut settings: serde_json::Value = serde_json::from_str(&spec.args[index + 1])?;
+        settings
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("invalid Claude settings object"))?
+            .insert("ultracode".into(), serde_json::Value::Bool(true));
+        spec.args[index + 1] = settings.to_string();
+    } else {
+        spec.args
+            .extend(["--settings".into(), r#"{"ultracode":true}"#.into()]);
+    }
+    Ok(())
+}
+
 /// Builds the command for one run. The arguments are fixed strings plus the model name (only
 /// when it passes `is_valid_model_name`), the effort level and, for a lean run, `lean`'s
 /// arguments; the prompt goes to stdin and `cwd` is set on the process, so neither ever appears
@@ -192,8 +209,10 @@ pub fn build(
             if let Some(m) = model {
                 args.extend(["--model".to_string(), m.to_string()]);
             }
-            if let Some(effort) = options.effort {
+            if let Some(effort) = options.effort.filter(|level| *level != Effort::Ultra) {
                 args.extend(["--effort".to_string(), effort.as_str().to_string()]);
+                // Claude's environment override takes precedence over its CLI flag.
+                env.push(("CLAUDE_CODE_EFFORT_LEVEL".into(), effort.as_str().into()));
             }
             if let Some(lean) = options.lean {
                 args.extend(lean::claude_args(lean.user_instructions));
@@ -339,6 +358,48 @@ mod tests {
         assert_eq!(
             &with_model[with_model.len() - 2..],
             ["--model", "claude-sonnet-5-5"]
+        );
+    }
+
+    #[test]
+    fn claude_effort_and_ultracode_are_independent_and_preserve_lean_settings() {
+        let mut options = opts(PermissionProfile::Auto, Some("fable"));
+        options.effort = Some(Effort::Max);
+        let build_spec = |options: &RunOptions<'_>| {
+            build(
+                ExecutorKind::Claude,
+                PathBuf::from("claude"),
+                options,
+                Path::new("."),
+                "p".into(),
+            )
+        };
+        let mut spec = build_spec(&options);
+        assert!(spec.args.windows(2).any(|pair| pair == ["--effort", "max"]));
+        assert!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == "CLAUDE_CODE_EFFORT_LEVEL" && value == "max")
+        );
+        spec.args.extend([
+            "--settings".into(),
+            r#"{"claudeMdExcludes":["**/CLAUDE.md"]}"#.into(),
+        ]);
+        enable_claude_ultracode(&mut spec).unwrap();
+        let mut settings = spec.args.windows(2).filter(|pair| pair[0] == "--settings");
+        let merged: serde_json::Value = serde_json::from_str(&settings.next().unwrap()[1]).unwrap();
+        assert_eq!(merged["ultracode"], true);
+        assert_eq!(merged["claudeMdExcludes"][0], "**/CLAUDE.md");
+        assert!(settings.next().is_none());
+
+        options.effort = Some(Effort::Ultra);
+        let spec = build_spec(&options);
+        assert!(!spec.args.iter().any(|arg| arg == "--effort"));
+        assert!(
+            !spec
+                .env
+                .iter()
+                .any(|(key, _)| key == "CLAUDE_CODE_EFFORT_LEVEL")
         );
     }
 
@@ -1227,11 +1288,15 @@ mod tests {
                         );
                         assert_eq!(spec.args, expected, "claude {case}");
                         assert_eq!(spec.lean, lean_run, "claude {case}");
-                        let memory_off = [(
-                            "CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(),
-                            "1".to_string(),
-                        )];
-                        assert_eq!(spec.env, &memory_off[..usize::from(lean_run)], "{case}");
+                        let mut expected_env = Vec::new();
+                        if effort.is_some() {
+                            expected_env.push(("CLAUDE_CODE_EFFORT_LEVEL".into(), "max".into()));
+                        }
+                        if lean_run {
+                            expected_env
+                                .push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
+                        }
+                        assert_eq!(spec.env, expected_env, "{case}");
 
                         for (dir, in_git) in [(repo.path(), true), (plain.path(), false)] {
                             let mut expected = vec!["exec", "--json"];

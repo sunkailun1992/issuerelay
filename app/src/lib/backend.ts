@@ -2,6 +2,8 @@ import type {
   AppInfo, Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job,
   LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
+import type { ModelCatalog } from "./model-catalog";
+import type { Handoff } from "./workflow-types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
 export const ERROR_CODES = [
@@ -34,6 +36,9 @@ export interface Backend {
   listJobs(limit: number): Promise<Job[]>;
   job(id: number): Promise<Job | null>;
   jobLog(id: number, lines: number): Promise<string[]>;
+  getHandoff(id: number): Promise<Handoff>;
+  claimHandoff(id: number, executor: ExecutorKind): Promise<Handoff>;
+  releaseHandoff(id: number, claimId: string): Promise<boolean>;
   issues(): Promise<IssueView[]>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -49,6 +54,7 @@ export interface Backend {
   labels(): Promise<string[]>;
   settings(): Promise<Settings>;
   saveSettings(settings: Settings): Promise<void>;
+  modelCatalog(executor: ExecutorKind): Promise<ModelCatalog>;
   doctor(): Promise<DoctorReport>;
   linearLogin(): Promise<Viewer>;
   linearCancelLogin(): Promise<void>;

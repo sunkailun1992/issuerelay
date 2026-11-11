@@ -20,6 +20,8 @@
 //! they hold the async cycle lock), except by `emit_job`, which reads a job's row and sends it
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
+mod workflow_support;
+
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
@@ -114,6 +116,19 @@ pub trait JobRunner: Send + Sync {
         cancel: CancellationToken,
         on_spawn: SpawnHook,
     ) -> RunOutput;
+
+    async fn run_with_output(
+        &self,
+        spec: CommandSpec,
+        kind: ExecutorKind,
+        log_path: PathBuf,
+        limits: RunLimits,
+        cancel: CancellationToken,
+        hooks: runner::RunHooks,
+    ) -> RunOutput {
+        let spawn = hooks.on_spawn.unwrap_or_else(|| Box::new(|_| {}));
+        self.run(spec, kind, log_path, limits, cancel, spawn).await
+    }
 }
 
 /// Runs real executor processes, each with the environment the readiness checks resolved.
@@ -144,6 +159,23 @@ impl JobRunner for ProcessJobRunner {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         runner::run(spec, kind, &log_path, limits, cancel, &env, Some(on_spawn)).await
+    }
+
+    async fn run_with_output(
+        &self,
+        spec: CommandSpec,
+        kind: ExecutorKind,
+        log_path: PathBuf,
+        limits: RunLimits,
+        cancel: CancellationToken,
+        hooks: runner::RunHooks,
+    ) -> RunOutput {
+        let env = self
+            .env
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        runner::run_with_output(spec, kind, &log_path, limits, cancel, &env, hooks).await
     }
 }
 
@@ -502,11 +534,11 @@ async fn run_once(
     log_path: PathBuf,
     limits: RunLimits,
     cancel: CancellationToken,
-    on_spawn: SpawnHook,
+    hooks: runner::RunHooks,
 ) -> RunOutput {
     let run = tokio::spawn(async move {
         runner
-            .run(spec, kind, log_path, limits, cancel, on_spawn)
+            .run_with_output(spec, kind, log_path, limits, cancel, hooks)
             .await
     });
     match run.await {
@@ -1076,7 +1108,13 @@ impl Engine {
         for issue in issues {
             // Read first and released at once: the verdict below looks at the bound folder on
             // disk, which must not happen while the store is locked.
-            let job = self.store().latest_for_issue(&issue.uuid)?;
+            let (job, routed) = {
+                let store = self.store();
+                (
+                    store.latest_for_issue(&issue.uuid)?,
+                    Self::effective_config(&store, &cfg, &issue)?.0,
+                )
+            };
             let status = if !same_name(&issue.state, &names.todo) {
                 IssueStatus::NotTodo {
                     state: clean_text(&issue.state),
@@ -1086,7 +1124,7 @@ impl Engine {
             } else {
                 // What the checks last found about its blockers; the list reads nothing more.
                 let blockers = self.known_blockers(&issue.uuid);
-                match trigger::evaluate(&issue, &cfg, &me.id, &ready, self.home(), &blockers) {
+                match trigger::evaluate(&issue, &routed, &me.id, &ready, self.home(), &blockers) {
                     Eligibility::Eligible(_) => IssueStatus::Eligible {
                         // What the poll does with such an issue (`reconcile`): a run in hand stays
                         // as it is, anything else is recorded anew only when `should_enqueue` says
@@ -1446,15 +1484,28 @@ impl Engine {
             seen.insert(issue.uuid.clone());
             let mode = trigger::candidate_mode(issue, names, &me.id).unwrap_or_default();
             let unfinished = blockers.get(&issue.uuid).map_or(&[][..], Vec::as_slice);
-            let eligibility = trigger::evaluate(issue, cfg, &me.id, ready, self.home(), unfinished);
+
             // Read the latest run, decide and write under one store guard. A stop or a retry that
             // came in between would otherwise be overwritten, or leave the issue with two
             // active rows.
             let store = self.store();
             let latest = store.latest_for_issue(&issue.uuid)?;
+            let conn = store.workflow_connection();
+            if let Some(job) = &latest
+                && (crate::workflow_store::read_claim(conn, job.id)?.is_some()
+                    || (!job.state.is_active()
+                        && job.state == JobState::Failed
+                        && crate::workflow_store::read_memory(conn, job.id)?
+                            .is_some_and(|memory| memory.interruption.is_some())))
+            {
+                continue;
+            }
+            let (routed, _, _) = Self::effective_config(&store, cfg, issue)?;
+            let eligibility =
+                trigger::evaluate(issue, &routed, &me.id, ready, self.home(), unfinished);
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
-                    let mut moved = Self::reassess(&store, &job, cfg, eligibility)?;
+                    let mut moved = Self::reassess(&store, &job, &routed, eligibility)?;
                     // The labels changed what the run is for (`ai-ready` added to a planning
                     // candidate, say); the start decides it again in any case.
                     if job.mode != mode {
@@ -1477,7 +1528,7 @@ impl Engine {
                             _ => None,
                         };
                         if let Some(id) =
-                            Self::enqueue(&store, issue, cfg, eligibility, mode, resume)?
+                            Self::enqueue(&store, issue, &routed, eligibility, mode, resume)?
                         {
                             changed.push(id);
                         }
@@ -1620,7 +1671,13 @@ impl Engine {
         if cfg.settings.paused || self.stopping() || self.draining() {
             return Ok(Vec::new());
         }
-        let queued = self.store().list_by_state(&[JobState::Queued])?;
+        let (queued, claimed_directories) = {
+            let store = self.store();
+            (
+                store.list_by_state(&[JobState::Queued])?,
+                crate::workflow_store::claimed_directories(store.workflow_connection())?,
+            )
+        };
         let now = tokio::time::Instant::now();
         let held_back: HashSet<i64> = {
             let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
@@ -1648,9 +1705,13 @@ impl Engine {
                     .bindings
                     .iter()
                     .find(|b| job.binding_id.as_deref() == Some(b.id.as_str()))?;
+                let directory = canonical_dir(&binding.directory);
+                if claimed_directories.contains(&directory) {
+                    return None;
+                }
                 Some(Candidate {
                     job_id: job.id,
-                    directory: canonical_dir(&binding.directory),
+                    directory,
                     priority: job.priority,
                     issue_created_at: job.issue_created_at,
                 })
@@ -1824,24 +1885,26 @@ impl Engine {
                 &mut HashMap::new(),
             )
             .await?;
-        let binding = match trigger::evaluate(&issue, cfg, &me.id, ready, self.home(), &blockers) {
-            Eligibility::Eligible(binding) => binding,
-            Eligibility::Waiting(reason) => {
-                let waiting = self.assign_if_queued(
-                    job.id,
-                    JobState::WaitingBinding,
-                    None,
-                    None,
-                    Some(&reason.describe()),
-                )?;
-                if waiting {
-                    self.emit_job(job.id);
+        let (routed, decision, context) = Self::effective_config(&self.store(), cfg, &issue)?;
+        let binding =
+            match trigger::evaluate(&issue, &routed, &me.id, ready, self.home(), &blockers) {
+                Eligibility::Eligible(binding) => binding,
+                Eligibility::Waiting(reason) => {
+                    let waiting = self.assign_if_queued(
+                        job.id,
+                        JobState::WaitingBinding,
+                        None,
+                        None,
+                        Some(&reason.describe()),
+                    )?;
+                    if waiting {
+                        self.emit_job(job.id);
+                    }
+                    return Ok(false);
                 }
-                return Ok(false);
-            }
-            Eligibility::NotCandidate => return Ok(false),
-        };
-        let kind = cfg.executor_for(&binding);
+                Eligibility::NotCandidate => return Ok(false),
+            };
+        let kind = decision.executor;
         // The scheduler picked this job for the folder of the binding recorded on its row. If the
         // issue has moved to another project since (or the binding changed folder or executor),
         // the run would go where the scheduler did not look, or the row would name an executor
@@ -1906,10 +1969,11 @@ impl Engine {
                 template: &template,
                 continuation,
             };
-            match mode {
+            let rendered = match mode {
                 RunMode::Implement => prompt::render(&input),
                 RunMode::Plan => prompt::render_plan(&input),
-            }
+            };
+            prompt::with_workflow_context(rendered, context.as_ref())
         };
         let prompt_text = prompt_for(continuation);
         // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
@@ -1928,7 +1992,7 @@ impl Engine {
         let options = executor::RunOptions {
             profile: cfg.permission_for(&binding),
             model: binding.model.as_deref(),
-            effort: cfg.effort_for(&binding),
+            effort: routed.effort_for_executor(&binding, kind),
             lean: lean_run.then_some(executor::Lean {
                 user_instructions: passable,
             }),
@@ -1960,6 +2024,12 @@ impl Engine {
             spec.notes.push(format!("this run starts afresh: {why}"));
         }
         for spec in std::iter::once(&mut spec).chain(fresh.as_mut()) {
+            if kind == ExecutorKind::Claude
+                && cfg.settings.claude_ultracode
+                && mode == RunMode::Implement
+            {
+                executor::enable_claude_ultracode(spec)?;
+            }
             if lean_run {
                 spec.notes.push(lean::log_note(kind).into());
             }
@@ -2025,6 +2095,10 @@ impl Engine {
         if resume.is_none() && job.resume_job_id.is_some() {
             self.store().set_resume_job(job.id, None)?;
         }
+        if let Err(error) = self.initial_memory(job.id, decision, context.clone()) {
+            self.end_run(job.id);
+            return Err(error);
+        }
         let started = self.store().mark_started(job.id, &log_path);
         if !matches!(started, Ok(true)) {
             // The user stopped it while the issue was being re-read, or the store failed.
@@ -2054,25 +2128,37 @@ impl Engine {
         let issue_uuid = job.issue_uuid.clone();
         let identifier = job.issue_identifier.clone();
         let started_from = issue.updated_at;
+        let attempt = self.store().get(job_id)?.and_then(|job| job.started_at);
+        let stdout = self.output_recorder(job_id, kind, attempt);
         let on_spawn = self.process_recorder(job_id);
+        let run_directory = binding.directory.clone();
         let fresh = fresh.map(|spec| (spec, self.process_recorder(job_id)));
         tokio::spawn(async move {
-            let mut output = run_once(
-                runner.clone(),
-                spec,
-                kind,
-                log_path.clone(),
-                limits,
-                cancel.clone(),
-                on_spawn,
-            )
-            .await;
+            engine.save_git_facts(job_id, crate::workflow_git::snapshot(&run_directory).await);
+            let mut output = if cancel.is_cancelled() {
+                RunOutput::ended(ExitKind::Canceled, None)
+            } else {
+                run_once(
+                    runner.clone(),
+                    spec,
+                    kind,
+                    log_path.clone(),
+                    limits,
+                    cancel.clone(),
+                    runner::RunHooks {
+                        on_spawn: Some(on_spawn),
+                        on_stdout: Some(stdout.clone()),
+                    },
+                )
+                .await
+            };
             // A resumed session that never started (gone from the executor, say: design section
             // 11.4): the same job runs again from the start. No work was done the first time.
             if let Some((mut spec, on_spawn)) = fresh
                 && let ExitKind::Exited(Some(code)) = output.exit
                 && code != 0
                 && output.session_id.is_none()
+                && !engine.quota_interruption(job_id).unwrap_or(true)
             {
                 tracing::info!(
                     job_id,
@@ -2090,8 +2176,21 @@ impl Engine {
                          {code}); this run starts afresh"
                     ),
                 );
-                output = run_once(runner, spec, kind, log_path, limits, cancel, on_spawn).await;
+                output = run_once(
+                    runner,
+                    spec,
+                    kind,
+                    log_path,
+                    limits,
+                    cancel,
+                    runner::RunHooks {
+                        on_spawn: Some(on_spawn),
+                        on_stdout: Some(stdout),
+                    },
+                )
+                .await;
             }
+            engine.save_git_facts(job_id, crate::workflow_git::snapshot(&run_directory).await);
             if let Err(e) = engine
                 .finish_job(
                     job_id,
@@ -2321,7 +2420,14 @@ impl Engine {
         // These texts come from outside (the AI, Linear, the operating system) and reach the
         // panel, the CLI and MCP. The summary is the AI's own; without a report line it is the
         // last thing the AI said.
-        let reason = reason.map(|reason| clean_text(&reason));
+        let reason = if state == JobState::Failed && self.quota_interruption(job_id)? {
+            Some(
+                "executor quota exhausted; saved progress is available for manual continuation"
+                    .into(),
+            )
+        } else {
+            reason.map(|reason| clean_text(&reason))
+        };
         let summary = match &report {
             Some(report) => Some(clean_text(report.summary())),
             None => output.final_text.as_deref().map(clean_text),
@@ -2583,7 +2689,13 @@ impl Engine {
                     job.issue_identifier
                 );
             }
+            let conn = store.workflow_connection();
+            anyhow::ensure!(
+                crate::workflow_store::read_claim(conn, job_id)?.is_none(),
+                "release the handoff before retrying"
+            );
             store.requeue(job_id)?;
+            crate::workflow_store::clear_archive(conn, job_id)?;
             tracing::info!(
                 job_id,
                 issue = %job.issue_identifier,
@@ -2607,12 +2719,28 @@ impl Engine {
     /// Marks an accepted run Done in Linear. Only the desktop panel calls this (spec 5.6);
     /// IPC, CLI and MCP never expose it.
     pub async fn mark_done(&self, job_id: i64) -> Result<()> {
+        let _cycle = self.inner.cycle.lock().await;
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
         if job.state != JobState::AwaitingAcceptance {
             bail!("job {job_id} is not awaiting acceptance");
         }
-        let done = self.config().settings.trigger.done;
+        let settings = self.config().settings;
+        {
+            let store = self.store();
+            let conn = store.workflow_connection();
+            anyhow::ensure!(
+                crate::workflow_store::read_claim(conn, job_id)?.is_none(),
+                "release the handoff before marking done"
+            );
+            if let Some(root) = &settings.wiki_root {
+                anyhow::ensure!(
+                    Self::current_archive_receipt(conn, job_id, root)?.is_some(),
+                    "archive this run in the configured Wiki before marking done"
+                );
+            }
+        }
+        let done = settings.trigger.done;
         self.linear().set_state(&job.issue_uuid, &done).await?;
         // The row may have changed while Linear was being updated; it becomes Done only from
         // awaiting acceptance.

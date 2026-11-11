@@ -2,6 +2,7 @@ import { CircleAlert, Copy, Info, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router";
+import { HandoffCard } from "@/components/HandoffCard";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
 import { RawLog } from "@/components/RawLog";
@@ -212,6 +213,7 @@ function RunView({ job }: { job: Job }) {
       <div className="flex flex-col gap-6">
         <Reason job={job} />
         <InfoCard job={job} />
+        <HandoffCard job={job} />
         <LogTabs job={job} />
       </div>
     </>

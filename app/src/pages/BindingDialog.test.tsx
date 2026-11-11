@@ -509,12 +509,12 @@ test("a model name that is fixed lets the form be saved again", async () => {
   await renderWithProviders(<BindingForm onSaved={() => {}} />);
   await fillTheEssentials();
   const model = screen.getByRole("textbox", { name: "Model" });
-  expect(screen.getByText(/Leave empty to use the executor's own setting/)).toBeInTheDocument();
+  expect(model).toHaveAccessibleDescription(/Leave empty to use the default model for this executor/);
   await userEvent.type(model, "-rf");
   expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   expect(model).toBeInvalid();
   expect(model).toHaveAccessibleDescription(/Only letters, digits and/);
-  expect(screen.queryByText(/Leave empty to use the executor's own setting/)).not.toBeInTheDocument();
+  expect(model).not.toHaveAccessibleDescription(/Leave empty to use the default model for this executor/);
   await userEvent.clear(model);
   await userEvent.type(model, "sonnet");
   expect(model).toBeValid();

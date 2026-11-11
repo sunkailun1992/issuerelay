@@ -1,11 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { FolderOpen, LoaderCircle, Plus, Trash2 } from "lucide-react";
 import { type ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ApiKeyForm } from "@/components/ApiKeyForm";
 import { Field, Hint } from "@/components/FormField";
 import { FullAccessWarning } from "@/components/FullAccessWarning";
+import { ModelCatalogField } from "@/components/ModelCatalogField";
 import { PageHeader } from "@/components/PageHeader";
 import { DetailLine, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
@@ -24,6 +25,7 @@ import {
   useCliPath,
   useControlServers,
   useInstallCliOnPath,
+  useModelCatalog,
   useRemoveCliFromPath,
   useSaveSettings,
   useSetAutostart,
@@ -34,9 +36,11 @@ import {
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { LANGUAGES } from "@/i18n/language";
+import { useBackend } from "@/lib/backend-context";
 import { cleanDisplayText } from "@/lib/clean";
 import { reportFailure, updateFailureKey } from "@/lib/errors";
 import { formatRelative } from "@/lib/format";
+import { modelEffortOptions } from "@/lib/model-catalog";
 import {
   type CountField,
   type Draft,
@@ -130,6 +134,8 @@ function problemText(t: ReturnType<typeof useTranslation>["t"], problem: Problem
       return t("settings.name_invalid");
     case "same_as_label":
       return t("settings.plan_label_same");
+    case "model":
+      return t("bindings.model_invalid");
   }
 }
 
@@ -529,6 +535,7 @@ const NO_EFFORT = "none";
 
 function SettingsForm({ settings }: { settings: SettingsData }) {
   const { t } = useTranslation();
+  const backend = useBackend();
   const client = useQueryClient();
   const ids = useId();
   const id = (name: string) => `${ids}-${name}`;
@@ -537,6 +544,8 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   const [asking, setAsking] = useState(false);
   const save = useSaveSettings();
   const info = useAppInfo();
+  const codexModels = useModelCatalog("codex");
+  const claudeModels = useModelCatalog("claude");
   // The Dock is macOS's: Windows has no such icon (the taskbar button follows the window), so the
   // switch is not offered there. Until the platform is known it is not shown either.
   const hasDock = info.data?.platform === "macos";
@@ -544,8 +553,23 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
   const problems = problemsOf(draft);
   const blocked = Object.keys(problems).length > 0;
   const dirty = !sameDraft(draft, base);
+  const executorModels = draft.default_executor === "codex" ? codexModels : claudeModels;
+  const configuredModel = draft.default_executor === "codex" ? draft.default_codex_model : draft.default_claude_model;
+  const activeModel = configuredModel.trim() || executorModels.data?.models.find((model) => model.is_default)?.id;
+  const activeEffort = draft.default_executor === "claude" && draft.default_effort === "ultra" ? null : draft.default_effort;
+  const effortOptions = modelEffortOptions(executorModels.data, draft.default_executor, activeModel, activeEffort ?? undefined, EFFORTS)
+    .filter((level): level is Effort => EFFORTS.includes(level as Effort));
 
   const edit = <K extends keyof Draft>(field: K, value: Draft[K]) => setEdits((current) => ({ ...current, [field]: value }));
+
+  const chooseWiki = async () => {
+    try {
+      const folder = await backend.chooseDirectory();
+      if (folder !== null) edit("wiki_root", folder);
+    } catch (error) {
+      reportFailure(error, t, "settings.wiki_choose_failed");
+    }
+  };
 
   const choosePermission = (level: PermissionProfile) => {
     // The first time full access is chosen the user is asked to understand what it means; until
@@ -644,7 +668,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             </Field>
             <Field label={t("settings.default_effort")} htmlFor={id("effort")}>
               <Select
-                value={draft.default_effort ?? NO_EFFORT}
+                value={activeEffort ?? NO_EFFORT}
                 onValueChange={(value) => edit("default_effort", value === NO_EFFORT ? null : (value as Effort))}
               >
                 <SelectTrigger id={id("effort")} className="w-full" aria-describedby={id("effort-hint")}>
@@ -652,7 +676,7 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={NO_EFFORT}>{t("effort.executor")}</SelectItem>
-                  {EFFORTS.map((level) => (
+                  {effortOptions.map((level) => (
                     <SelectItem key={level} value={level}>
                       {t(`effort.${level}`)}
                     </SelectItem>
@@ -663,6 +687,33 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
             </Field>
           </div>
           <Hint id={id("permission-hint")}>{t(`permission.${draft.default_permission}_hint`)}</Hint>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-4">
+            <ModelCatalogField
+              id={id("default_codex_model")}
+              label={t("settings.default_codex_model")}
+              executor="codex"
+              value={draft.default_codex_model}
+              onChange={(value) => edit("default_codex_model", value)}
+              hint={t("settings.default_model_hint")}
+              catalog={codexModels}
+            />
+            <ModelCatalogField
+              id={id("default_claude_model")}
+              label={t("settings.default_claude_model")}
+              executor="claude"
+              value={draft.default_claude_model}
+              onChange={(value) => edit("default_claude_model", value)}
+              hint={t("settings.default_model_hint")}
+              catalog={claudeModels}
+            />
+          </div>
+          <SwitchRow
+            id={id("claude_ultracode")}
+            label={t("settings.claude_ultracode")}
+            note={t("settings.claude_ultracode_hint")}
+            checked={draft.claude_ultracode}
+            onChange={(checked) => edit("claude_ultracode", checked)}
+          />
           <SwitchRow
             id={id("resume-sessions")}
             label={t("settings.resume_sessions")}
@@ -727,6 +778,30 @@ function SettingsForm({ settings }: { settings: SettingsData }) {
         </Group>
 
         <Group title={t("settings.group.advanced")}>
+          <Part title={t("settings.archive")} />
+          <Field label={t("settings.wiki_root")} htmlFor={id("wiki_root")}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                id={id("wiki_root")}
+                value={draft.wiki_root}
+                readOnly
+                aria-describedby={id("wiki_root_hint")}
+                title={draft.wiki_root || undefined}
+                className="min-w-0 flex-1 font-mono"
+              />
+              <Button type="button" variant="outline" onClick={() => void chooseWiki()}>
+                <FolderOpen aria-hidden="true" />
+                {t("settings.wiki_choose")}
+              </Button>
+              {draft.wiki_root !== "" && (
+                <Button type="button" variant="outline" onClick={() => edit("wiki_root", "")}>
+                  {t("settings.wiki_clear")}
+                </Button>
+              )}
+            </div>
+            <Hint id={id("wiki_root_hint")}>{t("settings.wiki_root_hint")}</Hint>
+          </Field>
+          <Separator />
           <Part title={t("settings.trigger_names")} />
           <div className="grid grid-cols-[repeat(auto-fit,minmax(14rem,1fr))] gap-4">
             {TRIGGER_NAMES.map(({ key, label }) => (
