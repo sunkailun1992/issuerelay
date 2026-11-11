@@ -259,12 +259,38 @@ impl Harness {
         homes: Homes,
         readiness: Arc<dyn ReadinessProbe>,
     ) -> Self {
+        Self::build(
+            cfg,
+            gated,
+            homes,
+            readiness,
+            Engine::new_for_scheduler_tests,
+        )
+    }
+
+    pub fn with_dispatch_review() -> Self {
+        Self::build(
+            Config::default(),
+            false,
+            Homes::default(),
+            Arc::new(FakeReadiness),
+            Engine::new,
+        )
+    }
+
+    fn build(
+        cfg: Config,
+        gated: bool,
+        homes: Homes,
+        readiness: Arc<dyn ReadinessProbe>,
+        build_engine: fn(EngineDeps) -> anyhow::Result<Engine>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let config_path = root.path().join("config.toml");
         cfg.save(&config_path).unwrap();
         let linear = FakeLinear::new("user-1");
         let runner = Arc::new(ScriptedRunner::new(linear.clone(), gated));
-        let engine = Engine::new(EngineDeps {
+        let engine = build_engine(EngineDeps {
             config_path,
             store: Store::open_in_memory().unwrap(),
             linear: Arc::new(linear.clone()),

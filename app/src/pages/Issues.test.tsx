@@ -103,7 +103,7 @@ test("each row offers what its run allows, and the actions column never holds a 
   await screen.findByText("DEMO-4");
   expect(within(rowOf("DEMO-10")).getByRole("button", { name: "Mark done" })).toBeInTheDocument();
   expect(within(rowOf("DEMO-12")).getByRole("button", { name: "Stop" })).toBeInTheDocument();
-  expect(within(rowOf("DEMO-8")).getByRole("button", { name: "Run again" })).toBeInTheDocument();
+  expect(within(rowOf("DEMO-8")).getByRole("button", { name: "Continue" })).toBeInTheDocument();
   // At the smallest window the table has about 600 px: a row's actions are one button at most (an
   // issue without a run has none), because Open in Linear is the identifier and not another button.
   for (const row of screen.getAllByRole("row").slice(1)) {
@@ -136,6 +136,79 @@ test("marking an issue's run done asks first, from the issue list too", async ()
   expect(markDone).toHaveBeenCalledWith(10);
 });
 
+test("the dispatch preview shows the context and only sends the token after confirmation", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0, dispatchReview: true });
+  const read = vi.spyOn(backend, "getDispatchPreview");
+  const approve = vi.spyOn(backend, "approveDispatch");
+  await renderWithProviders(<Issues />, { backend });
+  expect(await screen.findByText("Waiting for dispatch review")).toBeInTheDocument();
+  expect(read).not.toHaveBeenCalled();
+
+  const opener = within(rowOf("DEMO-3")).getByRole("button", { name: "Preview" });
+  await userEvent.click(opener);
+  const dialog = screen.getByRole("dialog", { name: "Review dispatch" });
+  const preview = within(dialog);
+  expect(await preview.findByText("Redacted session summary")).toBeInTheDocument();
+  expect(preview.getByText(/The old CI badge points to the retired build/)).toBeInTheDocument();
+  expect(preview.getByText("Update the README badge for the demo project.")).toBeInTheDocument();
+  expect(preview.getByText("The badge links to the current CI workflow.")).toBeInTheDocument();
+  expect(preview.getByText("wiki/ci.md#status-badge")).toBeInTheDocument();
+  expect(preview.getByText("Claude Code")).toBeInTheDocument();
+  expect(preview.getByText("~/code/demo-app")).toBeInTheDocument();
+  expect(preview.getByText("Implement")).toBeInTheDocument();
+  expect(approve).not.toHaveBeenCalled();
+
+  await userEvent.click(preview.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(dialog).not.toBeInTheDocument());
+  expect(approve).not.toHaveBeenCalled();
+  await userEvent.click(opener);
+  const confirm = screen.getByRole("button", { name: "Confirm dispatch" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await userEvent.click(confirm);
+  await waitFor(() => expect(approve).toHaveBeenCalledExactlyOnceWith("DEMO-3", "demo-dispatch-2"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(read.mock.calls).toEqual([["DEMO-3"], ["DEMO-3"]]);
+});
+
+test("a stale dispatch approval requires a new preview and another confirmation", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0, dispatchReview: true });
+  const approve = vi.spyOn(backend, "approveDispatch")
+    .mockRejectedValueOnce(new BackendError("the dispatch preview changed; read it again"));
+  await renderWithProviders(<Issues />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Preview" }));
+  const confirm = screen.getByRole("button", { name: "Confirm dispatch" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await userEvent.click(confirm);
+  expect(await screen.findByText("Could not approve dispatch")).toBeInTheDocument();
+  expect(confirm).toBeDisabled();
+
+  await userEvent.click(screen.getByRole("button", { name: "Reload preview" }));
+  await waitFor(() => expect(confirm).toBeEnabled());
+  expect(approve.mock.calls).toEqual([["DEMO-3", "demo-dispatch-1"]]);
+  await userEvent.click(confirm);
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(approve.mock.calls).toEqual([["DEMO-3", "demo-dispatch-1"], ["DEMO-3", "demo-dispatch-2"]]);
+});
+
+test("a failed preview cannot approve and an empty context is explicit after a successful read", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0, dispatchReview: true });
+  const read = backend.getDispatchPreview;
+  vi.spyOn(backend, "getDispatchPreview")
+    .mockRejectedValueOnce(new BackendError("could not read issue"))
+    .mockImplementation(async (identifier) => ({ ...await read(identifier), context: null }));
+  const approve = vi.spyOn(backend, "approveDispatch");
+  await renderWithProviders(<Issues />, { backend });
+  await userEvent.click(await screen.findByRole("button", { name: "Preview" }));
+  expect(await screen.findByText("Could not load the dispatch preview")).toBeInTheDocument();
+  const confirm = screen.getByRole("button", { name: "Confirm dispatch" });
+  expect(confirm).toBeDisabled();
+  expect(approve).not.toHaveBeenCalled();
+
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText(/No session summary or Wiki references are attached/)).toBeInTheDocument();
+  expect(confirm).toBeEnabled();
+});
+
 test("every verdict of the engine is said in the interface's words", async () => {
   const cases: [IssueStatus, string][] = [
     [{ kind: "eligible", picked_up: true }, "The next check picks it up"],
@@ -158,14 +231,14 @@ test("every verdict of the engine is said in the interface's words", async () =>
   }
 });
 
-test("an eligible issue whose run ended is not picked up by itself, and the row says so beside Run again", async () => {
+test("an eligible issue whose run ended is not picked up by itself, and the row says so beside Continue", async () => {
   await renderWithProviders(<Issues />);
   await screen.findByText("DEMO-4");
-  // DEMO-6's run was stopped and nothing changed in Linear since: only Run again starts it.
+  // DEMO-6's run was stopped and nothing changed in Linear since. Continue is explicit.
   const stopped = within(rowOf("DEMO-6"));
   expect(stopped.getByText("It runs again after a change in Linear")).toBeInTheDocument();
   expect(stopped.queryByText("The next check picks it up")).not.toBeInTheDocument();
-  expect(stopped.getByRole("button", { name: "Run again" })).toBeInTheDocument();
+  expect(stopped.getByRole("button", { name: "Continue" })).toBeInTheDocument();
   // An issue that has had no run, and one whose run is queued, are picked up.
   expect(within(rowOf("DEMO-3")).getByText("The next check picks it up")).toBeInTheDocument();
   expect(within(rowOf("DEMO-11")).getByText("The next check picks it up")).toBeInTheDocument();
@@ -192,11 +265,12 @@ test.each(["queued", "waiting_binding", "running"] as const)("a %s run says it a
   expect(within(rowOf("DEMO-4")).queryByText(/Its status is/)).not.toBeInTheDocument();
 });
 
-test("an issue whose run has ended still says what status stops the next check", async () => {
+test("an interrupted In Progress issue offers explicit continuation and other blocked reasons remain visible", async () => {
   await renderWithProviders(<Issues />);
   await screen.findByText("DEMO-4");
-  // DEMO-8 failed and is In Progress; DEMO-12 is In Progress with its run running (shows nothing).
-  expect(within(rowOf("DEMO-8")).getByText("Its status is In Progress, not Todo")).toBeInTheDocument();
+  const interrupted = within(rowOf("DEMO-8"));
+  expect(interrupted.getByRole("button", { name: "Continue" })).toBeInTheDocument();
+  expect(interrupted.queryByText(/Its status is/)).not.toBeInTheDocument();
   expect(within(rowOf("DEMO-12")).queryByText(/Its status is/)).not.toBeInTheDocument();
   expect(within(rowOf("DEMO-10")).getByText("Its status is In Testing, not Todo")).toBeInTheDocument();
   expect(within(rowOf("DEMO-4")).getByText("Its status is Backlog, not Todo")).toBeInTheDocument();

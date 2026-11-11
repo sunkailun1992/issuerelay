@@ -288,6 +288,51 @@
     "setup_body": "先在環境檢查裡設定好 Claude Code 或 Codex，再把一個 Linear 專案綁定到本機資料夾。",
     "bind_project": "綁定專案"
   },
+  "dispatch": {
+    "preview": "預覽",
+    "title": "確認派發",
+    "description": "請核對這裡的去識別化摘要、對話歷史和引用。確認後會隨需求儲存，並允許執行者啟動。",
+    "confirm": "確認並派發",
+    "implement": "執行開發",
+    "summary": "本輪對話去識別化摘要",
+    "wiki_refs": "Wiki 引用",
+    "empty_context": "未附加對話摘要或 Wiki 引用。執行者會使用 Linear 需求。",
+    "preview_failed": "無法讀取派發預覽",
+    "approval_failed": "無法確認派發",
+    "reload_preview": "重新讀取預覽",
+    "conversation_history": "目前的對話",
+    "implementation_scope": "執行開發只針對 {{issue}}。子需求需分別派發。",
+    "prepare_implementation": "請在 Linear 將此需求設為 {{todo}}，指派給自己並加上 {{label}} 標籤。完成後回到這裡重新讀取預覽。",
+    "issue_mismatch": "預覽與此需求不符。請重新讀取後再確認。"
+  },
+  "continuation": {
+    "action": "繼續上次",
+    "description": "選擇接手執行者，核對任務脈絡與上次執行的交接內容後繼續。",
+    "source_run": "上次執行",
+    "source_value": "#{{id}} · {{executor}}",
+    "strategy": "接續方式",
+    "resume_session": "恢復原執行者工作階段",
+    "handoff": "帶入已確認的交接內容並開啟新工作階段",
+    "evidence": "上次執行的證據",
+    "preview_mismatch": "預覽已與這次執行或執行者不符，請重新載入後再確認。",
+    "confirm": "確認並繼續"
+  },
+  "provider_session": {
+    "title": "執行者原工作階段",
+    "reopen_hint": "在上方顯示的工作目錄執行這條命令，即可在原用戶端閱讀完整對話。",
+    "copy": "複製開啟命令",
+    "preview": "預覽 Codex 工作階段",
+    "preview_description": "查看 Codex 原工作階段的近期文字。",
+    "read_failed": "無法讀取 Codex 工作階段",
+    "session_mismatch": "傳回的工作階段與這次執行記錄中的工作階段不符。",
+    "empty": "沒有可預覽的文字訊息。",
+    "more": "開啟 Codex 原工作階段可查看更早的訊息。",
+    "archive_hint": "如需封存，請使用 Codex 用戶端提供的封存操作。",
+    "role": {
+      "user": "使用者",
+      "assistant": "助理"
+    }
+  },
   "issues": {
     "description": "指派給你、帶有 {{label}} 或 {{plan_label}} 標籤的需求，最近更新的 50 項",
     "empty_title": "還沒有帶有 {{label}} 標籤的需求",
@@ -314,7 +359,8 @@
       "blocked_by": "被 {{issues}} 擋住，它們還沒完成",
       "labels_match_several_bindings": "標籤 {{labels}} 對上了專案的多個綁定，請只留一個",
       "no_binding_for_labels": "專案裡沒有綁定接它的標籤：請加一個不帶標籤的綁定，或把它的某個標籤加給一個綁定",
-      "plan_needs_lean": "方案不能在主目錄裡出，請綁定其他資料夾"
+      "plan_needs_lean": "方案不能在主目錄裡出，請綁定其他資料夾",
+      "dispatch_review_required": "等待派發確認"
     },
     "load_failed": "無法從 Linear 讀取需求",
     "open_guide": "開啟引導",
@@ -352,13 +398,13 @@
       "finished": "結束時間",
       "summary": "摘要",
       "mode": "執行用途",
-      "resumed": "接續",
+      "resumed": "接續來源",
       "usage": "用量"
     },
     "mode": {
       "plan": "只出方案"
     },
-    "resumed_from": "執行 #{{id}} 的工作階段",
+    "resumed_from": "接續自執行 #{{id}}",
     "usage": {
       "cost": "{{cost}}（估算）",
       "tokens": "輸入 {{input}}、輸出 {{output}} token",

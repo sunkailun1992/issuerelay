@@ -20,6 +20,7 @@
 //! they hold the async cycle lock), except by `emit_job`, which reads a job's row and sends it
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
+mod dispatch_review;
 mod workflow_support;
 
 use std::{
@@ -55,6 +56,26 @@ use crate::scheduler::{self, Candidate};
 use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
 use crate::trigger::{self, Eligibility, Readiness, WaitReason, WaitReasonView, same_name};
+use crate::workflow::ContinuationStrategy;
+
+/// Only a reviewed continuation may treat its already-started issue as a dispatch candidate.
+fn continuation_candidate(
+    mut issue: Issue,
+    names: &TriggerNames,
+    viewer_id: &str,
+    mode: RunMode,
+) -> Option<Issue> {
+    if mode == RunMode::Implement
+        && same_name(&issue.state, &names.in_progress)
+        && issue
+            .state_type
+            .as_deref()
+            .is_none_or(|kind| kind == "started")
+    {
+        issue.state.clone_from(&names.todo);
+    }
+    (trigger::candidate_mode(&issue, names, viewer_id) == Some(mode)).then_some(issue)
+}
 
 /// How much of the end of a log `Engine::log_tail` reads.
 const LOG_TAIL_WINDOW: u64 = 1024 * 1024;
@@ -88,6 +109,12 @@ struct Resume {
     job_id: i64,
     session_id: String,
     mode: RunMode,
+}
+
+#[derive(Default)]
+struct ContinuationPoll {
+    pending: HashMap<String, i64>,
+    unavailable: HashSet<String>,
 }
 
 /// How long what `unfinished_blockers` found about an issue stands while the issue itself does not
@@ -407,6 +434,8 @@ struct Inner {
     /// What the last look at each candidate issue's blockers found, by issue uuid
     /// (`unfinished_blockers`).
     blocker_checks: Mutex<HashMap<String, BlockerCheck>>,
+    dispatch_review: Mutex<dispatch_review::ReviewState>,
+    require_dispatch_review: bool,
 }
 
 /// Cheap to clone; every clone drives the same engine.
@@ -671,6 +700,16 @@ impl Engine {
     /// ended when `run_forever` starts. Only one engine may use a database at a time: a second one
     /// would mark the first one's runs failed and end their executors.
     pub fn new(deps: EngineDeps) -> Result<Self> {
+        Self::initialize(deps, true)
+    }
+
+    /// Isolates scheduler integration tests that exercise existing behavior after approval.
+    #[doc(hidden)]
+    pub fn new_for_scheduler_tests(deps: EngineDeps) -> Result<Self> {
+        Self::initialize(deps, false)
+    }
+
+    fn initialize(deps: EngineDeps, require_dispatch_review: bool) -> Result<Self> {
         // The bytes are read before the file is loaded: if it changes in between, the first save
         // refuses instead of overwriting the newer text.
         let config_file = read_config_file(&deps.config_path)?;
@@ -717,6 +756,8 @@ impl Engine {
                 start_backoff: Mutex::new(Backoffs::default()),
                 stop_causes: Mutex::new(HashMap::new()),
                 blocker_checks: Mutex::new(HashMap::new()),
+                dispatch_review: Mutex::new(dispatch_review::ReviewState::default()),
+                require_dispatch_review,
             }),
         })
     }
@@ -1108,12 +1149,24 @@ impl Engine {
         for issue in issues {
             // Read first and released at once: the verdict below looks at the bound folder on
             // disk, which must not happen while the store is locked.
-            let (job, routed) = {
+            let (job, routed, review_required) = {
                 let store = self.store();
-                (
-                    store.latest_for_issue(&issue.uuid)?,
-                    Self::effective_config(&store, &cfg, &issue)?.0,
-                )
+                let job = store.latest_for_issue(&issue.uuid)?;
+                let (routed, _, context) = Self::effective_config(&store, &cfg, &issue)?;
+                let mode = trigger::candidate_mode(&issue, names, &me.id);
+                let review_required = mode.is_some_and(|_| {
+                    job.as_ref().is_none_or(|job| {
+                        matches!(job.state, JobState::Queued | JobState::WaitingBinding)
+                            || trigger::should_enqueue(Some(job), &issue)
+                    })
+                }) && self.needs_dispatch_review(
+                    &store,
+                    &routed,
+                    &issue,
+                    mode.unwrap_or_default(),
+                    context.as_ref(),
+                )?;
+                (job, routed, review_required)
             };
             let status = if !same_name(&issue.state, &names.todo) {
                 IssueStatus::NotTodo {
@@ -1121,6 +1174,10 @@ impl Engine {
                 }
             } else if cfg.settings.paused {
                 IssueStatus::Paused
+            } else if review_required {
+                IssueStatus::Waiting {
+                    reason: WaitReason::DispatchReviewRequired.view(),
+                }
             } else {
                 // What the checks last found about its blockers; the list reads nothing more.
                 let blockers = self.known_blockers(&issue.uuid);
@@ -1208,7 +1265,23 @@ impl Engine {
         // and the issues it is compared with must come from the same one.
         let linear = self.linear();
         let me = self.viewer(&linear).await?;
-        let issues = candidates(linear.as_ref(), names).await?;
+        let mut issues = candidates(linear.as_ref(), names).await?;
+        let pending = self.store().list_pending_continuations()?;
+        let mut continuations = ContinuationPoll::default();
+        for job in pending {
+            issues.retain(|issue| issue.uuid != job.issue_uuid);
+            match linear.issue(&job.issue_uuid).await {
+                Ok(Some(issue)) if issue.uuid == job.issue_uuid => {
+                    continuations.pending.insert(job.issue_uuid, job.id);
+                    issues.extend(continuation_candidate(issue, names, &me.id, job.mode));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    continuations.unavailable.insert(job.issue_uuid);
+                    tracing::warn!(job_id = job.id, %error, "could not recheck continuation; trying again next poll");
+                }
+            }
+        }
         let (ready, _) = self.readiness().await;
         let blockers = self
             .blockers_for(linear.as_ref(), cfg, &me, &issues)
@@ -1216,7 +1289,14 @@ impl Engine {
         // The jobs this poll records or changes are announced once no store guard is held, also
         // when a store error ends the poll part way.
         let mut changed = Vec::new();
-        let result = self.reconcile(cfg, &me, &issues, &ready, &blockers, &mut changed);
+        let result = self.reconcile(
+            cfg,
+            &me,
+            &issues,
+            (&ready, &blockers),
+            continuations,
+            &mut changed,
+        );
         for id in changed {
             self.emit_job(id);
         }
@@ -1471,12 +1551,12 @@ impl Engine {
         cfg: &Config,
         me: &Viewer,
         issues: &[Issue],
-        ready: &Readiness,
-        blockers: &HashMap<String, Vec<String>>,
+        (ready, blockers): (&Readiness, &HashMap<String, Vec<String>>),
+        continuations: ContinuationPoll,
         changed: &mut Vec<i64>,
     ) -> Result<()> {
         let names = &cfg.settings.trigger;
-        let mut seen = HashSet::new();
+        let mut seen = continuations.unavailable;
         for issue in issues
             .iter()
             .filter(|i| trigger::is_candidate(i, names, &me.id))
@@ -1490,6 +1570,13 @@ impl Engine {
             // active rows.
             let store = self.store();
             let latest = store.latest_for_issue(&issue.uuid)?;
+            if let Some(expected) = continuations.pending.get(&issue.uuid)
+                && !latest
+                    .as_ref()
+                    .is_some_and(|job| job.id == *expected && job.state.is_active())
+            {
+                continue;
+            }
             let conn = store.workflow_connection();
             if let Some(job) = &latest
                 && (crate::workflow_store::read_claim(conn, job.id)?.is_some()
@@ -1500,15 +1587,40 @@ impl Engine {
             {
                 continue;
             }
-            let (routed, _, _) = Self::effective_config(&store, cfg, issue)?;
-            let eligibility =
-                trigger::evaluate(issue, &routed, &me.id, ready, self.home(), unfinished);
+            let context = crate::workflow_store::read_context(conn, &issue.uuid)?;
+            let intent = match &latest {
+                Some(job) if job.state.is_active() => store.read_continuation(job.id)?,
+                _ => None,
+            };
+            let (routed, _) = Self::selection_with_executor(
+                cfg,
+                issue,
+                context.as_ref(),
+                intent.as_ref().map(|intent| intent.executor),
+            );
+            let review_required = if let (Some(job), Some(intent)) = (&latest, &intent) {
+                self.continuation_needs_review(
+                    &store,
+                    job,
+                    intent,
+                    &routed,
+                    issue,
+                    context.as_ref(),
+                )?
+            } else {
+                self.needs_dispatch_review(&store, &routed, issue, mode, context.as_ref())?
+            };
+            let eligibility = if review_required {
+                Eligibility::Waiting(WaitReason::DispatchReviewRequired)
+            } else {
+                trigger::evaluate(issue, &routed, &me.id, ready, self.home(), unfinished)
+            };
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
                     let mut moved = Self::reassess(&store, &job, &routed, eligibility)?;
                     // The labels changed what the run is for (`ai-ready` added to a planning
                     // candidate, say); the start decides it again in any case.
-                    if job.mode != mode {
+                    if job.mode != mode && intent.is_none() {
                         store.set_mode(job.id, mode)?;
                         moved = true;
                     }
@@ -1755,7 +1867,7 @@ impl Engine {
             let started_job = match job {
                 Ok(Some(job)) => {
                     let label = job.issue_identifier.clone();
-                    self.start_job(linear.as_ref(), &cfg, &me, &ready, &reports, job)
+                    self.start_job(&linear, &cfg, &me, &ready, &reports, job)
                         .await
                         .map_err(|e| (label, e))
                 }
@@ -1850,7 +1962,7 @@ impl Engine {
 
     async fn start_job(
         &self,
-        linear: &dyn LinearApi,
+        linear: &Arc<dyn LinearApi>,
         cfg: &Config,
         me: &Viewer,
         ready: &Readiness,
@@ -1861,10 +1973,15 @@ impl Engine {
         // stop the job, pause the engine or change the configuration while this waits, so every
         // write below is conditional on the row still being queued, and the run only starts if
         // the configuration is still the one it was built from.
+        let intent = self.store().read_continuation(job.id)?;
         let current = linear.issue(&job.issue_uuid).await?;
-        let Some(issue) =
-            current.filter(|i| trigger::is_candidate(i, &cfg.settings.trigger, &me.id))
-        else {
+        let current = current.filter(|issue| issue.uuid == job.issue_uuid);
+        let Some(issue) = (match &intent {
+            Some(_) => current.and_then(|issue| {
+                continuation_candidate(issue, &cfg.settings.trigger, &me.id, job.mode)
+            }),
+            None => current.filter(|i| trigger::is_candidate(i, &cfg.settings.trigger, &me.id)),
+        }) else {
             let canceled = self.store().set_state_if(
                 job.id,
                 &[JobState::Queued],
@@ -1879,31 +1996,60 @@ impl Engine {
         // The re-read carries the issue's relations: what blocks it now decides as well.
         let blockers = self
             .unfinished_blockers(
-                linear,
+                linear.as_ref(),
                 &issue,
                 &cfg.settings.trigger.done,
                 &mut HashMap::new(),
             )
             .await?;
-        let (routed, decision, context) = Self::effective_config(&self.store(), cfg, &issue)?;
-        let binding =
-            match trigger::evaluate(&issue, &routed, &me.id, ready, self.home(), &blockers) {
-                Eligibility::Eligible(binding) => binding,
-                Eligibility::Waiting(reason) => {
-                    let waiting = self.assign_if_queued(
-                        job.id,
-                        JobState::WaitingBinding,
-                        None,
-                        None,
-                        Some(&reason.describe()),
-                    )?;
-                    if waiting {
-                        self.emit_job(job.id);
-                    }
-                    return Ok(false);
-                }
-                Eligibility::NotCandidate => return Ok(false),
+        let mode =
+            trigger::candidate_mode(&issue, &cfg.settings.trigger, &me.id).unwrap_or_default();
+        let (routed, decision, context, review_required) = {
+            let store = self.store();
+            let context =
+                crate::workflow_store::read_context(store.workflow_connection(), &issue.uuid)?;
+            let (routed, decision) = Self::selection_with_executor(
+                cfg,
+                &issue,
+                context.as_ref(),
+                intent.as_ref().map(|intent| intent.executor),
+            );
+            let review_required = if let Some(intent) = &intent {
+                self.continuation_needs_review(
+                    &store,
+                    &job,
+                    intent,
+                    &routed,
+                    &issue,
+                    context.as_ref(),
+                )?
+            } else {
+                self.needs_dispatch_review(&store, &routed, &issue, mode, context.as_ref())?
             };
+            (routed, decision, context, review_required)
+        };
+        let eligibility = if review_required {
+            Eligibility::Waiting(WaitReason::DispatchReviewRequired)
+        } else {
+            trigger::evaluate(&issue, &routed, &me.id, ready, self.home(), &blockers)
+        };
+        let binding = match eligibility {
+            Eligibility::Eligible(binding) => binding,
+            Eligibility::Waiting(reason) => {
+                let waiting = self.assign_if_queued(
+                    job.id,
+                    JobState::WaitingBinding,
+                    None,
+                    None,
+                    Some(&reason.describe()),
+                )?;
+                if waiting {
+                    self.emit_job(job.id);
+                }
+                return Ok(false);
+            }
+            Eligibility::NotCandidate => return Ok(false),
+        };
         let kind = decision.executor;
         // The scheduler picked this job for the folder of the binding recorded on its row. If the
         // issue has moved to another project since (or the binding changed folder or executor),
@@ -1937,12 +2083,29 @@ impl Engine {
             }
             return Ok(false);
         };
-        // What the labels ask for now; the re-read issue is a candidate, so it asks for something.
-        let mode =
-            trigger::candidate_mode(&issue, &cfg.settings.trigger, &me.id).unwrap_or_default();
         // Whether the run continues an earlier session, now that the executor, the folder and the
         // mode are known (run-improvements design, section 11.1).
-        let (resume, not_resumed) = match self.resume_target(cfg, &job, kind, &binding, mode) {
+        let target = match intent.as_ref().map(|intent| intent.strategy) {
+            Some(ContinuationStrategy::Handoff) => Ok(None),
+            _ => self.resume_target(cfg, &job, kind, &binding, mode),
+        };
+        if intent
+            .as_ref()
+            .is_some_and(|intent| intent.strategy == ContinuationStrategy::ResumeSession)
+            && !matches!(&target, Ok(Some(_)))
+        {
+            let canceled = self.store().set_state_if(
+                job.id,
+                &[JobState::Queued],
+                JobState::Canceled,
+                Some("the approved native session is unavailable; reopen the continuation preview"),
+            )?;
+            if canceled {
+                self.emit_job(job.id);
+            }
+            return Ok(false);
+        }
+        let (resume, not_resumed) = match target {
             Ok(resume) => (resume, None),
             Err(why) => (None, Some(why)),
         };
@@ -1973,9 +2136,18 @@ impl Engine {
                 RunMode::Implement => prompt::render(&input),
                 RunMode::Plan => prompt::render_plan(&input),
             };
-            prompt::with_workflow_context(rendered, context.as_ref())
+            prompt::with_workflow_context(
+                rendered,
+                context.as_ref(),
+                cfg.settings.wiki_root.as_deref(),
+            )
         };
-        let prompt_text = prompt_for(continuation);
+        let prompt_text = match &intent {
+            Some(intent) => {
+                prompt::with_continuation_evidence(prompt_for(Continuation::None), &intent.evidence)
+            }
+            None => prompt_for(continuation),
+        };
         // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
         // arguments is not passed, and the run log says so (lean-run design, section 5.1).
         let instructions =
@@ -2000,7 +2172,7 @@ impl Engine {
             resume: resume.as_ref().map(|previous| previous.session_id.as_str()),
         };
         // The same run without the session, should resuming it fail (section 11.4).
-        let mut fresh = resume.is_some().then(|| {
+        let mut fresh = (resume.is_some() && intent.is_none()).then(|| {
             let options = executor::RunOptions {
                 resume: None,
                 ..options
@@ -2091,15 +2263,49 @@ impl Engine {
         // does the run to continue (gone when it cannot be continued), from which the end works out
         // this run's own cost. Written while the row is still queued; a stop that comes meanwhile
         // leaves them on a canceled row.
-        self.store().set_mode(job.id, mode)?;
-        if resume.is_none() && job.resume_job_id.is_some() {
-            self.store().set_resume_job(job.id, None)?;
-        }
-        if let Err(error) = self.initial_memory(job.id, decision, context.clone()) {
-            self.end_run(job.id);
-            return Err(error);
-        }
-        let started = self.store().mark_started(job.id, &log_path);
+        let started = (|| {
+            // Bind the queued launch to the connection and configuration that were just checked.
+            let current_linear = self.inner.linear.read().expect("Linear connection lock");
+            let current_config = self.inner.config.read().expect("config lock");
+            if !Arc::ptr_eq(linear, &current_linear) || *current_config != *cfg {
+                self.poll_now();
+                return Ok(false);
+            }
+            let store = self.store();
+            if !store.get(job.id)?.is_some_and(|now| {
+                now.state == JobState::Queued && now.resume_job_id == job.resume_job_id
+            }) || store.read_continuation(job.id)? != intent
+            {
+                return Ok(false);
+            }
+            let review_required = if let Some(intent) = &intent {
+                self.continuation_needs_review(
+                    &store,
+                    &job,
+                    intent,
+                    &routed,
+                    &issue,
+                    context.as_ref(),
+                )?
+            } else {
+                self.needs_dispatch_review(&store, &routed, &issue, mode, context.as_ref())?
+            };
+            if review_required {
+                return Ok(false);
+            }
+            store.set_mode(job.id, mode)?;
+            if intent.is_none() && resume.is_none() && job.resume_job_id.is_some() {
+                store.set_resume_job(job.id, None)?;
+            }
+            Self::initial_memory(
+                &store,
+                job.id,
+                decision,
+                context,
+                cfg.settings.wiki_root.clone(),
+            )?;
+            store.mark_started(job.id, &log_path)
+        })();
         if !matches!(started, Ok(true)) {
             // The user stopped it while the issue was being re-read, or the store failed.
             self.end_run(job.id);
@@ -2244,6 +2450,19 @@ impl Engine {
             .ok()
             .flatten()
             .ok_or("the run to continue is no longer recorded")?;
+        Self::resume_for_source(cfg, &previous, kind, binding, mode).map(Some)
+    }
+
+    fn resume_for_source(
+        cfg: &Config,
+        previous: &Job,
+        kind: ExecutorKind,
+        binding: &Binding,
+        mode: RunMode,
+    ) -> std::result::Result<Resume, &'static str> {
+        if !cfg.settings.resume_sessions {
+            return Err("continuing sessions is turned off in the settings");
+        }
         let session_id = previous
             .session_id
             .clone()
@@ -2283,11 +2502,11 @@ impl Engine {
                 "a Codex planning run on personal settings starts afresh, to stay read-only",
             );
         }
-        Ok(Some(Resume {
+        Ok(Resume {
             job_id: previous.id,
             session_id,
             mode: previous.mode,
-        }))
+        })
     }
 
     /// Sets the state, binding and reason of a job, but only while it is still queued, and says
@@ -2485,7 +2704,13 @@ impl Engine {
             .get(job_id)
             .ok()
             .flatten()
-            .and_then(|job| job.resume_job_id);
+            .and_then(|job| job.resume_job_id)
+            .filter(|_| {
+                store.read_continuation(job_id).is_ok_and(|intent| {
+                    intent
+                        .is_none_or(|intent| intent.strategy == ContinuationStrategy::ResumeSession)
+                })
+            });
         let previous_total = resumed
             .and_then(|previous| store.get(previous).ok().flatten())
             .and_then(|previous| previous.usage)
@@ -2666,7 +2891,7 @@ impl Engine {
 
     /// Queues a failed, stopped or needs-info run again. Only the issue's latest run qualifies.
     pub fn retry_job(&self, job_id: i64) -> Result<()> {
-        {
+        let queued_id = {
             // One guard for the whole check-and-requeue: two clicks must not requeue a run that
             // the first one already started.
             let store = self.store();
@@ -2690,28 +2915,39 @@ impl Engine {
                 );
             }
             let conn = store.workflow_connection();
+            let was_continuation = store.read_continuation(job_id)?.is_some();
             anyhow::ensure!(
                 crate::workflow_store::read_claim(conn, job_id)?.is_none(),
                 "release the handoff before retrying"
             );
-            store.requeue(job_id)?;
-            crate::workflow_store::clear_archive(conn, job_id)?;
+            if self.inner.require_dispatch_review {
+                crate::workflow_store::clear_dispatch_approval(conn, &job.issue_uuid)?;
+                self.invalidate_dispatch_preview(&job.issue_uuid);
+            }
+            let queued_id = if was_continuation {
+                store.queue_fresh_attempt(job_id)?
+            } else {
+                store.requeue(job_id)?;
+                crate::workflow_store::clear_archive(conn, job_id)?;
+                job_id
+            };
             tracing::info!(
-                job_id,
+                job_id = queued_id,
                 issue = %job.issue_identifier,
                 state = JobState::Queued.as_str(),
                 "job queued again"
             );
-        }
+            queued_id
+        };
         // A manual retry starts afresh: no pause from an earlier failed start, and a start of this
         // job that is failing right now is not held against it (`hold_back`). Counted only after
         // the row is queued again.
         {
             let mut backoff = self.inner.start_backoff.lock().expect("backoff lock");
-            backoff.held.remove(&job_id);
-            *backoff.retries.entry(job_id).or_default() += 1;
+            backoff.held.remove(&queued_id);
+            *backoff.retries.entry(queued_id).or_default() += 1;
         }
-        self.emit_job(job_id);
+        self.emit_job(queued_id);
         self.poll_now();
         Ok(())
     }

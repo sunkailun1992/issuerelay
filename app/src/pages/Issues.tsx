@@ -2,6 +2,7 @@ import type { TFunction } from "i18next";
 import { Inbox, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router";
+import { DispatchReviewButton } from "@/components/DispatchReviewButton";
 import { IssueLink } from "@/components/IssueLink";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
@@ -9,7 +10,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { EmptyState, ErrorState, LinearConnecting, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useIssues, useStatus } from "@/hooks/queries";
+import { useContinuationSource, useIssues, useStatus } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
 import { isActive, isPlanned, isPlanRun } from "@/lib/runs";
@@ -60,6 +61,8 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
           return t("issues.waiting.no_binding_for_labels");
         case "plan_needs_lean":
           return t("issues.waiting.plan_needs_lean");
+        case "dispatch_review_required":
+          return t("issues.waiting.dispatch_review_required");
       }
   }
 }
@@ -73,10 +76,13 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
 function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
   const { t } = useTranslation();
   const { issue, job, status } = view;
-  // While a run is in hand its badge says it all; the issue's status is what holds back a run that
-  // has ended or has not begun.
-  const reason = status.kind === "not_todo" && job !== null && isActive(job) ? null : describeStatus(status, names, t);
+  const continuationSource = useContinuationSource(job);
+  // In Progress blocks a new automatic dispatch, but it allows an explicit continuation.
+  const canContinueInProgress = continuationSource !== null && sameName(issue.state, names.in_progress);
+  const reason = status.kind === "not_todo" && job !== null && (isActive(job) || canContinueInProgress)
+    ? null : describeStatus(status, names, t);
   const pickedUp = status.kind === "eligible" && status.picked_up;
+  const needsReview = status.kind === "waiting" && status.reason.code === "dispatch_review_required";
   return (
     <TableRow>
       <TableCell>
@@ -103,7 +109,9 @@ function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
         {reason !== null && <div className={cn("max-w-xs wrap-anywhere whitespace-normal", !pickedUp && "text-muted-foreground")}>{reason}</div>}
       </TableCell>
       <TableCell>
-        <JobActions job={job} compact />
+        {needsReview && continuationSource === null
+          ? <DispatchReviewButton issueIdentifier={issue.identifier} issueUuid={issue.uuid} />
+          : <JobActions job={job} continuationSource={continuationSource} compact />}
       </TableCell>
     </TableRow>
   );

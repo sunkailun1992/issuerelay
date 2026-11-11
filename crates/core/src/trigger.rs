@@ -26,6 +26,7 @@ pub enum WaitReason {
     NoBindingForLabels,
     /// A planning run is always lean, which a binding of the home folder cannot be.
     PlanNeedsLean,
+    DispatchReviewRequired,
 }
 
 impl WaitReason {
@@ -55,6 +56,7 @@ impl WaitReason {
             WaitReason::PlanNeedsLean => {
                 "planning runs need a bound folder other than the home folder".into()
             }
+            WaitReason::DispatchReviewRequired => "waiting for dispatch review".into(),
         }
     }
 }
@@ -72,6 +74,7 @@ pub enum WaitReasonView {
     LabelsMatchSeveralBindings { labels: Vec<String> },
     NoBindingForLabels,
     PlanNeedsLean,
+    DispatchReviewRequired,
 }
 
 impl WaitReason {
@@ -96,6 +99,7 @@ impl WaitReason {
             }
             WaitReason::NoBindingForLabels => WaitReasonView::NoBindingForLabels,
             WaitReason::PlanNeedsLean => WaitReasonView::PlanNeedsLean,
+            WaitReason::DispatchReviewRequired => WaitReasonView::DispatchReviewRequired,
         }
     }
 }

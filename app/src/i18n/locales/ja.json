@@ -288,6 +288,51 @@
     "setup_body": "環境チェックで Claude Code か Codex を準備してから、Linear のプロジェクトをフォルダーに紐付けてください。",
     "bind_project": "プロジェクトを紐付ける"
   },
+  "dispatch": {
+    "preview": "プレビュー",
+    "title": "実行前の確認",
+    "description": "表示された機密情報を除いた要約、セッション履歴、参照先を確認してください。確定すると課題に保存され、実行を開始できます。",
+    "confirm": "確認して実行",
+    "implement": "実装",
+    "summary": "セッション要約（機密情報を除く）",
+    "wiki_refs": "Wiki の参照先",
+    "empty_context": "セッション要約や Wiki の参照先は添付されていません。実行者は Linear の課題を参照します。",
+    "preview_failed": "実行前のプレビューを読み込めませんでした",
+    "approval_failed": "実行を承認できませんでした",
+    "reload_preview": "プレビューを再読み込み",
+    "conversation_history": "現在のセッション",
+    "implementation_scope": "実装対象は {{issue}} のみです。子課題は個別に実行します。",
+    "prepare_implementation": "Linear でこの課題を {{todo}} に設定し、自分に割り当てて {{label}} ラベルを追加してください。完了後、ここに戻ってプレビューを再読み込みしてください。",
+    "issue_mismatch": "プレビューがこの課題と一致しません。再読み込みしてから確認してください。"
+  },
+  "continuation": {
+    "action": "前回の実行を再開",
+    "description": "実行エージェントを選択し、タスクの背景と前回の引き継ぎ内容を確認してください。",
+    "source_run": "引き継ぎ元の実行",
+    "source_value": "#{{id}} · {{executor}}",
+    "strategy": "再開方法",
+    "resume_session": "元のエージェントセッションを再開",
+    "handoff": "確認した引き継ぎ内容で新しいセッションを開始",
+    "evidence": "前回の実行記録",
+    "preview_mismatch": "プレビューが実行またはエージェントと一致しません。確認する前に再読み込みしてください。",
+    "confirm": "確認して再開"
+  },
+  "provider_session": {
+    "title": "実行エージェントの元のセッション",
+    "reopen_hint": "上に表示された作業フォルダーでこのコマンドを実行すると、元のクライアントで会話全体を読めます。",
+    "copy": "再開コマンドをコピー",
+    "preview": "Codex セッションをプレビュー",
+    "preview_description": "元の Codex セッションの最近のテキストを表示します。",
+    "read_failed": "Codex セッションを読み取れませんでした",
+    "session_mismatch": "取得したセッションは実行記録のセッションと一致しません。",
+    "empty": "プレビューできるテキストメッセージがありません。",
+    "more": "以前のメッセージは元の Codex セッションで確認できます。",
+    "archive_hint": "アーカイブする場合は、Codex クライアントで利用できるアーカイブ操作を使ってください。",
+    "role": {
+      "user": "ユーザー",
+      "assistant": "アシスタント"
+    }
+  },
   "issues": {
     "description": "自分に割り当てられた {{label}} または {{plan_label}} ラベル付きの課題（最近更新された 50 件）",
     "empty_title": "{{label}} ラベル付きの課題はまだありません",
@@ -314,7 +359,8 @@
       "blocked_by": "{{issues}} にブロックされています（まだ完了していません）",
       "labels_match_several_bindings": "ラベル {{labels}} がプロジェクトの複数の紐付けに当てはまります。1 つだけにしてください",
       "no_binding_for_labels": "このラベルを受け持つ紐付けがありません。ラベルなしの紐付けを追加するか、ラベルを紐付けに加えてください",
-      "plan_needs_lean": "ホームフォルダーではプランを作れません。別のフォルダーを紐付けてください"
+      "plan_needs_lean": "ホームフォルダーではプランを作れません。別のフォルダーを紐付けてください",
+      "dispatch_review_required": "実行前の確認待ち"
     },
     "load_failed": "Linear から課題を読み込めませんでした",
     "open_guide": "ガイドを開く",
@@ -352,13 +398,13 @@
       "finished": "終了",
       "summary": "要約",
       "mode": "実行の目的",
-      "resumed": "続きの元",
+      "resumed": "引き継ぎ元",
       "usage": "使用量"
     },
     "mode": {
       "plan": "プランのみ"
     },
-    "resumed_from": "実行 #{{id}} のセッション",
+    "resumed_from": "実行 #{{id}} から続行",
     "usage": {
       "cost": "{{cost}}（推定）",
       "tokens": "入力 {{input}}・出力 {{output}} トークン",

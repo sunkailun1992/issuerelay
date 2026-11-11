@@ -1,4 +1,4 @@
-import type { Job, JobState } from "./types";
+import type { ExecutorKind, Job, JobState } from "./types";
 
 /** The states of a run that is still in hand: it waits, is queued or runs (core's `JobState::is_active`). */
 export const ACTIVE_STATES: readonly JobState[] = ["waiting_binding", "queued", "running"];
@@ -16,6 +16,28 @@ export function isPlanRun(job: Job): boolean {
 /** Whether the run is a planning run that posted its plan: it waits for the user to decide. */
 export function isPlanned(job: Job): boolean {
   return isPlanRun(job) && job.state === "needs_info" && job.report === "planned";
+}
+
+/** The persisted reason from core's dispatch-review wait state. */
+export function isWaitingForDispatchReview(job: Job): boolean {
+  return job.state === "waiting_binding" && job.reason === "waiting for dispatch review";
+}
+
+/** A completed attempt that was interrupted after its executor started. */
+export function isInterruptedRun(job: Job | null | undefined): job is Job & {
+  state: "failed" | "canceled";
+  started_at: string;
+  executor: ExecutorKind;
+} {
+  return job?.started_at != null && job.executor !== null && (job.state === "failed" || job.state === "canceled");
+}
+
+/** An unstarted follow-up may be reused to continue the earlier interrupted attempt. */
+export function pendingContinuationSourceId(job: Job | null | undefined): number | null {
+  if (job?.started_at === null && (job.state === "queued" || job.state === "waiting_binding" || job.state === "canceled")) {
+    return job.resume_job_id ?? null;
+  }
+  return null;
 }
 
 /** The newest run (the greatest id) of each issue among `jobs`, whatever their order. */

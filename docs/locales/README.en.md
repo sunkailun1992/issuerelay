@@ -4,9 +4,9 @@
 
 **A desktop task scheduler connecting Linear to Codex or Claude Code on your computer.**
 
-Prepare a Linear issue, pick a run mode, and IssueRelay finds the local repository through its project binding. It starts the selected coding agent in the background and keeps the run status, summary, logs, and usage for you to review. The detailed [user guide](../usage.md) and [installation guide](../install.md) are in Simplified Chinese.
+Prepare a Linear issue and pick a run mode. IssueRelay finds its local repository through the project binding and shows a dispatch preview for you to approve. It starts the selected coding agent in the background and keeps the run status, summary, logs, and usage for you to review. The detailed [user guide](../usage.md) and [installation guide](../install.md) are in Simplified Chinese.
 
-> A local 0.4.0 build has been tested on an Apple silicon Mac. Windows has automated coverage, and hardware validation is pending. See [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases) for published installers and [acceptance reports](../gates/) for the checks performed on each version.
+> The dispatch preview described here is in the current source. The published 0.4.0 installer uses its existing workflow. A local 0.4.0 build has been tested on an Apple silicon Mac. Windows has automated coverage, and hardware validation is pending. See [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases) for published installers and [acceptance reports](../gates/) for the checks performed on each version.
 
 ## Who does what
 
@@ -18,7 +18,7 @@ Prepare a Linear issue, pick a run mode, and IssueRelay finds the local reposito
 | Codex / Claude Code | Read the issue and repository, plan or implement the work, and use their own tools for Git, tests and Linear |
 | Skills and project rules | Guide the executor where the selected run mode loads them |
 
-You can draft an issue in either coding client, save its scope and acceptance criteria with the IssueRelay MCP, and then add the run label in Linear. An explicit issue selection takes precedence over the project binding, the client that registered the issue, and finally the global default. You can also prepare the issue directly in Linear and use the binding or global default.
+Either coding client can prepare a redacted summary, the relevant conversation history, scope, acceptance criteria and Wiki references as an IssueRelay MCP draft. Keep useful commands, original errors, versions and decisions. Exclude full chats, original screenshots and credentials. Add the run label in Linear, then review the draft in the desktop panel. An explicit issue selection takes precedence over the project binding, the client that registered the issue, and finally the global default. For issues prepared directly in Linear, you can approve an empty conversation context.
 
 ## How a run starts
 
@@ -29,10 +29,11 @@ IssueRelay checks Linear every 30 seconds by default through the official Linear
 3. Its state is `Todo`.
 4. Its project has a local directory binding. Routing labels select among bindings for the same project.
 5. The selected executor is installed, signed in and ready for the selected mode.
+6. You approve the dispatch preview in the desktop panel. It shows the Wiki folder, references, run mode and destination.
 
-An `ai-plan` run reads the issue and code and posts a plan as a comment. You decide when to add `ai-ready` for implementation. An `ai-ready` run waits for unfinished issues it is blocked by, then follows the project's implementation, verification and test-branch workflow and hands the issue to `In Testing` for your review. The planning mode skips the dependency wait. IssueRelay runs one task at a time per directory and applies a total concurrency limit. Labels, states and the polling interval are configurable.
+An `ai-plan` run reads the issue and code and posts a plan as a comment. To move to implementation, choose **Implement** on the finished plan run. If prompted, open the issue in Linear, set it to Todo, assign it to yourself and add `ai-ready`. Return to the preview and approve that same issue. Sub-issues are dispatched separately. An `ai-ready` run waits for unfinished issues it is blocked by, then follows the project's implementation, verification and test-branch workflow and hands the issue to `In Testing` for your review. The planning mode skips the dependency wait. IssueRelay runs one task at a time per directory and applies a total concurrency limit. Labels, states and the polling interval are configurable.
 
-IssueRelay checks for cancellation, completion, reassignment or deletion in Linear while monitoring is on and can stop the executor's process tree on the next poll. Rework can resume a compatible run within seven days, using the same executor and directory. Codex runs with automatic review are excluded from resume. You can turn session resume off in Settings. A manual rerun starts a new session.
+IssueRelay checks for cancellation, completion, reassignment or deletion in Linear while monitoring is on and can stop the executor's process tree on the next poll. Rework can resume a compatible run within seven days, using the same executor and directory. Codex runs with automatic review are excluded from resume. You can turn session resume off in Settings. A manual rerun requires fresh dispatch approval and starts a new session.
 
 ## Connect Codex and Claude Code
 
@@ -46,12 +47,12 @@ Register the IssueRelay MCP from **Settings → MCP control server**. Both clien
 | `pause`, `resume` | Pause new work or resume monitoring. Already running tasks continue when paused |
 | `poll_now` | Request an immediate poll while monitoring is enabled |
 | `get_run` | Read a run by local ID or look up the latest run for a Linear issue number |
-| `get_issue_context`, `set_issue_context` | Read or save revision-checked issue context before applying a run label |
+| `get_issue_context`, `set_issue_context` | Read the latest draft or saved context and stage a revision-checked draft in host memory |
 | `get_handoff` | Read handoff details, independent review instructions and archive material |
 | `claim_handoff`, `release_handoff` | Reserve the directory for a handoff and release it using the `job_id` and that claim's `claim_id` |
 | `record_archive` | Record an existing archive page and its commit receipt for the configured Wiki |
 
-A run ID reads local history even when Linear is offline. A Linear issue number is resolved against the currently connected workspace. The IssueRelay host must be running. Use the desktop panel to mark an issue done, rerun it or stop it. The [MCP guide](../usage.md#用-mcp-连接主控会话) has the parameters and registration steps.
+A run ID reads local history even when Linear is offline. A Linear issue number is resolved against the currently connected workspace. The IssueRelay host must be running. Use the desktop panel to approve dispatch, mark an issue done, rerun it or stop it. Approval saves the reviewed context and passes it to the chosen executor at launch. Drafts are cleared on host restart. The [MCP guide](../usage.md#用-mcp-连接主控会话) has the parameters and registration steps.
 
 ## Models, handoff and review
 
@@ -70,7 +71,7 @@ Download the installer from [GitHub Releases](https://github.com/sunkailun1992/i
 - On macOS 13.3 or later, use `IssueRelay_<version>_universal.dmg` for Apple silicon or Intel. Check the release notes for Apple notarization. An ad hoc build may require choosing **Open Anyway** in **System Settings → Privacy & Security** the first time.
 - On Windows, `IssueRelay_<version>_x64-setup.exe` installs for the current user without administrator rights. The MSI installs for all users. For packages without a Windows code signature, SmartScreen may prompt for approval.
 
-Before upgrading to 0.4.0, quit IssueRelay normally and back up its application data, including the database, settings, bindings and logs. The first launch migrates the run database to schema 3. An earlier version requires a compatible pre-upgrade backup. Reconnect the IssueRelay MCP in both coding clients after upgrading. See the [installation guide](../install.md) for setup, backups, automatic updates, notifications and uninstalling.
+Before upgrading, quit IssueRelay normally and back up its application data, including the database, settings, bindings and logs. The published 0.4.0 release uses schema 3. Current source builds with dispatch review and continuation migrate to schema 5. Schema 3 and schema 4 builds cannot open it. To return to an older version, restore a compatible pre-upgrade backup. Reconnect the IssueRelay MCP in both coding clients after upgrading. See the [installation guide](../install.md) for setup, backups, automatic updates, notifications and uninstalling.
 
 ## Screenshots
 

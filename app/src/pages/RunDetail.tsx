@@ -2,9 +2,11 @@ import { CircleAlert, Copy, Info, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router";
+import { DispatchReviewButton } from "@/components/DispatchReviewButton";
 import { HandoffCard } from "@/components/HandoffCard";
 import { JobActions } from "@/components/JobActions";
 import { PageHeader } from "@/components/PageHeader";
+import { ProviderSessionCard } from "@/components/ProviderSessionCard";
 import { RawLog } from "@/components/RawLog";
 import { RunDuration } from "@/components/RunDuration";
 import { RunTimeline } from "@/components/RunTimeline";
@@ -15,12 +17,12 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { LOG_LINES, useIssues, useJob, useJobLog } from "@/hooks/queries";
+import { LOG_LINES, useContinuationSource, useIssues, useJob, useJobLog } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
-import { isActive, isPlanned, isPlanRun } from "@/lib/runs";
+import { isActive, isPlanned, isPlanRun, isWaitingForDispatchReview } from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
 import type { Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -204,16 +206,34 @@ function LogTabs({ job }: { job: Job }) {
 
 /** The page of a run that exists: header, why, facts, and the log in two tabs. */
 function RunView({ job }: { job: Job }) {
+  const { t } = useTranslation();
   const issues = useIssues();
+  const continuationSource = useContinuationSource(job);
   // `Job` has no link; the issue's own is in the issue list when that has been read and has this issue.
   const url = issues.data?.find((view) => view.issue.uuid === job.issue_uuid)?.issue.url;
   return (
     <>
-      <PageHeader title={`${job.issue_identifier} ${job.title}`} actions={<JobActions job={job} url={url} />} />
+      <PageHeader title={`${job.issue_identifier} ${job.title}`} actions={<JobActions job={job} url={url} continuationSource={continuationSource} />} />
       <div className="flex flex-col gap-6">
         <Reason job={job} />
         <InfoCard job={job} />
+        {isWaitingForDispatchReview(job) && continuationSource === null && (
+          <div className="flex justify-end">
+            <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} />
+          </div>
+        )}
+        {isPlanned(job) && job.finished_at !== null && (
+          <Card size="sm">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3">
+              <p className="min-w-0 wrap-anywhere text-sm text-muted-foreground">
+                {t("dispatch.implementation_scope", { issue: cleanDisplayText(job.issue_identifier) })}
+              </p>
+              <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} developmentJobId={job.id} />
+            </CardContent>
+          </Card>
+        )}
         <HandoffCard job={job} />
+        <ProviderSessionCard job={job} />
         <LogTabs job={job} />
       </div>
     </>

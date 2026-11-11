@@ -15,6 +15,7 @@ pub mod model;
 pub mod model_catalog;
 pub mod paths;
 pub mod prompt;
+pub mod provider_sessions;
 pub mod runner;
 pub mod scheduler;
 pub mod setup;

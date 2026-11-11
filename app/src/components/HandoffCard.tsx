@@ -84,6 +84,7 @@ function HandoffFacts({ context, memory }: Pick<Handoff, "context" | "memory">) 
         {context !== null && (
           <>
             <TextFact label={t("handoff.request")} value={context.request} />
+            <TextFact label={t("dispatch.conversation_history")} value={context.conversation_history ?? null} />
             <TextFact label={t("handoff.scope")} value={context.scope} />
             <ListFact label={t("handoff.acceptance")} values={context.acceptance} />
             <ListFact label={t("handoff.sources")} values={context.source_refs} />

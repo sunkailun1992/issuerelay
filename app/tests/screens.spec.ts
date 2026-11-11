@@ -364,6 +364,38 @@ for (const { width, height } of SMALLEST) {
       }
     }
 
+    for (const language of LAYOUT_LANGUAGES) {
+      test(`the dispatch review in ${language} keeps both actions in reach`, async ({ page }) => {
+        const t = words(language);
+        await page.goto(`/?lang=${language}&dispatch-review#/issues`);
+        await expect(page.locator("html")).toHaveAttribute("lang", language);
+        await page.getByRole("button", { name: t("dispatch.preview"), exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: t("dispatch.title"), exact: true });
+        const confirm = dialog.getByRole("button", { name: t("dispatch.confirm"), exact: true });
+        await expect(confirm).toBeEnabled();
+        await settled(page);
+        await expectWithinWindow(dialog, confirm, dialog.getByRole("button", { name: t("common.cancel"), exact: true }));
+        expect(await reachPastRightEdge(dialog)).toEqual({ overflow: 0, past: [] });
+      });
+
+      test(`the continuation review in ${language} keeps both actions in reach`, async ({ page }) => {
+        const t = words(language);
+        await open(page, language, "/issues");
+        const row = page.getByRole("row").filter({ hasText: "DEMO-8" });
+        await row.getByRole("button", { name: t("continuation.action"), exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: t("continuation.action"), exact: true });
+        const confirm = dialog.getByRole("button", { name: t("continuation.confirm"), exact: true });
+        const cancel = dialog.getByRole("button", { name: t("common.cancel"), exact: true });
+        await expect(confirm).toBeDisabled();
+        await dialog.getByRole("radio", { name: t("executor.codex"), exact: true }).click();
+        await expect(dialog.getByText(t("continuation.handoff"), { exact: true })).toBeVisible();
+        await expect(confirm).toBeEnabled();
+        await settled(page);
+        await expectWithinWindow(dialog, confirm, cancel);
+        expect(await reachPastRightEdge(dialog)).toEqual({ overflow: 0, past: [] });
+      });
+    }
+
     // The dialog of a binding is no taller than the window: its fields scroll inside it and its buttons stay in sight.
     for (const language of ["en", "zh-CN"] as const) {
       for (const mode of ["add", "edit"] as const) {

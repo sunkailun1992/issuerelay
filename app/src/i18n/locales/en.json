@@ -288,6 +288,51 @@
     "setup_body": "Set up Claude Code or Codex in the environment check, then bind a Linear project to a folder.",
     "bind_project": "Bind a project"
   },
+  "dispatch": {
+    "preview": "Preview",
+    "title": "Review dispatch",
+    "description": "Review the redacted summary, conversation history, and references shown here. Confirming saves them with the issue and allows the executor to start.",
+    "confirm": "Confirm dispatch",
+    "implement": "Implement",
+    "summary": "Redacted session summary",
+    "wiki_refs": "Wiki references",
+    "empty_context": "No session summary or Wiki references are attached. The executor will use the Linear issue.",
+    "preview_failed": "Could not load the dispatch preview",
+    "approval_failed": "Could not approve dispatch",
+    "reload_preview": "Reload preview",
+    "conversation_history": "Current conversation",
+    "implementation_scope": "Implementation applies only to {{issue}}. Its child issues are dispatched separately.",
+    "prepare_implementation": "In Linear, set this issue to {{todo}}, assign it to yourself, and add {{label}}. Return here and reload the preview.",
+    "issue_mismatch": "The preview no longer matches this issue. Reload it before confirming."
+  },
+  "continuation": {
+    "action": "Continue",
+    "description": "Choose an executor and review the task context and saved work before continuing.",
+    "source_run": "Source run",
+    "source_value": "#{{id}} · {{executor}}",
+    "strategy": "Continuation method",
+    "resume_session": "Resume the original executor session",
+    "handoff": "Start a new session with the reviewed handoff",
+    "evidence": "Evidence from the previous run",
+    "preview_mismatch": "The preview no longer matches this run and executor. Reload it before confirming.",
+    "confirm": "Confirm and continue"
+  },
+  "provider_session": {
+    "title": "Original executor session",
+    "reopen_hint": "Run this command in the working folder shown above to read the full conversation in the original client.",
+    "copy": "Copy reopen command",
+    "preview": "Preview Codex session",
+    "preview_description": "Recent text from the original Codex session for local review.",
+    "read_failed": "Could not read the Codex session",
+    "session_mismatch": "The returned session differs from this run's recorded session.",
+    "empty": "There are no text messages to preview.",
+    "more": "Open the original Codex session to read earlier messages.",
+    "archive_hint": "Use the archive action in the Codex client where available.",
+    "role": {
+      "user": "User",
+      "assistant": "Assistant"
+    }
+  },
   "issues": {
     "description": "Issues assigned to you with the {{label}} or {{plan_label}} label, the 50 most recently updated",
     "empty_title": "No issues with the {{label}} label yet",
@@ -314,7 +359,8 @@
       "blocked_by": "Blocked by {{issues}}, which are not done yet",
       "labels_match_several_bindings": "Its labels {{labels}} match several bindings of the project; keep one",
       "no_binding_for_labels": "No binding of the project takes its labels: add a binding without labels, or one of its labels to a binding",
-      "plan_needs_lean": "A plan cannot be made in the home folder; bind another folder"
+      "plan_needs_lean": "A plan cannot be made in the home folder; bind another folder",
+      "dispatch_review_required": "Waiting for dispatch review"
     },
     "load_failed": "Could not read the issues from Linear",
     "open_guide": "Open the guide",
@@ -352,13 +398,13 @@
       "finished": "Finished",
       "summary": "Summary",
       "mode": "Run for",
-      "resumed": "Continues",
+      "resumed": "Continued from",
       "usage": "Usage"
     },
     "mode": {
       "plan": "Plan only"
     },
-    "resumed_from": "The session of run #{{id}}",
+    "resumed_from": "Continued from run #{{id}}",
     "usage": {
       "cost": "{{cost}} (estimate)",
       "tokens": "{{input}} tokens in, {{output}} out",

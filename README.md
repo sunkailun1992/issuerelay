@@ -4,25 +4,25 @@
 
 **连接 Linear 与本机 Codex / Claude Code 的桌面任务调度器。**
 
-你在 Linear 中准备需求并标记运行模式，IssueRelay 按项目绑定找到本地仓库，启动选定的编码 AI 在后台处理，并保存运行状态、摘要、日志和用量，供你跟进与验收。它适合已经使用 Linear 和本机编码 AI、希望把任务派发与运行跟踪集中起来的开发者。
+你在 Linear 中准备需求并标记运行模式，在 IssueRelay 面板预览并确认派发。IssueRelay 按项目绑定启动编码 AI，并保存运行状态、摘要、日志和用量，供你跟进与验收。它适合已经使用 Linear 和本机编码 AI、希望把任务派发与运行跟踪集中起来的开发者。
 
-*A desktop task scheduler connecting Linear to Codex or Claude Code on your own machine. Prepare an issue in Linear, choose a mode, and let IssueRelay dispatch it to the configured coding agent and track the run for your review.*
+*A desktop task scheduler connecting Linear to Codex or Claude Code on your own machine. Prepare an issue in Linear, choose a mode, and approve the dispatch preview in IssueRelay. IssueRelay starts the configured coding agent and tracks its run.*
 
-初次了解产品，先看下方职责与流程；完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
+初次了解产品，先看下方职责与流程。完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
 
-> **验证范围：** 0.4.0 已在 Apple silicon Mac 上验证升级、Wiki 配置，以及 Codex 和 Claude Code 对同一条合成运行的查询。Windows 安装与桌面行为仍待实机验收。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
+> 派发预览说明对应仓库当前源码。已发布的 0.4.0 安装包仍使用该版本的派发流程。0.4.0 已在 Apple silicon Mac 上验证升级、Wiki 配置，以及 Codex 和 Claude Code 对同一条合成运行的查询。Windows 安装与桌面行为仍待实机验收。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
 
 ## 谁负责什么
 
 | 角色 | 职责 |
 |---|---|
-| 你 | 明确目标与验收要求，选择项目、执行者和权限，检查结果并确认完成 |
+| 你 | 明确目标与验收要求，确认派发预览，检查结果并确认完成 |
 | Linear | 保存需求、指派、标签、依赖、状态和讨论 |
 | IssueRelay | 发现符合条件的需求，分流、排队、启动执行者，处理运行生命周期并保存记录 |
 | Codex / Claude Code | 读取需求与仓库，分析或修改代码，通过自己的工具操作 git、测试和 Linear |
 | Skills 与项目规则 | 给执行者提供工作方法与约束；实际加载范围取决于运行模式 |
 
-你可以在 Codex 或 Claude Code 中整理需求，先用 IssueRelay MCP 登记范围与验收条件，再在 Linear 标记运行模式。每次运行使用一个执行者，依次采用需求显式选择、项目绑定、登记入口和全局默认。你也可以直接在 Linear 编写需求，继续按绑定与全局设置处理。
+你可以让 Codex 或 Claude Code 整理本次任务的脱敏摘要、相关会话历史和 Wiki 引用，并通过 IssueRelay MCP 提交上下文草稿。Linear 标记运行模式后，在桌面面板核对预览中的内容、Wiki 目录和执行去向，再确认派发。直接在 Linear 编写的需求也走预览，允许确认空的会话上下文。每次运行使用一个执行者，依次采用需求显式选择、项目绑定、登记入口和全局默认。
 
 ## 它怎么工作
 
@@ -31,7 +31,7 @@
   指派给自己 + Todo + ai-plan 或 ai-ready + 已绑定的项目
        │
        ▼
-IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选定的执行者
+IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队 → 启动执行者
        │                                  同一目录一次只跑一条
        ├─ ai-plan  → AI 读需求和代码 → 把方案写回这条需求的评论
        │
@@ -53,8 +53,9 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 3. 状态为 `Todo`；
 4. 所属 Linear 项目已绑定本地目录；同一项目有多个绑定时，按分流标签选择；
 5. 选定执行者已安装、登录，并通过对应运行模式的环境检查。
+6. 你已在桌面面板确认当前派发预览。
 
-开发需求被未完成的需求阻塞（blocked by）时先等待；方案模式不等这项依赖。准备普通聊天或项目资料，不会直接触发 IssueRelay；让需求满足接单条件并保持监控开启后，它才会进入自动处理流程。
+开发需求被未完成的需求阻塞（blocked by）时先等待。方案模式无需等待这些依赖完成。开着监控时，符合条件的 Linear 标签会让需求进入候选列表。需求变更、执行去向改变、提交新草稿或手动重跑时，需要再次确认。
 
 ## Codex / Claude 怎样连接 IssueRelay
 
@@ -73,21 +74,22 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 | `resume` | 恢复监控，随后检查可处理的需求 |
 | `poll_now` | 请求立即检查；暂停时不执行轮询，也不解除暂停 |
 | `get_run` | 按运行 ID 或 Linear 需求编号读取运行详情 |
-| `get_issue_context` / `set_issue_context` | 读取或按修订号保存需求上下文。登记应在加运行标签之前完成 |
+| `get_issue_context` / `set_issue_context` | 读取最新草稿或已保存上下文，按修订号提交内存草稿 |
 | `get_handoff` | 读取运行交接、复核提示词与归档材料。当前保留的标识是 `claim_id` |
 | `claim_handoff` / `release_handoff` | 手动接手前保留目录。接手会话结束后，用 `job_id` 和自己取得的本次 `claim_id` 释放 |
 | `record_archive` | 为当前 Wiki 目录登记已写入的页面及提交回执 |
 
-`resume` 恢复监控。上下文、交接保留和归档回执只更新本机记录，仍通过 Linear 的正常条件触发派工。「标记完成」「重新运行」「停止」在面板操作。宿主未运行时，控制服务会提示打开 IssueRelay。参数与调用顺序见[使用指南](docs/usage.md#用-mcp-连接主控会话)。
+`resume` 恢复监控。上下文草稿由桌面面板确认后才写入本机任务记录，随获准的运行快照传给执行者。主控会话提供脱敏摘要、任务相关历史和引用。可保留复现命令、报错原文、版本及决定。请排除整段聊天、原始截图和凭据。「确认派发」「标记完成」「重新运行」「停止」在面板操作。宿主未运行时，控制服务会提示打开 IssueRelay。参数与调用顺序见[使用指南](docs/usage.md#用-mcp-连接主控会话)。
 
 ## 当前能力与范围
 
 | 能力 | 当前支持情况 |
 |---|---|
 | 方案与开发 | `ai-plan` 只出方案；`ai-ready` 执行开发流程 |
+| 派发预览 | 在桌面面板核对脱敏摘要、Wiki 引用、运行模式与执行去向，确认后保存并进入派发流程 |
 | 多项目调度 | 按项目与分流标签绑定目录，支持依赖等待、目录互斥和总并发限制 |
 | 执行者与模型 | 需求显式选择 → 项目绑定 → 登记入口 → 全局默认。默认模型与绑定中的模型都可配置 |
-| 会话接续 | 满足执行器、目录、时间与模式条件时尝试接续同一执行器的会话 |
+| 会话接续 | 在中断的运行详情点「继续上次」，选择 Codex 或 Claude Code，确认接续方式、工作目录和交接内容 |
 | 用量记录 | 展示执行者报告的 token；Claude 的费用为估算，不等于订阅实际扣费 |
 | 额度耗尽与手动接力 | 确认额度耗尽后停止自动重跑。你可以保留工作目录，把已保存的检查点交给新的 Codex 或 Claude 会话 |
 | 独立复核 | 从运行详情复制复核提示词，在新会话中核对 diff、测试和验收条件 |
@@ -101,16 +103,16 @@ IssueRelay：检查条件与依赖 → 按绑定分流 → 排队 → 启动选�
 
 Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
 
-升级到 0.4.0 前，正常退出 IssueRelay 并备份应用数据。新版会把数据库升级到 schema 3，旧版无法直接打开这份数据库。[升级与备份](docs/install.md#升级到-040-前备份数据)
+升级前，正常退出 IssueRelay 并备份应用数据。已发布的 0.4.0 使用 schema 3。包含派发预览和续作的当前源码会将数据库迁移至 schema 5。schema 3 和 schema 4 构建无法直接打开迁移后的数据。[升级与备份](docs/install.md#升级前备份数据)
 
-Before upgrading to 0.4.0, quit IssueRelay normally and back up its application data. The upgrade migrates the database to schema 3. Earlier releases cannot open that database directly. [Upgrade and backup instructions](docs/install.md#升级到-040-前备份数据)
+Before upgrading, quit IssueRelay normally and back up its application data. The published 0.4.0 release uses schema 3. Current source builds with dispatch review and continuation migrate the database to schema 5. Schema 3 and schema 4 builds cannot open it. [Upgrade and backup instructions](docs/install.md#升级前备份数据)
 
 ## 更多用法
 
-- **只出方案**：带 `ai-plan`（而不是 `ai-ready`）的需求，AI 读需求和代码，把方案写成一条评论；改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适后由你改为 `ai-ready`；满足续跑条件时，那次运行会尝试接着方案会话动手。
+- **只出方案**：带 `ai-plan`（而不是 `ai-ready`）的需求，AI 读需求和代码，把方案写成一条评论；改文件的工具都关掉，Linear 的工具也只留读取、评论和修改这条需求本身的。方案合适后，在运行详情点「执行开发」。如果当前需求还没准备好，按提示在 Linear 将它设为 Todo、指派给自己并添加 `ai-ready`，再回到预览确认。满足续跑条件时，执行器会尝试接着方案会话动手。
 - **一个项目分到几个目录**：绑定可以带分流标签（从 Linear 的标签里选），只接带其中任一标签的需求，用自己的目录和队列；不带标签的绑定接其余的需求。
 - **Linear 上的改动会停掉运行**：正在运行的需求在 Linear 上被取消、完成、改派或删除时，下一次检查就停掉运行（结束整棵进程树），运行记录写明原因。暂停监控时不查。
-- **重做时接续会话**：需求退回重做，或出完方案再加 `ai-ready` 时，接着上一次的会话继续（7 天内、同一执行者和目录；「自动审查」的 Codex 运行除外），可以在设置里关掉。手动「重新运行」总是从头开始。
+- **继续上次**：在中断运行的详情选择接手执行器，预览并确认原会话恢复或新会话交接。两种方式都沿用原项目工作目录，并记录新一次尝试。也可在原执行器的官方客户端查看原生会话。具体条件见[继续中断的运行](docs/usage.md#继续中断的运行)。
 - **用量**：运行详情显示用了多少 token，Claude 的还有按 API 价格估算的花费；用订阅登录 Claude Code 时，这不是实际扣费。命令行 `issuerelay jobs` 也有花费一栏。
 - **模型与推理**：在设置或绑定中选模型，也可以输入自定义模型。Codex 可刷新原生目录，支持的模型才提供 Ultra。Claude 的 Ultracode 是独立开关，可和推理力度一起使用。
 

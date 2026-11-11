@@ -15,13 +15,14 @@ use common::{
 use issuerelay_core::{
     config::{Binding, Config, ExecutorKind},
     doctor::{ExecutorReport, ReadinessProbe},
-    engine::{Engine, EngineDeps, JobRunner},
+    engine::{Engine, EngineDeps, IssueStatus, JobRunner},
     env::ExecEnv,
     executor::CommandSpec,
-    model::{Job, JobState},
+    model::{Job, JobState, RunMode},
     runner::{self, RunHooks, RunLimits, RunOutput, SpawnHook},
     store::Store,
-    workflow::{ExecutorSource, IssueContext},
+    trigger::WaitReasonView,
+    workflow::{ContinuationStrategy, ExecutorSource, IssueContext},
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,668 @@ fn brief(scope: &str) -> IssueContext {
         origin_executor: Some(ExecutorKind::Codex),
         ..IssueContext::default()
     }
+}
+
+async fn interrupted_implementation(h: &Harness) -> (Job, IssueContext) {
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![Script {
+            set_state: Some("In Progress"),
+            final_text: Some("Changed the demo fixture before the interruption".into()),
+            session_id: Some(SESSION.into()),
+            ..Script::exit_code(2)
+        }],
+    );
+    let context = h
+        .engine
+        .set_issue_context(
+            "DEMO-1",
+            0,
+            IssueContext {
+                preferred_executor: Some(ExecutorKind::Claude),
+                conversation_history: Some(
+                    "Original decision: keep the demo output stable.".into(),
+                ),
+                ..brief("Only the demo fixture")
+            },
+        )
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let source = h.latest("1");
+    assert_eq!(h.linear.get("1").state, "In Progress");
+    assert_eq!(source.state, JobState::Failed);
+    assert_eq!(source.executor, Some(ExecutorKind::Claude));
+    assert_eq!(source.session_id.as_deref(), Some(SESSION));
+    (source, context)
+}
+
+#[tokio::test]
+async fn explicit_continuation_resumes_same_executor_while_linear_is_in_progress() {
+    let h = Harness::with_dispatch_review();
+    let (source, context) = interrupted_implementation(&h).await;
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Claude)
+        .await
+        .unwrap();
+    assert_eq!(preview.strategy, ContinuationStrategy::ResumeSession);
+    assert_eq!(preview.context.as_ref(), Some(&context));
+    assert!(
+        preview
+            .evidence
+            .contains("Changed the demo fixture before the interruption")
+    );
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    assert_eq!(h.latest("1"), source);
+
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    assert_ne!(child_id, source.id);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let child = h.latest("1");
+    assert_eq!(child.id, child_id);
+    assert_eq!(child.resume_job_id, Some(source.id));
+    assert_eq!(child.state, JobState::AwaitingAcceptance);
+    let specs = h.runner.specs.lock().unwrap();
+    assert_eq!(specs.len(), 2);
+    assert!(specs[1].args.windows(2).any(|w| w == ["--resume", SESSION]));
+    assert!(specs[1].stdin.contains(&preview.evidence));
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_cross_executor_continuation_gets_reviewed_history_in_the_same_worktree() {
+    let h = Harness::with_dispatch_review();
+    let (source, first) = interrupted_implementation(&h).await;
+    let confirmed = h
+        .engine
+        .set_issue_context(
+            "DEMO-1",
+            first.revision,
+            IssueContext {
+                conversation_history: Some("New decision: verify the changed fixture.".into()),
+                ..first
+            },
+        )
+        .await
+        .unwrap();
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    assert_eq!(preview.strategy, ContinuationStrategy::Handoff);
+    assert_eq!(preview.executor, ExecutorKind::Codex);
+    assert_eq!(preview.source_executor, ExecutorKind::Claude);
+    assert_eq!(preview.context.as_ref(), Some(&confirmed));
+    assert!(
+        preview
+            .evidence
+            .contains("Changed the demo fixture before the interruption")
+    );
+    assert!(
+        !preview
+            .evidence
+            .contains("Original decision: keep the demo output stable.")
+    );
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").id, child_id);
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+    assert_eq!(
+        *h.runner.kinds.lock().unwrap(),
+        [ExecutorKind::Claude, ExecutorKind::Codex]
+    );
+    let specs = h.runner.specs.lock().unwrap();
+    assert_eq!(specs[0].cwd, specs[1].cwd);
+    assert!(
+        !specs[1]
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--resume" | "resume" | SESSION))
+    );
+    assert!(specs[1].stdin.contains(&preview.evidence));
+    assert!(
+        specs[1]
+            .stdin
+            .contains("New decision: verify the changed fixture.")
+    );
+    assert!(
+        !specs[1]
+            .stdin
+            .contains("Original decision: keep the demo output stable.")
+    );
+    assert_eq!(h.engine.handoff(child_id).unwrap().context, Some(confirmed));
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn new_task_context_requires_fresh_continuation_approval() {
+    let h = Harness::with_dispatch_review();
+    let (source, first) = interrupted_implementation(&h).await;
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+
+    let updated = h
+        .engine
+        .set_issue_context("DEMO-1", first.revision, brief("Only the updated demo"))
+        .await
+        .unwrap();
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").id, child_id);
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+
+    let renewed = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    assert_eq!(renewed.context, Some(updated));
+    assert_eq!(
+        h.engine
+            .approve_continuation(source.id, &renewed.token)
+            .await
+            .unwrap(),
+        child_id
+    );
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
+async fn explicit_continuation_rechecks_linear_revision_and_ownership() {
+    let h = Harness::with_dispatch_review();
+    let (source, _) = interrupted_implementation(&h).await;
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    h.linear
+        .update("1", |i| i.title = "Updated demo task".into());
+    assert!(
+        h.engine
+            .approve_continuation(source.id, &preview.token)
+            .await
+            .is_err()
+    );
+    assert_eq!(h.latest("1"), source);
+
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    h.linear.update("1", |i| {
+        i.title = "Clarified after continuation approval".into()
+    });
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+
+    let renewed = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.engine
+            .approve_continuation(source.id, &renewed.token)
+            .await
+            .unwrap(),
+        child_id
+    );
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    h.linear
+        .update("1", |i| i.assignee_id = Some("other-user".into()));
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").id, child_id);
+    assert_eq!(h.latest("1").state, JobState::Canceled);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn explicit_native_resume_failure_does_not_start_a_fresh_session() {
+    let h = Harness::with_dispatch_review();
+    let (source, _) = interrupted_implementation(&h).await;
+    h.runner
+        .queue("DEMO-1", vec![Script::exit_code(1), Script::success()]);
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Claude)
+        .await
+        .unwrap();
+    assert_eq!(preview.strategy, ContinuationStrategy::ResumeSession);
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1").id, child_id);
+    assert_eq!(h.latest("1").state, JobState::Failed);
+    assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1"]);
+    assert_eq!(h.linear.get("1").state, "In Progress");
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn manual_rerun_of_failed_continuation_keeps_history_and_needs_dispatch_review() {
+    let h = Harness::with_dispatch_review();
+    let (source, _) = interrupted_implementation(&h).await;
+    h.runner
+        .queue("DEMO-1", vec![Script::exit_code(1), Script::success()]);
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let failed = h.latest("1");
+    assert_eq!(failed.id, child_id);
+    assert_eq!(failed.state, JobState::Failed);
+    let log_path = failed.log_path.as_ref().unwrap();
+    let saved_log = std::fs::read(log_path).unwrap();
+
+    h.linear.update("1", |i| i.state = "Todo".into());
+    h.engine.retry_job(failed.id).unwrap();
+    h.engine.tick().await.unwrap();
+    let fresh = h.latest("1");
+    assert_ne!(fresh.id, failed.id);
+    assert_eq!(fresh.state, JobState::WaitingBinding);
+    assert_eq!(fresh.resume_job_id, None);
+    assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1"]);
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+
+    assert_eq!(h.latest("1").id, fresh.id);
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+    assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1", "DEMO-1"]);
+    let prior = h
+        .engine
+        .list_jobs(10)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.id == failed.id);
+    assert_eq!(std::fs::read(log_path).unwrap(), saved_log);
+    assert_eq!(prior, Some(failed));
+    let spec = &h.runner.specs.lock().unwrap()[2];
+    assert!(
+        !spec
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--resume" | "resume"))
+    );
+    assert!(!spec.stdin.contains("recorded_runs_newest_first"));
+}
+
+#[tokio::test]
+async fn dispatch_only_sends_the_exact_reviewed_context_and_keeps_it_in_the_handoff() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    let mut candidate = issue("1", "proj-1");
+    candidate.labels = vec!["ai-plan".into()];
+    h.linear.upsert(candidate);
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            set_state: None,
+            ..Script::needs_info()
+        },
+    );
+    let staged = h
+        .engine
+        .set_issue_context("DEMO-1", 0, IssueContext {
+            conversation_history: Some("Previous decision: keep the demo output stable.\nLatest evidence: the focused check failed.".into()),
+            ..brief("Only the approved demo fixture")
+        })
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    let pending = h.latest("1");
+    assert_eq!(pending.state, JobState::WaitingBinding);
+    assert_eq!(
+        h.engine.issues().await.unwrap()[0].status,
+        IssueStatus::Waiting {
+            reason: WaitReasonView::DispatchReviewRequired,
+        }
+    );
+    assert!(h.runner.started().is_empty());
+    assert!(h.engine.handoff(pending.id).unwrap().context.is_none());
+
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert_eq!(preview.context.as_ref(), Some(&staged));
+    assert_eq!(preview.executor, ExecutorKind::Codex);
+    assert_eq!(preview.mode, RunMode::Plan);
+    assert!(
+        h.engine
+            .approve_dispatch("DEMO-1", "wrong-token")
+            .await
+            .is_err()
+    );
+    h.engine.tick().await.unwrap();
+    assert!(h.runner.started().is_empty());
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    let spec = h.runner.specs.lock().unwrap()[0].clone();
+    assert!(spec.stdin.contains("This is a planning run"));
+    assert!(spec.stdin.contains("Before planning, editing, or testing"));
+    let injected = spec
+        .stdin
+        .lines()
+        .find_map(|line| serde_json::from_str::<IssueContext>(line).ok());
+    assert_eq!(injected.as_ref(), Some(&staged));
+
+    let later = h
+        .engine
+        .set_issue_context("DEMO-1", staged.revision, brief("Unreviewed follow-up"))
+        .await
+        .unwrap();
+    assert_eq!(h.engine.issue_context("DEMO-1").await.unwrap(), Some(later));
+    let handoff = h.engine.handoff(pending.id).unwrap();
+    assert!(
+        handoff
+            .review_prompt
+            .contains("Previous decision: keep the demo output stable.")
+    );
+    assert_eq!(handoff.context, Some(staged));
+    assert!(!handoff.prompt.contains("Unreviewed follow-up"));
+    assert!(!handoff.review_prompt.contains("Unreviewed follow-up"));
+}
+
+#[tokio::test]
+async fn dispatch_preview_expires_when_the_draft_linear_issue_or_destination_changes() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    let first = h
+        .engine
+        .set_issue_context("DEMO-1", 0, brief("First draft"))
+        .await
+        .unwrap();
+    let old_preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    let edited = h
+        .engine
+        .set_issue_context("DEMO-1", first.revision, brief("Reviewed edit"))
+        .await
+        .unwrap();
+    assert!(
+        h.engine
+            .approve_dispatch("DEMO-1", &old_preview.token)
+            .await
+            .is_err()
+    );
+
+    let old_preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.linear
+        .update("1", |issue| issue.title = "Edited demo".into());
+    assert!(
+        h.engine
+            .approve_dispatch("DEMO-1", &old_preview.token)
+            .await
+            .is_err()
+    );
+
+    let old_preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    let mut binding = h.engine.bindings().pop().unwrap();
+    binding.executor = Some(ExecutorKind::Codex);
+    binding.model = Some("demo-model-v2".into());
+    h.engine.add_binding(binding).unwrap();
+    assert!(
+        h.engine
+            .approve_dispatch("DEMO-1", &old_preview.token)
+            .await
+            .is_err()
+    );
+    h.engine.tick().await.unwrap();
+    assert!(h.runner.started().is_empty());
+
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert_eq!(preview.context.as_ref(), Some(&edited));
+    assert_eq!(preview.model.as_deref(), Some("demo-model-v2"));
+    assert_eq!(preview.title, "Edited demo");
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    assert_eq!(
+        h.engine.handoff(h.latest("1").id).unwrap().context,
+        Some(edited)
+    );
+}
+
+#[tokio::test]
+async fn dispatch_rechecks_approval_when_a_queued_issue_changes_before_start() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+
+    h.linear
+        .update("1", |issue| issue.title = "Edited demo".into());
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert!(h.runner.started().is_empty());
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.poll_once().await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+
+    let mut binding = h.engine.bindings().pop().unwrap();
+    binding.model = Some("demo-model-v2".into());
+    h.engine.add_binding(binding).unwrap();
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert!(h.runner.started().is_empty());
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+}
+
+#[tokio::test]
+async fn linear_only_dispatch_and_manual_retry_each_require_approval() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .queue("DEMO-1", vec![Script::exit_code(1), Script::success()]);
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert!(preview.context.is_none());
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let failed = h.latest("1");
+    assert_eq!(failed.state, JobState::Failed);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+
+    h.engine.retry_job(failed.id).unwrap();
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    assert!(
+        h.engine
+            .approve_dispatch("DEMO-1", &preview.token)
+            .await
+            .is_err()
+    );
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert!(preview.context.is_none());
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1"]);
+    assert_eq!(h.latest("1").id, failed.id);
+    assert!(h.engine.handoff(failed.id).unwrap().context.is_none());
+}
+
+#[tokio::test]
+async fn claude_plan_and_codex_implementation_receive_the_same_approved_history() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    let wiki_root = h.root.path().join("wiki");
+    std::fs::create_dir(&wiki_root).unwrap();
+    let mut settings = h.engine.settings();
+    settings.wiki_root = Some(wiki_root.clone());
+    h.engine.update_settings(settings).unwrap();
+
+    let mut candidate = issue("1", "proj-1");
+    let url = candidate.url.clone();
+    candidate.labels = vec!["ai-plan".into()];
+    h.linear.upsert(candidate);
+    h.runner.script(
+        "DEMO-1",
+        Script {
+            set_state: None,
+            final_text: Some(r#"{"result":"planned","summary":"The plan is ready"}"#.into()),
+            ..Script::success()
+        },
+    );
+
+    let history = "The previous session verified the example.\nThe current session requires a read-only test.";
+    let brief = IssueContext {
+        conversation_history: Some(history.into()),
+        preferred_executor: Some(ExecutorKind::Claude),
+        ..brief("Only the demo fixture")
+    };
+    let first = h
+        .engine
+        .set_issue_context("DEMO-1", 0, brief.clone())
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert_eq!(preview.wiki_root.as_ref(), Some(&wiki_root));
+    assert_eq!(preview.executor, ExecutorKind::Claude);
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let plan = h.latest("1");
+    assert_eq!(h.engine.development_issue_url(plan.id).await.unwrap(), url);
+
+    h.linear
+        .update("1", |issue| issue.labels = vec!["ai-ready".into()]);
+    h.runner.script("DEMO-1", Script::success());
+    let second = h
+        .engine
+        .set_issue_context(
+            "DEMO-1",
+            first.revision,
+            IssueContext {
+                preferred_executor: Some(ExecutorKind::Codex),
+                ..brief
+            },
+        )
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert_eq!(preview.mode, RunMode::Implement);
+    assert_eq!(preview.executor, ExecutorKind::Codex);
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(
+        *h.runner.kinds.lock().unwrap(),
+        [ExecutorKind::Claude, ExecutorKind::Codex]
+    );
+
+    for (spec, approved) in h.runner.specs.lock().unwrap().iter().zip([&first, &second]) {
+        let context = spec
+            .stdin
+            .lines()
+            .find_map(|line| serde_json::from_str::<IssueContext>(line).ok());
+        assert_eq!(context.as_ref(), Some(approved));
+        assert!(
+            spec.stdin
+                .contains(&serde_json::to_string(&wiki_root).unwrap())
+        );
+    }
+    assert_eq!(h.engine.handoff(plan.id).unwrap().context, Some(first));
+    let implementation = h.engine.handoff(h.latest("1").id).unwrap();
+    assert_eq!(implementation.context, Some(second));
+    assert!(
+        implementation
+            .review_prompt
+            .contains("The current session requires a read-only test.")
+    );
 }
 
 struct CodexOnly;
@@ -286,7 +949,7 @@ async fn native_checkpoint_is_readable_while_running_and_quota_does_not_restart_
     });
     let config_path = root.path().join("config.toml");
     cfg.save(&config_path).unwrap();
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&root.path().join("test.sqlite3")).unwrap(),
         linear: Arc::new(linear.clone()),

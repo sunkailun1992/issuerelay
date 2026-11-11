@@ -1240,7 +1240,7 @@ async fn a_config_file_edited_while_running_is_never_overwritten() {
 
     // A restarted host loads the edit and saves on top of it.
     let linear = FakeLinear::new("user-1");
-    let restarted = Engine::new(EngineDeps {
+    let restarted = Engine::new_for_scheduler_tests(EngineDeps {
         config_path: config_path.clone(),
         store: Store::open_in_memory().unwrap(),
         linear: Arc::new(linear.clone()),
@@ -1266,7 +1266,7 @@ async fn a_config_file_created_or_removed_while_running_is_a_change_too() {
     let root = tempfile::tempdir().unwrap();
     let config_path = root.path().join("config.toml");
     let linear = FakeLinear::new("user-1");
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path: config_path.clone(),
         store: Store::open_in_memory().unwrap(),
         linear: Arc::new(linear.clone()),
@@ -1341,7 +1341,7 @@ async fn interrupted_runs_fail_on_restart() {
             .unwrap();
     }
     let linear = FakeLinear::new("user-1");
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path: root.path().join("config.toml"),
         store: Store::open(&db).unwrap(),
         linear: Arc::new(linear.clone()),
@@ -1400,7 +1400,7 @@ async fn an_interrupted_run_is_not_rerun_until_linear_changes() {
     let linear = FakeLinear::new("user-1");
     linear.upsert(issue("1", "proj-1"));
     let runner = Arc::new(ScriptedRunner::new(linear.clone(), false));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: Arc::new(linear.clone()),
@@ -1436,7 +1436,7 @@ async fn a_started_run_records_its_executor_process() {
     let fake = FakeLinear::new("user-1");
     fake.upsert(issue("1", "proj-1"));
     let runner = Arc::new(ScriptedRunner::new(fake.clone(), true));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: Arc::new(fake),
@@ -1523,7 +1523,7 @@ fn record_interrupted_run(db: &Path, root: &Path, tag: &ProcessTag) -> i64 {
 #[cfg(target_os = "macos")]
 fn engine_on(db: &Path, root: &Path) -> Engine {
     let linear = FakeLinear::new("user-1");
-    Engine::new(EngineDeps {
+    Engine::new_for_scheduler_tests(EngineDeps {
         config_path: root.join("config.toml"),
         store: Store::open(db).unwrap(),
         linear: Arc::new(linear.clone()),
@@ -1815,7 +1815,7 @@ fn build_engine(
 ) -> Engine {
     let config_path = root.join("config.toml");
     cfg.save(&config_path).unwrap();
-    Engine::new(EngineDeps {
+    Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open_in_memory().unwrap(),
         linear,
@@ -3343,7 +3343,7 @@ async fn a_row_that_says_running_without_a_run_cannot_be_stopped() {
     cfg.save(&config_path).unwrap();
     let fake = FakeLinear::new("user-1");
     fake.upsert(issue("1", "proj-1"));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: Arc::new(fake.clone()),
@@ -3439,7 +3439,7 @@ async fn mark_done_does_not_overwrite_a_row_that_changed_while_linear_was_update
     let fake = FakeLinear::new("user-1");
     fake.upsert(issue("1", "proj-1"));
     let spy = Arc::new(SpyLinear::new(fake.clone()));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: spy.clone(),
@@ -3732,7 +3732,7 @@ async fn a_hand_edited_binding_with_a_relative_directory_stops_the_engine_from_s
     let text = "[[bindings]]\nid = 'p'\nproject_id = 'p'\nproject_name = 'Demo Project'\ndirectory = 'repo'\n";
     std::fs::write(&config_path, text).unwrap();
     let linear = FakeLinear::new("user-1");
-    let result = Engine::new(EngineDeps {
+    let result = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open_in_memory().unwrap(),
         linear: Arc::new(linear.clone()),
@@ -3756,7 +3756,7 @@ async fn an_unreadable_configuration_stops_the_engine_from_starting() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("config.toml"), "settings = 5\n").unwrap();
     let linear = FakeLinear::new("user-1");
-    let result = Engine::new(EngineDeps {
+    let result = Engine::new_for_scheduler_tests(EngineDeps {
         config_path: root.path().join("config.toml"),
         store: Store::open_in_memory().unwrap(),
         linear: Arc::new(linear.clone()),
@@ -3839,7 +3839,7 @@ fn starting_with_config_keys_this_version_does_not_know_warns_naming_only_the_ke
         }
         let linear = FakeLinear::new("user-1");
         let (engine, warnings) = logged_warnings(|| {
-            Engine::new(EngineDeps {
+            Engine::new_for_scheduler_tests(EngineDeps {
                 config_path,
                 store: Store::open_in_memory().unwrap(),
                 linear: Arc::new(linear.clone()),
@@ -5315,7 +5315,7 @@ async fn a_store_error_while_abandoning_a_run_does_not_stop_it_from_freeing_the_
     // `issue()` calls: 1 = DEMO-1's start re-read, 2 = the check of its result (panics).
     *spy.panic_on_issue_call.lock().unwrap() = Some(2);
     let runner = Arc::new(ScriptedRunner::new(fake, false));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: spy.clone(),
@@ -5361,7 +5361,7 @@ async fn an_abandoned_run_leaves_a_row_that_is_no_longer_running_alone() {
     // `issue()` calls: 1 = the start re-read, 2 = the check of the result (panics).
     *spy.panic_on_issue_call.lock().unwrap() = Some(2);
     let runner = Arc::new(ScriptedRunner::new(fake, true));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: spy.clone(),
@@ -5407,7 +5407,7 @@ async fn a_result_that_cannot_be_stored_fails_the_job_and_frees_the_folder() {
     let fake = FakeLinear::new("user-1");
     fake.upsert(issue("1", "proj-1"));
     let runner = Arc::new(ScriptedRunner::new(fake.clone(), true));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: Arc::new(fake),
@@ -5995,7 +5995,7 @@ async fn job_counts_that_cannot_be_read_are_reported_in_the_status() {
     cfg.save(&config_path).unwrap();
     let fake = FakeLinear::new("user-1");
     fake.upsert(issue("1", "proj-1"));
-    let engine = Engine::new(EngineDeps {
+    let engine = Engine::new_for_scheduler_tests(EngineDeps {
         config_path,
         store: Store::open(&db).unwrap(),
         linear: Arc::new(fake.clone()),

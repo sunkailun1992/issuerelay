@@ -288,6 +288,51 @@
     "setup_body": "환경 점검에서 Claude Code 또는 Codex를 준비한 뒤 Linear 프로젝트를 폴더에 연결하세요.",
     "bind_project": "프로젝트 연결하기"
   },
+  "dispatch": {
+    "preview": "미리 보기",
+    "title": "실행 전 검토",
+    "description": "표시된 민감 정보를 제거한 요약, 세션 기록, 참조를 확인하세요. 승인하면 이슈와 함께 저장되고 실행을 시작할 수 있습니다.",
+    "confirm": "확인하고 실행",
+    "implement": "구현",
+    "summary": "민감 정보를 제거한 세션 요약",
+    "wiki_refs": "Wiki 참조",
+    "empty_context": "세션 요약이나 Wiki 참조가 없습니다. 실행자는 Linear 이슈를 사용합니다.",
+    "preview_failed": "실행 미리 보기를 읽을 수 없습니다",
+    "approval_failed": "실행을 승인할 수 없습니다",
+    "reload_preview": "미리 보기 다시 읽기",
+    "conversation_history": "현재 세션",
+    "implementation_scope": "구현 대상은 {{issue}}뿐입니다. 하위 이슈는 각각 실행합니다.",
+    "prepare_implementation": "Linear에서 이 이슈를 {{todo}}로 설정하고 자신에게 할당한 뒤 {{label}} 레이블을 추가하세요. 완료 후 여기로 돌아와 미리 보기를 다시 읽으세요.",
+    "issue_mismatch": "미리 보기가 이 이슈와 일치하지 않습니다. 다시 읽은 후 확인하세요."
+  },
+  "continuation": {
+    "action": "이전 실행 계속",
+    "description": "실행기를 선택하고 작업 맥락과 이전 실행의 인계 내용을 확인하세요.",
+    "source_run": "이전 실행",
+    "source_value": "#{{id}} · {{executor}}",
+    "strategy": "계속하는 방식",
+    "resume_session": "기존 실행기 세션 재개",
+    "handoff": "확인한 인계 내용으로 새 세션 시작",
+    "evidence": "이전 실행의 근거",
+    "preview_mismatch": "미리보기가 실행 또는 실행기와 일치하지 않습니다. 다시 불러온 후 확인하세요.",
+    "confirm": "확인하고 계속"
+  },
+  "provider_session": {
+    "title": "기존 실행기 세션",
+    "reopen_hint": "위에 표시된 작업 폴더에서 이 명령을 실행하면 원래 클라이언트에서 전체 대화를 읽을 수 있습니다.",
+    "copy": "다시 열기 명령 복사",
+    "preview": "Codex 세션 미리보기",
+    "preview_description": "기존 Codex 세션의 최근 텍스트를 확인합니다.",
+    "read_failed": "Codex 세션을 읽을 수 없습니다",
+    "session_mismatch": "가져온 세션이 실행 기록에 있는 세션과 일치하지 않습니다.",
+    "empty": "미리 볼 텍스트 메시지가 없습니다.",
+    "more": "이전 메시지는 기존 Codex 세션에서 확인하세요.",
+    "archive_hint": "보관하려면 Codex 클라이언트에서 제공하는 보관 기능을 사용하세요.",
+    "role": {
+      "user": "사용자",
+      "assistant": "어시스턴트"
+    }
+  },
   "issues": {
     "description": "나에게 할당되고 {{label}} 또는 {{plan_label}} 라벨이 붙은 이슈 중 최근 업데이트된 50건",
     "empty_title": "{{label}} 라벨이 붙은 이슈가 아직 없습니다",
@@ -314,7 +359,8 @@
       "blocked_by": "{{issues}}에 막혀 있습니다(아직 완료되지 않음)",
       "labels_match_several_bindings": "라벨 {{labels}}이(가) 프로젝트의 연결 여러 개에 해당합니다. 하나만 남기세요",
       "no_binding_for_labels": "이 라벨을 맡는 연결이 없습니다. 라벨 없는 연결을 추가하거나 라벨을 연결에 추가하세요",
-      "plan_needs_lean": "홈 폴더에서는 계획을 만들 수 없습니다. 다른 폴더를 연결하세요"
+      "plan_needs_lean": "홈 폴더에서는 계획을 만들 수 없습니다. 다른 폴더를 연결하세요",
+      "dispatch_review_required": "실행 전 확인 대기 중"
     },
     "load_failed": "Linear에서 이슈를 읽지 못했습니다",
     "open_guide": "가이드 열기",
@@ -352,13 +398,13 @@
       "finished": "종료",
       "summary": "요약",
       "mode": "실행 용도",
-      "resumed": "이어받은 세션",
+      "resumed": "이전 실행",
       "usage": "사용량"
     },
     "mode": {
       "plan": "계획만"
     },
-    "resumed_from": "실행 #{{id}}의 세션",
+    "resumed_from": "실행 #{{id}}에서 계속",
     "usage": {
       "cost": "{{cost}}(추정)",
       "tokens": "입력 {{input}}, 출력 {{output}} 토큰",

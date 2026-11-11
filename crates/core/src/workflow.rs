@@ -7,8 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::ExecutorKind;
+use crate::config::{Effort, ExecutorKind, LeanStatus, PermissionProfile};
 use crate::executor::outcome::is_session_id;
+use crate::model::RunMode;
 use crate::text::is_invisible;
 
 const MAX_ISSUE_KEY_BYTES: usize = 64;
@@ -25,6 +26,8 @@ pub struct IssueContext {
     pub origin_executor: Option<ExecutorKind>,
     pub preferred_executor: Option<ExecutorKind>,
     pub request: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_history: Option<String>,
     pub scope: String,
     pub acceptance: Vec<String>,
     pub source_refs: Vec<String>,
@@ -33,9 +36,96 @@ pub struct IssueContext {
 impl IssueContext {
     pub fn validate(&self) -> Result<()> {
         validate_text("request", &self.request, 16 * 1024)?;
+        if let Some(history) = &self.conversation_history {
+            validate_text("conversation history", history, 96 * 1024)?;
+        }
         validate_text("scope", &self.scope, 16 * 1024)?;
         validate_list("acceptance", &self.acceptance, 32, 2048)?;
         validate_list("source_refs", &self.source_refs, 32, 1024)
+    }
+}
+
+/// The exact brief and destination shown before desktop approval.
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatchPreview {
+    pub token: String,
+    pub issue_uuid: String,
+    pub issue_identifier: String,
+    pub title: String,
+    pub mode: crate::model::RunMode,
+    pub context: Option<IssueContext>,
+    pub executor: ExecutorKind,
+    pub directory: PathBuf,
+    pub model: Option<String>,
+    pub effort: Option<crate::config::Effort>,
+    pub wiki_root: Option<PathBuf>,
+}
+
+/// The execution settings bound to a desktop approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchDestination {
+    pub binding_id: String,
+    pub directory: PathBuf,
+    pub canonical_directory: PathBuf,
+    pub executor: ExecutorKind,
+    pub mode: RunMode,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub permission: PermissionProfile,
+    pub lean: LeanStatus,
+    pub wiki_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_ultracode: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationStrategy {
+    ResumeSession,
+    Handoff,
+}
+
+/// The exact context and evidence shown before approving a continued run.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContinuationPreview {
+    pub token: String,
+    pub source_job_id: i64,
+    pub issue_uuid: String,
+    pub issue_identifier: String,
+    pub title: String,
+    pub executor: ExecutorKind,
+    pub source_executor: ExecutorKind,
+    pub strategy: ContinuationStrategy,
+    pub mode: RunMode,
+    pub directory: PathBuf,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub permission: PermissionProfile,
+    pub claude_ultracode: bool,
+    pub context: Option<IssueContext>,
+    pub wiki_root: Option<PathBuf>,
+    pub evidence: String,
+}
+
+/// The reviewed evidence and destination saved for a single continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuationIntent {
+    pub source_job_id: i64,
+    pub executor: ExecutorKind,
+    pub strategy: ContinuationStrategy,
+    pub evidence: String,
+    pub destination: DispatchDestination,
+}
+
+impl ContinuationIntent {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(self.source_job_id > 0, "invalid source run");
+        ensure!(
+            self.executor == self.destination.executor,
+            "continuation executor differs from its reviewed destination"
+        );
+        validate_text("continuation evidence", &self.evidence, 512 * 1024)
     }
 }
 
@@ -116,6 +206,8 @@ impl GitFacts {
 pub struct RunMemory {
     #[serde(default)]
     pub context: Option<IssueContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiki_root: Option<PathBuf>,
     #[serde(default)]
     pub milestones: Vec<CheckpointMilestone>,
     pub decision: Option<ExecutionDecision>,

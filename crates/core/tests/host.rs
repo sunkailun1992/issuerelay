@@ -978,8 +978,7 @@ async fn a_second_host_for_the_same_user_is_refused() {
     .await;
 }
 
-/// Binds the project `proj-1` to a folder under `root`, adds its issue to `linear` and waits until
-/// the host's engine runs it.
+/// Binds the project `proj-1` to a folder under `root`, approves its issue and waits for the run.
 async fn run_a_job(host: &Host, root: &Path, linear: &FakeLinear) {
     let dir = root.join("repo-a");
     std::fs::create_dir_all(&dir).unwrap();
@@ -999,7 +998,11 @@ async fn run_a_job(host: &Host, root: &Path, linear: &FakeLinear) {
         })
         .unwrap();
     linear.upsert(issue("1", "proj-1"));
-    host.engine().poll_now();
+    let preview = host.engine().dispatch_preview("DEMO-1").await.unwrap();
+    host.engine()
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
     eventually("the run never started", || {
         host.engine().status().running > 0
     })

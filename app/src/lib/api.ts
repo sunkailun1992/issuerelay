@@ -24,10 +24,16 @@ export const tauriBackend: Backend = {
   listJobs: (limit) => call("list_jobs", { limit }),
   job: (id) => call("job", { id }),
   jobLog: (id, lines) => call("job_log", { id, lines }),
+  readCodexSession: (id) => call("read_codex_session", { id }),
   getHandoff: (id) => call("get_handoff", { id }),
   claimHandoff: (id, executor) => call("claim_handoff", { id, executor }),
   releaseHandoff: (id, claimId) => call("release_handoff", { id, claimId }),
   issues: () => call("issues"),
+  getDispatchPreview: (issueIdentifier) => call("get_dispatch_preview", { issueIdentifier }),
+  approveDispatch: (issueIdentifier, token) => call("approve_dispatch", { issueIdentifier, token }),
+  getContinuationPreview: (id, executor) => call("get_continuation_preview", { id, executor }),
+  approveContinuation: (id, token) => call("approve_continuation", { id, token }),
+  getDevelopmentIssueUrl: (id) => call("get_development_issue_url", { id }),
   pause: () => call("pause"),
   resume: () => call("resume"),
   pollNow: () => call("poll_now"),
@@ -95,6 +101,11 @@ function mockUpdate(): string | undefined {
   return params.get("update") ?? undefined;
 }
 
+/** `?dispatch-review` in a browser makes one demo issue wait for the dispatch preview. */
+function mockDispatchReview(): boolean {
+  return new URLSearchParams(typeof location === "undefined" ? "" : location.search).has("dispatch-review");
+}
+
 /**
  * The backend the panel uses: the real commands inside Tauri; in a plain browser the mock,
  * loaded with `import()` only then, so the demo data stays out of the app's own start-up code.
@@ -102,5 +113,9 @@ function mockUpdate(): string | undefined {
 export async function loadBackend(): Promise<Backend> {
   if (isTauri()) return tauriBackend;
   const { createMockBackend } = await import("./mock");
-  return createMockBackend(mockScenario(), { language: mockLanguage(), update: mockUpdate() });
+  return createMockBackend(mockScenario(), {
+    language: mockLanguage(),
+    update: mockUpdate(),
+    dispatchReview: mockDispatchReview(),
+  });
 }

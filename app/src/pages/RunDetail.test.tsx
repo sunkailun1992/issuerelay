@@ -10,7 +10,7 @@ import { formatDateTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
 import { ago } from "@/lib/mock-fixtures";
 import type { Job } from "@/lib/types";
-import type { Handoff } from "@/lib/workflow-types";
+import type { DispatchPreview, Handoff } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { advanceUntil } from "@/test/time";
 import RunDetail from "./RunDetail";
@@ -133,6 +133,136 @@ const handoffFixture: Handoff = {
     updated_at: "2026-10-12T09:00:00Z",
   },
 };
+
+test("continuing shows the selected strategy and only dispatches the reviewed executor's token", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.getContinuationPreview;
+  backend.getContinuationPreview = vi.fn(async (...args: Parameters<typeof read>) => ({
+    ...(await read(...args)), context: handoffFixture.context, wiki_root: "/demo/wiki",
+    evidence: "Added the migration\nUnit tests passed\nVerify the query plan",
+  }));
+  let releaseApproval!: () => void;
+  const pendingApproval = new Promise<void>((resolve) => { releaseApproval = resolve; });
+  const queue = backend.approveContinuation;
+  const approve = vi.spyOn(backend, "approveContinuation").mockImplementation(async (id, token) => {
+    await pendingApproval;
+    return queue(id, token);
+  });
+  const { client } = await openRun(8, backend);
+  expect(screen.getByRole("button", { name: "Run again" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const confirm = dialog.getByRole("button", { name: "Confirm and continue" });
+  expect(confirm).toBeDisabled();
+  expect(backend.getContinuationPreview).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("radio", { name: "Claude Code" }));
+  expect(await dialog.findByText("Resume the original executor session")).toBeInTheDocument();
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  expect(await dialog.findByText("Start a new session with the reviewed handoff")).toBeInTheDocument();
+  expect(dialog.getByText("Wiki: Demo Index")).toBeInTheDocument();
+  expect(dialog.getByText(/Added the migration.*Unit tests passed.*Verify the query plan/)).toBeInTheDocument();
+  expect(approve).not.toHaveBeenCalled();
+  await userEvent.click(confirm);
+  await act(async () => {
+    releaseApproval();
+    await approve.mock.results[0].value;
+  });
+  expect(await screen.findByRole("link", { name: "Continued from run #8" })).toBeInTheDocument();
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(approve).toHaveBeenCalledExactlyOnceWith(8, "demo-continuation-2");
+  expect(await backend.job(13)).toMatchObject({ executor: "codex", state: "queued" });
+  expect(await backend.job(8)).toMatchObject({ executor: "claude", state: "failed" });
+});
+
+test.each([8, 13])("run #%i can use its unstarted follow-up without dispatching on cancel", async (id) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  const prepared: Job = {
+    ...source, id: 13, state: "waiting_binding", resume_job_id: source.id,
+    started_at: null, finished_at: null, reason: "waiting for dispatch review",
+  };
+  const readJob = backend.job;
+  backend.job = vi.fn((id) => id === prepared.id ? Promise.resolve(prepared) : readJob(id));
+  const listJobs = backend.listJobs;
+  backend.listJobs = vi.fn(async (limit) => [prepared, ...await listJobs(limit)]);
+  const preview = vi.spyOn(backend, "getContinuationPreview");
+  const approve = vi.spyOn(backend, "approveContinuation");
+  await openRun(id, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  expect(await dialog.findByText("Start a new session with the reviewed handoff")).toBeInTheDocument();
+  expect(preview).toHaveBeenCalledExactlyOnceWith(source.id, "codex");
+  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+  expect(approve).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Preview" })).not.toBeInTheDocument();
+});
+
+test("a rejected continuation approval keeps the preview open and requires a new preview", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const approve = vi.spyOn(backend, "approveContinuation").mockRejectedValueOnce(new BackendError("preview changed"));
+  await openRun(8, backend);
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  const confirm = dialog.getByRole("button", { name: "Confirm and continue" });
+  expect(await dialog.findByText("Start a new session with the reviewed handoff")).toBeInTheDocument();
+  await userEvent.click(confirm);
+  expect(await dialog.findByText("preview changed")).toBeInTheDocument();
+  expect(confirm).toBeDisabled();
+  await userEvent.click(dialog.getByRole("button", { name: "Reload preview" }));
+  await waitFor(() => expect(confirm).toBeEnabled());
+  await userEvent.click(confirm);
+  expect(await screen.findByRole("link", { name: "Continued from run #8" })).toBeInTheDocument();
+  expect(approve.mock.calls).toEqual([[8, "demo-continuation-1"], [8, "demo-continuation-2"]]);
+});
+
+test("a finished Claude session can be reopened in its own client using only the recorded ID", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const session = (await backend.job(8))!.session_id;
+  const read = vi.spyOn(backend, "readCodexSession");
+  const copy = stubClipboard();
+  await openRun(8, backend);
+  const card = within(screen.getByRole("region", { name: "Original executor session" }));
+  await userEvent.click(card.getByRole("button", { name: "Copy reopen command" }));
+  expect(copy).toHaveBeenCalledExactlyOnceWith(`claude --resume ${session}`);
+  expect(card.queryByRole("button", { name: "Preview Codex session" })).not.toBeInTheDocument();
+  expect(read).not.toHaveBeenCalled();
+});
+
+test("Codex session preview only reads after a click, and displays text from the recorded session", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  const readJob = backend.job;
+  backend.job = vi.fn((id) => id === job.id ? Promise.resolve({ ...job, executor: "codex" as const }) : readJob(id));
+  backend.readCodexSession = vi.fn().mockResolvedValue({
+    session_id: job.session_id,
+    title: "Index work",
+    messages: [{ role: "user", text: "<b>Review changes</b>" }, { role: "assistant", text: "Focused tests passed." }],
+    has_more: true,
+  });
+  const copy = stubClipboard();
+  await openRun(8, backend);
+  const card = within(screen.getByRole("region", { name: "Original executor session" }));
+  expect(backend.readCodexSession).not.toHaveBeenCalled();
+  await userEvent.click(card.getByRole("button", { name: "Copy reopen command" }));
+  expect(copy).toHaveBeenCalledExactlyOnceWith(`codex resume ${job.session_id}`);
+  await userEvent.click(card.getByRole("button", { name: "Preview Codex session" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Preview Codex session" }));
+  expect(await dialog.findByText("<b>Review changes</b>")).toBeInTheDocument();
+  expect(dialog.getByText("Focused tests passed.")).toBeInTheDocument();
+  expect(dialog.getByText("Open the original Codex session to read earlier messages.")).toBeInTheDocument();
+  expect(backend.readCodexSession).toHaveBeenCalledExactlyOnceWith(8);
+});
+
+test("a run with a malformed session ID has no provider session actions", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  const readJob = backend.job;
+  backend.job = vi.fn((id) => id === job.id ? Promise.resolve({ ...job, session_id: `${job.session_id}\n` }) : readJob(id));
+  await openRun(8, backend);
+  expect(screen.queryByRole("region", { name: "Original executor session" })).not.toBeInTheDocument();
+});
 
 test("a run handoff explains the saved context and copies the independent review prompt", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
@@ -306,9 +436,9 @@ test("a run that continues an earlier session links to that run", async () => {
   const read = backend.job.bind(backend);
   backend.job = vi.fn(async (id: number) => (id === 7 ? { ...done, resume_job_id: 6 } : read(id)));
   await openRun(7, backend);
-  const link = screen.getByRole("link", { name: "The session of run #6" });
+  const link = screen.getByRole("link", { name: "Continued from run #6" });
   expect(link).toHaveAttribute("href", "/runs/6");
-  expect(screen.getByText("Continues", { selector: "dt" })).toBeInTheDocument();
+  expect(screen.getByText("Continued from", { selector: "dt" })).toBeInTheDocument();
 });
 
 test("a planning run says what it was for, and one that posted its plan has its own badge", async () => {
@@ -318,6 +448,93 @@ test("a planning run says what it was for, and one that posted its plan has its 
   await openRun(9, backend);
   expect(field("Status")).toBe("Plan posted");
   expect(field("Run for")).toBe("Plan only");
+  expect(screen.getByRole("button", { name: "Implement" })).toBeInTheDocument();
+  expect(screen.getByText("Implementation applies only to DEMO-9. Its child issues are dispatched separately.")).toBeInTheDocument();
+});
+
+test.each([
+  { state: "needs_info", report: "needs_info" },
+  { state: "failed", report: "failed" },
+  { state: "running", report: "planned", finished_at: null },
+  { state: "needs_info", report: "planned", finished_at: null },
+] as const)("a plan without a finished successful result offers no implementation action: %j", async (patch) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(9))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, ...patch, mode: "plan" });
+  await openRun(9, backend);
+  expect(screen.queryByRole("button", { name: "Implement" })).not.toBeInTheDocument();
+});
+
+test("implementation opens the planned issue in Linear and waits for its exact implementation preview", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(9))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, mode: "plan", report: "planned" });
+  const preview: DispatchPreview = {
+    token: "implement-preview",
+    issue_uuid: job.issue_uuid,
+    issue_identifier: job.issue_identifier,
+    title: job.title,
+    mode: "implement",
+    executor: "codex",
+    directory: "~/code/demo-app",
+    model: "gpt-6.1-sol",
+    effort: "ultra",
+    wiki_root: "~/notes/demo-wiki",
+    context: {
+      revision: 1,
+      origin_executor: "codex",
+      preferred_executor: "codex",
+      request: "Use the revised export format.",
+      conversation_history: "The first format was rejected.\n\tThe final choice preserves the date in UTC.",
+      scope: "Update the export format.",
+      acceptance: ["Exports preserve the date in UTC."],
+      source_refs: ["wiki/exports.md#format"],
+    },
+  };
+  vi.spyOn(backend, "getDispatchPreview")
+    .mockRejectedValueOnce(new BackendError("issue no longer matches the dispatch conditions"))
+    .mockResolvedValueOnce({ ...preview, mode: "plan", token: "plan-preview" })
+    .mockResolvedValueOnce({ ...preview, issue_uuid: "different-workspace-issue", token: "unrelated-preview" })
+    .mockResolvedValue(preview);
+  const issueUrl = `https://linear.app/demo/issue/${job.issue_identifier}`;
+  const getUrl = vi.spyOn(backend, "getDevelopmentIssueUrl").mockResolvedValue(issueUrl);
+  const openLinear = vi.spyOn(backend, "openLinear");
+  const approve = vi.spyOn(backend, "approveDispatch").mockResolvedValue(undefined);
+  await openRun(9, backend);
+  expect(getUrl).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: "Implement" }));
+  const review = within(screen.getByRole("dialog", { name: "Review dispatch" }));
+  const confirm = review.getByRole("button", { name: "Confirm dispatch" });
+  expect(await review.findByText(/set this issue to Todo, assign it to yourself, and add ai-ready/)).toBeInTheDocument();
+  expect(confirm).toBeDisabled();
+  expect(getUrl).not.toHaveBeenCalled();
+  await userEvent.click(review.getByRole("button", { name: "Open in Linear" }));
+  await waitFor(() => expect(openLinear).toHaveBeenCalledExactlyOnceWith(issueUrl));
+  expect(getUrl).toHaveBeenCalledExactlyOnceWith(job.id);
+
+  const reload = () => userEvent.click(review.getByRole("button", { name: "Reload preview" }));
+  await reload();
+  expect(await review.findByText("Plan only")).toBeInTheDocument();
+  expect(confirm).toBeDisabled();
+  await userEvent.click(confirm);
+  expect(approve).not.toHaveBeenCalled();
+
+  await reload();
+  expect(await review.findByText(/preview no longer matches this issue/)).toBeInTheDocument();
+  expect(confirm).toBeDisabled();
+  expect(review.queryByText("Use the revised export format.")).not.toBeInTheDocument();
+
+  await reload();
+  expect(await review.findByText("Current conversation")).toBeInTheDocument();
+  expect(review.getByText(/The first format was rejected/).textContent).toBe(preview.context?.conversation_history);
+  expect(review.getByText("Wiki folder")).toBeInTheDocument();
+  expect(review.getByText("~/notes/demo-wiki")).toBeInTheDocument();
+  expect(review.getByText("wiki/exports.md#format")).toBeInTheDocument();
+  expect(confirm).toBeEnabled();
+  await userEvent.click(confirm);
+  await waitFor(() => expect(approve).toHaveBeenCalledExactlyOnceWith(job.issue_identifier, "implement-preview"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 });
 
 test("a usual run does not say what it was for", async () => {
@@ -459,6 +676,15 @@ test("the engine's reason is cleaned before it is shown", async () => {
 });
 
 // ---- what can be done -------------------------------------------------------------------------
+
+test("a run waiting for dispatch review can be approved from its detail even outside the issues list", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(9))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, state: "waiting_binding", reason: "waiting for dispatch review" });
+  backend.issues = vi.fn().mockResolvedValue([]);
+  await openRun(9, backend);
+  expect(screen.getByRole("button", { name: "Preview" })).toBeInTheDocument();
+});
 
 test("a run offers what its state allows, beside the title", async () => {
   await openRun(10);

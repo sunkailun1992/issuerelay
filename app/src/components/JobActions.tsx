@@ -1,5 +1,6 @@
 import { Check, ExternalLink, RotateCcw, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { ContinuationReviewButton } from "@/components/ContinuationReviewButton";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { useCancelJob, useJobs, useMarkDone, useRetryJob } from "@/hooks/queries";
 import { useOpenLinear } from "@/hooks/useOpenLinear";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
-import { isActive, isNewestRun } from "@/lib/runs";
+import { isActive, isInterruptedRun, isNewestRun, pendingContinuationSourceId } from "@/lib/runs";
 import type { Job, JobState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +50,13 @@ function RetryButton({ job, size }: { job: Job; size: Size }) {
       {t("actions.run_again")}
     </Button>
   );
+}
+
+function ContinueButton({ job, source, size }: { job: Job; source: Job; size: Size }) {
+  const jobs = useJobs();
+  const latest = jobs.data?.find((other) => other.issue_uuid === job.issue_uuid);
+  if (latest && latest.id > job.id && pendingContinuationSourceId(latest) !== source.id) return null;
+  return <ContinuationReviewButton source={source} size={size} />;
 }
 
 /**
@@ -101,22 +109,27 @@ function OpenInLinearButton({ url, compact }: { url: string; compact: boolean })
 
 /**
  * What can be done with a run, shared by the overview, the issue list and the run's page: only
- * the actions its state allows (stop while it is in hand; run again after a failure, a stop or a
- * question, if it is its issue's newest run; mark done once it awaits acceptance), and "Open in
- * Linear" when the issue's link is given. Without a run only the link is offered. `compact` is
- * for a row of a table or a list: smaller buttons that keep to one line, and a link that is an
- * icon. A table that cannot spare even that gives no `url` and makes the identifier the link
- * (`IssueLink`), as the issue list does.
+ * the actions its state allows, and "Open in Linear" when the issue's link is given. A compact row
+ * reserves one text button for its primary action. On the run's page, Continue and Run again
+ * remain separate actions.
  */
-export function JobActions({ job, url, compact = false }: { job?: Job | null; url?: string; compact?: boolean }) {
+export function JobActions({
+  job,
+  url,
+  compact = false,
+  continuationSource = isInterruptedRun(job) ? job : null,
+}: { job?: Job | null; url?: string; compact?: boolean; continuationSource?: Job | null }) {
   const size: Size = compact ? "sm" : "default";
-  const stoppable = job != null && isActive(job);
-  const retryable = job != null && RETRYABLE.includes(job.state);
+  const continuable = job != null && continuationSource !== null && (!compact || job.state !== "queued");
+  const showOtherActions = !compact || !continuable;
+  const stoppable = showOtherActions && job != null && isActive(job);
+  const retryable = showOtherActions && job != null && RETRYABLE.includes(job.state);
   const markable = job != null && job.state === "awaiting_acceptance";
-  if (!stoppable && !retryable && !markable && !url) return null;
+  if (!stoppable && !retryable && !continuable && !markable && !url) return null;
   return (
     <div className={cn("flex items-center gap-2", compact ? "flex-nowrap" : "flex-wrap")}>
       {stoppable && <StopButton job={job} size={size} />}
+      {continuable && <ContinueButton job={job} source={continuationSource} size={size} />}
       {retryable && <RetryButton job={job} size={size} />}
       {markable && <MarkDoneButton job={job} size={size} />}
       {url && <OpenInLinearButton url={url} compact={compact} />}

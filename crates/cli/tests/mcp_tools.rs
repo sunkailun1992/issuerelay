@@ -304,7 +304,8 @@ async fn each_entry_records_origin_without_dispatching_and_can_read_exact_progre
             "set_issue_context",
             Some(json!({
                 "issue_identifier":"DEMO-7", "expected_revision":0, "preferred_executor":"claude",
-                "request":"Make the example clearer", "scope":"README only"
+                "request":"Make the example clearer", "scope":"README only",
+                "conversation_history":"Previous decision: preserve the documented example.\nLatest evidence: a broken link."
             })),
         )
         .await;
@@ -324,6 +325,12 @@ async fn each_entry_records_origin_without_dispatching_and_can_read_exact_progre
         assert_eq!(calls[0].0, "workflow.set_context");
         assert_eq!(calls[0].1["context"]["origin_executor"], expected);
         assert_eq!(calls[0].1["context"]["preferred_executor"], json!("claude"));
+        assert_eq!(
+            calls[0].1["context"]["conversation_history"],
+            json!(
+                "Previous decision: preserve the documented example.\nLatest evidence: a broken link."
+            )
+        );
         assert_eq!(calls[1].0, "workflow.run");
         assert_eq!(calls[1].1["issue_identifier"], json!("DEMO-7"));
     }

@@ -87,7 +87,7 @@ export interface Job {
   /** The `result` of the AI's last line of JSON (`in_testing`, `needs_info`, `failed`, `planned`). */
   report?: string | null;
   session_id?: string | null;
-  /** The earlier run whose session this one continues. */
+  /** The earlier run continued through its session or an approved handoff. */
   resume_job_id?: number | null;
   usage?: RunUsage | null;
 }
@@ -132,7 +132,8 @@ export type WaitReason =
   /** Every binding of its project has routing labels, and it carries none of them. */
   | { code: "no_binding_for_labels" }
   /** A planning run is lean, which a binding of the home folder cannot be. */
-  | { code: "plan_needs_lean" };
+  | { code: "plan_needs_lean" }
+  | { code: "dispatch_review_required" };
 export type IssueStatus =
   /**
    * It meets every condition. `picked_up` is false only when its last run is over and Linear has not

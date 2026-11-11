@@ -90,6 +90,43 @@ describe("backend selection", () => {
     ]);
   });
 
+  test("dispatch approval sends only the issue identifier and preview token, and the Linear lookup uses the plan run", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(null);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    await tauriBackend.getDispatchPreview("DEMO-3");
+    await tauriBackend.approveDispatch("DEMO-3", "demo-dispatch-1");
+    await tauriBackend.getDevelopmentIssueUrl(9);
+    expect(invoke.mock.calls).toEqual([
+      ["get_dispatch_preview", { issueIdentifier: "DEMO-3" }],
+      ["approve_dispatch", { issueIdentifier: "DEMO-3", token: "demo-dispatch-1" }],
+      ["get_development_issue_url", { id: 9 }],
+    ]);
+  });
+
+  test("continuation preview chooses the executor and confirmation sends only the source and token", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(13);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    await tauriBackend.getContinuationPreview(8, "codex");
+    expect(await tauriBackend.approveContinuation(8, "demo-continuation-1")).toBe(13);
+    expect(invoke.mock.calls).toEqual([
+      ["get_continuation_preview", { id: 8, executor: "codex" }],
+      ["approve_continuation", { id: 8, token: "demo-continuation-1" }],
+    ]);
+  });
+
+  test("a provider session read sends only the stored run's ID", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue({ messages: [] });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    await tauriBackend.readCodexSession(8);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("read_codex_session", { id: 8 });
+  });
+
   test("command errors become BackendError with the backend's text, and codes are recognised", async () => {
     vi.resetModules();
     const invoke = vi

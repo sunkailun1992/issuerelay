@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
-import type { Binding, CliPathStatus, ExecutorKind, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
+import { isInterruptedRun, pendingContinuationSourceId } from "@/lib/runs";
+import type { Binding, CliPathStatus, ExecutorKind, Job, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
 import type { Handoff } from "@/lib/workflow-types";
 
 /**
@@ -18,8 +19,11 @@ export const queryKeys = {
   jobs: ["jobs"] as const,
   job: (id: number) => ["job", id] as const,
   log: (id: number) => ["log", id] as const,
+  codexSessionPreview: (id: number) => ["codexSessionPreview", id] as const,
   handoff: (id: number) => ["handoff", id] as const,
   issues: ["issues"] as const,
+  dispatchPreview: (issueIdentifier: string) => ["dispatchPreview", issueIdentifier] as const,
+  continuationPreview: (id: number, executor: ExecutorKind | null) => ["continuationPreview", id, executor] as const,
   bindings: ["bindings"] as const,
   projects: ["projects"] as const,
   labels: ["labels"] as const,
@@ -75,9 +79,17 @@ export function useJobs(limit = RUN_LIST_LIMIT) {
 }
 
 /** One run, or `null` when there is none with this id. */
-export function useJob(id: number) {
+export function useJob(id: number, enabled = true) {
   const backend = useBackend();
-  return useQuery({ queryKey: queryKeys.job(id), queryFn: () => backend.job(id) });
+  return useQuery({ queryKey: queryKeys.job(id), queryFn: () => backend.job(id), enabled });
+}
+
+/** Resolves an interrupted attempt, including one with an unstarted follow-up. */
+export function useContinuationSource(job: Job | null | undefined): Job | null {
+  const previous = pendingContinuationSourceId(job);
+  const earlier = useJob(previous ?? 0, previous !== null);
+  if (isInterruptedRun(job)) return job;
+  return isInterruptedRun(earlier.data) && earlier.data.issue_uuid === job?.issue_uuid ? earlier.data : null;
 }
 
 /** The saved context for reviewing or taking over a run. */
@@ -102,10 +114,44 @@ export function useJobLog(id: number, { live }: { live: boolean }) {
   });
 }
 
+/** Read only while the user has opened the provider session preview. */
+export function useCodexSessionPreview(id: number) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: queryKeys.codexSessionPreview(id),
+    queryFn: () => backend.readCodexSession(id),
+    gcTime: 0,
+    refetchOnMount: "always",
+  });
+}
+
 /** The issues with the trigger label and what IssueRelay makes of each. Asks Linear. */
 export function useIssues() {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.issues, queryFn: () => backend.issues() });
+}
+
+/** Reads a fresh preview when the dialog opens and drops its content when the dialog closes. */
+export function useDispatchPreview(issueIdentifier: string) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: queryKeys.dispatchPreview(issueIdentifier),
+    queryFn: () => backend.getDispatchPreview(issueIdentifier),
+    gcTime: 0,
+    refetchOnMount: "always",
+  });
+}
+
+/** The selected executor and this exact prior run determine the confirmation token. */
+export function useContinuationPreview(id: number, executor: ExecutorKind | null) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: queryKeys.continuationPreview(id, executor),
+    queryFn: () => executor === null ? null : backend.getContinuationPreview(id, executor),
+    enabled: executor !== null,
+    gcTime: 0,
+    refetchOnMount: "always",
+  });
 }
 
 export function useBindings() {
@@ -265,6 +311,32 @@ export function useCancelJob() {
 
 export function useRetryJob() {
   return useAction<number, void>((backend, id) => backend.retryJob(id), jobChange, "actions.failed.retry");
+}
+
+export function useApproveDispatch(issueIdentifier: string) {
+  return useAction<string, void>(
+    (backend, token) => backend.approveDispatch(issueIdentifier, token),
+    [queryKeys.issues, queryKeys.status, queryKeys.jobs],
+    "dispatch.approval_failed",
+    { quiet: () => true, gcTime: 0 },
+  );
+}
+
+export function useApproveContinuation(id: number) {
+  return useAction<string, number>(
+    (backend, token) => backend.approveContinuation(id, token),
+    jobChange(id),
+    "dispatch.approval_failed",
+    { quiet: () => true, gcTime: 0 },
+  );
+}
+
+export function useOpenDevelopmentIssue(id: number) {
+  return useAction<void, void>(
+    async (backend) => backend.openLinear(await backend.getDevelopmentIssueUrl(id)),
+    [],
+    "actions.failed.open_linear",
+  );
 }
 
 export function useMarkDone() {

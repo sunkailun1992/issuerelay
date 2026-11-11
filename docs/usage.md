@@ -2,9 +2,9 @@
 
 IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务调度器。它把需求、工作目录和无人值守的 AI 运行连起来，保存队列与运行记录，让你能知道哪些任务在等待、正在执行或需要验收。
 
-它适合已经用 Linear 管理需求、希望把明确的开发任务交给本机 AI 命令行执行的个人开发者，也适合团队成员各自在自己的电脑上使用。本文描述 0.4.0 源码中的工作流。安装、系统要求与卸载见[安装说明](install.md)，已发布版本的安装包在 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest)。
+它适合已经用 Linear 管理需求、希望把明确的开发任务交给本机 AI 命令行执行的个人开发者，也适合团队成员各自在自己的电脑上使用。本文描述仓库当前源码中的工作流。派发预览尚未包含在已发布的 0.4.0 安装包中。安装、系统要求与卸载见[安装说明](install.md)，已发布版本的安装包在 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest)。
 
-从旧版升级时，先正常退出并备份应用数据。0.4.0 的数据库 schema 3 需要支持该 schema 的版本打开。[升级与备份](install.md#升级到-040-前备份数据)
+从旧版升级时，先正常退出并备份应用数据。已发布的 0.4.0 使用 schema 3。包含派发预览和续作的当前源码会迁移到 schema 5。请用支持 schema 5 的构建打开迁移后的数据库。[升级与备份](install.md#升级前备份数据)
 
 ## 谁负责什么
 
@@ -21,7 +21,7 @@ IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务�
 
 **实现模式：`ai-ready`。** 执行者读取需求、改代码并验证，按项目约定交付测试分支与结果；正常交付时把需求移到 `In Testing` 并留言。IssueRelay 核对运行结果后供你验收。它不保证每条需求都能一次完成，信息不足或运行失败时需要补充和处理。
 
-**方案模式：`ai-plan`。** 先读需求和代码，把方案写进 Linear 评论，限制改文件的能力；这次不进入实现。认可方案后，移除 `ai-plan`、加上 `ai-ready` 并让需求满足触发条件，才开始实现。方案运行仍会读取你有权访问的文件，并把内容发送给 AI 服务、写入 Linear；工具限制细节与「按个人设置」的例外见 [README 的安全须知](../README.md#安全须知)。
+**方案模式：`ai-plan`。** 先读需求和代码，把方案写进 Linear 评论。这次运行限制改文件的能力，只出方案。认可方案后，可以从该次运行详情的「执行开发」准备实现模式的派发预览。方案运行仍会读取你有权访问的文件，并把内容发送给 AI 服务、写入 Linear；工具限制细节与「按个人设置」的例外见 [README 的安全须知](../README.md#安全须知)。
 
 ## 准备与一次任务的生命周期
 
@@ -29,13 +29,17 @@ IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务�
 
 默认需要 Linear 有 `ai-ready` 标签，以及 `Todo`、`In Progress`、`In Testing`、`Done` 状态；使用方案模式时再准备 `ai-plan`。工作区名字不同时，在「设置 → 高级 → 触发用的名字」里对应修改，IssueRelay 不会自动创建它们。
 
-1. 在 Linear 写清目标与验收条件，指派给自己并设为 `Todo`。从主控会话发起时，可以先通过 IssueRelay MCP 登记需求上下文，再由你或已授权的流程添加 `ai-ready` 或 `ai-plan`。
-2. IssueRelay 轮询候选需求，检查项目绑定、目录与执行者是否就绪。同一项目可按分流标签绑定多个目录。没有匹配绑定时先等待。
-3. 可以运行后进入队列。同一目录一次只执行一条，同时受总并发上限约束；实现任务被未完成的 Linear 需求阻塞时先等待，方案模式不等待这些依赖。
-4. 开跑前再次核对条件，再启动所选 CLI。运行详情显示进度、日志、交付结果，以及本轮使用的执行者和已登记的任务快照。
+1. 在 Linear 写清目标与验收条件，指派给自己并设为 `Todo`。从聊天发起时，让主控会话整理本次任务的脱敏摘要，保留相关的复现命令、报错、版本、决定和未决事项，附上 Wiki 页面或小节引用，再通过 IssueRelay MCP 提交上下文草稿。再由你或已授权的流程添加 `ai-ready` 或 `ai-plan`。
+2. IssueRelay 发现候选需求。在桌面面板「需求」找到等待派发确认的任务，打开预览核对会话摘要、相关历史、范围、验收条件、配置的 Wiki 目录和引用，以及运行模式和执行去向。直接在 Linear 创建的需求可以确认空的会话上下文。确认后，IssueRelay 将获准的上下文写入本机任务记录。
+3. 确认后按项目绑定、目录、执行者就绪状态与依赖排队。同一目录一次只执行一条，同时受总并发上限约束。实现任务被未完成的 Linear 需求阻塞时先等待，方案模式不等待这些依赖。
+4. 开跑前再次核对 Linear 需求和派发条件。需求、草稿或实际执行去向已变化时，回到面板重新预览。启动后，运行详情显示本轮使用的执行者和已确认的任务快照。
 5. 实现交付后，审阅 diff、测试和实际行为。配置了 Wiki 目录时，按该库规则写入归档并登记回执。验收通过后，你在面板点「标记完成」，IssueRelay 才会把 Linear 状态设为 `Done`。
 
-退回需求或从方案转实现时，开启接续设置、前次有可用会话、结束未满七天且执行者与目录相同等条件满足，才可能沿用前次会话。部分 Codex 模式不支持接续。手动「重新运行」会新开后台会话，换执行者时可把保存的交接提示词带到新的会话。
+### 从方案进入开发
+
+在已结束的方案运行详情点「执行开发」。如果该需求尚未满足实现条件，可以打开面板提供的 Linear 需求链接，将它设为 Todo、指派给自己并添加 `ai-ready`。回到面板重新读取预览，确认同一需求的实现派发。这一步只针对当前需求，子需求分别派发。
+
+退回需求或从方案转实现时，开启接续设置、前次有可用会话、结束未满七天且执行者与目录相同等条件满足，才可能沿用前次会话。部分 Codex 模式不支持接续。手动「重新运行」需要再次确认派发预览，然后新开后台会话。已中断的尝试也可按下文的「继续上次」流程处理。
 
 ## 执行者、模型与推理力度
 
@@ -73,8 +77,8 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 | `resume` | 无参数；恢复监控并立即检查，不接续某个任务 |
 | `poll_now` | 无参数；请求立即检查；暂停时不执行轮询，也不解除暂停 |
 | `get_run` | 传正整数 `id` 或 `issue_identifier`，二选一。按需求编号读取最近一次运行。返回运行与交接详情，当前保留的标识在 `handoff.claim_id` |
-| `get_issue_context` | 传 `issue_identifier`，读取已登记的任务上下文和 `revision` |
-| `set_issue_context` | 传 `issue_identifier`、`expected_revision`、`request`、`scope`，可带 `acceptance`、`source_refs`、`preferred_executor`。只保存本机上下文 |
+| `get_issue_context` | 传 `issue_identifier`，读取最新草稿或已保存的任务上下文和 `revision` |
+| `set_issue_context` | 传 `issue_identifier`、`expected_revision`、`request`、`scope`，可带 `conversation_history`、`acceptance`、`source_refs`、`preferred_executor`。把待确认的草稿暂存在本机内存 |
 | `get_handoff` | 传 `job_id`，直接返回交接对象，包括当前保留的 `claim_id`、检查点、本轮快照和复核提示词。配置 Wiki 时还包含归档材料和回执 |
 | `claim_handoff` | 传 `job_id` 和 `executor`（`codex` 或 `claude`）。保留本机工作目录，直接返回包含本次 `claim_id` 的交接对象 |
 | `release_handoff` | 传 `job_id` 和自己领取时取得的 `claim_id`，释放该次目录保留 |
@@ -82,13 +86,28 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 用 Linear 需求编号调用 `get_run`、`get_issue_context` 或 `set_issue_context` 时，IssueRelay 会通过当前已连接的 Linear 解析需求的内部身份。不同工作区的同名编号按各自的需求处理。已知本地运行 ID 时，`get_run` 只传 `id` 即可完全在本机读取。
 
-首次登记用 `expected_revision: 0`。修改前用 `get_issue_context` 取当前 `revision`，再把它传给 `expected_revision`。如果修订号冲突，先重读并核对别人的修改。`request` 写目标，`scope` 写允许的范围，`acceptance` 和 `source_refs` 分别用字符串列表记录验收条件和来源。`preferred_executor` 只在用户明确选择时设置，入口由 MCP 客户端识别。登记成功后再让已授权的 Linear 流程添加运行标签。
+首次登记用 `expected_revision: 0`。修改前用 `get_issue_context` 取当前 `revision`，再把它传给 `expected_revision`。修订号冲突时，先重读并核对修改。`request` 写目标和脱敏摘要。`conversation_history` 可单独保留与任务有关的命令、报错原文、版本、已作决定和未决事项。`scope` 写允许的范围。`acceptance` 和 `source_refs` 分别记录验收条件和来源引用。`preferred_executor` 只在用户明确选择时设置，入口由 MCP 客户端识别。草稿不随宿主重启保留，添加标签只让需求成为候选。
 
-「标记完成」「重新运行」「停止」需要到面板操作。MCP 与命令行不提供这些接口。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+「确认派发」「标记完成」「重新运行」「停止」需要到面板操作。MCP 与命令行不提供这些接口。请提交脱敏摘要、相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+
+## 继续中断的运行
+
+1. 打开最近一次已开始且因失败或取消而中断的运行，点「继续上次」，选择 Codex 或 Claude Code。若有手动交接保留，请先释放。续作使用原项目工作目录。如果项目绑定改到了别处，需要先恢复原绑定。
+2. 核对预览中的原运行、接续方式、目录、执行器、模型、推理力度、权限、当前完整任务上下文和已记录的续作证据。上下文包括已提交的任务摘要、任务相关会话历史和 Wiki 引用。证据取自已记录的运行结果、检查点和 Git 快照，整段聊天、原始日志和截图不随续作发送。
+3. 确认后，IssueRelay 保存一次新的尝试，或接管已经为该次续作排队且尚未开始的尝试。原运行保留。需求须在当前 Linear 工作区中仍指派给你并带原模式的标签。实现任务可以保持 Todo 或 In Progress，方案任务仍使用 Todo。IssueRelay 在这一流程中不更新 Linear。
+4. 同一执行器符合接续设置、原生会话 ID、原目录、七天期限和运行模式等条件时，预览显示恢复原会话，确认后用官方 CLI 接续。已确认恢复若在启动时失败，会显示失败原因并停下。切换执行器时，预览显示新会话交接，所选执行器在同一工作目录接收已确认的任务上下文和交接证据。同一执行器不符合原生恢复条件时，也可在预览明确显示新会话交接后再确认。
+
+## 查看和管理原生会话
+
+运行详情有原生会话 ID 时，会显示在原工作目录运行的打开命令。Codex 使用 `codex resume <session-id>`，Claude Code 使用 `claude --resume <session-id>`。Codex 的近期文本预览通过官方 App Server 的只读查询加载，不启动推理。预览为有限的用户与助手消息，完整会话可在 Codex 打开。Claude Code 会话通过原生客户端查看。CLI 2.1.285 或更新版本在 macOS 和 x64 Windows 上使用支持的 Claude 订阅时，也可用 `claude --desktop --resume <session-id>` 将已经停止的 CLI 会话交给 Claude Desktop 打开。 [Codex App Server](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming) · [Claude Code 会话管理](https://code.claude.com/docs/en/sessions) · [Claude Desktop 打开 CLI 会话](https://code.claude.com/docs/en/desktop#coming-from-the-cli)
+
+原生会话由各自的官方客户端管理。Codex 的归档会保留会话记录，并尝试归档由它生成的后代会话。Claude Code 后台列表中的会话可在官方客户端处理，`claude rm <id>` 处理后台列表记录和符合条件的 Claude 工作树，原生会话记录仍可通过 `claude --resume` 访问。IssueRelay 的日志保留设置只管理自身的运行日志。原生会话存储不由 IssueRelay 直接操作。 [Codex 归档规则](https://learn.chatgpt.com/docs/app-server#archive-a-thread) · [Claude Code 后台会话移除规则](https://code.claude.com/docs/en/agent-view#what-deleting-a-session-removes)
+
+Claude Desktop 的 Code 会话也可以在侧栏菜单归档。归档前先保存需要保留的工作树改动。根据会话状态及操作选项，归档可能丢弃未提交改动或清理未跟踪文件。 [Claude Desktop 工作树归档规则](https://code.claude.com/docs/en/desktop#keep-uncommitted-changes-when-a-session-is-archived)
 
 ## 手动接力、独立复核与归档
 
-运行详情会保存执行者报告的最新检查点，以及可取得的分支、提交和改动文件等本轮快照。只有执行者返回可识别的结构化额度事件时，IssueRelay 才把中断标为「额度已用尽」并阻止自动重跑。重置时间以执行者报告为准。普通错误文字仍显示为一般失败，可以查看日志和已保存的交接资料。恢复时由你选择继续等待、手动重跑或换执行者接手。
+运行详情会保存执行者报告的最新检查点，以及可取得的分支、提交和改动文件等本轮快照。只有执行者返回可识别的结构化额度事件时，IssueRelay 才把中断标为「额度已用尽」并阻止自动重跑。重置时间以执行者报告为准。普通错误文字仍显示为一般失败，可以查看日志和已保存的交接资料。恢复时可以继续等待，或通过「继续上次」选择恢复原会话或新会话交接。仍可使用下面的手动交接。
 
 1. **接手续作。** 在最近一次已结束、尚未完成的运行详情，选择执行者并点「领取交接」，或调用 `claim_handoff`。IssueRelay 会保留该本地目录，避免调度器再向它派工。点「复制交接提示词」，自己打开所选执行者的新会话，在同一目录核对工作树再继续。会话停止写入后，点「释放交接」或调用 `release_handoff`。用 MCP 操作时，请保存自己领取时返回的 `claim_id`，释放时传这个值。这样即使请求迟到，也不会清除后来重新领取的保留。
 2. **独立复核。** 在运行详情点「复制独立复核提示词」，交给一个新会话。复核者依据需求与验收条件核对 diff、执行者报告的验证、剩余风险，并按授权做验证。最终是否验收通过由你判断。

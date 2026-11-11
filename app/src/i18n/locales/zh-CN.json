@@ -288,6 +288,51 @@
     "setup_body": "先在环境检查里配好 Claude Code 或 Codex，再把一个 Linear 项目绑定到本地目录。",
     "bind_project": "绑定项目"
   },
+  "dispatch": {
+    "preview": "预览",
+    "title": "确认派发",
+    "description": "请核对这里的脱敏摘要、会话历史和引用。确认后会随需求保存，并允许执行者启动。",
+    "confirm": "确认并派发",
+    "implement": "执行开发",
+    "summary": "本轮会话脱敏摘要",
+    "wiki_refs": "Wiki 引用",
+    "empty_context": "未附加会话摘要或 Wiki 引用。执行者会使用 Linear 需求。",
+    "preview_failed": "无法读取派发预览",
+    "approval_failed": "无法确认派发",
+    "reload_preview": "重新读取预览",
+    "conversation_history": "当前会话",
+    "implementation_scope": "执行开发只针对 {{issue}}。它的子需求需分别派发。",
+    "prepare_implementation": "请在 Linear 将此需求设为 {{todo}}，指派给自己并添加 {{label}} 标签。完成后回到这里重新读取预览。",
+    "issue_mismatch": "预览与此需求不匹配。请重新读取后再确认。"
+  },
+  "continuation": {
+    "action": "继续上次",
+    "description": "选择接手执行器，核对任务上下文和上次运行的交接内容后继续。",
+    "source_run": "上次运行",
+    "source_value": "#{{id}} · {{executor}}",
+    "strategy": "接续方式",
+    "resume_session": "恢复原执行器会话",
+    "handoff": "携带已确认的交接内容开启新会话",
+    "evidence": "上次运行的证据",
+    "preview_mismatch": "预览已与此运行或执行器不匹配，请重新加载后再确认。",
+    "confirm": "确认并继续"
+  },
+  "provider_session": {
+    "title": "执行器原会话",
+    "reopen_hint": "在上方显示的工作目录运行这条命令，即可在原客户端阅读完整会话。",
+    "copy": "复制打开命令",
+    "preview": "预览 Codex 会话",
+    "preview_description": "查看 Codex 原会话的近期文字。",
+    "read_failed": "无法读取 Codex 会话",
+    "session_mismatch": "返回的会话与这次运行记录中的会话不一致。",
+    "empty": "没有可预览的文字消息。",
+    "more": "打开 Codex 原会话可查看更早的消息。",
+    "archive_hint": "如需归档，请使用 Codex 客户端中可用的归档操作。",
+    "role": {
+      "user": "用户",
+      "assistant": "助手"
+    }
+  },
   "issues": {
     "description": "指派给你、带 {{label}} 或 {{plan_label}} 标签的需求，最近更新的 50 条",
     "empty_title": "还没有带 {{label}} 标签的需求",
@@ -314,7 +359,8 @@
       "blocked_by": "被 {{issues}} 挡住，它们还没完成",
       "labels_match_several_bindings": "标签 {{labels}} 对上了项目的多个绑定，请只留一个",
       "no_binding_for_labels": "项目里没有绑定接它的标签：请加一个不带标签的绑定，或把它的某个标签加给一个绑定",
-      "plan_needs_lean": "方案不能在主目录里出，请绑定别的目录"
+      "plan_needs_lean": "方案不能在主目录里出，请绑定别的目录",
+      "dispatch_review_required": "等待派发确认"
     },
     "load_failed": "无法从 Linear 读取需求",
     "open_guide": "打开引导",
@@ -352,13 +398,13 @@
       "finished": "结束时间",
       "summary": "摘要",
       "mode": "运行用途",
-      "resumed": "接续",
+      "resumed": "接续来源",
       "usage": "用量"
     },
     "mode": {
       "plan": "只出方案"
     },
-    "resumed_from": "运行 #{{id}} 的会话",
+    "resumed_from": "接续自运行 #{{id}}",
     "usage": {
       "cost": "{{cost}}（估算）",
       "tokens": "输入 {{input}}、输出 {{output}} token",

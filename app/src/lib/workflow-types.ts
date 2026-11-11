@@ -1,4 +1,4 @@
-import type { ExecutorKind } from "./types";
+import type { Effort, ExecutorKind, PermissionProfile, RunMode } from "./types";
 
 /** The request and references registered for one issue revision. */
 export interface IssueContext {
@@ -6,9 +6,43 @@ export interface IssueContext {
   origin_executor: ExecutorKind | null;
   preferred_executor: ExecutorKind | null;
   request: string;
+  conversation_history?: string | null;
   scope: string;
   acceptance: string[];
   source_refs: string[];
+}
+
+/** The exact context and execution settings covered by one dispatch review. */
+export interface DispatchPreview {
+  token: string;
+  issue_uuid: string;
+  issue_identifier: string;
+  title: string;
+  mode: RunMode;
+  context: IssueContext | null;
+  executor: ExecutorKind;
+  directory: string;
+  model: string | null;
+  effort: Effort | null;
+  wiki_root?: string | null;
+}
+
+/** The exact source, destination and evidence approved for continuing an interrupted run. */
+export interface ContinuationPreview extends DispatchPreview {
+  source_job_id: number;
+  source_executor: ExecutorKind;
+  strategy: "resume_session" | "handoff";
+  permission: PermissionProfile;
+  claude_ultracode?: boolean;
+  evidence: string;
+}
+
+/** Recent text from the provider's own session for local review. */
+export interface NativeSessionPreview {
+  session_id: string;
+  title: string | null;
+  messages: { role: "user" | "assistant"; text: string }[];
+  has_more: boolean;
 }
 
 /** The saved decisions and facts of a run, separate from the original request and from its log. */

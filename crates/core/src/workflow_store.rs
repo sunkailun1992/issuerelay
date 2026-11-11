@@ -4,19 +4,34 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::config::ExecutorKind;
-use crate::workflow::{ArchiveReceipt, IssueContext, RunMemory};
+use crate::workflow::{ArchiveReceipt, ContinuationIntent, IssueContext, RunMemory};
 
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_CONTEXT_BYTES: usize = 128 * 1024;
+const MAX_CONTINUATION_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS workflow_context (
     issue_key TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision > 0),
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_dispatch_review (
+    issue_key TEXT PRIMARY KEY,
+    issue_updated_at TEXT NOT NULL,
+    context_revision INTEGER NOT NULL CHECK (context_revision >= 0),
+    target TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_continuation (
+    job_id INTEGER PRIMARY KEY CHECK (job_id > 0),
+    issue_updated_at TEXT NOT NULL,
+    context_revision INTEGER NOT NULL CHECK (context_revision >= 0),
     payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workflow_memory (
@@ -90,17 +105,29 @@ pub fn write_context(
     expected_revision: u64,
     context: &IssueContext,
 ) -> Result<IssueContext> {
-    let key = local_issue_key(key)?;
-    let expected = i64::try_from(expected_revision).context("invalid context revision")?;
-    let revision = expected
+    let revision = expected_revision
         .checked_add(1)
         .context("context revision is exhausted")?;
     let context = IssueContext {
-        revision: u64::try_from(revision).context("invalid next context revision")?,
+        revision,
         ..context.clone()
     };
+    write_context_at_revision(conn, key, expected_revision, &context)?;
+    Ok(context)
+}
+
+fn write_context_at_revision(
+    conn: &Connection,
+    key: &str,
+    expected_revision: u64,
+    context: &IssueContext,
+) -> Result<()> {
+    let key = local_issue_key(key)?;
+    let expected = i64::try_from(expected_revision).context("invalid context revision")?;
+    let revision = i64::try_from(context.revision).context("invalid next context revision")?;
+    ensure!(revision > expected, "issue context revision must advance");
     context.validate()?;
-    let payload = encode(&context)?;
+    let payload = encode(context)?;
     let changed = if expected == 0 {
         conn.execute(
             "INSERT INTO workflow_context (issue_key, revision, payload)
@@ -118,7 +145,158 @@ pub fn write_context(
         changed == 1,
         "issue context revision changed; read it and try again"
     );
-    Ok(context)
+    Ok(())
+}
+
+/// A review applies to the exact Linear revision, context and execution destination.
+pub fn dispatch_approved(
+    conn: &Connection,
+    key: &str,
+    updated_at: DateTime<Utc>,
+    revision: u64,
+    target: &str,
+) -> Result<bool> {
+    let key = local_issue_key(key)?;
+    let revision = i64::try_from(revision).context("invalid context revision")?;
+    let updated_at = updated_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM workflow_dispatch_review
+             WHERE issue_key = ?1 AND issue_updated_at = ?2
+               AND context_revision = ?3 AND target = ?4
+         )",
+        params![key, updated_at, revision, target],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn clear_dispatch_approval(conn: &Connection, key: &str) -> Result<()> {
+    let key = local_issue_key(key)?;
+    conn.execute(
+        "DELETE FROM workflow_dispatch_review WHERE issue_key = ?1",
+        [key],
+    )?;
+    Ok(())
+}
+
+/// Commits a reviewed draft and its approval together, or approves the current saved context.
+/// Revision zero refers to a task without saved context.
+pub fn approve_dispatch(
+    conn: &Connection,
+    key: &str,
+    updated_at: DateTime<Utc>,
+    expected_revision: u64,
+    draft: Option<&IssueContext>,
+    target: &str,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    record_dispatch_approval(&tx, key, updated_at, expected_revision, draft, target)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Records approval and any reviewed draft within the caller's transaction.
+pub(crate) fn record_dispatch_approval(
+    conn: &Connection,
+    key: &str,
+    updated_at: DateTime<Utc>,
+    expected_revision: u64,
+    draft: Option<&IssueContext>,
+    target: &str,
+) -> Result<u64> {
+    let key = local_issue_key(key)?;
+    ensure!(
+        !target.trim().is_empty() && target.len() <= MAX_PAYLOAD_BYTES,
+        "dispatch target is empty or too large"
+    );
+    let revision = if let Some(draft) = draft {
+        write_context_at_revision(conn, &key, expected_revision, draft)?;
+        draft.revision
+    } else {
+        let revision = read_context(conn, &key)?.map_or(0, |context| context.revision);
+        ensure!(
+            revision == expected_revision,
+            "issue context revision changed; read it and try again"
+        );
+        revision
+    };
+    let stored_revision = i64::try_from(revision).context("invalid context revision")?;
+    let updated_at = updated_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    conn.execute(
+        "INSERT INTO workflow_dispatch_review
+             (issue_key, issue_updated_at, context_revision, target)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(issue_key) DO UPDATE SET issue_updated_at = excluded.issue_updated_at,
+             context_revision = excluded.context_revision, target = excluded.target",
+        params![key, updated_at, stored_revision, target],
+    )?;
+    Ok(revision)
+}
+
+pub fn read_continuation(conn: &Connection, job_id: i64) -> Result<Option<ContinuationIntent>> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload FROM workflow_continuation WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    payload
+        .map(|payload| {
+            ensure!(
+                payload.len() <= MAX_CONTINUATION_PAYLOAD_BYTES,
+                "continuation evidence is too large"
+            );
+            let intent: ContinuationIntent = serde_json::from_str(&payload)
+                .map_err(|_| anyhow::anyhow!("invalid stored continuation evidence"))?;
+            intent.validate()?;
+            Ok(intent)
+        })
+        .transpose()
+}
+
+pub fn continuation_approved(
+    conn: &Connection,
+    job_id: i64,
+    updated_at: DateTime<Utc>,
+    revision: u64,
+) -> Result<bool> {
+    let revision = i64::try_from(revision).context("invalid context revision")?;
+    let updated_at = updated_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    Ok(conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM workflow_continuation
+             WHERE job_id = ?1 AND issue_updated_at = ?2 AND context_revision = ?3
+         )",
+        params![job_id, updated_at, revision],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn write_continuation(
+    conn: &Connection,
+    job_id: i64,
+    updated_at: DateTime<Utc>,
+    revision: u64,
+    intent: &ContinuationIntent,
+) -> Result<()> {
+    intent.validate()?;
+    let payload =
+        serde_json::to_string(intent).context("cannot serialize continuation evidence")?;
+    ensure!(
+        payload.len() <= MAX_CONTINUATION_PAYLOAD_BYTES,
+        "continuation evidence is too large"
+    );
+    let revision = i64::try_from(revision).context("invalid context revision")?;
+    let updated_at = updated_at.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    conn.execute(
+        "INSERT INTO workflow_continuation (job_id, issue_updated_at, context_revision, payload)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(job_id) DO UPDATE SET issue_updated_at = excluded.issue_updated_at,
+             context_revision = excluded.context_revision, payload = excluded.payload",
+        params![job_id, updated_at, revision, payload],
+    )?;
+    Ok(())
 }
 
 pub fn read_memory(conn: &Connection, job_id: i64) -> Result<Option<RunMemory>> {
@@ -271,6 +449,15 @@ fn encode(payload: &impl Serialize) -> Result<String> {
     Ok(text)
 }
 
+pub fn validate_context_payload(context: &IssueContext) -> Result<()> {
+    context.validate()?;
+    ensure!(
+        encode(context)?.len() <= MAX_CONTEXT_BYTES,
+        "task brief is too large"
+    );
+    Ok(())
+}
+
 fn decode<T: DeserializeOwned>(payload: &str) -> Result<T> {
     ensure!(
         payload.len() <= MAX_PAYLOAD_BYTES,
@@ -317,6 +504,114 @@ mod tests {
         assert_eq!(persisted.revision, 2);
         assert_eq!(persisted.request, "Keep the public behavior");
         assert_eq!(persisted.origin_executor, Some(ExecutorKind::Codex));
+    }
+
+    #[test]
+    fn dispatch_approval_matches_the_exact_issue_revision_and_target() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let key = "00000000-0000-4000-8000-00000000000a";
+        let other_issue = "00000000-0000-4000-8000-00000000000b";
+        let updated_at = DateTime::UNIX_EPOCH;
+        let edited_at = updated_at + chrono::Duration::nanoseconds(1);
+        let target = r#"{"executor":"codex"}"#;
+        let other_target = r#"{"executor":"claude"}"#;
+
+        assert!(!dispatch_approved(&conn, key, updated_at, 0, target).unwrap());
+        approve_dispatch(
+            &conn,
+            &key.to_ascii_uppercase(),
+            updated_at,
+            0,
+            None,
+            target,
+        )
+        .unwrap();
+        assert!(read_context(&conn, key).unwrap().is_none());
+        assert!(dispatch_approved(&conn, key, updated_at, 0, target).unwrap());
+        assert!(!dispatch_approved(&conn, other_issue, updated_at, 0, target).unwrap());
+        assert!(!dispatch_approved(&conn, key, edited_at, 0, target).unwrap());
+        assert!(!dispatch_approved(&conn, key, updated_at, 1, target).unwrap());
+        assert!(!dispatch_approved(&conn, key, updated_at, 0, other_target).unwrap());
+
+        let draft = IssueContext {
+            revision: 1,
+            request: "Fix the demo".into(),
+            scope: "Only the demo fixture".into(),
+            ..IssueContext::default()
+        };
+        approve_dispatch(&conn, key, edited_at, 0, Some(&draft), target).unwrap();
+        assert!(dispatch_approved(&conn, key, edited_at, 1, target).unwrap());
+        assert!(!dispatch_approved(&conn, key, updated_at, 0, target).unwrap());
+        let context = read_context(&conn, key).unwrap().unwrap();
+        assert_eq!(context.revision, 1);
+        assert_eq!(context.request, draft.request);
+
+        assert!(approve_dispatch(&conn, key, edited_at, 0, Some(&draft), other_target).is_err());
+        assert!(approve_dispatch(&conn, key, edited_at, 0, None, other_target).is_err());
+        assert!(dispatch_approved(&conn, key, edited_at, 1, target).unwrap());
+        assert_eq!(read_context(&conn, key).unwrap(), Some(context));
+
+        clear_dispatch_approval(&conn, key).unwrap();
+        assert!(!dispatch_approved(&conn, key, edited_at, 1, target).unwrap());
+        assert_eq!(read_context(&conn, key).unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn dispatch_approval_preserves_the_reviewed_revision_after_draft_edits() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let key = "00000000-0000-4000-8000-00000000000a";
+        let initial = IssueContext {
+            request: "Fix the demo".into(),
+            scope: "Only the demo fixture".into(),
+            ..IssueContext::default()
+        };
+        let initial = write_context(&conn, key, 0, &initial).unwrap();
+        let reviewed = IssueContext {
+            revision: 4,
+            request: "Keep the public behavior".into(),
+            ..initial.clone()
+        };
+        let target = r#"{"executor":"codex"}"#;
+        let updated_at = DateTime::UNIX_EPOCH;
+
+        approve_dispatch(
+            &conn,
+            key,
+            updated_at,
+            initial.revision,
+            Some(&reviewed),
+            target,
+        )
+        .unwrap();
+        assert_eq!(read_context(&conn, key).unwrap(), Some(reviewed));
+        assert!(dispatch_approved(&conn, key, updated_at, 4, target).unwrap());
+        assert!(!dispatch_approved(&conn, key, updated_at, 2, target).unwrap());
+    }
+
+    #[test]
+    fn dispatch_approval_rolls_back_the_draft_if_recording_approval_fails() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_review BEFORE INSERT ON workflow_dispatch_review
+             BEGIN SELECT RAISE(ABORT, 'simulated approval failure'); END;",
+        )
+        .unwrap();
+        let key = "00000000-0000-4000-8000-00000000000a";
+        let draft = IssueContext {
+            revision: 1,
+            request: "Fix the demo".into(),
+            scope: "Only the demo fixture".into(),
+            ..IssueContext::default()
+        };
+        let target = r#"{"executor":"codex"}"#;
+        let updated_at = DateTime::UNIX_EPOCH;
+
+        assert!(approve_dispatch(&conn, key, updated_at, 0, Some(&draft), target).is_err());
+        assert!(read_context(&conn, key).unwrap().is_none());
+        assert!(!dispatch_approved(&conn, key, updated_at, 1, target).unwrap());
     }
 
     #[test]
@@ -383,6 +678,7 @@ mod tests {
         ensure_schema(&conn).unwrap();
         let memory = RunMemory {
             context: None,
+            wiki_root: None,
             milestones: vec![],
             decision: None,
             checkpoint: Some(Checkpoint {

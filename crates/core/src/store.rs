@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{
     Connection, OptionalExtension, Row, params, params_from_iter,
@@ -17,6 +17,8 @@ use rusqlite::{
 
 use crate::config::{Binding, ExecutorKind};
 use crate::model::{Issue, Job, JobState, ProcessTag, RunMode, RunUsage};
+use crate::workflow::{ContinuationIntent, ContinuationStrategy, IssueContext};
+use crate::workflow_store as ws;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS jobs (
@@ -45,8 +47,8 @@ CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
-// An older scheduler would ignore the durable directory reservations.
-const SCHEMA_VERSION: i64 = 3;
+// Older schedulers would ignore the approved continuation attached to a queued job.
+const SCHEMA_VERSION: i64 = 5;
 
 /// The columns schema 2 added to the M1 table, with their types.
 const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
@@ -359,6 +361,132 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Approved continuations awaiting dispatch, including when Linear's Todo poll omits them.
+    pub fn list_pending_continuations(&self) -> Result<Vec<Job>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM jobs WHERE state IN (?1, ?2)
+             AND id IN (SELECT job_id FROM workflow_continuation) ORDER BY id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![JobState::Queued.as_str(), JobState::WaitingBinding.as_str()],
+            row_to_job,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn read_continuation(&self, job_id: i64) -> Result<Option<ContinuationIntent>> {
+        ws::read_continuation(&self.conn, job_id)
+    }
+
+    pub fn continuation_approved(
+        &self,
+        job_id: i64,
+        updated_at: DateTime<Utc>,
+        revision: u64,
+    ) -> Result<bool> {
+        ws::continuation_approved(&self.conn, job_id, updated_at, revision)
+    }
+
+    /// Records the exact approved continuation and its dispatch stamp with its pending job.
+    /// A never-started child already queued for the source can be adopted; prior attempts stay.
+    pub fn approve_continuation(
+        &self,
+        new: NewJob<'_>,
+        intent: &ContinuationIntent,
+        expected_latest_job_id: i64,
+        expected_revision: u64,
+        draft: Option<&IssueContext>,
+    ) -> Result<Job> {
+        let issue = new.issue;
+        let target = &intent.destination;
+        ensure!(
+            matches!(new.state, JobState::WaitingBinding | JobState::Queued)
+                && new.resume_job_id == Some(intent.source_job_id)
+                && new.mode == target.mode
+                && new.executor.is_none_or(|kind| kind == target.executor)
+                && new.binding.is_none_or(|binding| {
+                    binding.id == target.binding_id && binding.directory == target.directory
+                })
+                && (new.state != JobState::Queued
+                    || (new.executor.is_some() && new.binding.is_some())),
+            "pending continuation does not match its reviewed destination"
+        );
+        let tx = self.conn.unchecked_transaction()?;
+        let source = self
+            .get(intent.source_job_id)?
+            .context("source run not found")?;
+        ensure!(
+            source.issue_uuid == issue.uuid
+                && source.mode == new.mode
+                && source.started_at.is_some()
+                && matches!(source.state, JobState::Failed | JobState::Canceled)
+                && source.executor.is_some()
+                && (intent.strategy != ContinuationStrategy::ResumeSession
+                    || source.executor == Some(intent.executor)),
+            "source run is no longer eligible for this continuation"
+        );
+        let latest = self
+            .latest_for_issue(&issue.uuid)?
+            .context("latest run not found")?;
+        ensure!(
+            latest.id == expected_latest_job_id,
+            "latest run changed; open a new continuation preview"
+        );
+        let linked_unstarted = latest.resume_job_id == Some(source.id)
+            && latest.started_at.is_none()
+            && latest.log_path.is_none();
+        ensure!(
+            latest.id == source.id
+                || (linked_unstarted
+                    && matches!(
+                        latest.state,
+                        JobState::WaitingBinding | JobState::Queued | JobState::Canceled
+                    )),
+            "a newer run already owns this issue"
+        );
+        ensure!(
+            ws::read_claim(&tx, source.id)?.is_none() && ws::read_claim(&tx, latest.id)?.is_none(),
+            "release the handoff before approving this continuation"
+        );
+        let revision = ws::record_dispatch_approval(
+            &tx,
+            &issue.uuid,
+            issue.updated_at,
+            expected_revision,
+            draft,
+            &serde_json::to_string(target)?,
+        )?;
+        let child = if linked_unstarted && latest.state != JobState::Canceled {
+            self.assign(
+                latest.id,
+                new.state,
+                new.binding,
+                new.executor,
+                new.reason.as_deref(),
+            )?;
+            self.set_mode(latest.id, new.mode)?;
+            tx.execute(
+                "UPDATE jobs SET issue_identifier = ?2, title = ?3, priority = ?4,
+                 discovered_updated_at = ?5 WHERE id = ?1",
+                params![
+                    latest.id,
+                    issue.identifier,
+                    issue.title,
+                    i64::from(issue.priority),
+                    fmt(issue.updated_at),
+                ],
+            )?;
+            self.get(latest.id)?
+                .context("pending continuation disappeared")?
+        } else {
+            self.insert(new)?
+        };
+        ws::write_continuation(&tx, child.id, issue.updated_at, revision, intent)?;
+        tx.commit()?;
+        Ok(child)
+    }
+
     /// The newest runs first, at most `limit` rows.
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Job>> {
         let sql = format!("SELECT {COLUMNS} FROM jobs ORDER BY id DESC LIMIT ?1");
@@ -488,6 +616,10 @@ impl Store {
     /// re-enqueueing inserts a new row instead. A manual re-run starts afresh: what the previous
     /// attempt reported and the session it was to continue are cleared.
     pub fn requeue(&self, id: i64) -> Result<()> {
+        ensure!(
+            self.read_continuation(id)?.is_none(),
+            "this run has saved continuation evidence; open a new continuation preview"
+        );
         self.conn.execute(
             &format!(
                 "UPDATE jobs SET state = ?2, reason = NULL, summary = NULL, started_at = NULL, \
@@ -496,6 +628,20 @@ impl Store {
             params![id, JobState::Queued.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Creates a fresh attempt while preserving the reviewed evidence on the prior row.
+    pub fn queue_fresh_attempt(&self, id: i64) -> Result<i64> {
+        let inserted = self.conn.execute(
+            "INSERT INTO jobs (issue_uuid, issue_identifier, title, binding_id, directory,
+             executor, state, priority, issue_created_at, discovered_updated_at, created_at, mode)
+             SELECT issue_uuid, issue_identifier, title, binding_id, directory, executor,
+             ?2, priority, issue_created_at, COALESCE(verified_updated_at, discovered_updated_at),
+             ?3, mode FROM jobs WHERE id = ?1",
+            params![id, JobState::Queued.as_str(), fmt(Utc::now())],
+        )?;
+        ensure!(inserted == 1, "the run to retry disappeared");
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// Records what the run is for (`RunMode::stored`).
@@ -630,8 +776,9 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Binding, ExecutorKind};
+    use crate::config::{Binding, ExecutorKind, LeanStatus, PermissionProfile};
     use crate::model::{Issue, JobState, ProcessTag, RunMode, RunUsage};
+    use crate::workflow::DispatchDestination;
     use chrono::{Duration, TimeZone, Utc};
     use std::path::{Path, PathBuf};
 
@@ -686,6 +833,185 @@ mod tests {
                 resume_job_id: None,
             })
             .unwrap()
+    }
+
+    fn interrupted(store: &Store, uuid: &str) -> Job {
+        let job = queued(store, uuid);
+        assert!(
+            store
+                .mark_started(job.id, Path::new("source.jsonl"))
+                .unwrap()
+        );
+        store
+            .mark_finished(job.id, JobState::Canceled, Some("stopped"), None, None)
+            .unwrap();
+        store.get(job.id).unwrap().unwrap()
+    }
+
+    fn continuation(source: &Job, binding: &Binding) -> ContinuationIntent {
+        ContinuationIntent {
+            source_job_id: source.id,
+            executor: ExecutorKind::Codex,
+            strategy: ContinuationStrategy::Handoff,
+            evidence: "Changed demo.txt.\nNext, verify the demo build.".into(),
+            destination: DispatchDestination {
+                binding_id: binding.id.clone(),
+                directory: binding.directory.clone(),
+                canonical_directory: binding.directory.clone(),
+                executor: ExecutorKind::Codex,
+                mode: RunMode::Implement,
+                model: None,
+                effort: None,
+                permission: PermissionProfile::Full,
+                lean: LeanStatus::On,
+                wiki_root: None,
+                claude_ultracode: false,
+            },
+        }
+    }
+
+    fn pending_child<'a>(issue: &'a Issue, binding: &'a Binding, source_id: i64) -> NewJob<'a> {
+        NewJob {
+            issue,
+            binding: Some(binding),
+            executor: Some(ExecutorKind::Codex),
+            state: JobState::Queued,
+            reason: None,
+            mode: RunMode::Implement,
+            resume_job_id: Some(source_id),
+        }
+    }
+
+    #[test]
+    fn approved_continuation_adopts_pending_child_and_survives_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runs.sqlite");
+        let store = Store::open(&path).unwrap();
+        let issue = issue("1");
+        let binding = binding();
+        let source = interrupted(&store, &issue.uuid);
+        let intent = continuation(&source, &binding);
+        let mut new = pending_child(&issue, &binding, source.id);
+        new.state = JobState::WaitingBinding;
+        new.binding = None;
+        new.executor = None;
+        let existing = store.insert(new).unwrap();
+        assert!(store.list_pending_continuations().unwrap().is_empty());
+        let context = IssueContext {
+            revision: 1,
+            request: "Check the demo build.".into(),
+            scope: "Demo only.".into(),
+            ..IssueContext::default()
+        };
+        let child = store
+            .approve_continuation(
+                pending_child(&issue, &binding, source.id),
+                &intent,
+                existing.id,
+                0,
+                Some(&context),
+            )
+            .unwrap();
+        assert_eq!(child.id, existing.id);
+        assert_eq!(child.resume_job_id, Some(source.id));
+        assert_eq!(child.state, JobState::Queued);
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.list_pending_continuations().unwrap(),
+            vec![child.clone()]
+        );
+        assert_eq!(store.read_continuation(child.id).unwrap(), Some(intent));
+        assert_eq!(store.get(source.id).unwrap(), Some(source));
+        assert!(
+            store
+                .continuation_approved(child.id, issue.updated_at, 1)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .continuation_approved(child.id, issue.updated_at, 0)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .continuation_approved(child.id, issue.updated_at + Duration::seconds(1), 1)
+                .unwrap()
+        );
+        assert!(store.requeue(child.id).is_err());
+    }
+
+    #[test]
+    fn continuation_preserves_canceled_unstarted_child_and_rejects_a_stale_preview() {
+        let store = Store::open_in_memory().unwrap();
+        let issue = issue("1");
+        let binding = binding();
+        let source = interrupted(&store, &issue.uuid);
+        let intent = continuation(&source, &binding);
+        let canceled = store
+            .insert(pending_child(&issue, &binding, source.id))
+            .unwrap();
+        store
+            .set_state(canceled.id, JobState::Canceled, Some("stopped"))
+            .unwrap();
+        let approve = |latest| {
+            store.approve_continuation(
+                pending_child(&issue, &binding, source.id),
+                &intent,
+                latest,
+                0,
+                None,
+            )
+        };
+        assert!(approve(source.id).is_err());
+        let child = approve(canceled.id).unwrap();
+        assert_ne!(child.id, canceled.id);
+        assert_eq!(
+            store.get(canceled.id).unwrap().unwrap().state,
+            JobState::Canceled
+        );
+        assert!(approve(canceled.id).is_err());
+    }
+
+    #[test]
+    fn failed_continuation_evidence_write_rolls_back_context_and_child() {
+        let store = Store::open_in_memory().unwrap();
+        let issue = issue("1");
+        let binding = binding();
+        let source = interrupted(&store, &issue.uuid);
+        let mut intent = continuation(&source, &binding);
+        intent.evidence.clear();
+        let context = IssueContext {
+            revision: 1,
+            request: "Check the demo build.".into(),
+            scope: "Demo only.".into(),
+            ..IssueContext::default()
+        };
+        assert!(
+            store
+                .approve_continuation(
+                    pending_child(&issue, &binding, source.id),
+                    &intent,
+                    source.id,
+                    0,
+                    Some(&context),
+                )
+                .is_err()
+        );
+        assert_eq!(store.latest_for_issue(&issue.uuid).unwrap(), Some(source));
+        let conn = store.workflow_connection();
+        assert_eq!(ws::read_context(conn, &issue.uuid).unwrap(), None);
+        assert!(
+            !ws::dispatch_approved(
+                conn,
+                &issue.uuid,
+                issue.updated_at,
+                1,
+                &serde_json::to_string(&intent.destination).unwrap()
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1421,7 +1747,7 @@ mod tests {
     }
 
     // Legacy rows retain their column meanings through migration. This raw SQL test does not
-    // imply an older scheduler can safely open a version 3 database.
+    // imply an older scheduler can safely open a version 4 database.
     #[test]
     fn legacy_row_columns_keep_their_meaning() {
         let (_dir, path, store) = file_store();

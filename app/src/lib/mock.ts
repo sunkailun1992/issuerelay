@@ -6,12 +6,12 @@ import {
 } from "./mock-fixtures";
 import type { ModelCatalog } from "./model-catalog";
 import { bindingsOverlap } from "./routing";
-import { isActive } from "./runs";
+import { isActive, isInterruptedRun, isPlanned, pendingContinuationSourceId } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, HeldJob, Issue, IssueView, Job, LinearSetup,
   QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
-import type { Handoff } from "./workflow-types";
+import type { ContinuationPreview, DispatchPreview, Handoff } from "./workflow-types";
 
 export interface MockOptions {
   /** The delay of every call: 120 ms by default so loading states show in a browser; tests pass 0. */
@@ -24,6 +24,8 @@ export interface MockOptions {
    * or none, is up to date. The layout checks ask for one in the address.
    */
   update?: string;
+  /** Shows a waiting dispatch in the demo for exercising the preview in a browser. */
+  dispatchReview?: boolean;
 }
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
@@ -90,6 +92,11 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   let jobs: Job[] = demo ? structuredClone(DEMO_JOBS) : [];
   const claims = new Map<number, { id: string; executor: ExecutorKind }>();
   let nextClaimId = 1;
+  let dispatchReviewed = false;
+  let dispatchToken: string | null = null;
+  let nextDispatchToken = 1;
+  const continuationPreviews = new Map<number, ContinuationPreview>();
+  let nextContinuationToken = 1;
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
   let settings: Settings = {
@@ -165,6 +172,15 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   });
   const newestRun = (issueUuid: string): Job | undefined =>
     jobs.filter((job) => job.issue_uuid === issueUuid).sort((a, b) => b.id - a.id)[0];
+  const continuation = (id: number) => {
+    const source = find(id);
+    const latest = newestRun(source.issue_uuid);
+    if (!isInterruptedRun(source) || source.directory === null || latest === undefined ||
+        (latest.id !== id && pendingContinuationSourceId(latest) !== id)) {
+      return fail("only the latest interrupted run can be continued");
+    }
+    return { source, latest, directory: source.directory };
+  };
   const handoff = (job: Job): Handoff => ({
     job_id: job.id,
     issue_identifier: job.issue_identifier,
@@ -185,6 +201,9 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const issueViews = (): IssueView[] =>
     (demo ? DEMO_ISSUES : []).map(({ issue, status }) => {
       const job = newestRun(issue.uuid) ?? null;
+      if (options.dispatchReview && issue.identifier === "DEMO-3" && !dispatchReviewed) {
+        return { issue, job, status: { kind: "waiting", reason: { code: "dispatch_review_required" } } };
+      }
       // The verdict of an eligible issue follows its newest run, which stopping or running again changes.
       return { issue, job, status: status.kind === "eligible" ? { kind: "eligible", picked_up: pickedUp(issue, job) } : status };
     });
@@ -207,6 +226,21 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         find(id);
         return (DEMO_LOGS[id] ?? []).slice(-lines);
       }),
+    readCodexSession: (id) => reply(() => {
+      const job = find(id);
+      if (job.executor !== "codex" || job.finished_at === null || job.session_id == null) {
+        return fail("select a finished Codex run with a recorded session");
+      }
+      return {
+        session_id: job.session_id,
+        title: job.title,
+        messages: [
+          { role: "user", text: "Check the implementation and run its tests." },
+          { role: "assistant", text: "The focused checks passed." },
+        ],
+        has_more: false,
+      };
+    }),
     getHandoff: (id) => reply(() => handoff(find(id))),
     claimHandoff: (id, executor) => reply(() => {
       const job = find(id);
@@ -228,6 +262,103 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       return true;
     }),
     issues: () => reply(() => (connected() ? issueViews() : offline())),
+    getDispatchPreview: (issueIdentifier) => reply((): DispatchPreview => {
+      if (!connected()) return offline();
+      const candidate = issueViews().find(({ issue, status }) =>
+        issue.identifier === issueIdentifier && status.kind === "waiting" && status.reason.code === "dispatch_review_required");
+      if (candidate === undefined) return fail("this issue is not waiting for dispatch review");
+      dispatchToken = `demo-dispatch-${nextDispatchToken++}`;
+      return {
+        token: dispatchToken,
+        issue_uuid: candidate.issue.uuid,
+        issue_identifier: candidate.issue.identifier,
+        title: candidate.issue.title,
+        mode: "implement",
+        executor: "claude",
+        directory: "~/code/demo-app",
+        model: null,
+        effort: null,
+        wiki_root: settings.wiki_root ?? null,
+        context: {
+          revision: 0,
+          origin_executor: null,
+          preferred_executor: null,
+          request: "The old CI badge points to the retired build. Update it after checking the current workflow name.",
+          conversation_history: "The team confirmed the former build was retired. The current workflow name is in the repository.",
+          scope: "Update the README badge for the demo project.",
+          acceptance: ["The badge links to the current CI workflow."],
+          source_refs: ["wiki/ci.md#status-badge"],
+        },
+      };
+    }),
+    approveDispatch: (issueIdentifier, token) => reply(() => {
+      if (!connected()) return offline();
+      if (issueIdentifier !== "DEMO-3" || token !== dispatchToken || dispatchReviewed) {
+        return fail("the dispatch preview changed; read it again");
+      }
+      dispatchToken = null;
+      dispatchReviewed = true;
+    }),
+    getContinuationPreview: (id, executor) => reply(() => {
+      if (!connected()) return offline();
+      const { source, directory } = continuation(id);
+      const preview: ContinuationPreview = {
+        token: `demo-continuation-${nextContinuationToken++}`,
+        source_job_id: id,
+        source_executor: source.executor,
+        issue_uuid: source.issue_uuid,
+        issue_identifier: source.issue_identifier,
+        title: source.title,
+        mode: source.mode ?? "implement",
+        executor,
+        strategy: executor === source.executor && source.session_id != null && settings.resume_sessions
+          ? "resume_session" : "handoff",
+        directory,
+        model: (executor === "codex" ? settings.default_codex_model : settings.default_claude_model) || null,
+        effort: settings.default_effort ?? null,
+        permission: settings.default_permission,
+        claude_ultracode: executor === "claude" && source.mode !== "plan" && settings.claude_ultracode === true,
+        context: handoff(source).context,
+        wiki_root: settings.wiki_root ?? null,
+        evidence: [source.reason, source.summary].filter(Boolean).join("\n"),
+      };
+      continuationPreviews.set(id, preview);
+      return preview;
+    }),
+    approveContinuation: (id, token) => reply(() => {
+      if (!connected()) return offline();
+      const { source, latest } = continuation(id);
+      const preview = continuationPreviews.get(id);
+      if (preview === undefined || preview.token !== token) return fail("the continuation preview changed; read it again");
+      continuationPreviews.delete(id);
+      const jobId = latest.id === id ? Math.max(...jobs.map((job) => job.id)) + 1 : latest.id;
+      const job: Job = {
+        ...latest,
+        id: jobId,
+        created_at: latest.id === id ? now().toISOString() : latest.created_at,
+        executor: preview.executor,
+        state: "queued",
+        reason: null,
+        started_at: null,
+        finished_at: null,
+        log_path: null,
+        summary: null,
+        report: null,
+        session_id: null,
+        resume_job_id: source.id,
+        usage: null,
+      };
+      jobs = [job, ...jobs.filter((row) => row.id !== jobId)];
+      emit({ kind: "job", job });
+      emit({ kind: "status" });
+      return jobId;
+    }),
+    getDevelopmentIssueUrl: (id) => reply(() => {
+      if (!connected()) return offline();
+      const job = find(id);
+      if (!isPlanned(job) || job.finished_at === null) return fail("this run has not posted a plan");
+      return `https://linear.app/demo/issue/${job.issue_identifier}`;
+    }),
     pause: () =>
       reply(() => {
         settings = { ...settings, paused: true };

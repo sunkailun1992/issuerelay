@@ -24,8 +24,10 @@ use issuerelay_core::{
     host::{Host, LinearSetup},
     linear::{Project, Viewer},
     model::Job,
+    provider_sessions::NativeSessionPreview,
     setup::{self, SetupAction},
     text::{clean_text, strip_control},
+    workflow::{ContinuationPreview, DispatchPreview},
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -323,6 +325,18 @@ pub async fn job(state: State<'_, AppState>, id: i64) -> CmdResult<Option<Job>> 
 }
 
 #[tauri::command]
+pub async fn read_codex_session(
+    state: State<'_, AppState>,
+    id: i64,
+) -> CmdResult<NativeSessionPreview> {
+    host(&state)
+        .await?
+        .read_codex_session(id)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
 pub async fn get_handoff(
     state: State<'_, AppState>,
     id: i64,
@@ -390,6 +404,73 @@ pub async fn job_log(state: State<'_, AppState>, id: i64, lines: usize) -> CmdRe
 #[tauri::command]
 pub async fn issues(state: State<'_, AppState>) -> CmdResult<Vec<IssueView>> {
     host(&state).await?.engine().issues().await.map_err(error)
+}
+
+#[tauri::command]
+pub async fn get_dispatch_preview(
+    state: State<'_, AppState>,
+    issue_identifier: String,
+) -> CmdResult<DispatchPreview> {
+    host(&state)
+        .await?
+        .engine()
+        .dispatch_preview(&issue_identifier)
+        .await
+        .map_err(error)
+}
+
+/// Confirms the exact preview the panel displayed. Approval is not exposed to the CLI or MCP.
+#[tauri::command]
+pub async fn approve_dispatch(
+    state: State<'_, AppState>,
+    issue_identifier: String,
+    token: String,
+) -> CmdResult<()> {
+    host(&state)
+        .await?
+        .engine()
+        .approve_dispatch(&issue_identifier, &token)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn get_continuation_preview(
+    state: State<'_, AppState>,
+    id: i64,
+    executor: ExecutorKind,
+) -> CmdResult<ContinuationPreview> {
+    host(&state)
+        .await?
+        .engine()
+        .get_continuation_preview(id, executor)
+        .await
+        .map_err(error)
+}
+
+/// Only the desktop panel can confirm a reviewed continuation.
+#[tauri::command]
+pub async fn approve_continuation(
+    state: State<'_, AppState>,
+    id: i64,
+    token: String,
+) -> CmdResult<i64> {
+    host(&state)
+        .await?
+        .engine()
+        .approve_continuation(id, &token)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn get_development_issue_url(state: State<'_, AppState>, id: i64) -> CmdResult<String> {
+    host(&state)
+        .await?
+        .engine()
+        .development_issue_url(id)
+        .await
+        .map_err(error)
 }
 
 #[tauri::command]

@@ -13,6 +13,8 @@
 /crates/core/src/prompt.rs         @sunkailun1992
 /crates/core/src/config.rs         @sunkailun1992
 /crates/core/src/engine.rs         @sunkailun1992
+/crates/core/src/engine/dispatch_review.rs @sunkailun1992
+/crates/core/src/provider_sessions.rs @sunkailun1992
 /crates/core/src/host.rs           @sunkailun1992
 /crates/core/src/executor/         @sunkailun1992
 /crates/core/src/setup.rs          @sunkailun1992

@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::ExecutorKind;
 use crate::doctor::{self, LeanCheckPaths, ReadinessProbe, SystemReadiness};
 use crate::engine::{Engine, EngineDeps, JobRunner, ProcessJobRunner, display_viewer};
 use crate::env::{ExecEnv, SharedEnv};
@@ -46,6 +47,7 @@ use crate::linear::mcp::{LinearError, McpLinear};
 use crate::linear::{Disconnected, LinearApi, Viewer, auth};
 use crate::model::JobState;
 use crate::paths::AppPaths;
+use crate::provider_sessions::{self, NativeSessionPreview};
 use crate::store::Store;
 use crate::text::clean_text;
 
@@ -498,6 +500,23 @@ impl Host {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Only a recorded IssueRelay run can supply a session ID to the local reader.
+    pub async fn read_codex_session(&self, id: i64) -> Result<NativeSessionPreview> {
+        let job = self.engine().job(id)?.context("run not found")?;
+        anyhow::ensure!(
+            job.executor == Some(ExecutorKind::Codex) && job.finished_at.is_some(),
+            "select a finished Codex run"
+        );
+        let session_id = job
+            .session_id
+            .as_deref()
+            .context("no recorded Codex session")?;
+        let env = self.env();
+        let program =
+            crate::executor::resolve_program_in(ExecutorKind::Codex, env.path.as_deref())?;
+        provider_sessions::read_codex_session(&program, &env, session_id).await
     }
 
     /// Where the host keeps its files and its IPC endpoint.

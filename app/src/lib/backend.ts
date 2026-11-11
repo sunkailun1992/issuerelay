@@ -3,7 +3,7 @@ import type {
   LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
 import type { ModelCatalog } from "./model-catalog";
-import type { Handoff } from "./workflow-types";
+import type { ContinuationPreview, DispatchPreview, Handoff, NativeSessionPreview } from "./workflow-types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
 export const ERROR_CODES = [
@@ -36,10 +36,16 @@ export interface Backend {
   listJobs(limit: number): Promise<Job[]>;
   job(id: number): Promise<Job | null>;
   jobLog(id: number, lines: number): Promise<string[]>;
+  readCodexSession(id: number): Promise<NativeSessionPreview>;
   getHandoff(id: number): Promise<Handoff>;
   claimHandoff(id: number, executor: ExecutorKind): Promise<Handoff>;
   releaseHandoff(id: number, claimId: string): Promise<boolean>;
   issues(): Promise<IssueView[]>;
+  getDispatchPreview(issueIdentifier: string): Promise<DispatchPreview>;
+  approveDispatch(issueIdentifier: string, token: string): Promise<void>;
+  getContinuationPreview(id: number, executor: ExecutorKind): Promise<ContinuationPreview>;
+  approveContinuation(id: number, token: string): Promise<number>;
+  getDevelopmentIssueUrl(id: number): Promise<string>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   pollNow(): Promise<void>;
