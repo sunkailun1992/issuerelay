@@ -180,9 +180,23 @@ impl LeanCheck {
         match self.kind {
             ExecutorKind::Claude => self.claude(&event),
             ExecutorKind::Codex => {
-                let server = codex_mcp_server(&event)?;
+                let item = codex_mcp_item(&event)?;
+                let server = item["server"].as_str().unwrap_or("unnamed");
                 if server == CODEX_LINEAR_SERVER {
                     self.linear_seen = true;
+                    return None;
+                }
+                // Codex CLI 0.159.2 reports its built-in, untargeted resource listing with
+                // "codex" as a placeholder. A named target or a different tool is still checked.
+                if server == "codex"
+                    && matches!(
+                        item["tool"].as_str(),
+                        Some("list_mcp_resources" | "list_mcp_resource_templates")
+                    )
+                    && item["arguments"]
+                        .as_object()
+                        .is_some_and(|args| args.is_empty())
+                {
                     return None;
                 }
                 Some(format!("a call to the MCP server `{server}`"))
@@ -245,9 +259,8 @@ impl LeanCheck {
     }
 }
 
-/// The server of a Codex event that starts or ends a call to an MCP server (`unnamed` when the
-/// item names none); `None` for every other event.
-fn codex_mcp_server(event: &Value) -> Option<&str> {
+/// The item of a Codex event that starts or ends an MCP call.
+fn codex_mcp_item(event: &Value) -> Option<&Value> {
     if !matches!(
         event["type"].as_str(),
         Some("item.started" | "item.completed")
@@ -255,10 +268,7 @@ fn codex_mcp_server(event: &Value) -> Option<&str> {
         return None;
     }
     let item = &event["item"];
-    if item["type"] != "mcp_tool_call" {
-        return None;
-    }
-    Some(item["server"].as_str().unwrap_or("unnamed"))
+    (item["type"] == "mcp_tool_call").then_some(item)
 }
 
 /// Whether `paths` (Claude's `memory_paths`) names a folder: any non-empty string in it.
@@ -534,6 +544,57 @@ mod tests {
         let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"get_issue"}}"#;
         let detail = first_violation(ExecutorKind::Codex, &[started]).unwrap();
         assert!(detail.contains("`unnamed`"), "{detail}");
+    }
+
+    #[test]
+    fn codex_builtin_resource_listing_does_not_confirm_or_violate_lean() {
+        let mut check = LeanCheck::new(ExecutorKind::Codex);
+        for tool in ["list_mcp_resources", "list_mcp_resource_templates"] {
+            for event_type in ["item.started", "item.completed"] {
+                let event = json!({
+                    "type": event_type,
+                    "item": {
+                        "type": "mcp_tool_call",
+                        "server": "codex",
+                        "tool": tool,
+                        "arguments": {}
+                    }
+                });
+                assert_eq!(check.observe(&event.to_string()), None, "{event}");
+            }
+        }
+        assert!(check.unconfirmed().is_some());
+    }
+
+    #[test]
+    fn a_codex_resource_event_with_a_target_or_unknown_shape_is_a_violation() {
+        for (server, tool, arguments) in [
+            ("codex", "list_mcp_resources", json!({"server": "codex"})),
+            (
+                "codex",
+                "list_mcp_resources",
+                json!({"server": "demo-tools"}),
+            ),
+            ("codex", "list_mcp_resource_templates", Value::Null),
+            ("codex", "read_mcp_resource", json!({})),
+            ("demo-tools", "list_mcp_resources", json!({})),
+        ] {
+            let event = json!({
+                "type": "item.started",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "server": server,
+                    "tool": tool,
+                    "arguments": arguments
+                }
+            });
+            assert!(
+                LeanCheck::new(ExecutorKind::Codex)
+                    .observe(&event.to_string())
+                    .is_some(),
+                "{event}"
+            );
+        }
     }
 
     #[test]

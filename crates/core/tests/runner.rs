@@ -1130,6 +1130,21 @@ async fn a_clean_lean_codex_run_that_called_linear_passes() {
     assert_eq!(lines, [LINEAR_CALL]);
 }
 
+#[tokio::test]
+async fn a_lean_codex_run_continues_after_builtin_resource_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"status":"in_progress"}}"#;
+    let completed = r#"{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"status":"completed"}}"#;
+    let (exit, lines) = codex_run(
+        dir.path(),
+        true,
+        serde_json::json!([{"out": LINEAR_CALL}, {"out": started}, {"out": completed}, {"exit": 0}]),
+    )
+    .await;
+    assert_eq!(exit, ExitKind::Exited(Some(0)));
+    assert_eq!(lines, [LINEAR_CALL, started, completed]);
+}
+
 // A run that failed keeps its exit code: that it made no call to Linear then says nothing about
 // lean (a Codex that stops at its usage limit makes none).
 #[tokio::test]
