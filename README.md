@@ -1,5 +1,7 @@
 # IssueRelay
 
+**简体中文** · [繁體中文](docs/locales/README.zh-TW.md) · [English](docs/locales/README.en.md) · [日本語](docs/locales/README.ja.md) · [한국어](docs/locales/README.ko.md)
+
 **连接 Linear 与本机 Codex / Claude Code 的桌面任务调度器。**
 
 你在 Linear 中准备需求并标记运行模式，IssueRelay 按项目绑定找到本地仓库，启动选定的编码 AI 在后台处理，并保存运行状态、摘要、日志和用量，供你跟进与验收。它适合已经使用 Linear 和本机编码 AI、希望把任务派发与运行跟踪集中起来的开发者。
@@ -8,8 +10,7 @@
 
 初次了解产品，先看下方职责与流程；完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
 
-> **验证范围：** 既有桌面应用与安装包完成过 macOS 实机验收，Windows 仍待实机验收。本文的上下文登记、接力、复核与归档流程对应 0.4.0 源码。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
-> *Validation: earlier desktop builds and installers were tested on a real Mac. Windows acceptance is pending. See the release notes and acceptance reports for each version.*
+> **验证范围：** 0.4.0 已在 Apple silicon Mac 上验证升级、Wiki 配置，以及 Codex 和 Claude Code 对同一条合成运行的查询。Windows 安装与桌面行为仍待实机验收。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
 
 ## 谁负责什么
 
