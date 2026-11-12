@@ -9,7 +9,7 @@ import { DetailLine, EmptyState, ErrorState, LoadingState } from "@/components/s
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { RUN_LIST_LIMIT, useJobs, useStatus } from "@/hooks/queries";
+import { RUN_LIST_LIMIT, useJobs, usePlanClosable, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
@@ -74,10 +74,11 @@ function RunRow({ job, held, history = false, latest = false, historyToggle }: {
     if (event.defaultPrevented || (window.getSelection()?.toString() ?? "") !== "") return;
     void navigate(`/runs/${job.id}`);
   };
+  const closable = usePlanClosable(job);
   return (
     <TableRow className="cursor-pointer" onClick={open}>
       <TableCell>
-        <StatusBadge state={job.state} planned={isPlanned(job)} />
+        <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
       </TableCell>
       <TableCell>
         <div className="flex flex-col gap-0.5">

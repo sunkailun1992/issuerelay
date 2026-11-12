@@ -38,7 +38,7 @@ test("engine events refresh exactly the data they touch", async () => {
   await settled(client);
   emit({ kind: "job", job });
   const keys = spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
-  for (const key of [["status"], ["jobs"], ["job", job.id], ["handoff", job.id], ["issues"]]) {
+  for (const key of [["status"], ["jobs"], ["job", job.id], ["handoff", job.id], ["issues"], ["planProgress"]]) {
     expect(keys).toContain(JSON.stringify(key));
   }
   spy.mockClear();
@@ -51,6 +51,8 @@ test("engine events refresh exactly the data they touch", async () => {
   // "connected" or "connect_failed" without a reload.
   emit({ kind: "status" });
   expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toContain(JSON.stringify(["status"]));
+  // A check also refreshes what the open plans' children came to.
+  expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toContain(JSON.stringify(["planProgress"]));
   spy.mockClear();
   resync();
   expect(spy).toHaveBeenCalledWith();
@@ -78,7 +80,8 @@ test("a job event leaves what it does not touch alone", async () => {
   }
   spy.mockClear();
   emit({ kind: "status" });
-  expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toEqual([JSON.stringify(["status"])]);
+  // A finished check re-reads the status and what the open plans' children came to, nothing else.
+  expect(spy.mock.calls.map(([f]) => JSON.stringify(f?.queryKey))).toEqual([JSON.stringify(["status"]), JSON.stringify(["planProgress"])]);
   await settled(client);
 });
 
@@ -315,3 +318,22 @@ describe("when the connection to Linear changes", () => {
     expect(doctor).toHaveBeenCalledTimes(1);
   });
 });
+
+test("a finished check leaves the Linear read of an open plan's details alone", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  let emit: (event: EngineEvent) => void = () => {};
+  const listen = vi.fn(async (listener: (event: EngineEvent) => void) => {
+    emit = listener;
+    return () => {};
+  });
+  backend.onEngineEvent = listen;
+  const { client } = await renderWithProviders(<EngineEventsBridge />, { backend });
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  await settled(client);
+  // What a details page read from Linear: only opening it or closing the plan reads it again.
+  client.setQueryData(queryKeys.planProgressLive(21), { job_id: 21 });
+  emit({ kind: "status" });
+  expect(client.getQueryState(queryKeys.planProgressLive(21))?.isInvalidated).toBe(false);
+  await settled(client);
+});
+

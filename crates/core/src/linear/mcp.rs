@@ -13,7 +13,7 @@ use super::{
     ISSUE_DETAIL_FIELDS, ISSUE_FIELDS, LinearApi, PROJECT_FIELDS, Project, REQUIRED_ARGUMENTS,
     REQUIRED_FIELDS, REQUIRED_TOOLS, Team, Viewer, parse,
 };
-use crate::model::Issue;
+use crate::model::{ChildIssue, Issue};
 
 /// A connected, initialized rmcp client; the transport and its authorization are the caller's.
 pub type LinearClient = RunningService<RoleClient, ClientConfig>;
@@ -252,6 +252,15 @@ impl LinearApi for McpLinear {
         self.call("save_issue", json!({"id": id, "state": state}))
             .await
             .map(|_| ())
+    }
+
+    async fn children(&self, parent_uuid: &str) -> Result<Vec<ChildIssue>> {
+        // Archived children too: a deleted child only shows up that way, and an ended child may
+        // have been archived since. Creation order, like `candidate_issues`, so that a child
+        // edited during the walk cannot move to a page already read.
+        let args = json!({"parentId": parent_uuid, "includeArchived": true, "limit": 250, "orderBy": "createdAt", "fields": ISSUE_FIELDS});
+        self.all_pages("list_issues", args, parse::parse_child_page)
+            .await
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {

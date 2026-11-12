@@ -11,7 +11,7 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { DOCTOR_FRESH_MS, useBindings, useDoctor, useJobs, usePause, usePollNow, useResume, useStatus } from "@/hooks/queries";
+import { DOCTOR_FRESH_MS, useBindings, useDoctor, useJobs, usePause, usePlanClosable, usePollNow, useResume, useStatus } from "@/hooks/queries";
 import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
@@ -223,9 +223,10 @@ function RunningSection({ jobs }: { jobs: Job[] }) {
 
 /** The room for a state's badge: the widest ("Awaiting acceptance") fits, so the numbers and titles of all rows line up. */
 function StateColumn({ job }: { job: Job }) {
+  const closable = usePlanClosable(job);
   return (
     <div className="w-44 shrink-0">
-      <StatusBadge state={job.state} planned={isPlanned(job)} />
+      <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
     </div>
   );
 }

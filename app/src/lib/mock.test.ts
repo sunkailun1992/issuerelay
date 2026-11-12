@@ -265,3 +265,35 @@ test("the demo's fictional data is in English, so a screenshot in English shows 
     expect(JSON.stringify(value), name).not.toMatch(otherScript);
   }
 });
+
+describe("mock backend: split plans", () => {
+  const plans = () => createMockBackend("demo", { latencyMs: 0, plans: true });
+
+  test("the demo lists its split plans only when asked for", async () => {
+    expect(await createMockBackend("demo", { latencyMs: 0 }).planProgress()).toEqual([]);
+    const progress = await plans().planProgress();
+    expect(progress.map((p) => [p.job_id, p.closable])).toEqual([[20, false], [21, true]]);
+  });
+
+  test("a plan with open children cannot be completed, as the engine rules", async () => {
+    const backend = plans();
+    await expect(backend.completePlan(20)).rejects.toThrow("the plan cannot be closed yet");
+    expect((await backend.job(20))?.state).toBe("needs_info");
+  });
+
+  test("completing a closable plan marks its planning run done and announces it", async () => {
+    const backend = plans();
+    const events: EngineEvent[] = [];
+    await backend.onEngineEvent((event) => events.push(event));
+    await backend.completePlan(21);
+    expect((await backend.job(21))?.state).toBe("done");
+    expect(events).toContainEqual({ kind: "job", job: expect.objectContaining({ id: 21, state: "done" }) });
+  });
+
+  test("only a planning run that posted its plan has progress to read", async () => {
+    const backend = plans();
+    expect((await backend.refreshPlanProgress(21)).closable).toBe(true);
+    await expect(backend.refreshPlanProgress(7)).rejects.toThrow("not a planning run that posted its plan");
+  });
+});
+

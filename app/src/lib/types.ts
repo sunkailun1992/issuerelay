@@ -140,6 +140,26 @@ export type IssueStatus =
   | { kind: "paused" };
 export interface IssueView { issue: Issue; job: Job | null; status: IssueStatus }
 
+/**
+ * What the direct children of a plan issue came to, as last read from Linear (core's
+ * `engine::PlanProgress`, plan-closure design). A deleted child is not counted.
+ */
+export interface PlanProgress {
+  /** The planning run this progress belongs to. */
+  job_id: number;
+  issue_uuid: string;
+  total: number;
+  completed: number;
+  canceled: number;
+  /** Children that have not ended yet. */
+  open: number;
+  /** At least one child, none open and at least one completed: the plan can be closed. */
+  closable: boolean;
+  checked_at: string;
+  /** Why the children could not be read, cleaned; the counts are then all zero. */
+  error: string | null;
+}
+
 /** `plan_label`: issues with it get a planning run instead (run-improvements design, section 10). */
 export interface TriggerNames { label: string; todo: string; in_progress: string; in_testing: string; done: string; plan_label: string }
 export interface NotificationSettings { run_started: boolean; awaiting_acceptance: boolean; needs_info: boolean; failed: boolean }

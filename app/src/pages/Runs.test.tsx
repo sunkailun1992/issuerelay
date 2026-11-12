@@ -1,4 +1,4 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes, useLocation, useNavigationType } from "react-router";
 import { vi } from "vitest";
@@ -554,4 +554,12 @@ test("a list shorter than that says nothing about its length", async () => {
   await renderWithProviders(<Runs />);
   await screen.findByText("DEMO-7");
   expect(screen.queryByText(/Showing the latest/)).not.toBeInTheDocument();
+});
+
+test("a split plan whose child issues have all ended reads ready to close in the list", async () => {
+  await renderWithProviders(<Runs />, { backend: createMockBackend("demo", { latencyMs: 0, plans: true }) });
+  await screen.findByText("DEMO-21");
+  // The plans' progress is read apart from the runs, so the badge turns once it has arrived.
+  await waitFor(() => expect(cellsOf(rowOfRun(21))[0]).toEqual(["Ready to close"]));
+  expect(cellsOf(rowOfRun(20))[0]).toEqual(["Plan posted"]);
 });

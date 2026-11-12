@@ -24,10 +24,14 @@ export function useEngineEvents(): void {
       backend.onEngineEvent((event) => {
         switch (event.kind) {
           case "status":
-            refresh(queryKeys.status);
+            // A finished check has also read the children of the open plans.
+            refresh(queryKeys.status, queryKeys.planProgress);
             break;
           case "job":
-            refresh(queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.handoff(event.job.id), queryKeys.issues);
+            refresh(
+              queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.handoff(event.job.id),
+              queryKeys.issues, queryKeys.planProgress,
+            );
             break;
           case "config":
             refresh(queryKeys.settings, queryKeys.bindings, queryKeys.status);

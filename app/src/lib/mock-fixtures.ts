@@ -1,7 +1,7 @@
 import { MOCK_NOW } from "./clock";
 import shellLine from "./shell-line.json";
 import triggerDefaults from "./trigger-defaults.json";
-import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, Project, Settings, UpdateStatus, Viewer } from "./types";
+import type { AppInfo, Binding, DoctorReport, HeldJob, Issue, IssueStatus, Job, PlanProgress, Project, Settings, UpdateStatus, Viewer } from "./types";
 
 /** `MOCK_NOW` minus `minutes`, as the engine sends times. */
 export function ago(minutes: number): string {
@@ -142,6 +142,27 @@ export const DEMO_JOBS: Job[] = [
 
 /** DEMO-11's start failed once; it is tried again two minutes after `MOCK_NOW`. */
 export const DEMO_HELD: HeldJob[] = [{ job_id: 11, retry_at: "2026-10-12T09:02:00Z" }];
+
+/**
+ * Split plans, added to the demo only on request (`MockOptions.plans`): DEMO-20's plan still has
+ * open children, DEMO-21's children have all ended and the plan can be closed.
+ */
+export const DEMO_PLAN_JOBS: Job[] = [
+  job({
+    id: 21, issue_identifier: "DEMO-21", title: "Plan the export cleanup", mode: "plan", state: "needs_info", report: "planned",
+    started_at: ago(30 * 60), finished_at: ago(29 * 60), summary: "Split into two issues with acceptance checks",
+  }),
+  job({
+    id: 20, issue_identifier: "DEMO-20", title: "Plan the onboarding rework", mode: "plan", state: "needs_info", report: "planned",
+    started_at: ago(26 * 60), finished_at: ago(25 * 60), summary: "Split into five issues with acceptance checks",
+  }),
+];
+
+/** What the children of `DEMO_PLAN_JOBS` came to. */
+export const DEMO_PLAN_PROGRESS: PlanProgress[] = [
+  { job_id: 20, issue_uuid: "issue-20", total: 5, completed: 2, canceled: 1, open: 2, closable: false, checked_at: ago(1), error: null },
+  { job_id: 21, issue_uuid: "issue-21", total: 2, completed: 1, canceled: 1, open: 0, closable: true, checked_at: ago(1), error: null },
+];
 
 /**
  * A labeled issue. Nothing changed in Linear since the demo's runs were recorded: `updated_at` is the

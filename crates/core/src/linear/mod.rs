@@ -6,7 +6,7 @@ pub mod parse;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::model::Issue;
+use crate::model::{ChildIssue, Issue};
 
 /// The Linear user the connection is authorized as.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,7 +54,15 @@ pub const REQUIRED_ARGUMENTS: &[(&str, &[&str])] = &[
     (
         "list_issues",
         &[
-            "assignee", "label", "state", "limit", "orderBy", "fields", "cursor",
+            "assignee",
+            "label",
+            "state",
+            "limit",
+            "orderBy",
+            "fields",
+            "cursor",
+            "parentId",
+            "includeArchived",
         ],
     ),
     ("get_issue", &["id", "fields"]),
@@ -68,7 +76,7 @@ pub const REQUIRED_ARGUMENTS: &[(&str, &[&str])] = &[
 
 /// The `fields` requested from `list_issues` and `get_issue`, so replies carry everything
 /// `parse::parse_issue` reads.
-pub const ISSUE_FIELDS: [&str; 14] = [
+pub const ISSUE_FIELDS: [&str; 15] = [
     "id",
     "uuid",
     "title",
@@ -83,6 +91,7 @@ pub const ISSUE_FIELDS: [&str; 14] = [
     "priority",
     "createdAt",
     "updatedAt",
+    "archivedAt",
 ];
 
 /// The `fields` requested from `get_issue`: `ISSUE_FIELDS` and the issue's `relations`, which only
@@ -131,6 +140,9 @@ pub trait LinearApi: Send + Sync {
     async fn issue(&self, id: &str) -> Result<Option<Issue>>;
     /// Moves the issue to the status named `state`; an error when Linear rejects the change.
     async fn set_state(&self, id: &str, state: &str) -> Result<()>;
+    /// The direct children of the issue with this `uuid`, archived ones included (plan-closure
+    /// design): every page, so that a parent is never judged on part of its children.
+    async fn children(&self, parent_uuid: &str) -> Result<Vec<ChildIssue>>;
     /// All projects, each identified by its uuid and carrying the ids of its teams.
     async fn projects(&self) -> Result<Vec<Project>>;
     /// The names of all issue labels.
@@ -175,6 +187,9 @@ impl LinearApi for Disconnected {
         self.fail()
     }
     async fn set_state(&self, _id: &str, _state: &str) -> Result<()> {
+        self.fail()
+    }
+    async fn children(&self, _parent_uuid: &str) -> Result<Vec<ChildIssue>> {
         self.fail()
     }
     async fn projects(&self) -> Result<Vec<Project>> {

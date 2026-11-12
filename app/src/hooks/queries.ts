@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { type Backend, BackendError } from "@/lib/backend";
 import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
-import { isInterruptedRun, pendingContinuationSourceId } from "@/lib/runs";
+import { isInterruptedRun, isPlanned, pendingContinuationSourceId, planProgressFor } from "@/lib/runs";
 import type { Binding, CliPathStatus, ExecutorKind, Job, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
 import type { Handoff } from "@/lib/workflow-types";
 
@@ -22,6 +22,9 @@ export const queryKeys = {
   codexSessionPreview: (id: number) => ["codexSessionPreview", id] as const,
   handoff: (id: number) => ["handoff", id] as const,
   issues: ["issues"] as const,
+  planProgress: ["planProgress"] as const,
+  /** One plan read from Linear for its details: apart from `planProgress`, so a finished check does not read it again. */
+  planProgressLive: (id: number) => ["planProgressLive", id] as const,
   dispatchPreview: (issueIdentifier: string) => ["dispatchPreview", issueIdentifier] as const,
   continuationPreview: (id: number, executor: ExecutorKind | null) => ["continuationPreview", id, executor] as const,
   bindings: ["bindings"] as const,
@@ -129,6 +132,29 @@ export function useCodexSessionPreview(id: number) {
 export function useIssues() {
   const backend = useBackend();
   return useQuery({ queryKey: queryKeys.issues, queryFn: () => backend.issues() });
+}
+
+/** What the children of each open plan last came to; reads only the engine's cache. */
+export function usePlanProgress() {
+  const backend = useBackend();
+  return useQuery({ queryKey: queryKeys.planProgress, queryFn: () => backend.planProgress() });
+}
+
+/** Whether `job` is a posted plan whose child issues have all ended, as the last check found. */
+export function usePlanClosable(job: Job): boolean {
+  const progress = usePlanProgress();
+  return isPlanned(job) && planProgressFor(progress.data, job.id)?.closable === true;
+}
+
+/** One plan's progress read from Linear when its details open (`enabled` for a planning run only). */
+export function useRefreshedPlanProgress(id: number, enabled: boolean) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: queryKeys.planProgressLive(id),
+    queryFn: () => backend.refreshPlanProgress(id),
+    enabled,
+    refetchOnMount: "always",
+  });
 }
 
 /** Reads a fresh preview when the dialog opens and drops its content when the dialog closes. */
@@ -357,6 +383,15 @@ export function useOpenDevelopmentIssue(id: number) {
     async (backend) => backend.openLinear(await backend.getDevelopmentIssueUrl(id)),
     [],
     "actions.failed.open_linear",
+  );
+}
+
+/** Closes a split plan; refreshes what a change of the run touches and the plans' progress. */
+export function useCompletePlan() {
+  return useAction<number, void>(
+    (backend, id) => backend.completePlan(id),
+    (id) => [...jobChange(id), queryKeys.planProgress, queryKeys.planProgressLive(id)],
+    "actions.failed.complete_plan",
   );
 }
 

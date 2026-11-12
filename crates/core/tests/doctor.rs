@@ -12,7 +12,7 @@ use issuerelay_core::{
     doctor::{CmdOutput, CommandRunner, SystemRunner, check_workspace},
     env::ExecEnv,
     linear::{LinearApi, Project, Team, Viewer},
-    model::Issue,
+    model::{ChildIssue, Issue},
 };
 
 #[tokio::test]
@@ -163,6 +163,10 @@ impl LinearApi for Workspace {
     }
 
     async fn set_state(&self, _id: &str, _state: &str) -> Result<()> {
+        unimplemented!("not used by check_workspace")
+    }
+
+    async fn children(&self, _parent_uuid: &str) -> Result<Vec<ChildIssue>> {
         unimplemented!("not used by check_workspace")
     }
 

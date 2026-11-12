@@ -19,6 +19,7 @@
     "awaiting_acceptance": "待驗收",
     "needs_info": "待補充資訊",
     "planned": "方案已出",
+    "plan_closable": "可收口",
     "done": "已完成",
     "failed": "失敗",
     "canceled": "已取消",
@@ -242,6 +243,7 @@
       "retry": "無法重新執行",
       "record_local_completion": "無法記錄本機完成",
       "mark_done": "無法標記為完成",
+      "complete_plan": "無法完成方案",
       "save_binding": "無法儲存綁定",
       "remove_binding": "無法移除綁定",
       "save_settings": "無法儲存設定",
@@ -315,6 +317,15 @@
     "issue_mismatch": "預覽與此需求不符。請重新讀取後再確認。",
     "plan_next_steps": "方案已儲存。可在本需求進入開發預覽，也可分別派發已拆分的子需求。",
     "view_requirements": "查看需求清單"
+  },
+  "plan": {
+    "progress": "子需求：{{ended}}/{{total}} 已結束",
+    "split_notice": "此方案已拆分為子需求，請分別派發並完成，方案本身不再整包執行開發。",
+    "complete": "完成方案",
+    "complete_confirm": "{{identifier}} 的子需求已全部結束（{{completed}} 個完成，{{canceled}} 個取消）。要在 Linear 中把 {{identifier}} 設為 {{done}}，並把方案記為已完成嗎？子需求維持不變。",
+    "progress_unknown": "無法讀取子需求。",
+    "all_canceled": "子需求皆已取消，無法在這裡收口，請在 Linear 中處理此方案。",
+    "open_after_close": "方案收口後，有子需求尚未結束（{{open}} 個未結束）。"
   },
   "continuation": {
     "action": "繼續上次",

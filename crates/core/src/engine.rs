@@ -21,7 +21,10 @@
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
 mod dispatch_review;
+mod plan_closure;
 mod workflow_support;
+
+pub use plan_closure::{PLAN_PROGRESS_LIMIT, PlanProgress, tally};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -455,6 +458,9 @@ struct Inner {
     /// What the last look at each candidate issue's blockers found, by issue uuid
     /// (`unfinished_blockers`).
     blocker_checks: Mutex<HashMap<String, BlockerCheck>>,
+    /// What the children of each open plan last came to, by the planning run's id
+    /// (`refresh_open_plans`, `refresh_plan_progress`).
+    plan_progress: Mutex<HashMap<i64, plan_closure::PlanCheck>>,
     dispatch_review: Mutex<dispatch_review::ReviewState>,
     require_dispatch_review: bool,
 }
@@ -780,6 +786,7 @@ impl Engine {
                 start_backoff: Mutex::new(Backoffs::default()),
                 stop_causes: Mutex::new(HashMap::new()),
                 blocker_checks: Mutex::new(HashMap::new()),
+                plan_progress: Mutex::new(HashMap::new()),
                 dispatch_review: Mutex::new(dispatch_review::ReviewState::default()),
                 require_dispatch_review,
             }),
@@ -1338,6 +1345,7 @@ impl Engine {
             self.emit_job(id);
         }
         self.watch_running(linear.as_ref(), &me.id, names).await;
+        self.refresh_open_plans(linear.as_ref()).await;
         result
     }
 

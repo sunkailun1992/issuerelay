@@ -1,4 +1,4 @@
-import { DISPLAY_JOB_STATES, type DisplayJobState, type ExecutorKind, type Job, type JobState } from "./types";
+import { DISPLAY_JOB_STATES, type DisplayJobState, type ExecutorKind, type Job, type JobState, type PlanProgress } from "./types";
 
 /** The states of a run that is still in hand: it waits, is queued or runs (core's `JobState::is_active`). */
 export const ACTIVE_STATES: readonly JobState[] = ["waiting_binding", "queued", "running"];
@@ -16,6 +16,18 @@ export function isPlanRun(job: Job): boolean {
 /** Whether the run is a planning run that posted its plan: it waits for the user to decide. */
 export function isPlanned(job: Job): boolean {
   return isPlanRun(job) && job.state === "needs_info" && job.report === "planned";
+}
+
+/** The progress last read for this planning run, or `null` when there is none. */
+export function planProgressFor(progress: readonly PlanProgress[] | undefined, jobId: number): PlanProgress | null {
+  return progress?.find((entry) => entry.job_id === jobId) ?? null;
+}
+
+/** The later of two readings of one plan's progress (by `checked_at`), or the one there is. */
+export function newerProgress(a: PlanProgress | null, b: PlanProgress | null): PlanProgress | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Date.parse(b.checked_at) > Date.parse(a.checked_at) ? b : a;
 }
 
 /** The persisted reason from core's dispatch-review wait state. */

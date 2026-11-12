@@ -19,6 +19,7 @@
     "awaiting_acceptance": "確認待ち",
     "needs_info": "追加情報待ち",
     "planned": "プラン作成済み",
+    "plan_closable": "完了可能",
     "done": "完了",
     "failed": "失敗",
     "canceled": "キャンセル済み",
@@ -242,6 +243,7 @@
       "retry": "もう一度実行できませんでした",
       "record_local_completion": "ローカル完了を記録できませんでした",
       "mark_done": "完了にできませんでした",
+      "complete_plan": "プランを完了できませんでした",
       "save_binding": "紐付けを保存できませんでした",
       "remove_binding": "紐付けを削除できませんでした",
       "save_settings": "設定を保存できませんでした",
@@ -315,6 +317,15 @@
     "issue_mismatch": "プレビューがこの課題と一致しません。再読み込みしてから確認してください。",
     "plan_next_steps": "計画を保存しました。この課題の開発プレビューに進むか、分割した子課題を個別に割り当ててください。",
     "view_requirements": "課題一覧を見る"
+  },
+  "plan": {
+    "progress": "子課題：{{total}} 件中 {{ended}} 件が終了",
+    "split_notice": "このプランは子課題に分割されています。子課題を個別に割り当てて完了させてください。プラン全体はまとめて実装しません。",
+    "complete": "プランを完了",
+    "complete_confirm": "{{identifier}} の子課題はすべて終了しました（完了 {{completed}} 件、取消 {{canceled}} 件）。Linear で {{identifier}} を {{done}} にし、プランを完了として記録しますか？子課題は変更しません。",
+    "progress_unknown": "子課題を読み込めませんでした。",
+    "all_canceled": "子課題はすべて取り消されたため、ここではプランを完了できません。Linear で処理してください。",
+    "open_after_close": "プランの完了後に終了していない子課題があります（未終了 {{open}} 件）。"
   },
   "continuation": {
     "action": "前回の実行を再開",

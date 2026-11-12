@@ -577,7 +577,7 @@ mod tests {
             production.contains("engine.pause()"),
             "the scan must reach the dispatcher"
         );
-        for call in ["cancel_job", "retry_job", "mark_done"] {
+        for call in ["cancel_job", "retry_job", "mark_done", "complete_plan"] {
             assert!(
                 !production.contains(call),
                 "the IPC server must not call `{call}`"

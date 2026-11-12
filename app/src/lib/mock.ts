@@ -2,14 +2,14 @@ import { type Backend, BackendError } from "./backend";
 import { MOCK_NOW, now, setFixedClock } from "./clock";
 import {
   DEFAULT_SETTINGS, DEMO_APP_INFO, DEMO_BINDINGS, DEMO_DOCTOR, DEMO_HELD, DEMO_ISSUES, DEMO_JOBS, DEMO_LABELS, DEMO_LOGS,
-  DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_UPDATES, DEMO_VIEWER, FRESH_DOCTOR, ago,
+  DEMO_PLAN_JOBS, DEMO_PLAN_PROGRESS, DEMO_PROJECTS, DEMO_SHELL_LINE, DEMO_UPDATES, DEMO_VIEWER, FRESH_DOCTOR, ago,
 } from "./mock-fixtures";
 import type { ModelCatalog } from "./model-catalog";
 import { bindingsOverlap } from "./routing";
-import { canRecordLocalCompletion, isActive, isInterruptedRun, isPlanned, pendingContinuationSourceId } from "./runs";
+import { canRecordLocalCompletion, isActive, isInterruptedRun, isPlanned, isPlanRun, pendingContinuationSourceId } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, HeldJob, Issue, IssueView, Job, LinearSetup,
-  QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
+  PlanProgress, QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
 import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext } from "./workflow-types";
 
@@ -26,6 +26,8 @@ export interface MockOptions {
   update?: string;
   /** Shows a waiting dispatch in the demo for exercising the preview in a browser. */
   dispatchReview?: boolean;
+  /** Adds split plans to the demo (`DEMO_PLAN_JOBS`) for exercising plan closure in a browser. */
+  plans?: boolean;
 }
 
 const NOT_CONNECTED = "not connected to Linear: log in first";
@@ -89,7 +91,9 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   setFixedClock(MOCK_NOW);
   // "connecting" is the demo install starting up: its local data, Linear not connected yet.
   const demo = scenario !== "fresh";
-  let jobs: Job[] = demo ? structuredClone(DEMO_JOBS) : [];
+  const withPlans = demo && options.plans === true;
+  let jobs: Job[] = demo ? structuredClone(withPlans ? [...DEMO_PLAN_JOBS, ...DEMO_JOBS] : DEMO_JOBS) : [];
+  const plans = new Map<number, PlanProgress>(withPlans ? DEMO_PLAN_PROGRESS.map((entry) => [entry.job_id, structuredClone(entry)]) : []);
   const claims = new Map<number, { id: string; executor: ExecutorKind }>();
   let nextClaimId = 1;
   let dispatchReviewed = false;
@@ -408,6 +412,30 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         }
         held = held.filter((pause) => pause.job_id !== id);
         update(id, { state: "queued", reason: null, started_at: null, finished_at: null });
+      }),
+    planProgress: () => reply(() => [...plans.values()].map((entry) => structuredClone(entry))),
+    refreshPlanProgress: (id) =>
+      reply(() => {
+        const job = find(id);
+        // As `Engine::refresh_plan_progress`: a planning run that posted its plan, open or closed.
+        if (!isPlanRun(job) || job.report !== "planned" || job.finished_at === null || !["needs_info", "done"].includes(job.state)) {
+          fail(`job ${id} is not a planning run that posted its plan`);
+        }
+        const empty: PlanProgress = {
+          job_id: id, issue_uuid: job.issue_uuid, total: 0, completed: 0, canceled: 0, open: 0, closable: false,
+          checked_at: now().toISOString(), error: null,
+        };
+        return structuredClone(plans.get(id) ?? empty);
+      }),
+    completePlan: (id) =>
+      reply(() => {
+        const job = find(id);
+        // As `Engine::complete_plan`: the newest planning run, open and not claimed, and every child ended.
+        if (!isPlanned(job) || newestRun(job.issue_uuid)?.id !== id || claims.has(id)) {
+          fail(`job ${id} is not a plan waiting to be closed`);
+        }
+        if (plans.get(id)?.closable !== true) fail("the plan cannot be closed yet");
+        update(id, { state: "done" });
       }),
     markDone: (id) =>
       reply(() => {

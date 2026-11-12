@@ -104,6 +104,7 @@ mod tests {
             "retry_job",
             "cancel_job",
             "record_local_completion",
+            "complete_plan",
         ] {
             assert!(
                 !METHODS.contains(&forbidden),
@@ -113,7 +114,7 @@ mod tests {
         // Other spellings count too: `retry`, `job.cancel`, `markDone`, ...
         for method in METHODS {
             let lower = method.to_ascii_lowercase();
-            for word in ["done", "retry", "cancel"] {
+            for word in ["done", "retry", "cancel", "complete"] {
                 assert!(
                     !lower.contains(word),
                     "`{method}` looks like a panel-only action"

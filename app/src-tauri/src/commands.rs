@@ -1,8 +1,8 @@
 //! The commands the panel calls. Each waits for the host, does one thing and returns something
 //! the panel can show; an error comes back as one cleaned line, or as a code the panel
 //! translates (`not_a_linear_link`, `login_cancelled`, and the `update_*` codes of
-//! `install_update`). `mark_done`, `retry_job` and `cancel_job` exist only here (design 5.6): IPC,
-//! the CLI and MCP never offer them. Plugins (opener, dialog, autostart; the updater through
+//! `install_update`). `mark_done`, `complete_plan`, `retry_job` and `cancel_job` exist only here
+//! (design 5.6, plan-closure design): IPC, the CLI and MCP never offer them. Plugins (opener, dialog, autostart; the updater through
 //! `update.rs`) are used from here, so the panel itself needs no plugin permission.
 //! `Host::env()` holds the real proxy values (user name and password unmasked): neither it nor
 //! any proxy value ever reaches the panel. The commands use it to start processes, and
@@ -18,7 +18,7 @@ use issuerelay_core::{
     cli_path::{CliPathStatus, CliSetup},
     config::{Binding, ExecutorKind, Settings},
     doctor::{CommandRunner as _, DoctorReport, SystemRunner},
-    engine::{IssueView, StatusSnapshot},
+    engine::{IssueView, PlanProgress, StatusSnapshot},
     env::EnvSource,
     executor,
     host::{Host, LinearSetup},
@@ -550,6 +550,35 @@ pub async fn mark_done(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
         .await?
         .engine()
         .mark_done(id)
+        .await
+        .map_err(error)
+}
+
+/// What the children of each open plan last came to; reads nothing from Linear.
+#[tauri::command]
+pub async fn plan_progress(state: State<'_, AppState>) -> CmdResult<Vec<PlanProgress>> {
+    Ok(host(&state).await?.engine().plan_progress())
+}
+
+/// Reads the children of one plan's issue now, for its details page.
+#[tauri::command]
+pub async fn refresh_plan_progress(state: State<'_, AppState>, id: i64) -> CmdResult<PlanProgress> {
+    host(&state)
+        .await?
+        .engine()
+        .refresh_plan_progress(id)
+        .await
+        .map_err(error)
+}
+
+/// The panel's "complete plan": marks a split plan done in Linear once every child has ended,
+/// with the same single write as `mark_done` (plan-closure design).
+#[tauri::command]
+pub async fn complete_plan(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    host(&state)
+        .await?
+        .engine()
+        .complete_plan(id)
         .await
         .map_err(error)
 }

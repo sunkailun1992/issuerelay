@@ -125,6 +125,10 @@ pub struct ListIssuesArgs {
     #[serde(rename = "orderBy")]
     pub order_by: Option<String>,
     pub fields: Option<Vec<String>>,
+    #[serde(rename = "parentId")]
+    pub parent_id: Option<String>,
+    #[serde(rename = "includeArchived")]
+    pub include_archived: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -181,7 +185,10 @@ pub fn issue_json(n: u32) -> Value {
         "parentId": parent,
         "priority": {"value": 2, "name": "High"},
         "createdAt": "2026-10-01T08:00:00.000Z",
-        "updatedAt": "2026-10-01T09:00:00.000Z"
+        "updatedAt": "2026-10-01T09:00:00.000Z",
+        // Only the second fake issue is archived, so that every requested field has a value in
+        // some fake issue (`the_fake_issues_carry_a_value_for_every_requested_field`).
+        "archivedAt": if n == 2 { Value::from("2026-10-02T08:00:00.000Z") } else { Value::Null }
     })
 }
 

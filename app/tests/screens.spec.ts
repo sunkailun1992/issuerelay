@@ -408,6 +408,24 @@ for (const { width, height } of SMALLEST) {
         expect(await reachPastRightEdge(dialog)).toEqual({ overflow: 0, past: [] });
       });
 
+      test(`closing a split plan in ${language} keeps the confirmation in reach`, async ({ page }) => {
+        const t = words(language);
+        // `?plans` adds the split plans to the demo; DEMO-21's child issues have all ended.
+        await page.goto(`/?lang=${language}&plans#/runs/21`);
+        await expect(page.locator("html")).toHaveAttribute("lang", language);
+        const complete = page.getByRole("button", { name: t("plan.complete"), exact: true });
+        await expect(complete).toBeVisible();
+        await expect(page.getByRole("button", { name: t("dispatch.implement"), exact: true })).toHaveCount(0);
+        await complete.click();
+        const dialog = page.getByRole("alertdialog", { name: t("plan.complete"), exact: true });
+        const confirm = dialog.getByRole("button", { name: t("actions.confirm"), exact: true });
+        await settled(page);
+        await expectWithinWindow(dialog, confirm, dialog.getByRole("button", { name: t("common.cancel"), exact: true }));
+        expect(await reachPastRightEdge(dialog)).toEqual({ overflow: 0, past: [] });
+        await confirm.click();
+        await expect(complete).toHaveCount(0);
+      });
+
       test(`the continuation review in ${language} keeps both actions in reach`, async ({ page }) => {
         const t = words(language);
         await open(page, language, "/issues");

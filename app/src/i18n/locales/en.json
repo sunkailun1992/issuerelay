@@ -19,6 +19,7 @@
     "awaiting_acceptance": "Awaiting acceptance",
     "needs_info": "Needs information",
     "planned": "Plan posted",
+    "plan_closable": "Ready to close",
     "done": "Done",
     "failed": "Failed",
     "canceled": "Canceled",
@@ -242,6 +243,7 @@
       "retry": "Could not run it again",
       "record_local_completion": "Could not record local completion",
       "mark_done": "Could not mark it done",
+      "complete_plan": "Could not complete the plan",
       "save_binding": "Could not save the binding",
       "remove_binding": "Could not remove the binding",
       "save_settings": "Could not save the settings",
@@ -315,6 +317,15 @@
     "issue_mismatch": "The preview no longer matches this issue. Reload it before confirming.",
     "plan_next_steps": "The plan is saved. Continue this issue through a development preview, or dispatch the child issues separately.",
     "view_requirements": "View requirements"
+  },
+  "plan": {
+    "progress": "Child issues: {{ended}} of {{total}} ended",
+    "split_notice": "This plan was split into child issues. Dispatch and complete them one by one; the plan itself is not implemented as a whole.",
+    "complete": "Complete plan",
+    "complete_confirm": "Every child issue of {{identifier}} has ended ({{completed}} completed, {{canceled}} canceled). Set {{identifier}} to {{done}} in Linear and record the plan as done? The child issues stay as they are.",
+    "progress_unknown": "The child issues could not be read.",
+    "all_canceled": "Every child issue was canceled, so the plan cannot be closed here. Settle it in Linear.",
+    "open_after_close": "Some child issues have not ended since the plan was closed ({{open}} open)."
   },
   "continuation": {
     "action": "Continue",

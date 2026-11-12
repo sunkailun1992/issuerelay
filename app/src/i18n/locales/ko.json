@@ -19,6 +19,7 @@
     "awaiting_acceptance": "검수 대기",
     "needs_info": "추가 정보 필요",
     "planned": "계획 작성됨",
+    "plan_closable": "완료 가능",
     "done": "완료",
     "failed": "실패",
     "canceled": "취소됨",
@@ -242,6 +243,7 @@
       "retry": "다시 실행하지 못했습니다",
       "record_local_completion": "로컬 완료를 기록하지 못했습니다",
       "mark_done": "완료로 표시하지 못했습니다",
+      "complete_plan": "계획을 완료하지 못했습니다",
       "save_binding": "프로젝트 연결을 저장하지 못했습니다",
       "remove_binding": "프로젝트 연결을 삭제하지 못했습니다",
       "save_settings": "설정을 저장하지 못했습니다",
@@ -315,6 +317,15 @@
     "issue_mismatch": "미리 보기가 이 이슈와 일치하지 않습니다. 다시 읽은 후 확인하세요.",
     "plan_next_steps": "계획이 저장되었습니다. 이 요구사항의 개발 미리보기로 진행하거나 나눈 하위 요구사항을 각각 배정하세요.",
     "view_requirements": "요구사항 목록 보기"
+  },
+  "plan": {
+    "progress": "하위 요구사항: {{total}}개 중 {{ended}}개 종료",
+    "split_notice": "이 계획은 하위 요구사항으로 나뉘었습니다. 하위 요구사항을 각각 배정하고 완료하세요. 계획 전체를 한꺼번에 구현하지 않습니다.",
+    "complete": "계획 완료",
+    "complete_confirm": "{{identifier}}의 하위 요구사항이 모두 종료되었습니다(완료 {{completed}}개, 취소 {{canceled}}개). Linear에서 {{identifier}}을(를) {{done}} 상태로 바꾸고 계획을 완료로 기록할까요? 하위 요구사항은 그대로 둡니다.",
+    "progress_unknown": "하위 요구사항을 읽지 못했습니다.",
+    "all_canceled": "하위 요구사항이 모두 취소되어 여기서 계획을 완료할 수 없습니다. Linear에서 처리하세요.",
+    "open_after_close": "계획을 완료한 뒤 종료되지 않은 하위 요구사항이 있습니다(미종료 {{open}}개)."
   },
   "continuation": {
     "action": "이전 실행 계속",

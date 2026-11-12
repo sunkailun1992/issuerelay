@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
-import { isActive, isNewestRun, isPlanned, isPlanRun, newestRuns, parseRunFilter, RUN_FILTERS } from "./runs";
-import { DISPLAY_JOB_STATES } from "./types";
+import { isActive, isNewestRun, isPlanned, isPlanRun, newerProgress, newestRuns, parseRunFilter, planProgressFor, RUN_FILTERS } from "./runs";
+import { DISPLAY_JOB_STATES, type PlanProgress } from "./types";
 
 test("the newest run of an issue is the one with the greatest id", () => {
   // The demo has two runs of DEMO-12: the old failed one (id 2) and the one running now (id 12).
@@ -74,3 +74,27 @@ test("only a planning run that reported a plan and waits on the issue has posted
   // Nor has a usual run, whatever it reported.
   expect(isPlanned({ ...run, mode: "implement" })).toBe(false);
 });
+
+test("a plan's progress is found by its planning run, and a run without one has none", () => {
+  const progress: PlanProgress = {
+    job_id: 20, issue_uuid: "issue-20", total: 5, completed: 2, canceled: 1, open: 2, closable: false,
+    checked_at: "2026-10-12T09:00:00Z", error: null,
+  };
+  expect(planProgressFor([progress], 20)).toBe(progress);
+  expect(planProgressFor([progress], 21)).toBeNull();
+  expect(planProgressFor(undefined, 20)).toBeNull();
+});
+
+test("of two readings of a plan's progress the later one wins, and either stands alone", () => {
+  const at = (checked_at: string, open: number): PlanProgress => ({
+    job_id: 21, issue_uuid: "issue-21", total: 2, completed: 2 - open, canceled: 0, open, closable: open === 0, checked_at, error: null,
+  });
+  const earlier = at("2026-10-12T08:58:00Z", 1);
+  const later = at("2026-10-12T08:59:00Z", 0);
+  expect(newerProgress(earlier, later)).toBe(later);
+  expect(newerProgress(later, earlier)).toBe(later);
+  expect(newerProgress(null, earlier)).toBe(earlier);
+  expect(newerProgress(earlier, null)).toBe(earlier);
+  expect(newerProgress(null, null)).toBeNull();
+});
+

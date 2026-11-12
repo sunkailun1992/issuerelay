@@ -42,6 +42,9 @@ export const tauriBackend: Backend = {
   cancelJob: (id) => call("cancel_job", { id }),
   retryJob: (id) => call("retry_job", { id }),
   markDone: (id) => call("mark_done", { id }),
+  planProgress: () => call("plan_progress"),
+  refreshPlanProgress: (id) => call("refresh_plan_progress", { id }),
+  completePlan: (id) => call("complete_plan", { id }),
   recordLocalCompletion: (id) => call("record_local_completion", { id }),
   bindings: () => call("bindings"),
   saveBinding: (binding) => call("save_binding", { binding }),
@@ -104,6 +107,11 @@ function mockUpdate(): string | undefined {
   return params.get("update") ?? undefined;
 }
 
+/** `?plans` in a browser adds split plans to the demo, one of them ready to be closed. */
+function mockPlans(): boolean {
+  return new URLSearchParams(typeof location === "undefined" ? "" : location.search).has("plans");
+}
+
 /** `?dispatch-review` in a browser makes one demo issue wait for the dispatch preview. */
 function mockDispatchReview(): boolean {
   return new URLSearchParams(typeof location === "undefined" ? "" : location.search).has("dispatch-review");
@@ -120,5 +128,6 @@ export async function loadBackend(): Promise<Backend> {
     language: mockLanguage(),
     update: mockUpdate(),
     dispatchReview: mockDispatchReview(),
+    plans: mockPlans(),
   });
 }

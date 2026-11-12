@@ -60,3 +60,19 @@ test("only a run that waits for the user can show a posted plan", async () => {
   expect(screen.getByText("Failed")).toBeInTheDocument();
   expect(screen.queryByText("Plan posted")).not.toBeInTheDocument();
 });
+
+test.each([
+  ["en", "Ready to close"],
+  ["zh-CN", "可收口"],
+  ["zh-TW", "可收口"],
+  ["ja", "完了可能"],
+  ["ko", "완료 가능"],
+] as const)("a plan whose child issues have all ended has its own badge in %s", async (lang, label) => {
+  await renderWithProviders(<StatusBadge state="needs_info" planned closable />, { lang });
+  expect(screen.getByText(label)).toBeInTheDocument();
+});
+
+test("closable means nothing for a run that is not a posted plan", async () => {
+  await renderWithProviders(<StatusBadge state="done" planned closable />);
+  expect(screen.getByText("Done")).toBeInTheDocument();
+});

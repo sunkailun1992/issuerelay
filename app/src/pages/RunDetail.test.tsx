@@ -9,7 +9,7 @@ import { MOCK_NOW, setFixedClock } from "@/lib/clock";
 import { formatDateTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
 import { ago } from "@/lib/mock-fixtures";
-import type { Job } from "@/lib/types";
+import type { Job, PlanProgress } from "@/lib/types";
 import type { DispatchPreview, Handoff } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { advanceUntil } from "@/test/time";
@@ -1524,3 +1524,62 @@ test("the page is in the language of the interface", async () => {
   expect(field("状态")).toBe("失败");
   expect(field("时长")).toBe("1 小时 0 分");
 });
+
+describe("a split plan", () => {
+  const plans = () => createMockBackend("demo", { latencyMs: 0, plans: true });
+  const progress = (patch: Partial<PlanProgress>): PlanProgress => ({
+    job_id: 20, issue_uuid: "issue-20", total: 0, completed: 0, canceled: 0, open: 0, closable: false,
+    checked_at: "2026-10-12T08:59:00Z", error: null, ...patch,
+  });
+
+  test("shows how far its child issues are and offers no implementation of the whole plan", async () => {
+    await openRun(20, plans());
+    expect(await screen.findByText("Child issues: 3 of 5 ended")).toBeInTheDocument();
+    expect(screen.getByText(/This plan was split into child issues\./)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Implement" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Complete plan" })).not.toBeInTheDocument();
+    expect(field("Status")).toBe("Plan posted");
+  });
+
+  test("whose child issues have all ended is closed after one confirmation", async () => {
+    const backend = plans();
+    const complete = vi.spyOn(backend, "completePlan");
+    await openRun(21, backend);
+    await userEvent.click(await screen.findByRole("button", { name: "Complete plan" }));
+    expect(field("Status")).toBe("Ready to close");
+    const dialog = within(screen.getByRole("alertdialog", { name: "Complete plan" }));
+    expect(dialog.getByText(/DEMO-21.*1 completed, 1 canceled.*Done/)).toBeInTheDocument();
+    expect(complete).not.toHaveBeenCalled();
+    await userEvent.click(dialog.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(complete).toHaveBeenCalledExactlyOnceWith(21));
+  });
+
+  test("whose child issues cannot be read says so and keeps the implementation action", async () => {
+    const backend = plans();
+    vi.spyOn(backend, "refreshPlanProgress").mockResolvedValue(progress({ error: "Linear is unreachable" }));
+    await openRun(20, backend);
+    expect(await screen.findByText("The child issues could not be read.")).toBeInTheDocument();
+    expect(screen.getByText("Linear is unreachable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Implement" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Complete plan" })).not.toBeInTheDocument();
+  });
+
+  test("whose child issues were all canceled cannot be closed here", async () => {
+    const backend = plans();
+    vi.spyOn(backend, "refreshPlanProgress").mockResolvedValue(progress({ total: 2, canceled: 2 }));
+    await openRun(20, backend);
+    expect(await screen.findByText(/Every child issue was canceled/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Complete plan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Implement" })).not.toBeInTheDocument();
+  });
+
+  test("that was closed says when a child issue has not ended since", async () => {
+    const backend = plans();
+    await backend.completePlan(21);
+    vi.spyOn(backend, "refreshPlanProgress").mockResolvedValue(progress({ job_id: 21, total: 3, completed: 1, canceled: 1, open: 1 }));
+    await openRun(21, backend);
+    expect(await screen.findByText("Some child issues have not ended since the plan was closed (1 open).")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Complete plan" })).not.toBeInTheDocument();
+  });
+});
+

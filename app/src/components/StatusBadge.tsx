@@ -40,18 +40,28 @@ export const STATE_STYLE: Record<DisplayJobState, { icon: LucideIcon; className:
 export const PLANNED_STYLE = { icon: NotebookPen, className: STATE_STYLE.needs_info.className };
 
 /**
+ * A posted plan whose child issues have all ended (plan-closure design): it waits for the user to
+ * close it, in the colour of a run awaiting acceptance.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- shared with the tests like `STATE_STYLE`.
+export const CLOSABLE_STYLE = { icon: ClipboardCheck, className: STATE_STYLE.awaiting_acceptance.className };
+
+/**
  * A job's state as a coloured badge with its icon and its name in the interface language.
  * `planned`: the job is a planning run that posted its plan (`isPlanned`), shown as such.
+ * `closable`: that plan's child issues have all ended, so it can be closed; only a posted plan uses it.
  */
-export function StatusBadge({ state, planned = false }: { state: JobState; planned?: boolean }) {
+export function StatusBadge({ state, planned = false, closable = false }: { state: JobState; planned?: boolean; closable?: boolean }) {
   const { t } = useTranslation();
   const visibleState = displayJobState(state);
   const asPlanned = planned && visibleState === "needs_info";
-  const { icon: Icon, className } = asPlanned ? PLANNED_STYLE : STATE_STYLE[visibleState];
+  const asClosable = asPlanned && closable;
+  const { icon: Icon, className } = asClosable ? CLOSABLE_STYLE : asPlanned ? PLANNED_STYLE : STATE_STYLE[visibleState];
+  const label = asClosable ? t("state.plan_closable") : asPlanned ? t("state.planned") : t(`state.${visibleState}`);
   return (
     <Badge variant="outline" className={className}>
       <Icon aria-hidden className={state === "running" ? "animate-spin" : undefined} />
-      {asPlanned ? t("state.planned") : t(`state.${visibleState}`)}
+      {label}
     </Badge>
   );
 }

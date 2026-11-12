@@ -30,7 +30,7 @@ use issuerelay_core::{
     env::{EnvSource, ExecEnv},
     executor::CommandSpec,
     linear::{Disconnected, LinearApi, Project, Team, Viewer},
-    model::{Issue, Job, JobState, RunMode, RunUsage},
+    model::{ChildIssue, Issue, Job, JobState, RunMode, RunUsage},
     runner::{ExitKind, RunLimits},
     store::{NewJob, Store},
     trigger::WaitReasonView,
@@ -1936,6 +1936,10 @@ impl LinearApi for SpyLinear {
             hook();
         }
         self.inner.set_state(id, state).await
+    }
+
+    async fn children(&self, parent_uuid: &str) -> Result<Vec<ChildIssue>> {
+        self.inner.children(parent_uuid).await
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {

@@ -559,6 +559,7 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
     linear.labels().await.unwrap();
     linear.teams().await.unwrap();
     linear.statuses("team-1").await.unwrap();
+    linear.children("uuid-1").await.unwrap();
 
     let mut sent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (tool, arguments) in server.calls.lock().unwrap().iter() {
@@ -580,9 +581,9 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
         .collect();
     assert_eq!(sent, listed);
     // The paged tools really were asked for a second page, or `cursor` would not show up above
-    // (`list_issues` once more: `labeled_issues` reads a single page).
+    // (`list_issues` once more: `labeled_issues` reads a single page; `children` reads two).
     for (tool, calls) in [
-        ("list_issues", 3),
+        ("list_issues", 5),
         ("list_projects", 2),
         ("list_issue_labels", 2),
         ("list_teams", 2),
@@ -599,6 +600,7 @@ async fn the_fields_sent_per_tool_are_exactly_the_ones_in_required_fields() {
     let linear = linear_with(&server).await;
     linear.candidate_issues("ai-ready", "Todo").await.unwrap();
     linear.labeled_issues("ai-ready").await.unwrap();
+    linear.children("uuid-1").await.unwrap();
     linear.issue("DEMO-1").await.unwrap();
     linear.projects().await.unwrap();
     for (tool, fields) in REQUIRED_FIELDS {
@@ -624,6 +626,45 @@ async fn the_fields_sent_per_tool_are_exactly_the_ones_in_required_fields() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn children_read_every_page_with_the_parent_filter_and_archived_items() {
+    // A deleted child still comes back when archived items are included; it carries `archivedAt`.
+    let mut deleted = issue_json(3);
+    deleted["archivedAt"] = serde_json::json!("2026-10-02T08:00:00.000Z");
+    let server = FakeLinearServer::default();
+    server.reply(
+        "list_issues",
+        Reply::Pages(vec![
+            serde_json::json!({"issues": [issue_json(1), issue_json(4)], "hasNextPage": true, "cursor": "c2"})
+                .to_string(),
+            serde_json::json!({"issues": [deleted], "hasNextPage": false}).to_string(),
+        ]),
+    );
+    let children = linear_with(&server)
+        .await
+        .children("parent-uuid")
+        .await
+        .unwrap();
+    let identifiers: Vec<&str> = children.iter().map(|c| c.identifier.as_str()).collect();
+    assert_eq!(identifiers, ["DEMO-1", "DEMO-4", "DEMO-3"]);
+    let archived: Vec<bool> = children.iter().map(|c| c.archived).collect();
+    assert_eq!(archived, [false, false, true]);
+    assert_eq!(children[0].state_type.as_deref(), Some("unstarted"));
+    assert_eq!(children[0].uuid, "00000000-0000-0000-0000-000000000001");
+    let calls = server.calls_to("list_issues");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["parentId"], "parent-uuid");
+    assert_eq!(calls[0]["includeArchived"], true);
+    assert!(
+        calls[0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "archivedAt")
+    );
+    assert_eq!(calls[1]["cursor"], "c2");
 }
 
 #[tokio::test]

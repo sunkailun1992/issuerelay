@@ -2,6 +2,7 @@ import { CircleAlert, Copy, Info, ListChecks, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router";
+import { CompletePlanButton } from "@/components/CompletePlanButton";
 import { DispatchReviewButton } from "@/components/DispatchReviewButton";
 import { HandoffCard } from "@/components/HandoffCard";
 import { JobActions } from "@/components/JobActions";
@@ -28,15 +29,20 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { LOG_LINES, useContinuationSource, useHandoff, useIssues, useJob, useJobLog, useJobs, useRecordLocalCompletion } from "@/hooks/queries";
+import {
+  LOG_LINES, useContinuationSource, useHandoff, useIssues, useJob, useJobLog, useJobs, usePlanProgress, useRecordLocalCompletion,
+  useRefreshedPlanProgress,
+} from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { useTriggerNamesWithStatus } from "@/hooks/useTriggerNames";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
-import { canRecordLocalCompletion, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview } from "@/lib/runs";
+import {
+  canRecordLocalCompletion, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview, newerProgress, planProgressFor,
+} from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
-import type { Job } from "@/lib/types";
+import type { Job, PlanProgress } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** What stands where a field has no value. */
@@ -68,7 +74,7 @@ function Folder({ directory }: { directory: string }) {
 }
 
 /** The facts about the run (design 9.2). The summary is the AI's own words, cleaned. */
-function InfoCard({ job }: { job: Job }) {
+function InfoCard({ job, closable }: { job: Job; closable: boolean }) {
   const { t } = useTranslation();
   const lang = useLang();
   const time = (iso: string | null) => (iso === null ? NONE : formatDateTime(iso, lang));
@@ -79,7 +85,7 @@ function InfoCard({ job }: { job: Job }) {
         {/* As many columns as the card has room for, down to the 900 px window's three. */}
         <dl className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-6 gap-y-3">
           <Field label={t("runs.field.state")}>
-            <StatusBadge state={job.state} planned={isPlanned(job)} />
+            <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
             {job.state === "local_complete" && (
               <p className="mt-1 text-xs text-muted-foreground">{t("runs.local_completion_detail")}</p>
             )}
@@ -257,6 +263,14 @@ function RunView({ job }: { job: Job }) {
   const { names, loaded } = useTriggerNamesWithStatus();
   // The issue list supplies both the Linear link and the current state of the issue, when listed.
   const issue = issues.data?.find((view) => view.issue.uuid === job.issue_uuid);
+  // A planning run that posted its plan, open or closed: its child issues are read when it opens.
+  const postedPlan = isPlanRun(job) && job.report === "planned" && job.finished_at !== null && (job.state === "needs_info" || job.state === "done");
+  const planProgress = useRefreshedPlanProgress(job.id, postedPlan);
+  // Read when the page opened; a later check's reading (`usePlanProgress`) keeps it current.
+  const checked = usePlanProgress();
+  const progress = newerProgress(planProgress.data ?? null, postedPlan ? planProgressFor(checked.data, job.id) : null);
+  const readError = planProgress.error;
+  const progressError = readError !== null ? (readError instanceof Error ? readError.message : String(readError)) : progress?.error ?? null;
   return (
     <>
       <PageHeader
@@ -275,33 +289,82 @@ function RunView({ job }: { job: Job }) {
       />
       <div className="flex flex-col gap-6">
         <Reason job={job} />
-        <InfoCard job={job} />
+        <InfoCard job={job} closable={isPlanned(job) && progressError === null && progress?.closable === true} />
         {isWaitingForDispatchReview(job) && continuationSource === null && (
           <div className="flex justify-end">
             <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} />
           </div>
         )}
         {isPlanned(job) && job.finished_at !== null && (
-          <Card size="sm">
-            <CardContent className="flex flex-wrap items-center justify-between gap-3">
-              <p className="min-w-0 wrap-anywhere text-sm text-muted-foreground">
-                {t("dispatch.plan_next_steps")}
-                {" "}{t("dispatch.implementation_scope", { issue: cleanDisplayText(job.issue_identifier) })}
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Link className="text-sm text-primary underline-offset-4 hover:underline" to="/issues">
-                  {t("dispatch.view_requirements")}
-                </Link>
-                <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} developmentJobId={job.id} />
-              </div>
-            </CardContent>
-          </Card>
+          <PlanNextSteps job={job} progress={progressError === null ? progress : null} error={progressError} />
+        )}
+        {job.state === "done" && postedPlan && progressError === null && progress !== null && progress.open > 0 && (
+          <Alert>
+            <Info aria-hidden />
+            <AlertDescription>{t("plan.open_after_close", { open: progress.open })}</AlertDescription>
+          </Alert>
         )}
         <HandoffCard job={job} />
         <ProviderSessionCard job={job} />
         <LogTabs job={job} />
       </div>
     </>
+  );
+}
+
+/**
+ * What comes after a posted plan (plan-closure design). Without child issues, or while they are read
+ * or cannot be read, the plan can go on to development as before. Once the plan is split, the child
+ * issues are dispatched and completed one by one: the card shows how far they are and, once every
+ * one has ended with at least one completed, offers to close the plan.
+ */
+function PlanNextSteps({ job, progress, error }: { job: Job; progress: PlanProgress | null; error: string | null }) {
+  const { t } = useTranslation();
+  const requirements = (
+    <Link className="text-sm text-primary underline-offset-4 hover:underline" to="/issues">
+      {t("dispatch.view_requirements")}
+    </Link>
+  );
+  if (progress === null || progress.total === 0) {
+    return (
+      <Card size="sm">
+        <CardContent className="flex flex-col gap-3">
+          {error !== null && (
+            <div className="flex flex-col gap-1">
+              <p className="text-sm">{t("plan.progress_unknown")}</p>
+              <DetailLine text={error} />
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="min-w-0 wrap-anywhere text-sm text-muted-foreground">
+              {t("dispatch.plan_next_steps")}
+              {" "}{t("dispatch.implementation_scope", { issue: cleanDisplayText(job.issue_identifier) })}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {requirements}
+              <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} developmentJobId={job.id} />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+  const allCanceled = progress.open === 0 && progress.completed === 0;
+  return (
+    <Card size="sm">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <p className="text-sm">{t("plan.progress", { ended: progress.completed + progress.canceled, total: progress.total })}</p>
+          <p className="wrap-anywhere text-sm text-muted-foreground">
+            {allCanceled ? t("plan.all_canceled") : t("plan.split_notice")}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {requirements}
+          {progress.closable && <CompletePlanButton job={job} progress={progress} />}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

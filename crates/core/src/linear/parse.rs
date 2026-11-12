@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{Project, Team, Viewer};
-use crate::model::Issue;
+use crate::model::{ChildIssue, Issue};
 
 /// One page of a paged Linear list. `next_cursor` is `None` on the last page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +229,21 @@ fn list<T>(raw: &str, key: &str, item: impl Fn(&Value) -> Result<T>) -> Result<P
 /// must not silently skip an issue.
 pub fn parse_issue_page(raw: &str) -> Result<Page<Issue>> {
     list(raw, "issues", parse_issue)
+}
+
+/// Parses a `list_issues` reply that lists an issue's children. Each child is read like any
+/// issue, so one that cannot be read fails the whole list; `archived` says whether Linear set
+/// its `archivedAt`.
+pub fn parse_child_page(raw: &str) -> Result<Page<ChildIssue>> {
+    list(raw, "issues", |v| {
+        let issue = parse_issue(v)?;
+        Ok(ChildIssue {
+            uuid: issue.uuid,
+            identifier: issue.identifier,
+            state_type: issue.state_type,
+            archived: v.get("archivedAt").is_some_and(|at| !at.is_null()),
+        })
+    })
 }
 
 /// Parses a `get_issue` reply (the issue itself, or wrapped in `issue`). Fails when the text is

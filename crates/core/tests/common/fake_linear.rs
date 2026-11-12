@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use chrono::Duration;
 use issuerelay_core::{
     linear::{LinearApi, Project, Team, Viewer},
-    model::Issue,
+    model::{ChildIssue, Issue},
     trigger::same_name,
 };
 
@@ -37,6 +37,12 @@ struct State {
     team_statuses: HashMap<String, Vec<String>>,
     /// How many times `issue()` was called for each id it was given.
     issue_reads: HashMap<String, usize>,
+    /// Issues Linear archived (deleted, or closed long ago), by uuid.
+    archived: HashSet<String>,
+    /// Parents whose children cannot be read, by uuid.
+    failing_children: HashSet<String>,
+    /// How often the children of each parent were read, by uuid.
+    children_reads: HashMap<String, usize>,
 }
 
 #[derive(Clone, Default)]
@@ -187,6 +193,31 @@ impl FakeLinear {
             .unwrap_or(0)
     }
 
+    /// Marks the issue archived: `children` still lists it, with `archived` set.
+    pub fn archive(&self, uuid: &str) {
+        self.state.lock().unwrap().archived.insert(uuid.into());
+    }
+
+    /// Makes every read of this parent's children fail.
+    pub fn fail_children(&self, parent_uuid: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .failing_children
+            .insert(parent_uuid.into());
+    }
+
+    /// How often the children of this parent were read.
+    pub fn children_reads(&self, parent_uuid: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .children_reads
+            .get(parent_uuid)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn set_state_calls(&self) -> Vec<(String, String)> {
         self.state.lock().unwrap().set_state_calls.clone()
     }
@@ -288,6 +319,30 @@ impl LinearApi for FakeLinear {
             .push((id.into(), state.into()));
         self.update(id, |i| i.state = state.into());
         Ok(())
+    }
+
+    async fn children(&self, parent_uuid: &str) -> Result<Vec<ChildIssue>> {
+        self.check_failure()?;
+        let mut s = self.state.lock().unwrap();
+        *s.children_reads.entry(parent_uuid.to_string()).or_default() += 1;
+        if s.failing_children.contains(parent_uuid) {
+            return Err(anyhow!("Linear is unreachable"));
+        }
+        // Children name their parent by identifier (`parentId`), as Linear's replies do.
+        let Some(parent) = s.issues.iter().find(|i| i.uuid == parent_uuid) else {
+            return Ok(Vec::new());
+        };
+        let parent = parent.identifier.clone();
+        Ok(s.issues
+            .iter()
+            .filter(|i| i.parent_identifier.as_deref() == Some(parent.as_str()))
+            .map(|i| ChildIssue {
+                uuid: i.uuid.clone(),
+                identifier: i.identifier.clone(),
+                state_type: i.state_type.clone(),
+                archived: s.archived.contains(&i.uuid),
+            })
+            .collect())
     }
 
     async fn projects(&self) -> Result<Vec<Project>> {

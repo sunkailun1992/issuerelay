@@ -37,6 +37,18 @@ pub struct Issue {
     pub blocked_by: Option<Vec<String>>,
 }
 
+/// A direct child of an issue, as far as closing its parent plan needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildIssue {
+    pub uuid: String,
+    /// Human identifier such as `DEMO-2`.
+    pub identifier: String,
+    /// The kind of its status (`statusType`); `None` when Linear did not say.
+    pub state_type: Option<String>,
+    /// Linear archived it (`archivedAt` is set): closed long ago, or deleted.
+    pub archived: bool,
+}
+
 /// Local life cycle of one issue's run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

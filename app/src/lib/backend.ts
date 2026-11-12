@@ -1,6 +1,7 @@
 import type {
   AppInfo, Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, IssueView, Job,
-  LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus, Viewer,
+  LinearSetup, PlanProgress, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus,
+  Viewer,
 } from "./types";
 import type { ModelCatalog } from "./model-catalog";
 import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext, NativeSessionPreview } from "./workflow-types";
@@ -54,6 +55,12 @@ export interface Backend {
   cancelJob(id: number): Promise<void>;
   retryJob(id: number): Promise<void>;
   markDone(id: number): Promise<void>;
+  /** What the children of each open plan last came to; reads nothing from Linear. */
+  planProgress(): Promise<PlanProgress[]>;
+  /** Reads the children of one plan's issue now, for its details page. */
+  refreshPlanProgress(id: number): Promise<PlanProgress>;
+  /** Closes a split plan: marks the plan issue done in Linear once every child has ended. */
+  completePlan(id: number): Promise<void>;
   recordLocalCompletion(id: number): Promise<void>;
   bindings(): Promise<Binding[]>;
   saveBinding(binding: Binding): Promise<void>;
