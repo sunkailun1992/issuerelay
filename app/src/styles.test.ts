@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import css from "./styles.css?raw";
 import buttonSource from "@/components/ui/button.tsx?raw";
-import { JOB_STATES } from "@/lib/types";
+import { DISPLAY_JOB_STATES } from "@/lib/types";
 import { STATE_STYLE } from "@/components/StatusBadge";
 import { blend, bytes, contrast, inGamut, oklch } from "@/test/colour";
 
@@ -15,8 +15,8 @@ function block(selector: string): string {
 // The state badges name colours by class (text-state-running ...); a class without a variable
 // would simply not be styled, and nothing else would notice.
 test("every state colour the badges use is defined for light and dark and offered to Tailwind", () => {
-  const names = JOB_STATES.map((state) => STATE_STYLE[state].className.split(" ")[0].replace("text-state-", ""));
-  expect(new Set(names).size).toBe(JOB_STATES.length);
+  const names = DISPLAY_JOB_STATES.map((state) => STATE_STYLE[state].className.split(" ")[0].replace("text-state-", ""));
+  expect(new Set(names).size).toBe(DISPLAY_JOB_STATES.length);
   const theme = block("@theme inline");
   for (const name of names) {
     expect(block(":root"), `light --state-${name}`).toMatch(new RegExp(`--state-${name}: oklch\\(`));
@@ -66,7 +66,7 @@ const THEMES = [
   ["light", ":root"],
   ["dark", ".dark"],
 ] as const;
-const STATES = JOB_STATES.map((state) => STATE_STYLE[state].className.split(" ")[0].replace("text-state-", ""));
+const STATES = DISPLAY_JOB_STATES.map((state) => STATE_STYLE[state].className.split(" ")[0].replace("text-state-", ""));
 /** What a badge can sit on: the page, a card, and the muted fill of a hovered row or a block. */
 const SURFACES = ["background", "card", "muted"] as const;
 /** A badge's tint is its own colour at 10% over the surface (`bg-state-*` with `/10`). */

@@ -127,6 +127,15 @@ describe("backend selection", () => {
     expect(invoke).toHaveBeenCalledExactlyOnceWith("read_codex_session", { id: 8 });
   });
 
+  test("recording local completion sends only the run ID to its desktop command", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    await tauriBackend.recordLocalCompletion(9);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("record_local_completion", { id: 9 });
+  });
+
   test("command errors become BackendError with the backend's text, and codes are recognised", async () => {
     vi.resetModules();
     const invoke = vi

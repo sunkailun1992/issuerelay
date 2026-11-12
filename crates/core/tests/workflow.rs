@@ -32,12 +32,26 @@ const SESSION: &str = "00000000-0000-4000-8000-000000000001";
 fn brief(scope: &str) -> IssueContext {
     IssueContext {
         request: "Adjust the demo fixture".into(),
+        conversation_history: Some("Keep the demo output stable.".into()),
         scope: scope.into(),
         acceptance: vec!["Existing output stays compatible".into()],
         source_refs: vec!["docs/demo.md".into()],
         origin_executor: Some(ExecutorKind::Codex),
         ..IssueContext::default()
     }
+}
+
+fn remove_stored_history(path: &Path) {
+    // Reproduce a pre-upgrade record with an approval for a brief without this field.
+    let conn = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        conn.execute(
+            "UPDATE workflow_context SET payload = json_remove(payload, '$.conversation_history')",
+            [],
+        )
+        .unwrap(),
+        1
+    );
 }
 
 async fn interrupted_implementation(h: &Harness) -> (Job, IssueContext) {
@@ -118,6 +132,208 @@ async fn explicit_continuation_resumes_same_executor_while_linear_is_in_progress
     assert_eq!(specs.len(), 2);
     assert!(specs[1].args.windows(2).any(|w| w == ["--resume", SESSION]));
     assert!(specs[1].stdin.contains(&preview.evidence));
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn records_verified_legacy_completion_locally_without_resuming_or_touching_linear() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue("DEMO-1", vec![Script::needs_info()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let before = h.latest("1");
+    assert_eq!(before.state, JobState::NeedsInfo);
+    let reads = h.linear.issue_reads("1");
+    h.engine.record_local_completion(before.id).await.unwrap();
+    let after = h.latest("1");
+
+    assert_eq!(after.state.as_str(), "local_complete");
+    assert_eq!(after.report, before.report);
+    assert_eq!(after.summary, before.summary);
+    assert_eq!(after.finished_at, before.finished_at);
+    assert_eq!(after.verified_updated_at, before.verified_updated_at);
+    assert_eq!(after.log_path, before.log_path);
+    assert_eq!(h.linear.issue_reads("1"), reads);
+    assert!(h.linear.set_state_calls().is_empty());
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    assert!(h.engine.retry_job(before.id).is_err());
+    assert!(h.engine.record_local_completion(before.id).await.is_err());
+}
+
+#[tokio::test]
+async fn clean_local_completion_does_not_require_remote_testing_or_a_final_linear_read() {
+    let h = Harness::new(1, true);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![Script {
+            final_text: Some(r#"{"result":"local_complete","summary":"verified locally"}"#.into()),
+            ..Script::exit_code(0)
+        }],
+    );
+    h.engine.tick().await.unwrap();
+    let running = h.latest("1");
+    assert_eq!(running.state, JobState::Running);
+    assert!(h.engine.record_local_completion(running.id).await.is_err());
+    let reads = h.linear.issue_reads("1");
+    h.runner.gate.add_permits(1);
+    h.settle().await;
+
+    let job = h.latest("1");
+    assert_eq!(job.state.as_str(), "local_complete");
+    assert_eq!(job.report.as_deref(), Some("local_complete"));
+    assert_eq!(job.summary.as_deref(), Some("verified locally"));
+    assert_eq!(job.verified_updated_at, Some(h.linear.get("1").updated_at));
+    assert_eq!(h.linear.issue_reads("1"), reads);
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn marks_local_result_done_only_after_linear_moves_to_the_configured_testing_state() {
+    let mut cfg = Config::default();
+    cfg.settings.trigger.in_testing = "Ready for review".into();
+    let h = Harness::with_config(cfg, false);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue("DEMO-1", vec![Script::needs_info()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let id = h.latest("1").id;
+    h.engine.record_local_completion(id).await.unwrap();
+
+    let err = h.engine.mark_done(id).await.unwrap_err();
+    assert!(err.to_string().contains("Ready for review"), "{err:#}");
+    assert!(h.linear.set_state_calls().is_empty());
+
+    h.linear
+        .update("1", |issue| issue.state = "Ready for review".into());
+    h.linear.fail_issue_reads("1");
+    assert!(h.engine.mark_done(id).await.is_err());
+    assert!(h.linear.set_state_calls().is_empty());
+    assert_eq!(h.latest("1").state, JobState::LocalComplete);
+    h.linear.clear_issue_failures();
+
+    h.engine.mark_done(id).await.unwrap();
+    assert_eq!(h.latest("1").state, JobState::Done);
+    assert_eq!(h.latest("1").report.as_deref(), Some("needs_info"));
+    assert!(h.engine.mark_done(id).await.is_err());
+    assert_eq!(h.linear.set_state_calls(), [("1".into(), "Done".into())]);
+}
+
+#[tokio::test]
+async fn older_local_result_cannot_close_an_issue_even_when_it_is_in_testing() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue("DEMO-1", vec![Script::needs_info()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let id = h.latest("1").id;
+    h.engine.record_local_completion(id).await.unwrap();
+
+    h.linear.update("1", |issue| issue.state = "Todo".into());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_ne!(h.latest("1").id, id);
+    assert_eq!(h.linear.get("1").state, "In Testing");
+
+    let err = h.engine.mark_done(id).await.unwrap_err();
+    assert!(err.to_string().contains("not the latest run"), "{err:#}");
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn needs_info_implementation_resumes_without_a_label_after_reviewing_new_context() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue(
+        "DEMO-1",
+        vec![
+            Script {
+                session_id: Some(SESSION.into()),
+                ..Script::needs_info()
+            },
+            Script::success(),
+        ],
+    );
+    let original = h
+        .engine
+        .set_issue_context("DEMO-1", 0, brief("Only the demo fixture"))
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let source = h.latest("1");
+    assert_eq!(source.state, JobState::NeedsInfo);
+    assert_eq!(source.report.as_deref(), Some("needs_info"));
+    h.linear.update("1", |issue| issue.labels.clear());
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.latest("1"), source);
+    let error = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("supplement"), "{error}");
+
+    let supplement = h
+        .engine
+        .set_issue_context(
+            "DEMO-1",
+            original.revision,
+            IssueContext {
+                conversation_history: Some("The demo fixture is on the second page.".into()),
+                ..brief("Only the demo fixture")
+            },
+        )
+        .await
+        .unwrap();
+    let handoff = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Claude)
+        .await
+        .unwrap();
+    assert_eq!(handoff.strategy, ContinuationStrategy::Handoff);
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    assert_eq!(preview.strategy, ContinuationStrategy::ResumeSession);
+    assert_eq!(preview.context.as_ref(), Some(&supplement));
+    h.engine.tick().await.unwrap();
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+
+    let child = h.latest("1");
+    assert_eq!(child.id, child_id);
+    assert_eq!(child.resume_job_id, Some(source.id));
+    assert_eq!(child.state, JobState::AwaitingAcceptance);
+    let specs = h.runner.specs.lock().unwrap();
+    assert_eq!(specs.len(), 2);
+    assert!(specs[1].args.iter().any(|arg| arg == "resume"));
+    assert!(specs[1].args.iter().any(|arg| arg == SESSION));
+    assert!(
+        specs[1]
+            .stdin
+            .contains("The demo fixture is on the second page.")
+    );
+    assert!(h.linear.get("1").labels.is_empty());
     assert!(h.linear.set_state_calls().is_empty());
 }
 
@@ -235,6 +451,40 @@ async fn new_task_context_requires_fresh_continuation_approval() {
     h.engine.tick().await.unwrap();
     h.settle().await;
     assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+}
+
+#[tokio::test]
+async fn legacy_context_without_history_blocks_a_preapproved_continuation() {
+    let root = tempfile::tempdir().unwrap();
+    let db_path = root.path().join("legacy.sqlite3");
+    let h = Harness::with_dispatch_review_store(Store::open(&db_path).unwrap());
+    let (source, _) = interrupted_implementation(&h).await;
+    let preview = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    let child_id = h
+        .engine
+        .approve_continuation(source.id, &preview.token)
+        .await
+        .unwrap();
+    remove_stored_history(&db_path);
+
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").id, child_id);
+    assert_eq!(h.latest("1").state, JobState::WaitingBinding);
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    let error = h
+        .engine
+        .get_continuation_preview(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("conversation_history"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -384,6 +634,95 @@ async fn manual_rerun_of_failed_continuation_keeps_history_and_needs_dispatch_re
             .any(|arg| matches!(arg.as_str(), "--resume" | "resume"))
     );
     assert!(!spec.stdin.contains("recorded_runs_newest_first"));
+}
+
+#[tokio::test]
+async fn submitted_context_requires_task_conversation_without_replacing_a_valid_draft() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    let staged = h
+        .engine
+        .set_issue_context("DEMO-1", 0, brief("Only the demo fixture"))
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+
+    for history in [None, Some(" \t\n".into())] {
+        let error = h
+            .engine
+            .set_issue_context(
+                "DEMO-1",
+                staged.revision,
+                IssueContext {
+                    conversation_history: history,
+                    ..brief("Proposed follow-up")
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("conversation_history"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        h.engine.issue_context("DEMO-1").await.unwrap(),
+        Some(staged)
+    );
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_context_stays_readable_but_requires_history_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let db_path = root.path().join("legacy.sqlite3");
+    let h = Harness::with_dispatch_review_store(Store::open(&db_path).unwrap());
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::success());
+    let staged = h
+        .engine
+        .set_issue_context("DEMO-1", 0, brief("Only the demo fixture"))
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    remove_stored_history(&db_path);
+
+    let legacy = h.engine.issue_context("DEMO-1").await.unwrap().unwrap();
+    assert_eq!(legacy.revision, staged.revision);
+    assert!(legacy.conversation_history.is_none());
+    let preview = h.engine.dispatch_preview("DEMO-1").await;
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert!(h.runner.started().is_empty());
+    let error = preview.unwrap_err();
+    assert!(
+        error.to_string().contains("conversation_history"),
+        "{error}"
+    );
+
+    let complete = h
+        .engine
+        .set_issue_context("DEMO-1", legacy.revision, brief("Only the demo fixture"))
+        .await
+        .unwrap();
+    let preview = h.engine.dispatch_preview("DEMO-1").await.unwrap();
+    assert_eq!(preview.context, Some(complete));
+    h.engine
+        .approve_dispatch("DEMO-1", &preview.token)
+        .await
+        .unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
 }
 
 #[tokio::test]

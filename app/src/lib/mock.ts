@@ -6,12 +6,12 @@ import {
 } from "./mock-fixtures";
 import type { ModelCatalog } from "./model-catalog";
 import { bindingsOverlap } from "./routing";
-import { isActive, isInterruptedRun, isPlanned, pendingContinuationSourceId } from "./runs";
+import { canRecordLocalCompletion, isActive, isInterruptedRun, isPlanned, pendingContinuationSourceId } from "./runs";
 import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, HeldJob, Issue, IssueView, Job, LinearSetup,
   QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
-import type { ContinuationPreview, DispatchPreview, Handoff } from "./workflow-types";
+import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext } from "./workflow-types";
 
 export interface MockOptions {
   /** The delay of every call: 120 ms by default so loading states show in a browser; tests pass 0. */
@@ -96,6 +96,7 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   let dispatchToken: string | null = null;
   let nextDispatchToken = 1;
   const continuationPreviews = new Map<number, ContinuationPreview>();
+  const continuationContexts = new Map<string, IssueContext>();
   let nextContinuationToken = 1;
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
@@ -299,9 +300,28 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       dispatchToken = null;
       dispatchReviewed = true;
     }),
+    getContinuationContext: (id) => reply(() => {
+      const source = find(id);
+      return continuationContexts.get(source.issue_uuid) ?? handoff(source).context;
+    }),
+    supplementContinuationContext: (id, expectedRevision, supplement) => reply(() => {
+      const source = find(id);
+      const current = continuationContexts.get(source.issue_uuid) ?? handoff(source).context;
+      if ((current?.revision ?? 0) !== expectedRevision) return fail("issue context revision changed; read it and try again");
+      if (!supplement.trim()) return fail("provide additional task information");
+      const updated: IssueContext = {
+        ...(current ?? { origin_executor: null, preferred_executor: null, request: source.title, scope: "", acceptance: [], source_refs: [] }),
+        revision: expectedRevision + 1,
+        conversation_history: [current?.conversation_history, supplement].filter(Boolean).join("\n\n"),
+      };
+      continuationContexts.set(source.issue_uuid, updated);
+      continuationPreviews.delete(id);
+      return structuredClone(updated);
+    }),
     getContinuationPreview: (id, executor) => reply(() => {
       if (!connected()) return offline();
       const { source, directory } = continuation(id);
+      const canResume = executor === source.executor && source.session_id != null && settings.resume_sessions;
       const preview: ContinuationPreview = {
         token: `demo-continuation-${nextContinuationToken++}`,
         source_job_id: id,
@@ -311,14 +331,13 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         title: source.title,
         mode: source.mode ?? "implement",
         executor,
-        strategy: executor === source.executor && source.session_id != null && settings.resume_sessions
-          ? "resume_session" : "handoff",
+        strategy: canResume ? "resume_session" : "handoff",
         directory,
         model: (executor === "codex" ? settings.default_codex_model : settings.default_claude_model) || null,
         effort: settings.default_effort ?? null,
         permission: settings.default_permission,
         claude_ultracode: executor === "claude" && source.mode !== "plan" && settings.claude_ultracode === true,
-        context: handoff(source).context,
+        context: continuationContexts.get(source.issue_uuid) ?? handoff(source).context,
         wiki_root: settings.wiki_root ?? null,
         evidence: [source.reason, source.summary].filter(Boolean).join("\n"),
       };
@@ -394,6 +413,13 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       reply(() => {
         if (find(id).state !== "awaiting_acceptance") fail(`job ${id} is not awaiting acceptance`);
         update(id, { state: "done" });
+      }),
+    recordLocalCompletion: (id) =>
+      reply(() => {
+        const job = find(id);
+        if (!canRecordLocalCompletion(job)) fail("only a finished implementation waiting for information can be recorded as complete locally");
+        if (newestRun(job.issue_uuid)?.id !== id || claims.has(id)) fail("this run is superseded or claimed");
+        update(id, { state: "local_complete" });
       }),
     bindings: () => reply(() => structuredClone(bindings)),
     saveBinding: (binding) =>

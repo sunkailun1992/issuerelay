@@ -12,7 +12,7 @@ import zhCN from "@/i18n/locales/zh-CN.json";
 import { type Backend, BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
 import { DEMO_APP_INFO, DEMO_BINDINGS } from "@/lib/mock-fixtures";
-import type { Binding, DoctorReport, LinearSetup, Settings, StatusView } from "@/lib/types";
+import { DISPLAY_JOB_STATES, type Binding, type DoctorReport, type LinearSetup, type Settings, type StatusView } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Onboarding from "./Onboarding";
 
@@ -1121,8 +1121,10 @@ test("the last step tells the four conditions, one example, how an issue moves a
   expect(screen.queryByText("Make the app faster")).not.toBeInTheDocument();
   const flow = screen.getByRole("region", { name: "How an issue moves" });
   expect(within(flow).getByRole("list", { name: "The statuses of an issue in Linear" })).toBeInTheDocument();
-  // The eight local statuses, and the badge of a posted plan.
-  expect(within(flow).getByRole("list", { name: "What the statuses in the panel mean" }).children).toHaveLength(9);
+  const statuses = within(flow).getByRole("list", { name: "What the statuses in the panel mean" });
+  expect(statuses.children).toHaveLength(DISPLAY_JOB_STATES.length + 1);
+  expect(within(statuses).getAllByText("Awaiting acceptance")).toHaveLength(1);
+  expect(within(statuses).queryByText("Completed locally")).not.toBeInTheDocument();
   expect(
     screen.getByText(
       "In Settings you can let Claude Code and Codex use IssueRelay's MCP control server. It is registered for your user, so unattended runs that are not lean load it too, and its tools can pause monitoring.",

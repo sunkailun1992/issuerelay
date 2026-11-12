@@ -27,7 +27,7 @@ use issuerelay_core::{
     provider_sessions::NativeSessionPreview,
     setup::{self, SetupAction},
     text::{clean_text, strip_control},
-    workflow::{ContinuationPreview, DispatchPreview},
+    workflow::{ContinuationPreview, DispatchPreview, IssueContext},
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -448,6 +448,34 @@ pub async fn get_continuation_preview(
         .map_err(error)
 }
 
+#[tauri::command]
+pub async fn get_continuation_context(
+    state: State<'_, AppState>,
+    id: i64,
+) -> CmdResult<Option<IssueContext>> {
+    host(&state)
+        .await?
+        .engine()
+        .continuation_context(id)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn supplement_continuation_context(
+    state: State<'_, AppState>,
+    id: i64,
+    expected_revision: u64,
+    supplement: String,
+) -> CmdResult<IssueContext> {
+    host(&state)
+        .await?
+        .engine()
+        .supplement_continuation_context(id, expected_revision, &supplement)
+        .await
+        .map_err(error)
+}
+
 /// Only the desktop panel can confirm a reviewed continuation.
 #[tauri::command]
 pub async fn approve_continuation(
@@ -503,6 +531,16 @@ pub async fn cancel_job(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 #[tauri::command]
 pub async fn retry_job(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     host(&state).await?.engine().retry_job(id).map_err(error)
+}
+
+#[tauri::command]
+pub async fn record_local_completion(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    host(&state)
+        .await?
+        .engine()
+        .record_local_completion(id)
+        .await
+        .map_err(error)
 }
 
 /// The panel's "mark done": IssueRelay's only write to Linear (design 5.6).

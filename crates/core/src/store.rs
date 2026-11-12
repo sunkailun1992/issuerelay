@@ -47,8 +47,8 @@ CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
-// Older schedulers would ignore the approved continuation attached to a queued job.
-const SCHEMA_VERSION: i64 = 5;
+// Older releases cannot read the local_complete job state.
+const SCHEMA_VERSION: i64 = 6;
 
 /// The columns schema 2 added to the M1 table, with their types.
 const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
@@ -419,8 +419,7 @@ impl Store {
         ensure!(
             source.issue_uuid == issue.uuid
                 && source.mode == new.mode
-                && source.started_at.is_some()
-                && matches!(source.state, JobState::Failed | JobState::Canceled)
+                && source.can_source_continuation()
                 && source.executor.is_some()
                 && (intent.strategy != ContinuationStrategy::ResumeSession
                     || source.executor == Some(intent.executor)),

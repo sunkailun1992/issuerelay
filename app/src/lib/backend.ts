@@ -3,7 +3,7 @@ import type {
   LinearSetup, Project, QuitMode, QuitPrompt, Settings, SetupAction, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
 import type { ModelCatalog } from "./model-catalog";
-import type { ContinuationPreview, DispatchPreview, Handoff, NativeSessionPreview } from "./workflow-types";
+import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext, NativeSessionPreview } from "./workflow-types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
 export const ERROR_CODES = [
@@ -44,6 +44,8 @@ export interface Backend {
   getDispatchPreview(issueIdentifier: string): Promise<DispatchPreview>;
   approveDispatch(issueIdentifier: string, token: string): Promise<void>;
   getContinuationPreview(id: number, executor: ExecutorKind): Promise<ContinuationPreview>;
+  getContinuationContext(id: number): Promise<IssueContext | null>;
+  supplementContinuationContext(id: number, expectedRevision: number, supplement: string): Promise<IssueContext>;
   approveContinuation(id: number, token: string): Promise<number>;
   getDevelopmentIssueUrl(id: number): Promise<string>;
   pause(): Promise<void>;
@@ -52,6 +54,7 @@ export interface Backend {
   cancelJob(id: number): Promise<void>;
   retryJob(id: number): Promise<void>;
   markDone(id: number): Promise<void>;
+  recordLocalCompletion(id: number): Promise<void>;
   bindings(): Promise<Binding[]>;
   saveBinding(binding: Binding): Promise<void>;
   removeBinding(id: string): Promise<boolean>;

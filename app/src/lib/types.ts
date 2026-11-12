@@ -1,13 +1,4 @@
-export type JobState =
-  | "waiting_binding"
-  | "queued"
-  | "running"
-  | "awaiting_acceptance"
-  | "needs_info"
-  | "done"
-  | "failed"
-  | "canceled";
-export const JOB_STATES: JobState[] = [
+export const DISPLAY_JOB_STATES = [
   "waiting_binding",
   "queued",
   "running",
@@ -16,7 +7,10 @@ export const JOB_STATES: JobState[] = [
   "done",
   "failed",
   "canceled",
-];
+] as const;
+export type DisplayJobState = (typeof DISPLAY_JOB_STATES)[number];
+/** The persisted engine state. Local completion is displayed as awaiting acceptance. */
+export type JobState = DisplayJobState | "local_complete";
 export type ExecutorKind = "claude" | "codex";
 export type PermissionProfile = "full" | "auto" | "personal";
 /** How hard the executor reasons (`config::Effort`). */
@@ -84,7 +78,7 @@ export interface Job {
   summary: string | null;
   /** Absent from hosts before planning runs: a usual run. */
   mode?: RunMode;
-  /** The `result` of the AI's last line of JSON (`in_testing`, `needs_info`, `failed`, `planned`). */
+  /** The result reported by the executor, retained if the local run status changes later. */
   report?: string | null;
   session_id?: string | null;
   /** The earlier run continued through its session or an approved handoff. */

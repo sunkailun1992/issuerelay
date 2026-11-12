@@ -143,7 +143,8 @@ const SCREENS: { name: string; route: string; ready: (page: Page, t: Words) => P
     route: "/runs",
     ready: async (page, t) => {
       await expect(title(page, t("nav.runs"))).toBeVisible();
-      await expect(page.getByText("executor exited with code 1")).toBeVisible();
+      await expect(page.getByRole("link", { name: "DEMO-12", exact: true })).toBeVisible();
+      await expect(page.getByText("executor exited with code 1")).toHaveCount(0);
     },
   },
   {
@@ -351,7 +352,7 @@ for (const { width, height } of SMALLEST) {
           await expect(title(page, t(route === "/issues" ? "nav.issues" : "nav.runs"))).toBeVisible();
           await expect(page.locator('[data-slot="table-container"]')).toBeVisible();
           // The demo's rows are there: a table without rows measures nothing.
-          await expect(page.locator('[data-slot="table-body"] tr')).toHaveCount(9);
+          await expect(page.locator('[data-slot="table-body"] tr')).toHaveCount(route === "/runs" ? 8 : 9);
           await settled(page);
 
           // Chinese column names are short: each keeps to one line.
@@ -362,6 +363,35 @@ for (const { width, height } of SMALLEST) {
           expect(pastWindow, "the window").toBeLessThanOrEqual(0);
         });
       }
+    }
+
+    for (const language of LAYOUT_LANGUAGES) {
+      test(`the grouped run history in ${language} stays reachable and filters by latest state`, async ({ page }) => {
+        const t = words(language);
+        await open(page, language, "/runs?state=running");
+        const toggle = page.getByRole("button", { name: t("runs.expand_history").replace("{{issue}}", "DEMO-12"), exact: true });
+        await expect(toggle).toBeVisible();
+        await toggle.click();
+        const history = page.getByRole("region", { name: t("runs.history_caption").replace("{{issue}}", "DEMO-12"), exact: true });
+        const latest = history.getByRole("link", { name: t("runs.run_label").replace("{{id}}", "12"), exact: true });
+        const previous = history.getByRole("link", { name: t("runs.run_label").replace("{{id}}", "2"), exact: true });
+        await expect(latest).toBeVisible();
+        await expect(previous).toBeVisible();
+        await expect(history.getByText(t("runs.latest"), { exact: true })).toBeVisible();
+        await settled(page);
+        expect(await reachPastRightEdge(history.locator('[data-slot="table-container"]')), "the history table").toEqual({ overflow: 0, past: [] });
+        expect(await reachPastRightEdge(page.locator("main")), "the page").toEqual({ overflow: 0, past: [] });
+        await latest.scrollIntoViewIfNeeded();
+        await expectWithinWindow(latest);
+        await previous.scrollIntoViewIfNeeded();
+        await expectWithinWindow(previous);
+        await previous.click();
+        await expect(page).toHaveURL(/#\/runs\/2$/);
+
+        await open(page, language, "/runs?state=failed");
+        await expect(page.getByRole("link", { name: "DEMO-8", exact: true })).toBeVisible();
+        await expect(page.getByRole("link", { name: "DEMO-12", exact: true })).toHaveCount(0);
+      });
     }
 
     for (const language of LAYOUT_LANGUAGES) {

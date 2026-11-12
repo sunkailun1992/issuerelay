@@ -50,7 +50,7 @@ function linesOfCell(cell: HTMLElement): string[] {
   const lines: string[] = [];
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
     const text = node.textContent?.trim() ?? "";
-    if (text !== "") lines.push(text);
+    if (text !== "" && node.parentElement?.closest("button") === null) lines.push(text);
   }
   return lines;
 }
@@ -101,9 +101,76 @@ test("the list is a table with a column for each thing it says about a run", asy
     "Started / Duration",
     "Note",
   ]);
-  // The engine's order is kept: the newest run first (DEMO-12 has two runs, the old failed one last).
+  // One latest run per issue; DEMO-12's failed attempt stays in its collapsed history.
   const ids = screen.getAllByRole("row").slice(1).map((row) => within(row).getByRole("link").getAttribute("href"));
-  expect(ids).toEqual(["/runs/12", "/runs/11", "/runs/10", "/runs/9", "/runs/8", "/runs/7", "/runs/6", "/runs/5", "/runs/2"]);
+  expect(ids).toEqual(["/runs/12", "/runs/11", "/runs/10", "/runs/9", "/runs/8", "/runs/7", "/runs/6", "/runs/5"]);
+});
+
+test("an issue expands all its attempts without leaving the list or reading more jobs", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const readJobs = vi.spyOn(backend, "listJobs");
+  await renderWithProviders(pages, { backend, route: "/runs?state=running" });
+  const toggle = await screen.findByRole("button", { name: "Show runs for DEMO-12" });
+  expect(toggle).toHaveTextContent("2 runs");
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getAllByRole("link")).toHaveLength(1);
+  const reads = readJobs.mock.calls.length;
+
+  await userEvent.click(toggle);
+  expect(screen.getByTestId("where")).toHaveTextContent(/^\/runs\?state=running$/);
+  expect(readJobs).toHaveBeenCalledTimes(reads);
+  const history = screen.getByRole("region", { name: "Runs for DEMO-12" });
+  expect(screen.getByRole("button", { name: "Hide runs for DEMO-12" })).toHaveAttribute("aria-expanded", "true");
+  expect(within(history).getAllByRole("link").map((link) => link.getAttribute("href"))).toEqual(["/runs/12", "/runs/2"]);
+  expect(within(history).getByRole("link", { name: "Run #12" })).toBeInTheDocument();
+  expect(within(history).getByText("Latest")).toBeInTheDocument();
+  const old = within(history).getByRole("link", { name: "Run #2" }).closest("tr")!;
+  expect(cellsOf(old)).toEqual([
+    ["Failed"],
+    ["Run #2", "Claude Code"],
+    ["Development"],
+    [formatTime("2026-10-10T09:00:00Z", "en"), "5 min 0 s"],
+    ["executor exited with code 1"],
+  ]);
+  await userEvent.click(within(history).getByRole("link", { name: "Run #2" }));
+  expect(screen.getByTestId("where")).toHaveTextContent(/^\/runs\/2$/);
+});
+
+test("history gives each round's mode, executor, continuation and creation time when it has not started", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const base = (await backend.listJobs(100))[0];
+  backend.listJobs = vi.fn().mockResolvedValue([
+    { ...base, id: 21, mode: "plan", state: "needs_info", report: "planned", executor: "claude", resume_job_id: null },
+    { ...base, id: 23, mode: "implement", state: "queued", executor: "codex", started_at: null, resume_job_id: 22 },
+    { ...base, id: 22, mode: "implement", state: "failed", executor: "claude", resume_job_id: 21 },
+  ]);
+  await renderWithProviders(pages, { backend, route: "/runs?state=queued" });
+  const toggle = await screen.findByRole("button", { name: "Show runs for DEMO-12" });
+  toggle.focus();
+  await userEvent.keyboard("{Enter}");
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByTestId("where")).toHaveTextContent(/^\/runs\?state=queued$/);
+  const history = screen.getByRole("region", { name: "Runs for DEMO-12" });
+  const rows = within(history).getAllByRole("row").slice(1);
+  expect(rows.map((row) => within(row).getAllByRole("cell")[1].textContent)).toEqual(["Run #23CodexLatest", "Run #22Claude Code", "Run #21Claude Code"]);
+  expect(cellsOf(rows[0])[2]).toEqual(["Development", "Continued from run #22"]);
+  expect(cellsOf(rows[0])[3].slice(0, 2)).toEqual(["Created", formatTime(base.created_at, "en")]);
+  expect(cellsOf(rows[2])[2]).toEqual(["Plan only"]);
+  await userEvent.click(within(rows[0]).getByRole("link", { name: "Continued from run #22" }));
+  expect(screen.getByTestId("where")).toHaveTextContent(/^\/runs\/22$/);
+});
+
+test("an old failed round does not put an issue whose latest round is running in the failed filter", async () => {
+  await renderWithProviders(<Runs />, { route: "/runs?state=failed" });
+  await screen.findByRole("link", { name: "DEMO-8" });
+  expect(screen.queryByRole("link", { name: "DEMO-12" })).not.toBeInTheDocument();
+  expect(screen.queryByText("executor exited with code 1")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "Running" }));
+  await userEvent.click(screen.getByRole("button", { name: "Show runs for DEMO-12" }));
+  expect(screen.getByRole("link", { name: "Run #2" })).toBeInTheDocument();
+  expect(screen.getByText("executor exited with code 1")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Hide runs for DEMO-12" }));
+  expect(screen.queryByRole("region", { name: "Runs for DEMO-12" })).not.toBeInTheDocument();
 });
 
 test("a row says the state, the issue and who ran it, the title, when and for how long, and what came of it", async () => {
@@ -150,13 +217,7 @@ test("a row says the state, the issue and who ran it, the title, when and for ho
     ["project is not bound to a local directory"],
   ]);
   expect(cellsOf(rowOfRun(6)).at(-1)).toEqual(["stopped by the user"]);
-  expect(cellsOf(rowOfRun(2))).toEqual([
-    ["Failed"],
-    ["DEMO-12", "Claude Code"],
-    ["Add a health check endpoint"],
-    ["2 days ago", "5 min 0 s"],
-    ["executor exited with code 1"],
-  ]);
+  expect(screen.queryByText("executor exited with code 1")).not.toBeInTheDocument();
 });
 
 test("the note is the summary of a run that did something and the reason of one that did not", async () => {
@@ -200,10 +261,10 @@ test("a planning run says so after its executor, and one that posted its plan ha
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const base = (await backend.listJobs(100)).find((job) => job.id === 8)!;
   backend.listJobs = vi.fn().mockResolvedValue([
-    { ...base, id: 33, issue_identifier: "DEMO-33", mode: "plan", state: "running", finished_at: null, reason: null },
-    { ...base, id: 34, issue_identifier: "DEMO-34", mode: "plan", state: "needs_info", report: "planned", reason: null, summary: "Posted a plan in three steps" },
+    { ...base, id: 33, issue_uuid: "issue-33", issue_identifier: "DEMO-33", mode: "plan", state: "running", finished_at: null, reason: null },
+    { ...base, id: 34, issue_uuid: "issue-34", issue_identifier: "DEMO-34", mode: "plan", state: "needs_info", report: "planned", reason: null, summary: "Posted a plan in three steps" },
     // A usual run that asked a question is not a plan.
-    { ...base, id: 35, issue_identifier: "DEMO-35", mode: "implement", state: "needs_info", report: "needs_info", reason: null, summary: "Asked which format" },
+    { ...base, id: 35, issue_uuid: "issue-35", issue_identifier: "DEMO-35", mode: "implement", state: "needs_info", report: "needs_info", reason: null, summary: "Asked which format" },
   ]);
   await renderWithProviders(<Runs />, { backend });
   await screen.findByText("DEMO-33");
@@ -225,9 +286,9 @@ test("a run without a cost shows none, and a cost under a cent is not shown as n
     turns: null,
   };
   backend.listJobs = vi.fn().mockResolvedValue([
-    { ...base, id: 36, issue_identifier: "DEMO-36", usage: { ...usage, cost_micro_usd: 4_000, session_cost_micro_usd: 4_000, turns: 3 } },
+    { ...base, id: 36, issue_uuid: "issue-36", issue_identifier: "DEMO-36", usage: { ...usage, cost_micro_usd: 4_000, session_cost_micro_usd: 4_000, turns: 3 } },
     // Codex reports tokens only.
-    { ...base, id: 37, issue_identifier: "DEMO-37", executor: "codex", usage },
+    { ...base, id: 37, issue_uuid: "issue-37", issue_identifier: "DEMO-37", executor: "codex", usage },
   ]);
   await renderWithProviders(<Runs />, { backend });
   await screen.findByText("DEMO-36");
@@ -241,8 +302,8 @@ test("the AI's summary and the engine's reason are cleaned before they are shown
   const esc = String.fromCharCode(0x1b);
   const rlo = String.fromCharCode(0x202e);
   backend.listJobs = vi.fn().mockResolvedValue([
-    { ...base, id: 31, issue_identifier: "DEMO-31", state: "done", reason: null, summary: `${esc}[31mFixed${esc}[0m it${rlo}` },
-    { ...base, id: 32, issue_identifier: "DEMO-32", state: "failed", summary: null, reason: `exit${esc}[2K code${rlo} 1` },
+    { ...base, id: 31, issue_uuid: "issue-31", issue_identifier: "DEMO-31", state: "done", reason: null, summary: `${esc}[31mFixed${esc}[0m it${rlo}` },
+    { ...base, id: 32, issue_uuid: "issue-32", issue_identifier: "DEMO-32", state: "failed", summary: null, reason: `exit${esc}[2K code${rlo} 1` },
   ]);
   await renderWithProviders(<Runs />, { backend });
   await screen.findByText("DEMO-31");
@@ -273,14 +334,14 @@ test("the runs are shown without the retry time when the status cannot be read",
 
 /** The tab of each filter, and the demo's runs that it shows (the newest first). */
 const TABS: Record<RunFilter, [string, number[]]> = {
-  all: ["All", [12, 11, 10, 9, 8, 7, 6, 5, 2]],
+  all: ["All", [12, 11, 10, 9, 8, 7, 6, 5]],
   waiting_binding: ["Waiting for setup", [5]],
   queued: ["Queued", [11]],
   running: ["Running", [12]],
   awaiting_acceptance: ["Awaiting acceptance", [10]],
   needs_info: ["Needs information", [9]],
   done: ["Done", [7]],
-  failed: ["Failed", [8, 2]],
+  failed: ["Failed", [8]],
   canceled: ["Canceled", [6]],
 };
 
@@ -298,6 +359,16 @@ test.each(RUN_FILTERS)("the address ?state=%s selects its tab and shows the runs
   expect(screen.getAllByRole("tab", { selected: true })).toHaveLength(1);
   await screen.findByRole("table");
   expect(listedRuns()).toEqual(ids);
+});
+
+test.each(["awaiting_acceptance", "local_complete"])("%s opens the one acceptance filter with both kinds of run", async (state) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.recordLocalCompletion(9);
+  await renderWithProviders(<Runs />, { backend, route: `/runs?state=${state}` });
+  expect(await screen.findByRole("tab", { name: "Awaiting acceptance", selected: true })).toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Completed locally" })).not.toBeInTheDocument();
+  await screen.findByRole("table");
+  expect(listedRuns()).toEqual([10, 9]);
 });
 
 test("a state the page does not know in the address means all runs", async () => {

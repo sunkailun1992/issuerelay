@@ -184,6 +184,18 @@ pub fn evaluate(
     let Some(mode) = candidate_mode(issue, &cfg.settings.trigger, me) else {
         return Eligibility::NotCandidate;
     };
+    evaluate_candidate(issue, cfg, mode, ready, home, blockers)
+}
+
+/// Checks a candidate whose mode was already verified, including an approved continuation.
+pub(crate) fn evaluate_candidate(
+    issue: &Issue,
+    cfg: &Config,
+    mode: RunMode,
+    ready: &Readiness,
+    home: Option<&Path>,
+    blockers: &[String],
+) -> Eligibility {
     let binding = match cfg.route(issue) {
         Route::Bound(binding) => binding,
         Route::NotBound => return Eligibility::Waiting(WaitReason::ProjectNotBound),

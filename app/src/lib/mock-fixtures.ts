@@ -105,7 +105,7 @@ function job(fields: Pick<Job, "id" | "issue_identifier" | "title" | "state"> & 
 }
 
 /**
- * One job in every state, newest first, plus an older failed run of DEMO-12 (id 2): only the
+ * Demo jobs, newest first, plus an older failed run of DEMO-12 (id 2): only the
  * newest run of an issue may run again, and an old failure does not raise the overview's alert.
  */
 export const DEMO_JOBS: Job[] = [
@@ -132,7 +132,7 @@ export const DEMO_JOBS: Job[] = [
       turns: 17,
     },
   }),
-  job({ id: 9, issue_identifier: "DEMO-9", title: "Clarify the export format", state: "needs_info", started_at: ago(70), finished_at: ago(60), summary: "Asked on the issue which date format the export should use" }),
+  job({ id: 9, issue_identifier: "DEMO-9", title: "Clarify the export format", mode: "implement", state: "needs_info", report: "needs_info", started_at: ago(70), finished_at: ago(60), summary: "Asked on the issue which date format the export should use" }),
   job({ id: 8, issue_identifier: "DEMO-8", title: "Speed up the search index", state: "failed", reason: "run exceeded the time limit", started_at: ago(130), finished_at: ago(70), session_id: "91b20493-d441-4faf-913c-cda9d1c80e12" }),
   job({ id: 7, issue_identifier: "DEMO-7", title: "Fix the login redirect", state: "done", started_at: ago(240), finished_at: ago(200), summary: "Fixed the redirect after login and added a test" }),
   job({ id: 6, issue_identifier: "DEMO-6", title: "Remove the old banner", state: "canceled", reason: "stopped by the user", started_at: ago(300), finished_at: ago(290) }),

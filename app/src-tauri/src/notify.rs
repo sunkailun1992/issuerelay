@@ -29,7 +29,9 @@ pub fn notification_for(previous: Option<JobState>, job: &Job) -> Option<Notific
     }
     match job.state {
         JobState::Running => Some(NotificationKind::RunStarted),
-        JobState::AwaitingAcceptance => Some(NotificationKind::AwaitingAcceptance),
+        JobState::AwaitingAcceptance | JobState::LocalComplete => {
+            Some(NotificationKind::AwaitingAcceptance)
+        }
         JobState::NeedsInfo => Some(NotificationKind::NeedsInfo),
         JobState::Failed => Some(NotificationKind::Failed),
         _ => None,
@@ -52,6 +54,9 @@ pub fn content(kind: NotificationKind, job: &Job, t: &Translator) -> (String, St
     let title = format!("{} {}", job.issue_identifier, job.title);
     let key = match kind {
         NotificationKind::RunStarted => "notify.run_started",
+        NotificationKind::AwaitingAcceptance if job.state == JobState::LocalComplete => {
+            "notify.local_complete"
+        }
         NotificationKind::AwaitingAcceptance => "notify.awaiting_acceptance",
         // A planning run that posted its plan waits for the user as well, for the next step: the
         // `needs_info` switch covers it, with words of its own.
@@ -142,6 +147,32 @@ mod tests {
                 "{quiet:?}"
             );
         }
+    }
+
+    #[test]
+    fn local_completion_uses_the_acceptance_switch_and_local_wording() {
+        let local = job(JobState::LocalComplete);
+        assert_eq!(
+            notification_for(Some(JobState::Running), &local),
+            Some(NotificationKind::AwaitingAcceptance)
+        );
+        assert_eq!(
+            notification_for(Some(JobState::LocalComplete), &local),
+            None
+        );
+        let mut settings = NotificationSettings::default();
+        assert!(enabled(NotificationKind::AwaitingAcceptance, &settings));
+        settings.awaiting_acceptance = false;
+        assert!(!enabled(NotificationKind::AwaitingAcceptance, &settings));
+        let (_, body) = content(
+            NotificationKind::AwaitingAcceptance,
+            &local,
+            &Translator::new("en"),
+        );
+        assert_eq!(
+            body,
+            "Local development and verification are complete; review the result."
+        );
     }
 
     #[test]

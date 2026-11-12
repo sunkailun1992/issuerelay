@@ -1,5 +1,8 @@
 {
-  "app": { "name": "IssueRelay", "tagline": "把 Linear 需求交給 Claude Code 與 Codex 處理" },
+  "app": {
+    "name": "IssueRelay",
+    "tagline": "把 Linear 需求交給 Claude Code 與 Codex 處理"
+  },
   "nav": {
     "overview": "總覽",
     "issues": "需求",
@@ -70,11 +73,12 @@
   "notify": {
     "run_started": "已開始執行。",
     "awaiting_acceptance": "可以驗收了：需求已進入測試狀態。",
-    "needs_info": "AI 在需求下提出了問題。補充資訊後，請重新加上 ai-ready 標籤。",
+    "needs_info": "AI 請求補充資訊，請在面板查看所需內容。",
     "plan_ready": "方案已寫在需求下。要照方案動手，請加上 ai-ready 標籤。",
     "failed": "執行失敗，原因請見面板。",
     "update_available": "IssueRelay {{version}} 已發佈",
-    "update_available_body": "開啟面板即可安裝。"
+    "update_available_body": "開啟面板即可安裝。",
+    "local_complete": "本機開發與驗證已完成，請驗收結果。"
   },
   "quit": {
     "title": "仍有任務正在執行",
@@ -150,6 +154,8 @@
     "next": "下一步",
     "verification": "回報的驗證",
     "blockers": "阻塞項目",
+    "information_requested": "待補充資訊",
+    "information_requested_fallback": "請查看 Linear 需求的最新留言，確認上次執行提出的問題。",
     "updated_at": "儲存時間",
     "git_head": "提交",
     "git_branch": "分支",
@@ -220,6 +226,8 @@
   "actions": {
     "stop": "停止",
     "run_again": "重新執行",
+    "record_local_completion": "記錄本機完成",
+    "record_local_completion_confirm": "將執行 #{{id}} 記錄為已完成本機開發和驗證。此操作只更新本機記錄，Linear 需求維持原狀。",
     "mark_done": "標記完成",
     "open_in_linear": "在 Linear 中開啟",
     "open_issue_in_linear": "在 Linear 中開啟 {{identifier}}",
@@ -232,6 +240,7 @@
       "poll_now": "無法開始檢查",
       "cancel": "無法停止這次執行",
       "retry": "無法重新執行",
+      "record_local_completion": "無法記錄本機完成",
       "mark_done": "無法標記為完成",
       "save_binding": "無法儲存綁定",
       "remove_binding": "無法移除綁定",
@@ -303,7 +312,9 @@
     "conversation_history": "目前的對話",
     "implementation_scope": "執行開發只針對 {{issue}}。子需求需分別派發。",
     "prepare_implementation": "請在 Linear 將此需求設為 {{todo}}，指派給自己並加上 {{label}} 標籤。完成後回到這裡重新讀取預覽。",
-    "issue_mismatch": "預覽與此需求不符。請重新讀取後再確認。"
+    "issue_mismatch": "預覽與此需求不符。請重新讀取後再確認。",
+    "plan_next_steps": "方案已儲存。可在本需求進入開發預覽，也可分別派發已拆分的子需求。",
+    "view_requirements": "查看需求清單"
   },
   "continuation": {
     "action": "繼續上次",
@@ -315,7 +326,11 @@
     "handoff": "帶入已確認的交接內容並開啟新工作階段",
     "evidence": "上次執行的證據",
     "preview_mismatch": "預覽已與這次執行或執行者不符，請重新載入後再確認。",
-    "confirm": "確認並繼續"
+    "confirm": "確認並繼續",
+    "supplement_label": "補充任務資訊",
+    "supplement_hint": "填寫本次缺少的資訊。補充內容會附加至原任務歷史，確認預覽後再交給執行器。",
+    "supplement_preview": "儲存補充並預覽",
+    "supplement_failed": "補充任務資訊失敗"
   },
   "provider_session": {
     "title": "執行者原工作階段",
@@ -385,6 +400,7 @@
   },
   "runs": {
     "all": "全部",
+    "local_completion_detail": "本機開發和驗證已完成。",
     "field": {
       "state": "狀態",
       "issue": "編號",
@@ -402,7 +418,8 @@
       "usage": "用量"
     },
     "mode": {
-      "plan": "只出方案"
+      "plan": "只出方案",
+      "implement": "開發"
     },
     "resumed_from": "接續自執行 #{{id}}",
     "usage": {
@@ -442,7 +459,14 @@
     "no_output": "暫時沒有可顯示的內容",
     "log_capped": "只顯示日誌的最後 {{lines}} 行，執行在這之前就已開始。",
     "list_capped": "只顯示最近的 {{runs}} 次執行，更早的沒有列出。",
-    "no_output_ended": "這次執行沒有留下可顯示的內容"
+    "no_output_ended": "這次執行沒有留下可顯示的內容",
+    "history_count_one": "{{count}} 次執行",
+    "history_count_other": "{{count}} 次執行",
+    "expand_history": "展開 {{issue}} 的執行",
+    "collapse_history": "收合 {{issue}} 的執行",
+    "history_caption": "{{issue}} 的執行歷史",
+    "run_label": "執行 #{{id}}",
+    "latest": "最新一次"
   },
   "timeline": {
     "session_started": "工作階段開始",
@@ -711,7 +735,7 @@
       "waiting_binding": "需求符合觸發條件，但專案還沒綁定資料夾，或執行者還沒就緒。修好之後會自動繼續。",
       "queued": "在等資料夾空出來，或等同時執行的名額。",
       "running": "執行者正在處理。",
-      "awaiting_acceptance": "執行順利結束，需求已在測試中。驗收後請在面板上標記完成。",
+      "awaiting_acceptance": "已在本機完成驗證的工作和已送測的執行都在等待驗收。已送測的執行驗收通過後，可以在面板上標記完成。",
       "needs_info": "AI 覺得需求寫得不清楚，已在需求下提問並移除標籤。補充細節後重新加上標籤。",
       "planned": "只出方案的執行已在需求下留了方案。加上 {{label}} 就照方案動手。",
       "done": "你已標記完成。",

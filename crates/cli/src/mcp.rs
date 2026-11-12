@@ -59,7 +59,7 @@ struct SetContextArgs {
     expected_revision: u64,
     preferred_executor: Option<ToolExecutor>,
     request: String,
-    conversation_history: Option<String>,
+    conversation_history: String,
     scope: String,
     #[serde(default)]
     acceptance: Vec<String>,
@@ -227,7 +227,7 @@ impl ControlServer {
     }
 
     #[rmcp::tool(
-        description = "Stage a task brief for desktop dispatch review. Include task-relevant current conversation text and Wiki references. Leave out full chat transcripts and raw screenshots. Staging does not save the brief, start work, or change Linear",
+        description = "Stage a task brief for desktop dispatch review. Provide the task-relevant current conversation text in conversation_history and include relevant Wiki references. Leave out full chat transcripts, raw screenshots, and credentials. Staging does not save the brief, start work, or change Linear",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn set_issue_context(
@@ -239,13 +239,11 @@ impl ControlServer {
             .peer
             .peer_info()
             .and_then(|peer| entry_executor(&peer.client_info.name));
-        let mut brief = json!({
+        let brief = json!({
             "revision":args.expected_revision,"origin_executor":origin,"preferred_executor":args.preferred_executor,
-            "request":args.request,"scope":args.scope,"acceptance":args.acceptance,"source_refs":args.source_refs
+            "request":args.request,"conversation_history":args.conversation_history,
+            "scope":args.scope,"acceptance":args.acceptance,"source_refs":args.source_refs
         });
-        if let Some(history) = args.conversation_history {
-            brief["conversation_history"] = json!(history);
-        }
         self.forward("workflow.set_context", json!({"issue_identifier":args.issue_identifier,"expected_revision":args.expected_revision,"context":brief})).await
     }
 

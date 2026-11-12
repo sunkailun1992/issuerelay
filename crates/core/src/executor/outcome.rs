@@ -8,10 +8,11 @@ use serde_json::Value;
 use crate::config::ExecutorKind;
 use crate::model::RunUsage;
 
-/// The AI's own claim about the run; the engine still verifies the issue state in Linear.
+/// The AI's own claim about the run. Remote workflow results still need Linear verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Report {
     InTesting(String),
+    LocalComplete(String),
     NeedsInfo(String),
     Failed(String),
     /// A planning run posted its plan (run-improvements design, section 10.4).
@@ -22,6 +23,7 @@ impl Report {
     pub fn summary(&self) -> &str {
         match self {
             Report::InTesting(s)
+            | Report::LocalComplete(s)
             | Report::NeedsInfo(s)
             | Report::Failed(s)
             | Report::Planned(s) => s,
@@ -32,6 +34,7 @@ impl Report {
     pub fn as_str(&self) -> &'static str {
         match self {
             Report::InTesting(_) => "in_testing",
+            Report::LocalComplete(_) => "local_complete",
             Report::NeedsInfo(_) => "needs_info",
             Report::Failed(_) => "failed",
             Report::Planned(_) => "planned",
@@ -195,7 +198,7 @@ impl OutputTracker {
 }
 
 /// Scans from the last line upward for a JSON object whose `result` is `in_testing`, `needs_info`,
-/// `failed` or `planned`. Code fences are ignored.
+/// `failed`, `planned` or `local_complete`. Code fences are ignored.
 pub fn parse_report(text: &str) -> Option<Report> {
     for line in text.lines().rev() {
         let line = line.trim().trim_matches('`').trim();
@@ -208,6 +211,7 @@ pub fn parse_report(text: &str) -> Option<Report> {
         let summary = value["summary"].as_str().unwrap_or_default().to_string();
         let report = match value["result"].as_str() {
             Some("in_testing") => Report::InTesting(summary),
+            Some("local_complete") if !summary.trim().is_empty() => Report::LocalComplete(summary),
             Some("needs_info") => Report::NeedsInfo(summary),
             Some("failed") => Report::Failed(summary),
             Some("planned") => Report::Planned(summary),

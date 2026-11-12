@@ -64,6 +64,7 @@ fn continuation_candidate(
     names: &TriggerNames,
     viewer_id: &str,
     mode: RunMode,
+    needs_info_source: bool,
 ) -> Option<Issue> {
     if mode == RunMode::Implement
         && same_name(&issue.state, &names.in_progress)
@@ -74,7 +75,13 @@ fn continuation_candidate(
     {
         issue.state.clone_from(&names.todo);
     }
-    (trigger::candidate_mode(&issue, names, viewer_id) == Some(mode)).then_some(issue)
+    let candidate = trigger::candidate_mode(&issue, names, viewer_id);
+    let needs_info_without_label = needs_info_source
+        && mode == RunMode::Implement
+        && candidate.is_none()
+        && issue.assignee_id.as_deref() == Some(viewer_id)
+        && same_name(&issue.state, &names.todo);
+    (candidate == Some(mode) || needs_info_without_label).then_some(issue)
 }
 
 /// How much of the end of a log `Engine::log_tail` reads.
@@ -113,8 +120,22 @@ struct Resume {
 
 #[derive(Default)]
 struct ContinuationPoll {
-    pending: HashMap<String, i64>,
+    pending: HashMap<String, (i64, RunMode)>,
     unavailable: HashSet<String>,
+}
+
+impl ContinuationPoll {
+    fn candidate_mode(
+        &self,
+        issue: &Issue,
+        names: &TriggerNames,
+        viewer_id: &str,
+    ) -> Option<RunMode> {
+        self.pending
+            .get(&issue.uuid)
+            .map(|&(_, mode)| mode)
+            .or_else(|| trigger::candidate_mode(issue, names, viewer_id))
+    }
 }
 
 /// How long what `unfinished_blockers` found about an issue stands while the issue itself does not
@@ -659,7 +680,10 @@ pub fn decide(
         }
         ExitKind::Exited(_) if is(&names.in_testing) => (JobState::AwaitingAcceptance, None),
         ExitKind::Exited(_) if is(&names.done) => (JobState::Done, None),
-        ExitKind::Exited(_) if matches!(report, Some(Report::NeedsInfo(_))) && is(&names.todo) => {
+        ExitKind::Exited(_)
+            if matches!(report, Some(Report::NeedsInfo(_)))
+                && (is(&names.todo) || is(&names.in_progress)) =>
+        {
             (JobState::NeedsInfo, None)
         }
         ExitKind::Exited(_) => (
@@ -1272,8 +1296,21 @@ impl Engine {
             issues.retain(|issue| issue.uuid != job.issue_uuid);
             match linear.issue(&job.issue_uuid).await {
                 Ok(Some(issue)) if issue.uuid == job.issue_uuid => {
-                    continuations.pending.insert(job.issue_uuid, job.id);
-                    issues.extend(continuation_candidate(issue, names, &me.id, job.mode));
+                    let needs_info_source = match job.resume_job_id {
+                        Some(id) => self
+                            .store()
+                            .get(id)?
+                            .is_some_and(|source| source.needs_info_implementation()),
+                        None => false,
+                    };
+                    if let Some(candidate) =
+                        continuation_candidate(issue, names, &me.id, job.mode, needs_info_source)
+                    {
+                        continuations
+                            .pending
+                            .insert(job.issue_uuid, (job.id, job.mode));
+                        issues.push(candidate);
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -1284,7 +1321,7 @@ impl Engine {
         }
         let (ready, _) = self.readiness().await;
         let blockers = self
-            .blockers_for(linear.as_ref(), cfg, &me, &issues)
+            .blockers_for(linear.as_ref(), cfg, &me, &issues, &continuations)
             .await?;
         // The jobs this poll records or changes are announced once no store guard is held, also
         // when a store error ends the poll part way.
@@ -1403,6 +1440,7 @@ impl Engine {
         cfg: &Config,
         me: &Viewer,
         issues: &[Issue],
+        continuations: &ContinuationPoll,
     ) -> Result<HashMap<String, Vec<String>>> {
         let names = &cfg.settings.trigger;
         let mut seen = HashMap::new();
@@ -1410,7 +1448,7 @@ impl Engine {
         // Blockers hold back usual runs only (design W9).
         for issue in issues
             .iter()
-            .filter(|i| trigger::candidate_mode(i, names, &me.id) == Some(RunMode::Implement))
+            .filter(|i| continuations.candidate_mode(i, names, &me.id) == Some(RunMode::Implement))
         {
             let known = self
                 .inner
@@ -1552,17 +1590,16 @@ impl Engine {
         me: &Viewer,
         issues: &[Issue],
         (ready, blockers): (&Readiness, &HashMap<String, Vec<String>>),
-        continuations: ContinuationPoll,
+        mut continuations: ContinuationPoll,
         changed: &mut Vec<i64>,
     ) -> Result<()> {
         let names = &cfg.settings.trigger;
-        let mut seen = continuations.unavailable;
-        for issue in issues
-            .iter()
-            .filter(|i| trigger::is_candidate(i, names, &me.id))
-        {
+        let mut seen = std::mem::take(&mut continuations.unavailable);
+        for issue in issues {
+            let Some(mode) = continuations.candidate_mode(issue, names, &me.id) else {
+                continue;
+            };
             seen.insert(issue.uuid.clone());
-            let mode = trigger::candidate_mode(issue, names, &me.id).unwrap_or_default();
             let unfinished = blockers.get(&issue.uuid).map_or(&[][..], Vec::as_slice);
 
             // Read the latest run, decide and write under one store guard. A stop or a retry that
@@ -1570,7 +1607,7 @@ impl Engine {
             // active rows.
             let store = self.store();
             let latest = store.latest_for_issue(&issue.uuid)?;
-            if let Some(expected) = continuations.pending.get(&issue.uuid)
+            if let Some((expected, _)) = continuations.pending.get(&issue.uuid)
                 && !latest
                     .as_ref()
                     .is_some_and(|job| job.id == *expected && job.state.is_active())
@@ -1613,7 +1650,7 @@ impl Engine {
             let eligibility = if review_required {
                 Eligibility::Waiting(WaitReason::DispatchReviewRequired)
             } else {
-                trigger::evaluate(issue, &routed, &me.id, ready, self.home(), unfinished)
+                trigger::evaluate_candidate(issue, &routed, mode, ready, self.home(), unfinished)
             };
             match latest {
                 Some(job) if matches!(job.state, JobState::Queued | JobState::WaitingBinding) => {
@@ -1977,9 +2014,21 @@ impl Engine {
         let current = linear.issue(&job.issue_uuid).await?;
         let current = current.filter(|issue| issue.uuid == job.issue_uuid);
         let Some(issue) = (match &intent {
-            Some(_) => current.and_then(|issue| {
-                continuation_candidate(issue, &cfg.settings.trigger, &me.id, job.mode)
-            }),
+            Some(intent) => {
+                let needs_info_source = self
+                    .store()
+                    .get(intent.source_job_id)?
+                    .is_some_and(|source| source.needs_info_implementation());
+                current.and_then(|issue| {
+                    continuation_candidate(
+                        issue,
+                        &cfg.settings.trigger,
+                        &me.id,
+                        job.mode,
+                        needs_info_source,
+                    )
+                })
+            }
             None => current.filter(|i| trigger::is_candidate(i, &cfg.settings.trigger, &me.id)),
         }) else {
             let canceled = self.store().set_state_if(
@@ -2002,8 +2051,11 @@ impl Engine {
                 &mut HashMap::new(),
             )
             .await?;
-        let mode =
-            trigger::candidate_mode(&issue, &cfg.settings.trigger, &me.id).unwrap_or_default();
+        let mode = if intent.is_some() {
+            job.mode
+        } else {
+            trigger::candidate_mode(&issue, &cfg.settings.trigger, &me.id).unwrap_or_default()
+        };
         let (routed, decision, context, review_required) = {
             let store = self.store();
             let context =
@@ -2031,7 +2083,7 @@ impl Engine {
         let eligibility = if review_required {
             Eligibility::Waiting(WaitReason::DispatchReviewRequired)
         } else {
-            trigger::evaluate(&issue, &routed, &me.id, ready, self.home(), &blockers)
+            trigger::evaluate_candidate(&issue, &routed, mode, ready, self.home(), &blockers)
         };
         let binding = match eligibility {
             Eligibility::Eligible(binding) => binding,
@@ -2530,8 +2582,9 @@ impl Engine {
         }
     }
 
-    /// Checks the result in Linear, records it, frees the run's slot and wakes the loop so the
-    /// next queued job can start. When a clean run would fail although Linear shows its issue
+    /// Records the result, frees the run's slot and wakes the loop. A clean implementation
+    /// reporting local completion uses the issue timestamp already read at start. When another
+    /// clean run would fail although Linear shows its issue
     /// unchanged since `started_from` (the issue's `updatedAt` right before the run started), the
     /// issue is read again after each pause in `STALE_REREAD_PAUSES` unless the run is told to stop
     /// meanwhile, and the last read decides.
@@ -2546,13 +2599,8 @@ impl Engine {
     ) -> Result<()> {
         let names = self.config().settings.trigger;
         let report = output.final_text.as_deref().and_then(outcome::parse_report);
-        let mode = self
-            .store()
-            .get(job_id)
-            .ok()
-            .flatten()
-            .map(|job| job.mode)
-            .unwrap_or_default();
+        let job = self.store().get(job_id).ok().flatten();
+        let mode = job.as_ref().map(|job| job.mode).unwrap_or_default();
         // A stop that came from Linear (`watch_running`) is recorded with its own reason. Taken in
         // any case, so the table forgets the job; from here on none is recorded for it.
         self.mark_finishing(job_id);
@@ -2561,6 +2609,17 @@ impl Engine {
             .filter(|_| output.exit == ExitKind::Canceled);
         let mut rereads = STALE_REREAD_PAUSES.into_iter();
         let (state, reason, verified_at) = loop {
+            if let Some(job) = job.as_ref()
+                && job.mode == RunMode::Implement
+                && output.exit == ExitKind::Exited(Some(0))
+                && matches!(report, Some(Report::LocalComplete(_)))
+            {
+                let verified = job
+                    .verified_updated_at
+                    .unwrap_or(started_from)
+                    .max(started_from);
+                break (JobState::LocalComplete, None, Some(verified));
+            }
             let verified = self.verify_read(job_id, issue_uuid).await;
             let unchanged =
                 matches!(&verified, Ok(Some(issue)) if issue.updated_at <= started_from);
@@ -2588,6 +2647,13 @@ impl Engine {
                     );
                     let (state, reason) = decide_plan(&output.exit, report.as_ref(), &names);
                     (state, reason, None)
+                }
+                Err(e)
+                    if output.exit == ExitKind::Exited(Some(0))
+                        && matches!(report, Some(Report::NeedsInfo(_))) =>
+                {
+                    tracing::warn!(job_id, error = %format!("{e:#}"), "information request retained while Linear is unavailable");
+                    (JobState::NeedsInfo, None, Some(started_from))
                 }
                 Err(e) => {
                     let state = if output.exit == ExitKind::Canceled {
@@ -2952,18 +3018,64 @@ impl Engine {
         Ok(())
     }
 
+    /// Records the desktop user's review of a legacy local result without changing its report.
+    pub async fn record_local_completion(&self, job_id: i64) -> Result<()> {
+        let _cycle = self.inner.cycle.lock().await;
+        {
+            let store = self.store();
+            let job = store
+                .get(job_id)?
+                .ok_or_else(|| anyhow!("job {job_id} not found"))?;
+            anyhow::ensure!(
+                job.needs_info_implementation() && job.finished_at.is_some(),
+                "job {job_id} is not a finished implementation waiting for information"
+            );
+            anyhow::ensure!(
+                store.latest_for_issue(&job.issue_uuid)?.map(|job| job.id) == Some(job_id),
+                "job {job_id} is not the latest run of {}",
+                job.issue_identifier
+            );
+            anyhow::ensure!(
+                crate::workflow_store::read_claim(store.workflow_connection(), job_id)?.is_none(),
+                "release the handoff before recording local completion"
+            );
+            anyhow::ensure!(
+                store.set_state_if(
+                    job_id,
+                    &[JobState::NeedsInfo],
+                    JobState::LocalComplete,
+                    job.reason.as_deref(),
+                )?,
+                "job {job_id} changed before recording local completion"
+            );
+        }
+        self.emit_job(job_id);
+        Ok(())
+    }
+
     /// Marks an accepted run Done in Linear. Only the desktop panel calls this (spec 5.6);
     /// IPC, CLI and MCP never expose it.
     pub async fn mark_done(&self, job_id: i64) -> Result<()> {
         let _cycle = self.inner.cycle.lock().await;
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
-        if job.state != JobState::AwaitingAcceptance {
-            bail!("job {job_id} is not awaiting acceptance");
-        }
+        anyhow::ensure!(
+            matches!(
+                job.state,
+                JobState::AwaitingAcceptance | JobState::LocalComplete
+            ),
+            "job {job_id} is not awaiting acceptance"
+        );
         let settings = self.config().settings;
         {
             let store = self.store();
+            if job.state == JobState::LocalComplete {
+                anyhow::ensure!(
+                    store.latest_for_issue(&job.issue_uuid)?.map(|job| job.id) == Some(job_id),
+                    "job {job_id} is not the latest run of {}",
+                    job.issue_identifier
+                );
+            }
             let conn = store.workflow_connection();
             anyhow::ensure!(
                 crate::workflow_store::read_claim(conn, job_id)?.is_none(),
@@ -2976,11 +3088,25 @@ impl Engine {
                 );
             }
         }
+        let linear = self.linear();
+        if job.state == JobState::LocalComplete {
+            // A local result was not verified against Linear at exit. Confirm the current
+            // state of this exact issue after the user clicks, before the only remote write.
+            let issue = linear
+                .issue(&job.issue_uuid)
+                .await?
+                .filter(|issue| issue.uuid == job.issue_uuid)
+                .ok_or_else(|| anyhow!("the issue no longer exists in Linear"))?;
+            let in_testing = &settings.trigger.in_testing;
+            anyhow::ensure!(
+                same_name(&issue.state, in_testing),
+                "the issue must be in {in_testing:?} in Linear before marking done"
+            );
+        }
         let done = settings.trigger.done;
-        self.linear().set_state(&job.issue_uuid, &done).await?;
-        // The row may have changed while Linear was being updated; it becomes Done only from
-        // awaiting acceptance.
-        let waiting = [JobState::AwaitingAcceptance];
+        linear.set_state(&job.issue_uuid, &done).await?;
+        // Keep the transition conditional on the exact state that was checked above.
+        let waiting = [job.state];
         let marked = self
             .store()
             .set_state_if(job_id, &waiting, JobState::Done, None)?;
@@ -3234,6 +3360,7 @@ mod tests {
             None,
             Some(Report::Failed("no".into())),
             Some(Report::InTesting("?".into())),
+            Some(Report::LocalComplete("not a plan".into())),
         ] {
             assert_eq!(
                 decide_plan(&clean, report.as_ref(), &n),
@@ -3295,6 +3422,10 @@ mod tests {
         );
         assert_eq!(
             decide(&ok, Some("In Progress"), Some(&info), &names()).0,
+            JobState::NeedsInfo
+        );
+        assert_eq!(
+            decide(&ok, Some("Canceled"), Some(&info), &names()).0,
             JobState::Failed
         );
         let claimed = Report::InTesting("done".into());

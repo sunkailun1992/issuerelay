@@ -1,5 +1,8 @@
 {
-  "app": { "name": "IssueRelay", "tagline": "Hands your Linear issues to Claude Code and Codex" },
+  "app": {
+    "name": "IssueRelay",
+    "tagline": "Hands your Linear issues to Claude Code and Codex"
+  },
   "nav": {
     "overview": "Overview",
     "issues": "Issues",
@@ -70,11 +73,12 @@
   "notify": {
     "run_started": "The run has started.",
     "awaiting_acceptance": "Ready for you to accept: it is in testing now.",
-    "needs_info": "The AI asked a question on the issue; add the details and label it ai-ready again.",
+    "needs_info": "The AI requested more information; open the panel to review what is needed.",
     "plan_ready": "A plan is posted on the issue; add the ai-ready label to have it carried out.",
     "failed": "The run failed. The panel shows why.",
     "update_available": "IssueRelay {{version}} is available",
-    "update_available_body": "Open the panel to install it."
+    "update_available_body": "Open the panel to install it.",
+    "local_complete": "Local development and verification are complete; review the result."
   },
   "quit": {
     "title": "Runs are still in progress",
@@ -150,6 +154,8 @@
     "next": "Next steps",
     "verification": "Reported verification",
     "blockers": "Blockers",
+    "information_requested": "Information requested",
+    "information_requested_fallback": "Check the latest Linear comment for the information requested by the last run.",
     "updated_at": "Saved at",
     "git_head": "Commit",
     "git_branch": "Branch",
@@ -220,6 +226,8 @@
   "actions": {
     "stop": "Stop",
     "run_again": "Run again",
+    "record_local_completion": "Record local completion",
+    "record_local_completion_confirm": "Record that development and verification for run #{{id}} are complete on this computer. The Linear issue remains unchanged.",
     "mark_done": "Mark done",
     "open_in_linear": "Open in Linear",
     "open_issue_in_linear": "Open {{identifier}} in Linear",
@@ -232,6 +240,7 @@
       "poll_now": "Could not start a check",
       "cancel": "Could not stop the run",
       "retry": "Could not run it again",
+      "record_local_completion": "Could not record local completion",
       "mark_done": "Could not mark it done",
       "save_binding": "Could not save the binding",
       "remove_binding": "Could not remove the binding",
@@ -303,7 +312,9 @@
     "conversation_history": "Current conversation",
     "implementation_scope": "Implementation applies only to {{issue}}. Its child issues are dispatched separately.",
     "prepare_implementation": "In Linear, set this issue to {{todo}}, assign it to yourself, and add {{label}}. Return here and reload the preview.",
-    "issue_mismatch": "The preview no longer matches this issue. Reload it before confirming."
+    "issue_mismatch": "The preview no longer matches this issue. Reload it before confirming.",
+    "plan_next_steps": "The plan is saved. Continue this issue through a development preview, or dispatch the child issues separately.",
+    "view_requirements": "View requirements"
   },
   "continuation": {
     "action": "Continue",
@@ -315,7 +326,11 @@
     "handoff": "Start a new session with the reviewed handoff",
     "evidence": "Evidence from the previous run",
     "preview_mismatch": "The preview no longer matches this run and executor. Reload it before confirming.",
-    "confirm": "Confirm and continue"
+    "confirm": "Confirm and continue",
+    "supplement_label": "Additional task information",
+    "supplement_hint": "Add the missing information. It will be appended to the existing task history and sent only after you confirm the preview.",
+    "supplement_preview": "Save information and preview",
+    "supplement_failed": "Could not update task information"
   },
   "provider_session": {
     "title": "Original executor session",
@@ -385,6 +400,7 @@
   },
   "runs": {
     "all": "All",
+    "local_completion_detail": "Development and verification are complete on this computer.",
     "field": {
       "state": "Status",
       "issue": "Issue",
@@ -402,7 +418,8 @@
       "usage": "Usage"
     },
     "mode": {
-      "plan": "Plan only"
+      "plan": "Plan only",
+      "implement": "Development"
     },
     "resumed_from": "Continued from run #{{id}}",
     "usage": {
@@ -442,7 +459,14 @@
     "no_output": "Nothing to show yet",
     "log_capped": "Only the last {{lines}} lines of the log are shown; the run began before them.",
     "list_capped": "Showing the latest {{runs}} runs; older ones are not listed.",
-    "no_output_ended": "This run left nothing to show"
+    "no_output_ended": "This run left nothing to show",
+    "history_count_one": "{{count}} run",
+    "history_count_other": "{{count}} runs",
+    "expand_history": "Show runs for {{issue}}",
+    "collapse_history": "Hide runs for {{issue}}",
+    "history_caption": "Runs for {{issue}}",
+    "run_label": "Run #{{id}}",
+    "latest": "Latest"
   },
   "timeline": {
     "session_started": "Session started",
@@ -711,7 +735,7 @@
       "waiting_binding": "The issue meets the conditions, but its project is not bound to a folder or its executor is not ready. It goes on once that is mended.",
       "queued": "It waits for its folder to be free or for a place among the runs allowed at the same time.",
       "running": "The executor is working on it.",
-      "awaiting_acceptance": "The run ended well and the issue is in testing. Mark it done in the panel when you accept it.",
+      "awaiting_acceptance": "Locally verified work and runs submitted for testing are ready for review. After accepting a run submitted for testing, you can mark it done in the panel.",
       "needs_info": "The AI found the issue unclear, asked on the issue and took the label off. Add the details and label it again.",
       "planned": "A planning run posted its plan on the issue. Add {{label}} to have it carried out.",
       "done": "You marked it done.",

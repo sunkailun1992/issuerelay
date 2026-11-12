@@ -17,7 +17,8 @@ import { useCancelJob, useJobs, useMarkDone, useRetryJob } from "@/hooks/queries
 import { useOpenLinear } from "@/hooks/useOpenLinear";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { isActive, isInterruptedRun, isNewestRun, pendingContinuationSourceId } from "@/lib/runs";
-import type { Job, JobState } from "@/lib/types";
+import { sameName } from "@/lib/settings-form";
+import type { IssueView, Job, JobState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** The runs that can be run again: they ended without the result the issue needed. */
@@ -55,6 +56,7 @@ function RetryButton({ job, size }: { job: Job; size: Size }) {
 function ContinueButton({ job, source, size }: { job: Job; source: Job; size: Size }) {
   const jobs = useJobs();
   const latest = jobs.data?.find((other) => other.issue_uuid === job.issue_uuid);
+  if (source.state === "needs_info" && latest === undefined) return null;
   if (latest && latest.id > job.id && pendingContinuationSourceId(latest) !== source.id) return null;
   return <ContinuationReviewButton source={source} size={size} />;
 }
@@ -118,13 +120,25 @@ export function JobActions({
   url,
   compact = false,
   continuationSource = isInterruptedRun(job) ? job : null,
-}: { job?: Job | null; url?: string; compact?: boolean; continuationSource?: Job | null }) {
+  localAcceptance,
+}: {
+  job?: Job | null;
+  url?: string;
+  compact?: boolean;
+  continuationSource?: Job | null;
+  localAcceptance?: { view: IssueView; inTesting: string };
+}) {
   const size: Size = compact ? "sm" : "default";
   const continuable = job != null && continuationSource !== null && (!compact || job.state !== "queued");
   const showOtherActions = !compact || !continuable;
   const stoppable = showOtherActions && job != null && isActive(job);
   const retryable = showOtherActions && job != null && RETRYABLE.includes(job.state);
-  const markable = job != null && job.state === "awaiting_acceptance";
+  // The shared issue list supplies the latest run and last Linear status read. The engine checks again on confirmation.
+  const markable = job != null && (job.state === "awaiting_acceptance" || (
+    job.state === "local_complete" && localAcceptance !== undefined &&
+    localAcceptance.view.issue.uuid === job.issue_uuid && localAcceptance.view.job?.id === job.id &&
+    sameName(localAcceptance.view.issue.state, localAcceptance.inTesting)
+  ));
   if (!stoppable && !retryable && !continuable && !markable && !url) return null;
   return (
     <div className={cn("flex items-center gap-2", compact ? "flex-nowrap" : "flex-wrap")}>

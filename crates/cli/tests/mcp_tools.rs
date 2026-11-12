@@ -291,6 +291,50 @@ async fn a_failure_text_carries_no_invisible_characters_either() {
 }
 
 #[tokio::test]
+async fn each_entry_requires_conversation_history_in_the_task_brief() {
+    for client_name in ["Codex", "claude-code"] {
+        let (server, calls) = recording_server(|_| Ok(json!({})));
+        let client = connect_named(server, client_name).await;
+        let tool = client
+            .list_all_tools()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|tool| tool.name == "set_issue_context")
+            .unwrap();
+        assert!(
+            tool.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("conversation_history")),
+            "{client_name}"
+        );
+        for history in [None, Some(Value::Null)] {
+            let mut args = json!({
+                "issue_identifier": "DEMO-7",
+                "expected_revision": 0,
+                "request": "Make the example clearer",
+                "scope": "README only"
+            });
+            if let Some(history) = history {
+                args["conversation_history"] = history;
+            }
+            let request = CallToolRequestParams::new("set_issue_context")
+                .with_arguments(args.as_object().unwrap().clone());
+            match client.call_tool(request).await {
+                Ok(result) => assert_eq!(result.is_error, Some(true)),
+                Err(error) => assert!(
+                    error.to_string().contains("conversation_history"),
+                    "{error}"
+                ),
+            }
+        }
+        assert!(calls.lock().unwrap().is_empty(), "{client_name}");
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn each_entry_records_origin_without_dispatching_and_can_read_exact_progress() {
     for (client_name, expected) in [
         ("Codex", json!("codex")),

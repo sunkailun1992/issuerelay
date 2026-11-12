@@ -10,7 +10,7 @@
 
 初次了解产品，先看下方职责与流程。完整说明见 [使用指南](docs/usage.md)，安装与连接步骤见 [安装说明](docs/install.md)。
 
-> 派发预览说明对应仓库当前源码。已发布的 0.4.0 安装包仍使用该版本的派发流程。0.4.0 已在 Apple silicon Mac 上验证升级、Wiki 配置，以及 Codex 和 Claude Code 对同一条合成运行的查询。Windows 安装与桌面行为仍待实机验收。各版本的发布和验证记录见 [Releases](https://github.com/sunkailun1992/issuerelay/releases) 与 [验收报告](docs/gates/)。
+> 工作流说明对应仓库当前源码。安装包包含的功能以各版本的发布说明为准。 [Releases](https://github.com/sunkailun1992/issuerelay/releases) · [验收报告](docs/gates/)
 
 ## 谁负责什么
 
@@ -22,7 +22,7 @@
 | Codex / Claude Code | 读取需求与仓库，分析或修改代码，通过自己的工具操作 git、测试和 Linear |
 | Skills 与项目规则 | 给执行者提供工作方法与约束；实际加载范围取决于运行模式 |
 
-你可以让 Codex 或 Claude Code 整理本次任务的脱敏摘要、相关会话历史和 Wiki 引用，并通过 IssueRelay MCP 提交上下文草稿。Linear 标记运行模式后，在桌面面板核对预览中的内容、Wiki 目录和执行去向，再确认派发。直接在 Linear 编写的需求也走预览，允许确认空的会话上下文。每次运行使用一个执行者，依次采用需求显式选择、项目绑定、登记入口和全局默认。
+你可以让 Codex 或 Claude Code 整理本次任务的摘要、完整任务相关会话文字和 Wiki 引用，并通过 IssueRelay MCP 提交上下文草稿。Linear 标记运行模式后，在桌面面板核对预览中的内容、Wiki 目录和执行去向，再确认派发。直接在 Linear 编写、没有前序会话的需求也走预览，面板明确显示没有会话上下文；提交了上下文的任务则必须带任务相关历史。每次运行使用一个执行者，依次采用需求显式选择、项目绑定、登记入口和全局默认。
 
 ## 它怎么工作
 
@@ -35,13 +35,12 @@ IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队
        │                                  同一目录一次只跑一条
        ├─ ai-plan  → AI 读需求和代码 → 把方案写回这条需求的评论
        │
-       └─ ai-ready → AI 实现、验证并推测试分支 → 交到 In Testing
-                                                    │
-                                                    ▼
-                                你验收 → 按需登记 Wiki 归档回执
-                                                    │
-                                                    ▼
-                                            在面板标记完成
+       └─ ai-ready → AI 实现并验证
+                       ├─ 仅本地范围 → 运行显示待验收
+                       └─ 已获准提测 → 推测试分支并交到 In Testing
+                                             │
+                                             ▼
+                         你验收 → 按需登记 Wiki 归档回执 → 在面板标记完成
 ```
 
 默认每 30 秒经 Linear 官方 MCP 检查一次，使用你授权的账户；触发名称可配置。只出方案与开发是两种运行模式，方案不会自动变成开发任务。开发模式的 AI 被要求遵守三条固定规则：不设 Done、不推主分支、不发正式环境；具体执行仍须符合目标仓库的规则和你的授权。
@@ -79,13 +78,14 @@ IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队
 | `claim_handoff` / `release_handoff` | 手动接手前保留目录。接手会话结束后，用 `job_id` 和自己取得的本次 `claim_id` 释放 |
 | `record_archive` | 为当前 Wiki 目录登记已写入的页面及提交回执 |
 
-`resume` 恢复监控。上下文草稿由桌面面板确认后才写入本机任务记录，随获准的运行快照传给执行者。主控会话提供脱敏摘要、任务相关历史和引用。可保留复现命令、报错原文、版本及决定。请排除整段聊天、原始截图和凭据。「确认派发」「标记完成」「重新运行」「停止」在面板操作。宿主未运行时，控制服务会提示打开 IssueRelay。参数与调用顺序见[使用指南](docs/usage.md#用-mcp-连接主控会话)。
+`resume` 恢复监控。上下文草稿由桌面面板确认后才写入本机任务记录，随获准的运行快照传给执行者。主控会话提供任务摘要、完整任务相关历史和引用。可保留复现命令、报错原文、版本及决定。请排除整段聊天、原始截图和凭据。「确认派发」「记录本地完成」「标记完成」「重新运行」「停止」在面板操作。宿主未运行时，控制服务会提示打开 IssueRelay。参数与调用顺序见[使用指南](docs/usage.md#用-mcp-连接主控会话)。
 
 ## 当前能力与范围
 
 | 能力 | 当前支持情况 |
 |---|---|
 | 方案与开发 | `ai-plan` 只出方案；`ai-ready` 执行开发流程 |
+| 本地交付 | 本地实现与验证完成后，运行显示「待验收」。详情说明本地验证结果，Linear 状态独立显示。符合条件的旧运行也可在桌面详情经人工确认后记录。 [操作条件](docs/usage.md#只做本地实现与验证) |
 | 派发预览 | 在桌面面板核对脱敏摘要、Wiki 引用、运行模式与执行去向，确认后保存并进入派发流程 |
 | 多项目调度 | 按项目与分流标签绑定目录，支持依赖等待、目录互斥和总并发限制 |
 | 执行者与模型 | 需求显式选择 → 项目绑定 → 登记入口 → 全局默认。默认模型与绑定中的模型都可配置 |
@@ -103,9 +103,9 @@ IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队
 
 Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
 
-升级前，正常退出 IssueRelay 并备份应用数据。已发布的 0.4.0 使用 schema 3。包含派发预览和续作的当前源码会将数据库迁移至 schema 5。schema 3 和 schema 4 构建无法直接打开迁移后的数据。[升级与备份](docs/install.md#升级前备份数据)
+升级前，正常退出 IssueRelay 并备份应用数据。支持本地交付结果的构建会将运行数据库迁移至 schema 6。退回只支持 schema 5 的构建时，恢复升级前的备份。 [升级与备份](docs/install.md#升级前备份数据)
 
-Before upgrading, quit IssueRelay normally and back up its application data. The published 0.4.0 release uses schema 3. Current source builds with dispatch review and continuation migrate the database to schema 5. Schema 3 and schema 4 builds cannot open it. [Upgrade and backup instructions](docs/install.md#升级前备份数据)
+Before upgrading, quit IssueRelay normally and back up its application data. Builds that record local delivery outcomes migrate the run database to schema 6. Restore the pre-upgrade backup before returning to a build that supports only schema 5. [Upgrade and backup instructions](docs/install.md#升级前备份数据)
 
 ## 更多用法
 

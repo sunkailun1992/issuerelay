@@ -3,7 +3,7 @@ import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { Section } from "@/components/Section";
 import { StatusBadge } from "@/components/StatusBadge";
-import { JOB_STATES, type TriggerNames } from "@/lib/types";
+import { DISPLAY_JOB_STATES, type TriggerNames } from "@/lib/types";
 
 /** The four conditions an issue has to meet (design 5.1, without the monitoring switch), in the order the page lists them. */
 const CONDITIONS = ["assigned", "label", "todo", "bound"] as const;
@@ -43,7 +43,7 @@ export function IssueFlow({ names }: { names: TriggerNames }) {
         ))}
       </ol>
       <ul aria-label={t("help.states_title")} className="divide-y rounded-xl border bg-card">
-        {JOB_STATES.map((state) => (
+        {DISPLAY_JOB_STATES.map((state) => (
           <li key={state} className="flex items-start gap-3 px-4 py-3">
             {/* The room for the widest badge, so that every sentence starts at the same place. */}
             <div className="w-44 shrink-0">

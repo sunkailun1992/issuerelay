@@ -1,5 +1,8 @@
 {
-  "app": { "name": "IssueRelay", "tagline": "把 Linear 需求交给 Claude Code 和 Codex 去完成" },
+  "app": {
+    "name": "IssueRelay",
+    "tagline": "把 Linear 需求交给 Claude Code 和 Codex 去完成"
+  },
   "nav": {
     "overview": "概览",
     "issues": "需求",
@@ -70,11 +73,12 @@
   "notify": {
     "run_started": "已开始运行。",
     "awaiting_acceptance": "可以验收了：需求已进入测试状态。",
-    "needs_info": "AI 在需求下提了问题。补充信息后，请重新加上 ai-ready 标签。",
+    "needs_info": "AI 请求补充信息，请在面板查看所需内容。",
     "plan_ready": "方案已写在需求下。要照方案动手，请加上 ai-ready 标签。",
     "failed": "运行失败，原因见面板。",
     "update_available": "IssueRelay {{version}} 已发布",
-    "update_available_body": "打开面板即可安装。"
+    "update_available_body": "打开面板即可安装。",
+    "local_complete": "本地开发与验证已完成，请验收结果。"
   },
   "quit": {
     "title": "仍有任务在运行",
@@ -150,6 +154,8 @@
     "next": "下一步",
     "verification": "报告的验证",
     "blockers": "阻塞项",
+    "information_requested": "待补充信息",
+    "information_requested_fallback": "请查看 Linear 工单最新评论，核对上次运行提出的问题。",
     "updated_at": "保存时间",
     "git_head": "提交",
     "git_branch": "分支",
@@ -220,6 +226,8 @@
   "actions": {
     "stop": "停止",
     "run_again": "重新运行",
+    "record_local_completion": "记录本地完成",
+    "record_local_completion_confirm": "将运行 #{{id}} 记录为本地开发和验证已完成。此操作只更新本机记录，Linear 工单保持原样。",
     "mark_done": "标记完成",
     "open_in_linear": "在 Linear 中打开",
     "open_issue_in_linear": "在 Linear 中打开 {{identifier}}",
@@ -232,6 +240,7 @@
       "poll_now": "无法开始检查",
       "cancel": "无法停止这次运行",
       "retry": "无法重新运行",
+      "record_local_completion": "无法记录本地完成",
       "mark_done": "无法标记为完成",
       "save_binding": "无法保存绑定",
       "remove_binding": "无法移除绑定",
@@ -303,7 +312,9 @@
     "conversation_history": "当前会话",
     "implementation_scope": "执行开发只针对 {{issue}}。它的子需求需分别派发。",
     "prepare_implementation": "请在 Linear 将此需求设为 {{todo}}，指派给自己并添加 {{label}} 标签。完成后回到这里重新读取预览。",
-    "issue_mismatch": "预览与此需求不匹配。请重新读取后再确认。"
+    "issue_mismatch": "预览与此需求不匹配。请重新读取后再确认。",
+    "plan_next_steps": "方案已保存。可在本需求进入开发预览，也可分别派发已拆分的子需求。",
+    "view_requirements": "查看需求列表"
   },
   "continuation": {
     "action": "继续上次",
@@ -315,7 +326,11 @@
     "handoff": "携带已确认的交接内容开启新会话",
     "evidence": "上次运行的证据",
     "preview_mismatch": "预览已与此运行或执行器不匹配，请重新加载后再确认。",
-    "confirm": "确认并继续"
+    "confirm": "确认并继续",
+    "supplement_label": "补充任务信息",
+    "supplement_hint": "填写本次缺少的信息。补充内容会追加到原任务历史，确认预览后再交给执行器。",
+    "supplement_preview": "保存补充并预览",
+    "supplement_failed": "补充任务信息失败"
   },
   "provider_session": {
     "title": "执行器原会话",
@@ -385,6 +400,7 @@
   },
   "runs": {
     "all": "全部",
+    "local_completion_detail": "本地开发和验证已完成。",
     "field": {
       "state": "状态",
       "issue": "编号",
@@ -402,7 +418,8 @@
       "usage": "用量"
     },
     "mode": {
-      "plan": "只出方案"
+      "plan": "只出方案",
+      "implement": "开发"
     },
     "resumed_from": "接续自运行 #{{id}}",
     "usage": {
@@ -442,7 +459,14 @@
     "no_output": "暂时没有可显示的内容",
     "log_capped": "只显示日志的最后 {{lines}} 行，运行在这之前就已开始。",
     "list_capped": "只显示最近的 {{runs}} 次运行，更早的没有列出。",
-    "no_output_ended": "这次运行没有留下可显示的内容"
+    "no_output_ended": "这次运行没有留下可显示的内容",
+    "history_count_one": "{{count}} 次运行",
+    "history_count_other": "{{count}} 次运行",
+    "expand_history": "展开 {{issue}} 的运行",
+    "collapse_history": "收起 {{issue}} 的运行",
+    "history_caption": "{{issue}} 的运行历史",
+    "run_label": "运行 #{{id}}",
+    "latest": "最新一次"
   },
   "timeline": {
     "session_started": "会话开始",
@@ -711,7 +735,7 @@
       "waiting_binding": "需求满足触发条件，但项目还没绑定目录，或执行者还没就绪。修好之后会自动继续。",
       "queued": "在等目录空闲，或等同时运行的名额。",
       "running": "执行者正在处理。",
-      "awaiting_acceptance": "运行顺利结束，需求已在测试中。验收后请在面板上标记完成。",
+      "awaiting_acceptance": "已在本机完成验证的工作和已提测的运行都在等待验收。已提测的运行验收通过后，可以在面板上标记完成。",
       "needs_info": "AI 觉得需求写得不清楚，已在需求下提问并去掉了标签。补充细节后重新加上标签。",
       "planned": "只出方案的运行已在需求下留了方案。加上 {{label}} 就照方案动手。",
       "done": "你已标记完成。",

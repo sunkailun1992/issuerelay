@@ -331,6 +331,27 @@ export function useApproveContinuation(id: number) {
   );
 }
 
+export function useContinuationContext(id: number, enabled = true) {
+  const backend = useBackend();
+  return useQuery({
+    queryKey: ["continuationContext", id],
+    queryFn: () => backend.getContinuationContext(id),
+    enabled,
+    gcTime: 0,
+    refetchOnMount: "always",
+  });
+}
+
+export function useSupplementContinuationContext(id: number) {
+  return useAction(
+    (backend, variables: { expectedRevision: number; supplement: string }) =>
+      backend.supplementContinuationContext(id, variables.expectedRevision, variables.supplement),
+    [["continuationContext", id], ["continuationPreview", id], queryKeys.handoff(id)],
+    "continuation.supplement_failed",
+    { quiet: () => true, gcTime: 0 },
+  );
+}
+
 export function useOpenDevelopmentIssue(id: number) {
   return useAction<void, void>(
     async (backend) => backend.openLinear(await backend.getDevelopmentIssueUrl(id)),
@@ -341,6 +362,14 @@ export function useOpenDevelopmentIssue(id: number) {
 
 export function useMarkDone() {
   return useAction<number, void>((backend, id) => backend.markDone(id), jobChange, "actions.failed.mark_done");
+}
+
+export function useRecordLocalCompletion() {
+  return useAction<number, void>(
+    (backend, id) => backend.recordLocalCompletion(id),
+    jobChange,
+    "actions.failed.record_local_completion",
+  );
 }
 
 export function useClaimHandoff(id: number) {

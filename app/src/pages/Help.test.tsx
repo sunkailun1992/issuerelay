@@ -3,7 +3,7 @@ import { vi } from "vitest";
 import en from "@/i18n/locales/en.json";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
-import { JOB_STATES } from "@/lib/types";
+import { DISPLAY_JOB_STATES } from "@/lib/types";
 import { renderWithProviders } from "@/test/render";
 import Help from "./Help";
 
@@ -111,21 +111,23 @@ test("the default names are the ones the flow shows without settings", async () 
   ]);
 });
 
-test("the eight local statuses each have their badge and what it means, and so does a posted plan", async () => {
+test("each local status has its badge and meaning, and so does a posted plan", async () => {
   const backend = await backendNaming({ label: "ready-for-ai" });
   await renderWithProviders(<Help />, { backend });
   const legend = await screen.findByRole("list", { name: "What the statuses in the panel mean" });
   const items = within(legend).getAllByRole("listitem");
-  expect(items).toHaveLength(JOB_STATES.length + 1);
+  expect(items).toHaveLength(DISPLAY_JOB_STATES.length + 1);
   const badges = ["Waiting for setup", "Queued", "Running", "Awaiting acceptance", "Needs information", "Done", "Failed", "Canceled"];
-  JOB_STATES.forEach((_state, index) => {
+  DISPLAY_JOB_STATES.forEach((_state, index) => {
     // The badge is the state's own, the sentence next to it says what it is.
     expect(items[index]).toHaveTextContent(badges[index]);
     expect(within(items[index]).getAllByText(/.+/).length).toBeGreaterThan(1);
   });
   expect(items[0]).toHaveTextContent(/not bound|bound/);
+  expect(within(legend).getAllByText("Awaiting acceptance")).toHaveLength(1);
+  expect(within(legend).getByText(/Locally verified work and runs submitted for testing/)).toBeInTheDocument();
   // A planning run that posted its plan ends as "needs information" in the store, and shows its own badge.
-  const planned = items[JOB_STATES.length];
+  const planned = items[DISPLAY_JOB_STATES.length];
   expect(within(planned).getByText("Plan posted")).toBeInTheDocument();
   expect(await within(planned).findByText("A planning run posted its plan on the issue. Add ready-for-ai to have it carried out.")).toBeInTheDocument();
 });

@@ -156,7 +156,7 @@ test("the reminders lead to where the matter is dealt with", async () => {
   expect(await screen.findByRole("link", { name: "Open the environment check" })).toHaveAttribute("href", "/doctor");
   // The reminders about runs: failed first, then awaiting acceptance.
   const views = await screen.findAllByRole("link", { name: "View" });
-  expect(views.map((link) => link.getAttribute("href"))).toEqual(["/runs?state=failed", "/issues"]);
+  expect(views.map((link) => link.getAttribute("href"))).toEqual(["/runs?state=failed", "/runs?state=awaiting_acceptance"]);
   await userEvent.click(views[0]);
   expect(screen.getByTestId("where")).toHaveTextContent("/runs?state=failed");
 });
@@ -365,6 +365,18 @@ test("an empty queue says nothing is waiting", async () => {
   const queue = await screen.findByRole("region", { name: "Queued" });
   expect(within(queue).getByText("Nothing is waiting")).toBeInTheDocument();
   expect(within(queue).queryAllByRole("listitem")).toHaveLength(0);
+});
+
+test("a local completion appears in recent results and contributes to the shared acceptance reminder", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.recordLocalCompletion(9);
+  await renderWithProviders(<Overview />, { backend });
+  const recent = within(await screen.findByRole("region", { name: "Recent results" }));
+  const row = recent.getAllByRole("link").find((link) => link.getAttribute("href") === "/runs/9")!;
+  expect(row).toHaveTextContent("Awaiting acceptance");
+  const reminder = (await screen.findByText("2 issues await your acceptance")).closest('[role="status"]')!;
+  expect(within(reminder as HTMLElement).getByRole("link", { name: "View" })).toHaveAttribute("href", "/runs?state=awaiting_acceptance");
+  expect(recent.queryByRole("button", { name: "Record local completion" })).not.toBeInTheDocument();
 });
 
 test("the recent results are the finished runs, newest first, each leading to its run", async () => {

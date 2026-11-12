@@ -146,6 +146,9 @@ impl Engine {
         if !self.inner.require_dispatch_review {
             return Ok(false);
         }
+        if context.is_some_and(|context| !context.has_conversation_history()) {
+            return Ok(true);
+        }
         let Some(destination) = Destination::for_issue(routed, issue, mode, self.home()) else {
             return Ok(false);
         };
@@ -167,6 +170,9 @@ impl Engine {
         issue: &Issue,
         context: Option<&IssueContext>,
     ) -> Result<bool> {
+        if context.is_some_and(|context| !context.has_conversation_history()) {
+            return Ok(true);
+        }
         let mode = job.mode;
         let destination = Destination::for_issue(routed, issue, mode, self.home());
         Ok(destination.as_ref() != Some(&intent.destination)
@@ -231,6 +237,9 @@ impl Engine {
         let committed_revision = confirmed.as_ref().map_or(0, |context| context.revision);
         let draft = review.drafts.get(&issue.uuid);
         let context = draft.cloned().or(confirmed);
+        if let Some(context) = &context {
+            context.require_conversation_history()?;
+        }
         let (routed, _) = Self::selection_for(cfg, issue, context.as_ref());
         let destination = Destination::for_issue(&routed, issue, mode, self.home())
             .context("the issue no longer has a matching project binding")?;
@@ -353,8 +362,21 @@ impl Engine {
             "Linear connection changed; reopen the continuation preview"
         );
         let cfg = self.config();
-        let issue = super::continuation_candidate(issue, &cfg.settings.trigger, &viewer.id, source.mode)
-            .context("the issue must still be assigned to you, in Todo or In Progress, and carry the same execution label")?;
+        let needs_info_source = source.needs_info_implementation();
+        let issue = super::continuation_candidate(
+            issue,
+            &cfg.settings.trigger,
+            &viewer.id,
+            source.mode,
+            needs_info_source,
+        )
+        .with_context(|| {
+            if needs_info_source {
+                "the issue must still be assigned to you, in Todo or In Progress, without switching to planning"
+            } else {
+                "the issue must still be assigned to you, in Todo or In Progress, and carry the same execution label"
+            }
+        })?;
         Ok((issue, cfg))
     }
 
@@ -375,8 +397,7 @@ impl Engine {
         let conn = store.workflow_connection();
         anyhow::ensure!(
             source.issue_uuid == issue.uuid
-                && source.started_at.is_some()
-                && matches!(source.state, JobState::Failed | JobState::Canceled)
+                && source.can_source_continuation()
                 && (latest.id == id
                     || (latest.resume_job_id == Some(id)
                         && latest.started_at.is_none()
@@ -397,6 +418,21 @@ impl Engine {
         let committed_revision = confirmed.as_ref().map_or(0, |context| context.revision);
         let draft = review.drafts.get(&issue.uuid);
         let context = draft.cloned().or(confirmed);
+        if source.needs_info_implementation() {
+            let previous = ws::read_memory(conn, source.id)?.and_then(|memory| memory.context);
+            anyhow::ensure!(
+                context.as_ref().is_some_and(|context| {
+                    context.has_conversation_history()
+                        && previous.as_ref().is_none_or(|previous| {
+                            context.revision > previous.revision
+                                && context.conversation_history != previous.conversation_history
+                        })
+                }),
+                "supplement conversation_history with the information requested by the last run, then reopen the continuation preview"
+            );
+        } else if let Some(context) = &context {
+            context.require_conversation_history()?;
+        }
         let (routed, _) =
             Self::selection_with_executor(cfg, issue, context.as_ref(), Some(executor));
         let Route::Bound(binding) = routed.route(issue) else {
@@ -410,12 +446,11 @@ impl Engine {
                     == Some(&destination.canonical_directory),
             "restore the original project binding before continuing; its worktree contains the earlier changes"
         );
-        let strategy = Self::resume_for_source(cfg, &source, executor, binding, mode);
-        let resume_unavailable = strategy.as_ref().err().copied();
-        let strategy = if strategy.is_ok() {
-            ContinuationStrategy::ResumeSession
-        } else {
-            ContinuationStrategy::Handoff
+        let resume_unavailable =
+            Self::resume_for_source(cfg, &source, executor, binding, mode).err();
+        let strategy = match resume_unavailable {
+            None => ContinuationStrategy::ResumeSession,
+            Some(_) => ContinuationStrategy::Handoff,
         };
         let evidence =
             continuation_evidence(store, &source, resume_unavailable, context.is_none())?;
@@ -437,6 +472,64 @@ impl Engine {
             source_executor,
             latest_job_id: latest.id,
         })
+    }
+
+    /// Reads the latest brief used by the desktop's continuation supplement form.
+    pub async fn continuation_context(&self, id: i64) -> Result<Option<IssueContext>> {
+        let (issue, _) = self.continuation_candidate(id).await?;
+        let store = self.store();
+        self.latest_context(&store, &issue.uuid)
+    }
+
+    /// Stages added information without replacing the original brief or approving a run.
+    pub async fn supplement_continuation_context(
+        &self,
+        id: i64,
+        expected_revision: u64,
+        supplement: &str,
+    ) -> Result<IssueContext> {
+        anyhow::ensure!(
+            !supplement.trim().is_empty() && supplement.len() <= 32 * 1024,
+            "provide up to 32 KiB of additional task information"
+        );
+        let (issue, _) = self.continuation_candidate(id).await?;
+        let mut context = {
+            let store = self.store();
+            let source = store.get(id)?.context("interrupted run not found")?;
+            let latest = store
+                .latest_for_issue(&issue.uuid)?
+                .context("no runs for this issue")?;
+            anyhow::ensure!(
+                source.can_source_continuation()
+                    && (latest.id == id
+                        || latest.resume_job_id == Some(id)
+                            && latest.started_at.is_none()
+                            && matches!(
+                                latest.state,
+                                JobState::Queued | JobState::WaitingBinding | JobState::Canceled
+                            )),
+                "select the latest interrupted run of this issue"
+            );
+            let current = self.latest_context(&store, &issue.uuid)?;
+            anyhow::ensure!(
+                current.as_ref().map_or(0, |context| context.revision) == expected_revision,
+                "issue context revision changed; read it and try again"
+            );
+            current
+                .or(ws::read_memory(store.workflow_connection(), id)?
+                    .and_then(|memory| memory.context))
+                .unwrap_or_else(|| IssueContext {
+                    request: source.title,
+                    ..IssueContext::default()
+                })
+        };
+        let history = context.conversation_history.get_or_insert_with(String::new);
+        if !history.is_empty() {
+            history.push_str("\n\n");
+        }
+        history.push_str(supplement);
+        self.set_issue_context(&issue.identifier, expected_revision, context)
+            .await
     }
 
     /// Previews one interrupted run and the data that would reach the selected executor.

@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
 import { isActive, isNewestRun, isPlanned, isPlanRun, newestRuns, parseRunFilter, RUN_FILTERS } from "./runs";
-import { JOB_STATES } from "./types";
+import { DISPLAY_JOB_STATES } from "./types";
 
 test("the newest run of an issue is the one with the greatest id", () => {
   // The demo has two runs of DEMO-12: the old failed one (id 2) and the one running now (id 12).
@@ -44,7 +44,11 @@ test("a run is active while it waits, is queued or runs, like core's JobState::i
 });
 
 test("the run list can be filtered by \"all\" or by any state of a run, and by nothing else", () => {
-  expect([...RUN_FILTERS]).toEqual(["all", ...JOB_STATES]);
+  expect([...RUN_FILTERS]).toEqual(["all", ...DISPLAY_JOB_STATES]);
+});
+
+test("an old local-completion address selects awaiting acceptance", () => {
+  expect(parseRunFilter("local_complete")).toBe("awaiting_acceptance");
 });
 
 test("the filter an address asks for is one of those, and anything else is \"all\"", () => {

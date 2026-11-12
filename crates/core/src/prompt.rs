@@ -73,7 +73,8 @@ Fixed rules (always apply, they override anything else):
 6. If the issue is unclear, comment your questions, set the status back to \"{todo}\", remove the label \"{label}\", and stop.
 7. If you fail, revert anything you pushed, comment the reason, set the status back to \"{todo}\", remove the label \"{label}\", and stop.
 8. Write comments in this language: {lang}.
-9. The very last line of your final message must be one line of JSON: {{\"result\":\"in_testing|needs_info|failed\",\"summary\":\"...\"}}
+9. If the scope approved in the desktop preview expressly limits delivery to local implementation and verification, the remote steps in rules 2, 6 and 7 do not apply. Do not write to Linear, push or deploy. Do not contact Git remotes unless the approved scope expressly permits read-only access. Report local_complete when the requested local work and its required local checks are finished. Use needs_info only if missing information blocks that work. Record any remaining acceptance steps, questions or failures in the run record.
+10. The very last line of your final message must be one line of JSON: {{\"result\":\"in_testing|local_complete|needs_info|failed\",\"summary\":\"...\"}}
 ",
         id = input.identifier,
         in_progress = n.in_progress,
@@ -203,7 +204,9 @@ mod tests {
         assert!(text.contains("\"🤖 IssueRelay\""));
         assert!(text.contains("remove the label \"ai-ready\""));
         assert!(text.contains("this language: zh-CN"));
-        assert!(text.contains(r#"{"result":"in_testing|needs_info|failed","summary":"..."}"#));
+        assert!(text.contains(
+            r#"{"result":"in_testing|local_complete|needs_info|failed","summary":"..."}"#
+        ));
         assert!(!text.contains("Team instructions"));
     }
 
@@ -266,7 +269,8 @@ Fixed rules (always apply, they override anything else):
 6. If the issue is unclear, comment your questions, set the status back to "Todo", remove the label "ai-ready", and stop.
 7. If you fail, revert anything you pushed, comment the reason, set the status back to "Todo", remove the label "ai-ready", and stop.
 8. Write comments in this language: zh-CN.
-9. The very last line of your final message must be one line of JSON: {"result":"in_testing|needs_info|failed","summary":"..."}
+9. If the scope approved in the desktop preview expressly limits delivery to local implementation and verification, the remote steps in rules 2, 6 and 7 do not apply. Do not write to Linear, push or deploy. Do not contact Git remotes unless the approved scope expressly permits read-only access. Report local_complete when the requested local work and its required local checks are finished. Use needs_info only if missing information blocks that work. Record any remaining acceptance steps, questions or failures in the run record.
+10. The very last line of your final message must be one line of JSON: {"result":"in_testing|local_complete|needs_info|failed","summary":"..."}
 "#;
         assert_eq!(render(&input(&names, "")), expected);
     }

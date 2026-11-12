@@ -87,6 +87,7 @@ impl Engine {
         expected_revision: u64,
         mut context: IssueContext,
     ) -> Result<IssueContext> {
+        context.require_conversation_history()?;
         let _cycle = self.inner.cycle.lock().await;
         let linear = self.linear();
         let issue = Self::resolve_issue_on(linear.as_ref(), identifier).await?;

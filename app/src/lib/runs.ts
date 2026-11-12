@@ -1,4 +1,4 @@
-import type { ExecutorKind, Job, JobState } from "./types";
+import { DISPLAY_JOB_STATES, type DisplayJobState, type ExecutorKind, type Job, type JobState } from "./types";
 
 /** The states of a run that is still in hand: it waits, is queued or runs (core's `JobState::is_active`). */
 export const ACTIVE_STATES: readonly JobState[] = ["waiting_binding", "queued", "running"];
@@ -23,13 +23,24 @@ export function isWaitingForDispatchReview(job: Job): boolean {
   return job.state === "waiting_binding" && job.reason === "waiting for dispatch review";
 }
 
-/** A completed attempt that was interrupted after its executor started. */
+/** An implementation paused after the executor explicitly asked for more information. */
+export function isNeedsInfoImplementation(job: Job | null | undefined): boolean {
+  return job?.started_at != null && job.state === "needs_info" && job.mode === "implement" && job.report === "needs_info";
+}
+
+/** A finished implementation that can be recorded as complete locally from its detail page. */
+export function canRecordLocalCompletion(job: Job): boolean {
+  return isNeedsInfoImplementation(job) && job.finished_at !== null;
+}
+
+/** A started attempt that stopped and can be considered for continuation. */
 export function isInterruptedRun(job: Job | null | undefined): job is Job & {
-  state: "failed" | "canceled";
+  state: "failed" | "canceled" | "needs_info";
   started_at: string;
   executor: ExecutorKind;
 } {
-  return job?.started_at != null && job.executor !== null && (job.state === "failed" || job.state === "canceled");
+  return job?.started_at != null && job.executor !== null &&
+    (job.state === "failed" || job.state === "canceled" || isNeedsInfoImplementation(job));
 }
 
 /** An unstarted follow-up may be reused to continue the earlier interrupted attempt. */
@@ -58,24 +69,17 @@ export function isNewestRun(job: Job, jobs: readonly Job[]): boolean {
   return !jobs.some((other) => other.issue_uuid === job.issue_uuid && other.id > job.id);
 }
 
-/**
- * What `/runs?state=` accepts: every state a run can be in, or "all". The overview's reminder links
- * to `/runs?state=failed`.
- */
-export const RUN_FILTERS = [
-  "all",
-  "waiting_binding",
-  "queued",
-  "running",
-  "awaiting_acceptance",
-  "needs_info",
-  "done",
-  "failed",
-  "canceled",
-] as const;
+/** The state shown in the panel. Actions that affect Linear still use the persisted state. */
+export function displayJobState(state: JobState): DisplayJobState {
+  return state === "local_complete" ? "awaiting_acceptance" : state;
+}
+
+/** The visible state filters. The old local-completion address remains an alias. */
+export const RUN_FILTERS = ["all", ...DISPLAY_JOB_STATES] as const;
 export type RunFilter = (typeof RUN_FILTERS)[number];
 
 /** The filter an address asks for; anything the page does not know means every run. */
 export function parseRunFilter(value: string | null): RunFilter {
+  if (value === "local_complete") return displayJobState(value);
   return RUN_FILTERS.find((filter) => filter === value) ?? "all";
 }

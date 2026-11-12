@@ -12,7 +12,8 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
-import type { JobState } from "@/lib/types";
+import { displayJobState } from "@/lib/runs";
+import type { DisplayJobState, JobState } from "@/lib/types";
 
 /**
  * The colour and icon of each job state, the same everywhere a state is shown. The colours are
@@ -20,7 +21,7 @@ import type { JobState } from "@/lib/types";
  * are written out in full so that Tailwind finds them.
  */
 // eslint-disable-next-line react-refresh/only-export-components -- the table is shared with the tests; a change here reloads the page.
-export const STATE_STYLE: Record<JobState, { icon: LucideIcon; className: string }> = {
+export const STATE_STYLE: Record<DisplayJobState, { icon: LucideIcon; className: string }> = {
   waiting_binding: { icon: Unplug, className: "text-state-waiting border-state-waiting/30 bg-state-waiting/10" },
   queued: { icon: Clock, className: "text-state-queued border-state-queued/30 bg-state-queued/10" },
   running: { icon: LoaderCircle, className: "text-state-running border-state-running/30 bg-state-running/10" },
@@ -44,12 +45,13 @@ export const PLANNED_STYLE = { icon: NotebookPen, className: STATE_STYLE.needs_i
  */
 export function StatusBadge({ state, planned = false }: { state: JobState; planned?: boolean }) {
   const { t } = useTranslation();
-  const asPlanned = planned && state === "needs_info";
-  const { icon: Icon, className } = asPlanned ? PLANNED_STYLE : STATE_STYLE[state];
+  const visibleState = displayJobState(state);
+  const asPlanned = planned && visibleState === "needs_info";
+  const { icon: Icon, className } = asPlanned ? PLANNED_STYLE : STATE_STYLE[visibleState];
   return (
     <Badge variant="outline" className={className}>
       <Icon aria-hidden className={state === "running" ? "animate-spin" : undefined} />
-      {asPlanned ? t("state.planned") : t(`state.${state}`)}
+      {asPlanned ? t("state.planned") : t(`state.${visibleState}`)}
     </Badge>
   );
 }

@@ -1,11 +1,12 @@
-import { History } from "lucide-react";
-import { Fragment, type MouseEvent } from "react";
+import { ChevronDown, ChevronRight, History } from "lucide-react";
+import { Fragment, useId, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { PageHeader } from "@/components/PageHeader";
 import { RunDuration } from "@/components/RunDuration";
 import { StatusBadge } from "@/components/StatusBadge";
 import { DetailLine, EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RUN_LIST_LIMIT, useJobs, useStatus } from "@/hooks/queries";
@@ -13,7 +14,8 @@ import { useLang } from "@/hooks/useLang";
 import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatCost, formatRelative, formatTime } from "@/lib/format";
-import { isPlanned, isPlanRun, parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
+import { groupIssueRuns, type IssueRunGroup } from "@/lib/run-groups";
+import { displayJobState, isPlanned, isPlanRun, parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
 import type { HeldJob, Job } from "@/lib/types";
 
 /** What stands where a run has no value (it has no executor yet, or has not started). */
@@ -58,7 +60,13 @@ function Note({ job, held }: { job: Job; held: HeldJob | undefined }) {
  * screen readers. A click that the link has already handled, or that ends a text selection (the
  * reason is text a reader may want to copy), is not a second one.
  */
-function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
+function RunRow({ job, held, history = false, latest = false, historyToggle }: {
+  job: Job;
+  held: HeldJob | undefined;
+  history?: boolean;
+  latest?: boolean;
+  historyToggle?: { count: number; expanded: boolean; id: string; toggle: () => void };
+}) {
   const { t } = useTranslation();
   const lang = useLang();
   const navigate = useNavigate();
@@ -77,25 +85,55 @@ function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
             to={`/runs/${job.id}`}
             className="rounded-sm font-mono text-xs text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
           >
-            {job.issue_identifier}
+            {history ? t("runs.run_label", { id: job.id }) : job.issue_identifier}
           </Link>
           {job.executor !== null && (
             <span className="text-xs text-muted-foreground">
               {t(`executor.${job.executor}`)}
-              {isPlanRun(job) && ` · ${t("runs.mode.plan")}`}
+              {!history && isPlanRun(job) && ` · ${t("runs.mode.plan")}`}
             </span>
+          )}
+          {history && latest && <span className="text-xs text-muted-foreground">{t("runs.latest")}</span>}
+        </div>
+      </TableCell>
+      <TableCell>
+        <div className="flex max-w-sm flex-col items-start gap-1 wrap-anywhere whitespace-normal">
+          {history ? (
+            <>
+              <span>{t(isPlanRun(job) ? "runs.mode.plan" : "runs.mode.implement")}</span>
+              {job.resume_job_id != null && (
+                <Link to={`/runs/${job.resume_job_id}`} className="text-xs text-primary underline-offset-4 hover:underline">
+                  {t("runs.resumed_from", { id: job.resume_job_id })}
+                </Link>
+              )}
+            </>
+          ) : job.title}
+          {historyToggle !== undefined && (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="max-w-full whitespace-normal text-muted-foreground"
+              aria-label={t(historyToggle.expanded ? "runs.collapse_history" : "runs.expand_history", { issue: job.issue_identifier })}
+              aria-expanded={historyToggle.expanded}
+              aria-controls={historyToggle.id}
+              onClick={(event) => {
+                event.stopPropagation();
+                historyToggle.toggle();
+              }}
+            >
+              {historyToggle.expanded ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+              {t("runs.history_count", { count: historyToggle.count })}
+            </Button>
           )}
         </div>
       </TableCell>
       <TableCell>
-        <div className="max-w-sm wrap-anywhere whitespace-normal">{job.title}</div>
-      </TableCell>
-      <TableCell>
-        {job.started_at === null ? (
+        {!history && job.started_at === null ? (
           NONE
         ) : (
           <div className="flex flex-col gap-0.5">
-            <span>{formatRelative(job.started_at, lang)}</span>
+            {history && job.started_at === null && <span className="text-xs text-muted-foreground">{t("runs.field.created")}</span>}
+            <span>{history ? formatTime(job.started_at ?? job.created_at, lang) : formatRelative(job.started_at!, lang)}</span>
             <span className="text-xs text-muted-foreground">
               <RunDuration job={job} />
               {job.usage?.cost_micro_usd != null && ` · ${formatCost(job.usage.cost_micro_usd)}`}
@@ -112,7 +150,46 @@ function RunRow({ job, held }: { job: Job; held: HeldJob | undefined }) {
   );
 }
 
-function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
+function IssueHistory({ group, held }: { group: IssueRunGroup; held: HeldJob[] }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const id = useId();
+  return (
+    <>
+      <RunRow
+        job={group.latest}
+        held={held.find((pause) => pause.job_id === group.latest.id)}
+        historyToggle={{ count: group.runs.length, expanded, id, toggle: () => setExpanded(!expanded) }}
+      />
+      {expanded && (
+        <TableRow className="hover:bg-transparent">
+          <TableCell colSpan={COLUMNS.length} className="bg-muted/30 p-2">
+            <section id={id} aria-label={t("runs.history_caption", { issue: group.latest.issue_identifier })}>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("runs.field.state")}</TableHead>
+                    <TableHead>{t("nav.runs")} / {t("runs.field.executor")}</TableHead>
+                    <TableHead>{t("runs.field.mode")}</TableHead>
+                    <TableHead>{t("runs.field.started")} / {t("runs.field.duration")}</TableHead>
+                    <TableHead>{t("runs.field.note")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {group.runs.map((job) => (
+                    <RunRow key={job.id} job={job} held={held.find((pause) => pause.job_id === job.id)} history latest={job.id === group.latest.id} />
+                  ))}
+                </TableBody>
+              </Table>
+            </section>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+function RunsTable({ groups, held }: { groups: IssueRunGroup[]; held: HeldJob[] }) {
   const { t } = useTranslation();
   // "5 minutes ago" stays right while the page is open.
   useTick(CLOCK_MS);
@@ -136,8 +213,8 @@ function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {jobs.map((job) => (
-          <RunRow key={job.id} job={job} held={held.find((pause) => pause.job_id === job.id)} />
+        {groups.map((group) => (
+          <IssueHistory key={group.key} group={group} held={held} />
         ))}
       </TableBody>
     </Table>
@@ -146,9 +223,9 @@ function RunsTable({ jobs, held }: { jobs: Job[]; held: HeldJob[] }) {
 
 /**
  * The runs (design 9.2), newest first, filtered by state with tabs whose choice is kept in the
- * address (`?state=`, so the overview's "View" for failed runs lands on the right tab). A row opens
- * the run's page. The list is the latest `RUN_LIST_LIMIT` runs: when it is that long, it says that
- * older ones are left out.
+ * address (`?state=`). Each issue shows its latest run; expanding it reveals the loaded history.
+ * A state filter uses that latest run and keeps all its previous attempts together. The list is
+ * the latest `RUN_LIST_LIMIT` runs, so it says when older attempts may have been left out.
  */
 export default function Runs() {
   const { t } = useTranslation();
@@ -168,7 +245,8 @@ export default function Runs() {
     );
   }
 
-  const shown = jobs.data?.filter((job) => filter === "all" || job.state === filter);
+  const shown = jobs.data === undefined ? undefined : groupIssueRuns(jobs.data)
+    .filter((group) => filter === "all" || displayJobState(group.latest.state) === filter);
   let content;
   if (shown === undefined) {
     content = <LoadingState rows={5} />;
@@ -178,14 +256,14 @@ export default function Runs() {
     content = <EmptyState icon={History} title={t("runs.empty_filtered")} description={t("runs.empty_filtered_description")} />;
   } else {
     // A queued run that failed to start waits for a retry: the status knows when.
-    content = <RunsTable jobs={shown} held={status.data?.status.held ?? []} />;
+    content = <RunsTable groups={shown} held={status.data?.status.held ?? []} />;
   }
 
   return (
     <>
       {header}
       <Tabs value={filter} onValueChange={(value) => setParams({ state: parseRunFilter(value) }, { replace: true })}>
-        {/* Nine tabs do not fit a narrow window in one line: they wrap. */}
+        {/* The state tabs wrap in a narrow window. */}
         <TabsList className="h-auto! flex-wrap justify-start gap-1">
           {RUN_FILTERS.map((value) => (
             <TabsTrigger key={value} value={value} className="flex-none!">

@@ -90,7 +90,7 @@ IssueRelay 是连接 Linear 与本机编码 AI 的桌面任务调度器，每个
 - **macOS**：`~/Library/Application Support/com.sunkailun.issuerelay`。
 - **Windows**：`%APPDATA%\com.sunkailun.issuerelay` 和 `%LOCALAPPDATA%\com.sunkailun.issuerelay` 中存在的目录。
 
-保留一份升级前的备份。已发布的 0.4.0 首次打开时会迁移到 schema 3。派发预览构建使用 schema 4，保存派发确认记录。包含续作的当前源码构建会迁移到 schema 5，保存用户已确认的续作尝试与交接记录。已发布的 0.4.0 和 schema 4 构建都无法打开 schema 5。请勿修改 `user_version` 或手工降级数据库。
+保留升级前的备份。支持本地交付结果的构建首次打开时会将运行数据库 `state.db` 迁移到 schema 6，以识别新增的 `local_complete` 运行状态。只支持 schema 5 或更早格式的构建无法打开迁移后的数据库。请通过备份恢复旧格式。
 
 ## 自动更新
 
@@ -105,7 +105,7 @@ IssueRelay 是连接 Linear 与本机编码 AI 的桌面任务调度器，每个
 
 ## 退回旧版本
 
-如果目标版本不支持当前数据库格式，先正常退出应用并另存升级后的数据，再恢复兼容的升级前备份并启动旧版。比如从 schema 5 的续作构建退回已发布的 0.4.0，需要恢复 schema 3 的备份。退回 schema 4 的派发预览构建，需要恢复兼容的 schema 4 备份。旧版会看到备份时的记录。
+如果目标版本不支持当前数据库格式，先正常退出应用并另存升级后的数据，再恢复兼容的升级前备份并启动旧版。从 schema 6 退回 schema 5 时，使用升级前的 schema 5 备份。旧版会显示备份时的设置、绑定和运行记录，升级后新增的记录保存在另存的数据中。
 
 以下提示适用于目标版本支持当前数据库格式的情况。
 

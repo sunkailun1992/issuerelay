@@ -26,6 +26,7 @@ pub struct IssueContext {
     pub origin_executor: Option<ExecutorKind>,
     pub preferred_executor: Option<ExecutorKind>,
     pub request: String,
+    // Older briefs and run snapshots may lack history and must remain readable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_history: Option<String>,
     pub scope: String,
@@ -34,6 +35,20 @@ pub struct IssueContext {
 }
 
 impl IssueContext {
+    pub(crate) fn has_conversation_history(&self) -> bool {
+        self.conversation_history
+            .as_deref()
+            .is_some_and(|history| !history.trim().is_empty())
+    }
+
+    pub(crate) fn require_conversation_history(&self) -> Result<()> {
+        ensure!(
+            self.has_conversation_history(),
+            "conversation_history is required for a task brief. Provide the task-relevant current conversation text before desktop confirmation."
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_text("request", &self.request, 16 * 1024)?;
         if let Some(history) = &self.conversation_history {

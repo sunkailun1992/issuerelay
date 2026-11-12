@@ -1,5 +1,8 @@
 {
-  "app": { "name": "IssueRelay", "tagline": "Linear の課題を Claude Code と Codex に任せる" },
+  "app": {
+    "name": "IssueRelay",
+    "tagline": "Linear の課題を Claude Code と Codex に任せる"
+  },
   "nav": {
     "overview": "概要",
     "issues": "課題",
@@ -70,11 +73,12 @@
   "notify": {
     "run_started": "実行を開始しました。",
     "awaiting_acceptance": "確認をお願いします。課題はテスト中になりました。",
-    "needs_info": "AI が課題に質問を残しました。内容を補足して、もう一度 ai-ready ラベルを付けてください。",
+    "needs_info": "AI が追加情報を求めています。パネルで必要な情報を確認してください。",
     "plan_ready": "課題にプランを書きました。この通りに進めるには ai-ready ラベルを付けてください。",
     "failed": "実行に失敗しました。原因はパネルで確認できます。",
     "update_available": "IssueRelay {{version}} が利用可能です",
-    "update_available_body": "パネルを開くとインストールできます。"
+    "update_available_body": "パネルを開くとインストールできます。",
+    "local_complete": "ローカルでの開発と検証が完了しました。結果を確認してください。"
   },
   "quit": {
     "title": "実行中のタスクがあります",
@@ -150,6 +154,8 @@
     "next": "次の作業",
     "verification": "報告された検証",
     "blockers": "ブロッカー",
+    "information_requested": "追加情報のリクエスト",
+    "information_requested_fallback": "Linear の課題の最新コメントで、前回の実行が求めた情報を確認してください。",
     "updated_at": "保存日時",
     "git_head": "コミット",
     "git_branch": "ブランチ",
@@ -220,6 +226,8 @@
   "actions": {
     "stop": "停止",
     "run_again": "もう一度実行",
+    "record_local_completion": "ローカル完了を記録",
+    "record_local_completion_confirm": "実行 #{{id}} の開発と検証がこの端末で完了したことを記録します。Linear の課題は変更されません。",
     "mark_done": "完了にする",
     "open_in_linear": "Linear で開く",
     "open_issue_in_linear": "{{identifier}} を Linear で開く",
@@ -232,6 +240,7 @@
       "poll_now": "チェックを開始できませんでした",
       "cancel": "実行を停止できませんでした",
       "retry": "もう一度実行できませんでした",
+      "record_local_completion": "ローカル完了を記録できませんでした",
       "mark_done": "完了にできませんでした",
       "save_binding": "紐付けを保存できませんでした",
       "remove_binding": "紐付けを削除できませんでした",
@@ -303,7 +312,9 @@
     "conversation_history": "現在のセッション",
     "implementation_scope": "実装対象は {{issue}} のみです。子課題は個別に実行します。",
     "prepare_implementation": "Linear でこの課題を {{todo}} に設定し、自分に割り当てて {{label}} ラベルを追加してください。完了後、ここに戻ってプレビューを再読み込みしてください。",
-    "issue_mismatch": "プレビューがこの課題と一致しません。再読み込みしてから確認してください。"
+    "issue_mismatch": "プレビューがこの課題と一致しません。再読み込みしてから確認してください。",
+    "plan_next_steps": "計画を保存しました。この課題の開発プレビューに進むか、分割した子課題を個別に割り当ててください。",
+    "view_requirements": "課題一覧を見る"
   },
   "continuation": {
     "action": "前回の実行を再開",
@@ -315,7 +326,11 @@
     "handoff": "確認した引き継ぎ内容で新しいセッションを開始",
     "evidence": "前回の実行記録",
     "preview_mismatch": "プレビューが実行またはエージェントと一致しません。確認する前に再読み込みしてください。",
-    "confirm": "確認して再開"
+    "confirm": "確認して再開",
+    "supplement_label": "タスク情報を追加",
+    "supplement_hint": "不足している情報を入力してください。既存のタスク履歴に追記され、プレビューの確認後に実行者へ渡されます。",
+    "supplement_preview": "情報を保存してプレビュー",
+    "supplement_failed": "タスク情報を追加できませんでした"
   },
   "provider_session": {
     "title": "実行エージェントの元のセッション",
@@ -385,6 +400,7 @@
   },
   "runs": {
     "all": "すべて",
+    "local_completion_detail": "この端末での開発と検証が完了しました。",
     "field": {
       "state": "状態",
       "issue": "課題",
@@ -402,7 +418,8 @@
       "usage": "使用量"
     },
     "mode": {
-      "plan": "プランのみ"
+      "plan": "プランのみ",
+      "implement": "開発"
     },
     "resumed_from": "実行 #{{id}} から続行",
     "usage": {
@@ -442,7 +459,14 @@
     "no_output": "表示できる内容はまだありません",
     "log_capped": "ログの最後の {{lines}} 行だけを表示しています。実行はそれより前に始まっています。",
     "list_capped": "最新の {{runs}} 件の実行だけを表示しています。それより古いものは一覧にありません。",
-    "no_output_ended": "この実行には表示できる内容が残っていません"
+    "no_output_ended": "この実行には表示できる内容が残っていません",
+    "history_count_one": "{{count}} 回の実行",
+    "history_count_other": "{{count}} 回の実行",
+    "expand_history": "{{issue}} の実行を表示",
+    "collapse_history": "{{issue}} の実行を閉じる",
+    "history_caption": "{{issue}} の実行履歴",
+    "run_label": "実行 #{{id}}",
+    "latest": "最新"
   },
   "timeline": {
     "session_started": "セッション開始",
@@ -711,7 +735,7 @@
       "waiting_binding": "条件は満たしているが、プロジェクトがフォルダーに紐付けられていないか、実行ツールの準備ができていません。解消すると自動で進みます。",
       "queued": "フォルダーが空くか、同時実行の枠が空くのを待っています。",
       "running": "実行ツールが処理中です。",
-      "awaiting_acceptance": "実行は正常に終わり、課題はテスト中です。確認できたらパネルで完了にしてください。",
+      "awaiting_acceptance": "この端末で検証が済んだ作業や、テストに回した実行は確認待ちです。テストに回した実行は、確認後にパネルで完了にできます。",
       "needs_info": "AI が課題の内容を不明確と判断し、課題に質問を残してラベルを外しました。内容を補足して、もう一度ラベルを付けてください。",
       "planned": "プランのみの実行が課題にプランを書きました。{{label}} を付けるとプランどおりに進めます。",
       "done": "完了にしました。",

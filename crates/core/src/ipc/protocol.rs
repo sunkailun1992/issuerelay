@@ -99,7 +99,12 @@ mod tests {
 
     #[test]
     fn method_table_never_exposes_panel_only_actions() {
-        for forbidden in ["mark_done", "retry_job", "cancel_job"] {
+        for forbidden in [
+            "mark_done",
+            "retry_job",
+            "cancel_job",
+            "record_local_completion",
+        ] {
             assert!(
                 !METHODS.contains(&forbidden),
                 "{forbidden} must stay panel-only"

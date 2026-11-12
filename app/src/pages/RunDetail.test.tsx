@@ -174,6 +174,229 @@ test("continuing shows the selected strategy and only dispatches the reviewed ex
   expect(await backend.job(8)).toMatchObject({ executor: "claude", state: "failed" });
 });
 
+test("a needs-information implementation shows what to supplement and allows either executor", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  const needsInfo: Job = { ...source, mode: "implement", state: "needs_info", report: "needs_info" };
+  const readJob = backend.job;
+  backend.job = vi.fn((id) => id === source.id ? Promise.resolve(needsInfo) : readJob(id));
+  backend.getHandoff = vi.fn().mockResolvedValue(handoffFixture);
+  backend.getContinuationContext = vi.fn().mockResolvedValue(handoffFixture.context);
+  const read = backend.getContinuationPreview;
+  backend.getContinuationPreview = vi.fn(async (...args: Parameters<typeof read>) => ({
+    ...(await read(...args)),
+    context: { ...handoffFixture.context!, conversation_history: "The demo fixture is on the second page." },
+  }));
+  const approve = vi.spyOn(backend, "approveContinuation");
+  await openRun(source.id, backend);
+  const requested = within(await screen.findByRole("region", { name: "Information requested" }));
+  expect(requested.getByText("The integration test remains")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const dialogRequest = await dialog.findByRole("region", { name: "Information requested" });
+  expect(within(dialogRequest).getByText("The integration test remains")).toBeInTheDocument();
+  const supplement = await dialog.findByRole("textbox", { name: "Additional task information" });
+  expect(dialogRequest.compareDocumentPosition(supplement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(dialog.getByRole("radio", { name: "Codex" })).toBeInTheDocument();
+  await userEvent.click(dialog.getByRole("radio", { name: "Claude Code" }));
+  expect(await dialog.findByText("Resume the original executor session")).toBeInTheDocument();
+  expect(dialog.getByText("The demo fixture is on the second page.")).toBeInTheDocument();
+  expect(dialog.getByText("Wiki: Demo Index")).toBeInTheDocument();
+  expect(approve).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("button", { name: "Confirm and continue" }));
+  expect(await screen.findByRole("link", { name: "Continued from run #8" })).toBeInTheDocument();
+  expect(approve).toHaveBeenCalledExactlyOnceWith(source.id, "demo-continuation-1");
+});
+
+test("supplementing a needs-information run preserves its context and requires a new preview", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  const readJob = backend.job;
+  const needsInfo: Job = { ...source, state: "needs_info", mode: "implement", report: "needs_info" };
+  backend.job = vi.fn((id) => id === source.id
+    ? Promise.resolve(needsInfo)
+    : readJob(id));
+  let current = { ...handoffFixture.context!, conversation_history: "Original decision: preserve the index." };
+  backend.getContinuationContext = vi.fn(async () => current);
+  const preview = backend.getContinuationPreview;
+  backend.getContinuationPreview = vi.fn(async (...args: Parameters<typeof preview>) => ({
+    ...(await preview(...args)), context: current,
+  }));
+  let releaseSave!: () => void;
+  const pendingSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+  const save = vi.spyOn(backend, "supplementContinuationContext").mockImplementation(async (_id, revision, text) => {
+    await pendingSave;
+    current = { ...current, revision: revision + 1, conversation_history: `${current.conversation_history}\n\n${text}` };
+    return current;
+  });
+  const approve = vi.spyOn(backend, "approveContinuation");
+  const { client } = await openRun(source.id, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const information = await dialog.findByRole("textbox", { name: "Additional task information" });
+  expect(information).toHaveValue("");
+  const saveButton = dialog.getByRole("button", { name: "Save information and preview" });
+  expect(saveButton).toBeDisabled();
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  await dialog.findByText("Start a new session with the reviewed handoff");
+  const confirm = dialog.getByRole("button", { name: "Confirm and continue" });
+  await waitFor(() => expect(confirm).toBeEnabled());
+
+  await userEvent.type(information, "The integration fixture is on the second page.");
+  expect(confirm).toBeDisabled();
+  await userEvent.click(saveButton);
+  expect(save).toHaveBeenCalledExactlyOnceWith(source.id, 1, "The integration fixture is on the second page.");
+  expect(confirm).toBeDisabled();
+  expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  expect(dialog.getByRole("radio", { name: "Claude Code" })).toBeDisabled();
+  await act(async () => { releaseSave(); await save.mock.results[0].value; });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(information).toHaveValue("");
+  expect(dialog.getByText(/Original decision: preserve the index.*The integration fixture is on the second page\./)).toBeInTheDocument();
+  expect(dialog.getByText("Wiki: Demo Index")).toBeInTheDocument();
+  expect(dialog.getByText("Change the demo repository only")).toBeInTheDocument();
+  expect(confirm).toBeEnabled();
+  expect(approve).not.toHaveBeenCalled();
+  expect(await backend.job(source.id)).toMatchObject({ state: "needs_info" });
+});
+
+test("failed supplemental information stays editable and cannot be confirmed as sent", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...source, state: "needs_info", mode: "implement", report: "needs_info" });
+  backend.getContinuationContext = vi.fn().mockResolvedValue(handoffFixture.context);
+  backend.supplementContinuationContext = vi.fn().mockRejectedValue(new BackendError("issue context revision changed; read it and try again"));
+  const approve = vi.spyOn(backend, "approveContinuation");
+  const { client } = await openRun(source.id, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const information = await dialog.findByRole("textbox", { name: "Additional task information" });
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  await userEvent.type(information, "The fixture is on the second page.");
+  await userEvent.click(dialog.getByRole("button", { name: "Save information and preview" }));
+  expect(await dialog.findByText("Could not update task information")).toBeInTheDocument();
+  expect(information).toHaveValue("The fixture is on the second page.");
+  expect(dialog.getByRole("button", { name: "Confirm and continue" })).toBeDisabled();
+  expect(approve).not.toHaveBeenCalled();
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+});
+
+test("a needs-information run waits for its current context and can retry a failed read", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...source, state: "needs_info", mode: "implement", report: "needs_info" });
+  backend.getContinuationContext = vi.fn()
+    .mockRejectedValueOnce(new BackendError("cannot read the current task brief"))
+    .mockResolvedValue(handoffFixture.context);
+  await openRun(source.id, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(await dialog.findByText("cannot read the current task brief")).toBeInTheDocument();
+  expect(dialog.queryByRole("textbox", { name: "Additional task information" })).not.toBeInTheDocument();
+  expect(dialog.getByRole("button", { name: "Confirm and continue" })).toBeDisabled();
+  await userEvent.click(dialog.getByRole("button", { name: "Try again" }));
+  expect(await dialog.findByRole("textbox", { name: "Additional task information" })).toHaveValue("");
+});
+
+test("a needs-information implementation without recorded blockers points to the latest issue comment", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  const needsInfo: Job = { ...source, mode: "implement", state: "needs_info", report: "needs_info" };
+  backend.job = vi.fn().mockResolvedValue(needsInfo);
+  backend.getHandoff = vi.fn().mockResolvedValue({ ...handoffFixture, memory: null });
+  await openRun(source.id, backend);
+  const requested = within(await screen.findByRole("region", { name: "Information requested" }));
+  expect(requested.getByText(/latest Linear comment/)).toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  const dialogRequest = within(await dialog.findByRole("region", { name: "Information requested" }));
+  expect(dialogRequest.getByText(/latest Linear comment/)).toBeInTheDocument();
+});
+
+test("the continuation dialog retries a failed read of the information requested", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...source, mode: "implement", state: "needs_info", report: "needs_info" });
+  backend.getHandoff = vi.fn().mockRejectedValue(new BackendError("cannot read the saved checkpoint"));
+  const approve = vi.spyOn(backend, "approveContinuation");
+  const save = vi.spyOn(backend, "supplementContinuationContext");
+  await openRun(source.id, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(await dialog.findByText("Could not read the handoff")).toBeInTheDocument();
+  expect(dialog.getByText("cannot read the saved checkpoint")).toBeInTheDocument();
+
+  backend.getHandoff = vi.fn().mockResolvedValue(handoffFixture);
+  await userEvent.click(dialog.getByRole("button", { name: "Try again" }));
+  const requested = within(await dialog.findByRole("region", { name: "Information requested" }));
+  expect(requested.getByText("The integration test remains")).toBeInTheDocument();
+  expect(dialog.queryByText("Could not read the handoff")).not.toBeInTheDocument();
+  expect(approve).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+});
+
+test("recording local completion requires confirmation, refreshes the run, and keeps its checkpoint", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const original = (await backend.job(9))!;
+  backend.getHandoff = vi.fn().mockResolvedValue({ ...handoffFixture, job_id: original.id });
+  const record = vi.spyOn(backend, "recordLocalCompletion");
+  const markDone = vi.spyOn(backend, "markDone");
+
+  await openRun(original.id, backend);
+  const action = await screen.findByRole("button", { name: "Record local completion" });
+  await userEvent.click(action);
+  let dialog = within(screen.getByRole("alertdialog"));
+  expect(dialog.getByText(/development and verification.*Linear issue remains unchanged/)).toBeInTheDocument();
+  expect(record).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+  expect(record).not.toHaveBeenCalled();
+
+  await userEvent.click(action);
+  dialog = within(screen.getByRole("alertdialog"));
+  await userEvent.click(dialog.getByRole("button", { name: "Confirm" }));
+  expect(record).toHaveBeenCalledExactlyOnceWith(original.id);
+  expect(markDone).not.toHaveBeenCalled();
+  expect(await screen.findByText("Awaiting acceptance")).toBeInTheDocument();
+  expect(screen.getByText("Development and verification are complete on this computer.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Needs information")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Record local completion" })).not.toBeInTheDocument();
+  expect(screen.getByText("The integration test remains")).toBeInTheDocument();
+  expect(await backend.job(original.id)).toMatchObject({ state: "local_complete", report: "needs_info" });
+});
+
+test.each([
+  { mode: "plan", report: "planned" },
+  { mode: "implement", finished_at: null },
+  { mode: "implement", started_at: null },
+  { mode: "implement", report: null },
+  { mode: "implement", state: "done" },
+] as const)("an ineligible run offers no local completion action: %j", async (patch) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(9))!;
+  const job: Job = { ...source, ...patch };
+  backend.job = vi.fn().mockResolvedValue(job);
+  await openRun(job.id, backend);
+  expect(screen.queryByRole("button", { name: "Record local completion" })).not.toBeInTheDocument();
+});
+
+test.each(["superseded", "claimed"] as const)("a %s run offers no local completion action", async (obstacle) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(9))!;
+  if (obstacle === "superseded") {
+    const list = backend.listJobs;
+    backend.listJobs = vi.fn(async (limit) => [{ ...source, id: 13 }, ...await list(limit)]);
+  } else {
+    backend.getHandoff = vi.fn().mockResolvedValue({ ...handoffFixture, job_id: source.id, claimed_by: "codex" });
+  }
+  const { client } = await openRun(source.id, backend);
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.queryByRole("button", { name: "Record local completion" })).not.toBeInTheDocument();
+});
+
 test.each([8, 13])("run #%i can use its unstarted follow-up without dispatching on cancel", async (id) => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   const source = (await backend.job(8))!;
@@ -449,7 +672,8 @@ test("a planning run says what it was for, and one that posted its plan has its 
   expect(field("Status")).toBe("Plan posted");
   expect(field("Run for")).toBe("Plan only");
   expect(screen.getByRole("button", { name: "Implement" })).toBeInTheDocument();
-  expect(screen.getByText("Implementation applies only to DEMO-9. Its child issues are dispatched separately.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+  expect(screen.getByText(/The plan is saved\..*Implementation applies only to DEMO-9\./)).toBeInTheDocument();
 });
 
 test.each([
@@ -690,6 +914,53 @@ test("a run offers what its state allows, beside the title", async () => {
   await openRun(10);
   expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+});
+
+test.each([
+  ["matching latest run", true],
+  ["issue left testing", false],
+  ["a newer run exists", false],
+  ["no issue snapshot", false],
+  ["Linear read failed", false],
+  ["settings read failed", false],
+] as const)("local completion on the detail page: %s", async (condition, allowed) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const stored = (await backend.job(10))!;
+  const job = { ...stored, state: "local_complete" as const, report: "local_complete" };
+  const views = await backend.issues();
+  backend.job = vi.fn().mockResolvedValue(job);
+  const issue = views.find((view) => view.issue.uuid === job.issue_uuid)!;
+  const latest = {
+    ...issue,
+    issue: condition === "issue left testing" ? { ...issue.issue, state: "Done" } : issue.issue,
+    job: condition === "a newer run exists" ? { ...job, id: job.id + 1 } : job,
+  };
+  if (condition === "settings read failed") {
+    backend.settings = vi.fn().mockRejectedValue(new BackendError("cannot read settings"));
+  }
+  backend.issues = condition === "Linear read failed"
+    ? vi.fn().mockRejectedValue(new BackendError("cannot read Linear"))
+    : vi.fn().mockResolvedValue(condition === "no issue snapshot" ? [] : [latest]);
+  const markDone = vi.fn().mockResolvedValue(undefined);
+  backend.markDone = markDone;
+
+  const { client } = await openRun(job.id, backend);
+  await waitFor(() => expect(client.getQueryState(queryKeys.issues)?.status).toBe(
+    condition === "Linear read failed" ? "error" : "success",
+  ));
+  await waitFor(() => expect(client.getQueryState(queryKeys.settings)?.status).toBe(
+    condition === "settings read failed" ? "error" : "success",
+  ));
+  expect(screen.getByText("Awaiting acceptance")).toBeInTheDocument();
+  if (allowed) {
+    await userEvent.click(await screen.findByRole("button", { name: "Mark done" }));
+    expect(markDone).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(markDone).toHaveBeenCalledExactlyOnceWith(job.id);
+  } else {
+    expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+    expect(markDone).not.toHaveBeenCalled();
+  }
 });
 
 test("the newest run of an issue can be run again after a failure, an older one cannot", async () => {

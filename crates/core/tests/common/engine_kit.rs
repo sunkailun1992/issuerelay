@@ -264,16 +264,22 @@ impl Harness {
             gated,
             homes,
             readiness,
+            Store::open_in_memory().unwrap(),
             Engine::new_for_scheduler_tests,
         )
     }
 
     pub fn with_dispatch_review() -> Self {
+        Self::with_dispatch_review_store(Store::open_in_memory().unwrap())
+    }
+
+    pub fn with_dispatch_review_store(store: Store) -> Self {
         Self::build(
             Config::default(),
             false,
             Homes::default(),
             Arc::new(FakeReadiness),
+            store,
             Engine::new,
         )
     }
@@ -283,6 +289,7 @@ impl Harness {
         gated: bool,
         homes: Homes,
         readiness: Arc<dyn ReadinessProbe>,
+        store: Store,
         build_engine: fn(EngineDeps) -> anyhow::Result<Engine>,
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -292,7 +299,7 @@ impl Harness {
         let runner = Arc::new(ScriptedRunner::new(linear.clone(), gated));
         let engine = build_engine(EngineDeps {
             config_path,
-            store: Store::open_in_memory().unwrap(),
+            store,
             linear: Arc::new(linear.clone()),
             readiness,
             job_runner: runner.clone(),

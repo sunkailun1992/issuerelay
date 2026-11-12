@@ -136,6 +136,39 @@ test("marking an issue's run done asks first, from the issue list too", async ()
   expect(markDone).toHaveBeenCalledWith(10);
 });
 
+test("a locally completed run in the configured testing state can be marked done from its issue row", async () => {
+  let state = " review qa ";
+  const backend = backendWithIssues((views) => views.map((view) => (
+    view.issue.identifier === "DEMO-10" && view.job !== null
+      ? { ...view, issue: { ...view.issue, state }, job: { ...view.job, state: "local_complete" } }
+      : view
+  )));
+  const settings = await backend.settings();
+  backend.settings = async () => ({ ...settings, trigger: { ...settings.trigger, in_testing: "Review QA" } });
+  const markDone = vi.fn().mockResolvedValue(undefined);
+  backend.markDone = markDone;
+  await renderWithProviders(<Issues />, { backend });
+
+  await screen.findByText("DEMO-10");
+  const row = within(rowOf("DEMO-10"));
+  expect(row.getByText("Awaiting acceptance")).toBeInTheDocument();
+  await userEvent.click(await row.findByRole("button", { name: "Mark done" }));
+  expect(markDone).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+  state = "In Progress";
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await row.findByText("In Progress");
+  expect(row.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+  expect(markDone).not.toHaveBeenCalled();
+
+  state = "Review QA";
+  await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await userEvent.click(await row.findByRole("button", { name: "Mark done" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm" }));
+  expect(markDone).toHaveBeenCalledExactlyOnceWith(10);
+});
+
 test("the dispatch preview shows the context and only sends the token after confirmation", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0, dispatchReview: true });
   const read = vi.spyOn(backend, "getDispatchPreview");

@@ -46,6 +46,7 @@ pub enum JobState {
     Running,
     AwaitingAcceptance,
     NeedsInfo,
+    LocalComplete,
     Done,
     Failed,
     Canceled,
@@ -53,12 +54,13 @@ pub enum JobState {
 
 impl JobState {
     /// Every state, in display order.
-    pub const ALL: [JobState; 8] = [
+    pub const ALL: [JobState; 9] = [
         JobState::WaitingBinding,
         JobState::Queued,
         JobState::Running,
         JobState::AwaitingAcceptance,
         JobState::NeedsInfo,
+        JobState::LocalComplete,
         JobState::Done,
         JobState::Failed,
         JobState::Canceled,
@@ -72,6 +74,7 @@ impl JobState {
             JobState::Running => "running",
             JobState::AwaitingAcceptance => "awaiting_acceptance",
             JobState::NeedsInfo => "needs_info",
+            JobState::LocalComplete => "local_complete",
             JobState::Done => "done",
             JobState::Failed => "failed",
             JobState::Canceled => "canceled",
@@ -180,7 +183,7 @@ pub struct Job {
     #[serde(default)]
     pub mode: RunMode,
     /// The `result` of the AI's last line of JSON (`in_testing`, `needs_info`, `failed`,
-    /// `planned`), when there was one.
+    /// `planned`, `local_complete`), when there was one.
     #[serde(default)]
     pub report: Option<String>,
     /// The executor's session: Claude's `session_id`, Codex's `thread_id`, when the run started one.
@@ -192,6 +195,21 @@ pub struct Job {
     /// What the run used, when the executor reported anything.
     #[serde(default)]
     pub usage: Option<RunUsage>,
+}
+
+impl Job {
+    pub(crate) fn needs_info_implementation(&self) -> bool {
+        self.started_at.is_some()
+            && self.state == JobState::NeedsInfo
+            && self.mode == RunMode::Implement
+            && self.report.as_deref() == Some("needs_info")
+    }
+
+    pub(crate) fn can_source_continuation(&self) -> bool {
+        self.started_at.is_some()
+            && (matches!(self.state, JobState::Failed | JobState::Canceled)
+                || self.needs_info_implementation())
+    }
 }
 
 /// The executor process of a run, as recorded when it started: the PID and the kernel's start
@@ -242,6 +260,7 @@ mod tests {
                 "running",
                 "awaiting_acceptance",
                 "needs_info",
+                "local_complete",
                 "done",
                 "failed",
                 "canceled"
@@ -311,6 +330,7 @@ mod tests {
                 | JobState::Running
                 | JobState::AwaitingAcceptance
                 | JobState::NeedsInfo
+                | JobState::LocalComplete
                 | JobState::Done
                 | JobState::Failed
                 | JobState::Canceled => {}

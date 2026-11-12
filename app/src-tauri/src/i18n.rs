@@ -50,6 +50,7 @@ pub const USED_KEYS: &[&str] = &[
     "menu.help",
     "notify.run_started",
     "notify.awaiting_acceptance",
+    "notify.local_complete",
     "notify.needs_info",
     "notify.failed",
     "notify.update_available",

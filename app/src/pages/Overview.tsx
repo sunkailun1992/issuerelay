@@ -17,7 +17,7 @@ import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatDuration, formatRelative, formatTime } from "@/lib/format";
 import { problemCause } from "@/lib/problem";
-import { isPlanned, newestRuns } from "@/lib/runs";
+import { displayJobState, isPlanned, newestRuns } from "@/lib/runs";
 import type { HeldJob, Job, JobState, LinearSetup, StatusView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { executorReady } from "./onboarding/check";
@@ -25,7 +25,7 @@ import { executorReady } from "./onboarding/check";
 /** How many finished runs the overview lists. */
 const RECENT_COUNT = 8;
 /** The states of a run that has ended. */
-const FINISHED: readonly JobState[] = ["awaiting_acceptance", "needs_info", "done", "failed", "canceled"];
+const FINISHED: readonly JobState[] = ["awaiting_acceptance", "needs_info", "local_complete", "done", "failed", "canceled"];
 /** The states of a run that is on its way to start. */
 const WAITING: readonly JobState[] = ["queued", "waiting_binding"];
 
@@ -82,7 +82,7 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
   // A failure that a later run of the same issue followed is history, not a reminder.
   const latest = jobs === undefined ? [] : newestRuns(jobs);
   const failed = latest.filter((job) => job.state === "failed").length;
-  const awaiting = latest.filter((job) => job.state === "awaiting_acceptance").length;
+  const awaiting = latest.filter((job) => displayJobState(job.state) === "awaiting_acceptance").length;
   if (cause === null && failed === 0 && awaiting === 0 && !view.status.draining) return null;
   return (
     <div className="flex flex-col gap-3">
@@ -118,7 +118,7 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
           <ClipboardCheck aria-hidden className="text-state-awaiting!" />
           <AlertTitle>{t("overview.alert_awaiting", { count: awaiting })}</AlertTitle>
           <AlertAction>
-            <Link to="/issues" className={VIEW_LINK}>
+            <Link to="/runs?state=awaiting_acceptance" className={VIEW_LINK}>
               {t("overview.view")}
             </Link>
           </AlertAction>

@@ -1,4 +1,4 @@
-import { CircleAlert, Copy, Info, SearchX } from "lucide-react";
+import { CircleAlert, Copy, Info, ListChecks, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router";
@@ -14,15 +14,27 @@ import { RunUsageSummary } from "@/components/RunUsage";
 import { StatusBadge } from "@/components/StatusBadge";
 import { DetailLine, EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { LOG_LINES, useContinuationSource, useIssues, useJob, useJobLog } from "@/hooks/queries";
+import { LOG_LINES, useContinuationSource, useHandoff, useIssues, useJob, useJobLog, useJobs, useRecordLocalCompletion } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
+import { useTriggerNamesWithStatus } from "@/hooks/useTriggerNames";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
-import { isActive, isPlanned, isPlanRun, isWaitingForDispatchReview } from "@/lib/runs";
+import { canRecordLocalCompletion, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview } from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
 import type { Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -68,6 +80,9 @@ function InfoCard({ job }: { job: Job }) {
         <dl className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-6 gap-y-3">
           <Field label={t("runs.field.state")}>
             <StatusBadge state={job.state} planned={isPlanned(job)} />
+            {job.state === "local_complete" && (
+              <p className="mt-1 text-xs text-muted-foreground">{t("runs.local_completion_detail")}</p>
+            )}
           </Field>
           <Field label={t("runs.field.executor")}>{job.executor === null ? NONE : t(`executor.${job.executor}`)}</Field>
           {isPlanRun(job) && <Field label={t("runs.field.mode")}>{t("runs.mode.plan")}</Field>}
@@ -204,16 +219,60 @@ function LogTabs({ job }: { job: Job }) {
   );
 }
 
+function RecordLocalCompletion({ job }: { job: Job }) {
+  const { t } = useTranslation();
+  const jobs = useJobs();
+  const handoff = useHandoff(job.id);
+  const record = useRecordLocalCompletion();
+  if (jobs.isPending || handoff.isPending || handoff.data?.claimed_by != null ||
+      (jobs.data !== undefined && !isNewestRun(job, jobs.data))) return null;
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button variant="outline" disabled={record.isPending || record.isSuccess}>
+          <ListChecks aria-hidden />
+          {t("actions.record_local_completion")}
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{t("actions.record_local_completion")}</AlertDialogTitle>
+          <AlertDialogDescription>{t("actions.record_local_completion_confirm", { id: job.id })}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+          <AlertDialogAction onClick={() => record.mutate(job.id)}>{t("actions.confirm")}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** The page of a run that exists: header, why, facts, and the log in two tabs. */
 function RunView({ job }: { job: Job }) {
   const { t } = useTranslation();
   const issues = useIssues();
   const continuationSource = useContinuationSource(job);
-  // `Job` has no link; the issue's own is in the issue list when that has been read and has this issue.
-  const url = issues.data?.find((view) => view.issue.uuid === job.issue_uuid)?.issue.url;
+  const { names, loaded } = useTriggerNamesWithStatus();
+  // The issue list supplies both the Linear link and the current state of the issue, when listed.
+  const issue = issues.data?.find((view) => view.issue.uuid === job.issue_uuid);
   return (
     <>
-      <PageHeader title={`${job.issue_identifier} ${job.title}`} actions={<JobActions job={job} url={url} continuationSource={continuationSource} />} />
+      <PageHeader
+        title={`${job.issue_identifier} ${job.title}`}
+        actions={
+          <>
+            <JobActions
+              job={job}
+              url={issue?.issue.url}
+              continuationSource={continuationSource}
+              localAcceptance={loaded && issues.isSuccess && issue !== undefined ? { view: issue, inTesting: names.in_testing } : undefined}
+            />
+            {canRecordLocalCompletion(job) && <RecordLocalCompletion job={job} />}
+          </>
+        }
+      />
       <div className="flex flex-col gap-6">
         <Reason job={job} />
         <InfoCard job={job} />
@@ -226,9 +285,15 @@ function RunView({ job }: { job: Job }) {
           <Card size="sm">
             <CardContent className="flex flex-wrap items-center justify-between gap-3">
               <p className="min-w-0 wrap-anywhere text-sm text-muted-foreground">
-                {t("dispatch.implementation_scope", { issue: cleanDisplayText(job.issue_identifier) })}
+                {t("dispatch.plan_next_steps")}
+                {" "}{t("dispatch.implementation_scope", { issue: cleanDisplayText(job.issue_identifier) })}
               </p>
-              <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} developmentJobId={job.id} />
+              <div className="flex flex-wrap gap-2">
+                <Link className="text-sm text-primary underline-offset-4 hover:underline" to="/issues">
+                  {t("dispatch.view_requirements")}
+                </Link>
+                <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} developmentJobId={job.id} />
+              </div>
             </CardContent>
           </Card>
         )}

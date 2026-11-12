@@ -12,7 +12,7 @@ import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
-import { isActive } from "@/lib/runs";
+import { isActive, isNeedsInfoImplementation } from "@/lib/runs";
 import type { ExecutorKind, Job } from "@/lib/types";
 import type { Handoff, RunMemory, WikiArchive } from "@/lib/workflow-types";
 
@@ -31,8 +31,12 @@ function TextFact({ label, value }: { label: string; value: string | null }) {
   return text === "" ? null : <Fact label={label}>{text}</Fact>;
 }
 
+function visibleItems(values: string[]) {
+  return [...new Set(values.map((value) => cleanDisplayLines(value).trim()).filter(Boolean))];
+}
+
 function ListFact({ label, values }: { label: string; values: string[] }) {
-  const items = [...new Set(values.map((value) => cleanDisplayLines(value).trim()).filter(Boolean))];
+  const items = visibleItems(values);
   if (items.length === 0) return null;
   return (
     <Fact label={label}>
@@ -40,6 +44,19 @@ function ListFact({ label, values }: { label: string; values: string[] }) {
         {items.map((item) => <li key={item}>{item}</li>)}
       </ul>
     </Fact>
+  );
+}
+
+export function InformationRequested({ blockers }: { blockers: string[] }) {
+  const { t } = useTranslation();
+  const items = visibleItems(blockers);
+  return (
+    <section aria-label={t("handoff.information_requested")} className="space-y-1 text-sm">
+      <h3 className="font-medium">{t("handoff.information_requested")}</h3>
+      {items.length > 0
+        ? <ul className="list-disc space-y-0.5 break-words ps-4">{items.map((item) => <li key={item}>{item}</li>)}</ul>
+        : <p className="text-muted-foreground">{t("handoff.information_requested_fallback")}</p>}
+    </section>
   );
 }
 
@@ -60,7 +77,7 @@ function Interruption({ interruption }: { interruption: NonNullable<RunMemory["i
   );
 }
 
-function HandoffFacts({ context, memory }: Pick<Handoff, "context" | "memory">) {
+function HandoffFacts({ context, memory, showBlockers }: Pick<Handoff, "context" | "memory"> & { showBlockers: boolean }) {
   const { t } = useTranslation();
   const lang = useLang();
   if (context === null && memory === null) return <p className="text-sm text-muted-foreground">{t("handoff.empty")}</p>;
@@ -96,7 +113,7 @@ function HandoffFacts({ context, memory }: Pick<Handoff, "context" | "memory">) 
             <ListFact label={t("handoff.completed")} values={memory.checkpoint.done} />
             <ListFact label={t("handoff.next")} values={memory.checkpoint.next} />
             <ListFact label={t("handoff.verification")} values={memory.checkpoint.verification} />
-            <ListFact label={t("handoff.blockers")} values={memory.checkpoint.blockers} />
+            {showBlockers && <ListFact label={t("handoff.blockers")} values={memory.checkpoint.blockers} />}
           </>
         )}
         {memory?.git != null && (
@@ -159,7 +176,7 @@ function Release({ id, executor, claimId }: { id: number; executor: ExecutorKind
 function HandoffActions({ job, handoff }: { job: Job; handoff: Handoff }) {
   const { t } = useTranslation();
   const copy = useCopyText();
-  const hasPrompt = handoff.prompt.trim() !== "";
+  const hasPrompt = job.state !== "local_complete" && handoff.prompt.trim() !== "";
   const hasReview = handoff.review_prompt.trim() !== "";
   return (
     <>
@@ -224,6 +241,7 @@ export function HandoffCard({ job }: { job: Job }) {
   const { t } = useTranslation();
   const titleId = useId();
   const handoff = useHandoff(job.id);
+  const needsInfo = isNeedsInfoImplementation(job);
   return (
     <section aria-labelledby={titleId}>
       <Card size="sm">
@@ -235,7 +253,8 @@ export function HandoffCard({ job }: { job: Job }) {
             <LoadingState rows={1} />
           ) : (
             <>
-              <HandoffFacts context={handoff.data.context} memory={handoff.data.memory} />
+              {needsInfo && <InformationRequested blockers={handoff.data.memory?.checkpoint?.blockers ?? []} />}
+              <HandoffFacts context={handoff.data.context} memory={handoff.data.memory} showBlockers={!needsInfo} />
               <HandoffActions job={job} handoff={handoff.data} />
               {handoff.data.archive != null && <WikiArchiveDetails archive={handoff.data.archive} />}
             </>

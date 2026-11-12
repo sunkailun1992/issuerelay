@@ -11,7 +11,7 @@ import { EmptyState, ErrorState, LinearConnecting, LoadingState } from "@/compon
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useContinuationSource, useIssues, useStatus } from "@/hooks/queries";
-import { useTriggerNames } from "@/hooks/useTriggerNames";
+import { useTriggerNamesWithStatus } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
 import { isActive, isPlanned, isPlanRun } from "@/lib/runs";
 import { sameName } from "@/lib/settings-form";
@@ -73,7 +73,7 @@ function describeStatus(status: IssueStatus, names: TriggerNames, t: TFunction):
  * (`IssueLink`), so the actions are one button at most; the title and the reason wrap, a long word
  * of them too (a folder's path, say); a state name wraps between words.
  */
-function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
+function IssueRow({ view, names, canCheckLocalAcceptance }: { view: IssueView; names: TriggerNames; canCheckLocalAcceptance: boolean }) {
   const { t } = useTranslation();
   const { issue, job, status } = view;
   const continuationSource = useContinuationSource(job);
@@ -111,7 +111,12 @@ function IssueRow({ view, names }: { view: IssueView; names: TriggerNames }) {
       <TableCell>
         {needsReview && continuationSource === null
           ? <DispatchReviewButton issueIdentifier={issue.identifier} issueUuid={issue.uuid} />
-          : <JobActions job={job} continuationSource={continuationSource} compact />}
+          : <JobActions
+              job={job}
+              continuationSource={continuationSource}
+              localAcceptance={canCheckLocalAcceptance ? { view, inTesting: names.in_testing } : undefined}
+              compact
+            />}
       </TableCell>
     </TableRow>
   );
@@ -128,7 +133,7 @@ export default function Issues() {
   const navigate = useNavigate();
   const issues = useIssues();
   const status = useStatus();
-  const names = useTriggerNames();
+  const { names, loaded } = useTriggerNamesWithStatus();
 
   const header = (
     <PageHeader
@@ -208,7 +213,7 @@ export default function Issues() {
         </TableHeader>
         <TableBody>
           {issues.data.map((view) => (
-            <IssueRow key={view.issue.uuid} view={view} names={names} />
+            <IssueRow key={view.issue.uuid} view={view} names={names} canCheckLocalAcceptance={loaded && issues.isSuccess} />
           ))}
         </TableBody>
       </Table>
