@@ -36,7 +36,7 @@
 
 - macOS：套接字所在目录权限 0700；启动前检测是否已有宿主在运行，只有残留的套接字文件才删除。
 - Windows：命名管道设 `reject_remote_clients(true)`；用 `first_pipe_instance(true)` 保证只有一个宿主；安全描述符按宿主所在用户的 SID 生成（`ipc::pipe_security::pipe_sddl`）：属主是这个用户，只有它和 SYSTEM 有访问权；不用 `OW`（属主权限），因为提权宿主的默认属主常是 Administrators 组，会挡住同一用户未提权的命令行、放进所有提权的管理员进程；客户端连接后核对管道服务端进程的用户，与自己不同就拒绝通信。
-- 只提供 `METHODS` 列出的方法；「标记完成」「重试」「取消」只在面板（进程内）提供。
+- 只提供 `METHODS` 列出的方法；「标记完成」「完成方案」「重试」「取消」只在面板（进程内）提供。
 - 桌面面板（网页视图）只能调本程序自己的命令，Tauri 自带的接口只开放事件的 `listen` 与 `unlisten`：`app/src-tauri/build.rs` 在应用清单（`AppManifest`）里登记全部命令，Tauri 因此也按能力文件检查本程序的命令；`capabilities/default.json` 只给主窗口（本地内容）每条命令一个 `allow-<命令>` 和这两条事件权限，不给任何插件权限或其他核心权限。打开链接（只开 Linear 的 `https` 链接，交给系统的是检查时 `url::Url` 解析出的规范化地址，从不是原文：系统的打开方式按自己的规则解析，macOS 的 NSURL 会把 `https://linear.app\@evil.example/` 读成 evil.example）、选目录、通知、开机自启都在 Rust 侧的命令里做。`app/src-tauri/src/lib.rs` 的测试在命令表、应用清单与能力文件不一致，或多出任何权限时失败，运行时也不许加能力（同一处的测试检查本 crate 的源码里没有 `add_capability`）；`app/src/lib/api.test.ts` 在面板绕过 `api.ts` 直接用 Tauri、或调了能力文件没给的命令时失败。
 - 链接只在一处检查（`commands.rs` 的 `linear_url`；假后端 `mock.ts` 里的近似版只供浏览器预览，不算检查）：`url::Url` 解析后协议必须是 `https`，主机是 `linear.app` 或它的子域名（OAuth 授权页在 `mcp.linear.app`），不带用户名或密码，主机里没有空标签（例如结尾的点）。`open_linear` 命令与 Linear 登录时打开授权页共用这一个检查和打开方式（`open_linear_link`）；其他链接一律拒绝并记日志，面板收到代码 `not_a_linear_link`。opener 插件关掉了替页面打开点击链接的功能（`open_js_links_on_click(false)`）。
 - `Host::env()` 带着真实的代理值（用户名和密码没打码）：它本身和任何代理值都不交给网页视图，命令拿它启动进程；由其中 PATH 得出的不含秘密的事实可以返回（`cli_on_path` 只回答 `~/.local/bin` 在不在登录 shell 的 PATH 里，外加固定的那一行 shell 命令；环境检查的报告本来就带着 PATH）；面板看到的执行环境是 `Engine::doctor` 给的、代理已打码的那份。
