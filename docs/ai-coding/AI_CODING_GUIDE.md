@@ -74,7 +74,7 @@ IssueRelay 是连接 Linear 与本机编码 AI 的桌面任务调度器，每个
 | 日志逐行清洗（devhost 与桌面应用共用） | `crates/core/src/logscrub.rs` |
 | 托盘、通知、退出状态机、启动状态 | `app/src-tauri/src/tray.rs`、`notify.rs`、`quit.rs`、`state.rs`、`startup.rs` |
 | 自动更新（检查、验签、经退出流程安装） | `app/src-tauri/src/update.rs` |
-| 面板命令（含仅面板可用的标记完成、完成方案、重试、停止） | `app/src-tauri/src/commands.rs` |
+| 面板命令（共用引擎的生命周期操作） | `app/src-tauri/src/commands.rs` |
 | 面板能调什么（应用清单、能力文件） | `app/src-tauri/build.rs`、`app/src-tauri/capabilities/default.json` |
 | 前端数据层、假后端与虚构数据 | `app/src/lib/` |
 | 面板唯一接触 Tauri 的地方、后端接口 | `app/src/lib/api.ts`、`app/src/lib/backend.ts` |
@@ -106,7 +106,8 @@ IssueRelay 是连接 Linear 与本机编码 AI 的桌面任务调度器，每个
 
 - **Linear MCP**：工具名、参数、返回格式以 M0 样本（`docs/gates/samples/m0/linear/`）为准。Linear 改了格式时，先更新脱敏样本和 `parse.rs` 的测试，再改代码；增删工具或参数要同步 `REQUIRED_TOOLS` / `REQUIRED_ARGUMENTS`（`fields` 的取值同步 `REQUIRED_FIELDS`）、`crates/core/tests/fixtures/linear-tools.json`（M0 `tools.json` 的副本，假服务端按它校验每次调用）和测试。
 - **Claude Code / Codex 参数**：以验收报告记录的版本为准。参数变化时同时改 `executor::build`、它的测试和设计 6.1 的表；输出事件格式变化时改 `outcome::observe` 和样本测试；面板的时间线读同样的输出和日志里 IssueRelay 自己的 `{"stream":…,"text":…}` 行（`app/src/lib/timeline.ts`，测试直接读 `crates/core/tests/fixtures/{claude-stream,codex-exec}.jsonl`，不复制），格式变了一并改。
-- **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试；「标记完成」「完成方案」「重试」「取消」不得加入。
+- **IPC 方法表**：改 `METHODS` 必须同步 `server` 的分发、命令行、MCP 工具和测试。生命周期写操作走固定类型预览、确认和复核流程。
+- **会话功能同步**：新增或修改面板业务能力时，同批实现等效的 MCP 工具，复用引擎和授权语义。同步工具声明、用法、`docs/chat-controls.md` 和测试。读操作提供结构化结果，敏感写操作测试确认、拒绝、过期及重复提交。纯展示或系统授权在覆盖表登记等效呈现或原生交接。
 - **面板的类型**：Rust 侧给面板的类型变了（含 `StatusSnapshot`、`IssueStatus`、`StartupState`，以及 `quit-requested` 的载荷 `quit::QuitPrompt { running, waiting, purpose }`、`update-status` 与 `update_status`、`check_update` 给出的 `update::UpdateStatus`），同步改 `app/src/lib/types.ts`、`mock-fixtures.ts` 和假后端（`mock.ts`），以及读它们的组件（`QuitDialog`、`UpdateBanner`、设置页的版本一行）。
 - **面板命令**：增删命令要同时改 `commands.rs`、`lib.rs` 的 `generate_handler!`、`build.rs` 的 `PANEL_COMMANDS`、`capabilities/default.json`（`allow-<命令>`，下划线写成连字符）和前端的 `backend.ts`、`api.ts`、`mock.ts`；`lib.rs` 与 `api.test.ts` 的测试拦住不一致。面板要用 Tauri 自带的其他接口（窗口、路径等）时，只在能力文件里加用到的那一条权限，并在提交说明里写明理由；插件权限不给，插件只在 Rust 侧用。
 - **开发者工具**：调试构建里 Cmd+Opt+I（macOS）/ Ctrl+Shift+I（Windows）什么也不做，因为能力文件没有给 `core:webview:allow-internal-toggle-devtools`；需要时只在本机临时加上（`lib.rs` 与 `api.test.ts` 的边界测试会因此失败），不要提交；发布构建没有开发者工具。

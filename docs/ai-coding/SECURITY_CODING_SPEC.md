@@ -36,7 +36,7 @@
 
 - macOS：套接字所在目录权限 0700；启动前检测是否已有宿主在运行，只有残留的套接字文件才删除。
 - Windows：命名管道设 `reject_remote_clients(true)`；用 `first_pipe_instance(true)` 保证只有一个宿主；安全描述符按宿主所在用户的 SID 生成（`ipc::pipe_security::pipe_sddl`）：属主是这个用户，只有它和 SYSTEM 有访问权；不用 `OW`（属主权限），因为提权宿主的默认属主常是 Administrators 组，会挡住同一用户未提权的命令行、放进所有提权的管理员进程；客户端连接后核对管道服务端进程的用户，与自己不同就拒绝通信。
-- 只提供 `METHODS` 列出的方法；「标记完成」「完成方案」「重试」「取消」只在面板（进程内）提供。
+- 只提供 `METHODS` 列出的方法。生命周期操作由同用户宿主准备短期、一次性预览。MCP 控制服务持有提交令牌，通过客户端原生确认后才提交。取消、超时、无表单支持均不执行。该确认依赖可信 MCP 客户端，本机 IPC 依赖操作系统当前用户边界。
 - 桌面面板（网页视图）只能调本程序自己的命令，Tauri 自带的接口只开放事件的 `listen` 与 `unlisten`：`app/src-tauri/build.rs` 在应用清单（`AppManifest`）里登记全部命令，Tauri 因此也按能力文件检查本程序的命令；`capabilities/default.json` 只给主窗口（本地内容）每条命令一个 `allow-<命令>` 和这两条事件权限，不给任何插件权限或其他核心权限。打开链接（只开 Linear 的 `https` 链接，交给系统的是检查时 `url::Url` 解析出的规范化地址，从不是原文：系统的打开方式按自己的规则解析，macOS 的 NSURL 会把 `https://linear.app\@evil.example/` 读成 evil.example）、选目录、通知、开机自启都在 Rust 侧的命令里做。`app/src-tauri/src/lib.rs` 的测试在命令表、应用清单与能力文件不一致，或多出任何权限时失败，运行时也不许加能力（同一处的测试检查本 crate 的源码里没有 `add_capability`）；`app/src/lib/api.test.ts` 在面板绕过 `api.ts` 直接用 Tauri、或调了能力文件没给的命令时失败。
 - 链接只在一处检查（`commands.rs` 的 `linear_url`；假后端 `mock.ts` 里的近似版只供浏览器预览，不算检查）：`url::Url` 解析后协议必须是 `https`，主机是 `linear.app` 或它的子域名（OAuth 授权页在 `mcp.linear.app`），不带用户名或密码，主机里没有空标签（例如结尾的点）。`open_linear` 命令与 Linear 登录时打开授权页共用这一个检查和打开方式（`open_linear_link`）；其他链接一律拒绝并记日志，面板收到代码 `not_a_linear_link`。opener 插件关掉了替页面打开点击链接的功能（`open_js_links_on_click(false)`）。
 - `Host::env()` 带着真实的代理值（用户名和密码没打码）：它本身和任何代理值都不交给网页视图，命令拿它启动进程；由其中 PATH 得出的不含秘密的事实可以返回（`cli_on_path` 只回答 `~/.local/bin` 在不在登录 shell 的 PATH 里，外加固定的那一行 shell 命令；环境检查的报告本来就带着 PATH）；面板看到的执行环境是 `Engine::doctor` 给的、代理已打码的那份。
@@ -51,8 +51,9 @@
 ## 7. 开源卫生
 
 - 仓库是公开的。代码、测试、夹具、文档、提交信息里不得出现令牌、API key、公司名、内网地址、真实 Linear 工作区或需求内容、本机绝对路径。
+- 私有会话原文、用户私人意见、交接草稿、真实任务提示词、原始日志和截图都留在本机。临时放进工作树时，使用 `.conversation/`、`.handoff-local/`、`.workspace-local/` 或其他已核实忽略的目录。按精确路径暂存并检查 `git diff --cached --name-status` 和 `git diff --cached`。已跟踪文件和提交信息同样不能带入私有材料。
 - 每次提交前跑 `bash scripts/check-secrets.sh --strict`，必须无输出、退出码为 0（CI 同样用 `--strict`；退出码 2 表示扫描本身出错，要先修好）；改 `check-secrets.sh` 的模式时，同步改 `check-secrets-self-test.sh` 里的样本并运行它（CI 的 `secrets` 任务先跑自测，再扫仓库）；GitHub 已开启密钥扫描与推送拦截。
-- 来自真实运行的样本先脱敏再提交（见 `TESTING_SPEC.md`）。
+- 优先使用合成夹具。真实运行只提交获准、脱敏且必要的验收结论或最小样本（见 `TESTING_SPEC.md`）。
 - 发现疑似泄露只报告文件和行号；是否改写历史由用户决定。
 - 被跟踪的文本文件里不放原样的不可见字符、方向控制字符和控制字符（制表、换行、回车除外），一律写成转义（不可见字符的范围与 core 的 `text::is_invisible` 相同：零宽不连字与零宽连字 U+200C、U+200D 可以原样出现，表情序列和印度系文字要用它们，它们也不能改变文字的顺序）：TS 与 JSON 写 `\u200b`（补充平面的字符写成代理对），Rust 写 `\u{200b}`。这类字符在编辑器和 diff 里看不见，能让评审看到的代码与实际执行的不同，也可能被编辑器悄悄吞掉而用例照样通过。`bash scripts/check-secrets.sh --strict` 会跑下面这条扫描（需要带 PCRE2 的 git；没有时扫描本身失败，退出码 2），命中时报文件和行号并以 1 退出，所以本地检查与 CI 都会拦住；要单独查时也可以直接跑，应无输出：
 
