@@ -20,6 +20,7 @@
 //! they hold the async cycle lock), except by `emit_job`, which reads a job's row and sends it
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
+mod control_actions;
 mod dispatch_review;
 mod plan_closure;
 mod workflow_support;
@@ -56,6 +57,7 @@ use crate::model::{Issue, Job, JobState, ProcessTag, RunMode, RunUsage};
 use crate::prompt::{self, Continuation, PromptInput};
 use crate::runner::{self, ExitKind, RunLimits, RunOutput, SpawnHook};
 use crate::scheduler::{self, Candidate};
+use crate::setup::{self, McpRegistration};
 use crate::store::{Leftover, NewJob, Store};
 use crate::text::clean_text;
 use crate::trigger::{self, Eligibility, Readiness, WaitReason, WaitReasonView, same_name};
@@ -462,6 +464,7 @@ struct Inner {
     /// (`refresh_open_plans`, `refresh_plan_progress`).
     plan_progress: Mutex<HashMap<i64, plan_closure::PlanCheck>>,
     dispatch_review: Mutex<dispatch_review::ReviewState>,
+    control_actions: Mutex<control_actions::PendingActions>,
     require_dispatch_review: bool,
 }
 
@@ -788,6 +791,7 @@ impl Engine {
                 blocker_checks: Mutex::new(HashMap::new()),
                 plan_progress: Mutex::new(HashMap::new()),
                 dispatch_review: Mutex::new(dispatch_review::ReviewState::default()),
+                control_actions: Mutex::new(control_actions::PendingActions::default()),
                 require_dispatch_review,
             }),
         })
@@ -951,9 +955,16 @@ impl Engine {
     /// runs (in M1 the only way to change limits, intervals and templates) is not in memory, and
     /// saving would silently revert it. Such a change is refused and nothing is saved or changed.
     fn update_config(&self, change: impl FnOnce(&mut Config)) -> Result<()> {
+        self.update_config_checked(|config| {
+            change(config);
+            Ok(())
+        })
+    }
+
+    fn update_config_checked(&self, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<()> {
         let mut current = self.inner.config.write().expect("config lock");
         let mut next = current.clone();
-        change(&mut next);
+        change(&mut next)?;
         next.validate()?;
         let mut known = self.inner.config_file.lock().expect("config file lock");
         if read_config_file(&self.inner.config_path)? != *known {
@@ -977,6 +988,32 @@ impl Engine {
     /// The current settings.
     pub fn settings(&self) -> Settings {
         self.config().settings
+    }
+
+    /// Checks whether the named IssueRelay control server is configured for this executor.
+    pub async fn control_server_status(&self, executor: ExecutorKind) -> McpRegistration {
+        self.executor_mcp_status(executor, false).await
+    }
+
+    /// Checks the exact server name used by Linear's login command, without testing OAuth.
+    pub async fn linear_server_status(&self, executor: ExecutorKind) -> McpRegistration {
+        self.executor_mcp_status(executor, true).await
+    }
+
+    async fn executor_mcp_status(&self, executor: ExecutorKind, linear: bool) -> McpRegistration {
+        let Some(env) = self.inner.readiness.env() else {
+            return McpRegistration::Unknown;
+        };
+        let Ok(program) = executor::resolve_program_in(executor, env.path.as_deref()) else {
+            return McpRegistration::NotInstalled;
+        };
+        let runner = doctor::SystemRunner::with_env(env.shared());
+        let result = if linear {
+            setup::linear_server_named(executor, &program, &runner).await
+        } else {
+            setup::control_server_registered(&program, &runner).await
+        };
+        result.into()
     }
 
     /// Validates and saves `settings`, then wakes the loop so that a shorter interval or a higher
@@ -2965,12 +3002,17 @@ impl Engine {
 
     /// Queues a failed, stopped or needs-info run again. Only the issue's latest run qualifies.
     pub fn retry_job(&self, job_id: i64) -> Result<()> {
+        self.retry_job_inner(job_id, None).map(|_| ())
+    }
+
+    fn retry_job_inner(&self, job_id: i64, reviewed: Option<&Job>) -> Result<i64> {
         let queued_id = {
             // One guard for the whole check-and-requeue: two clicks must not requeue a run that
             // the first one already started.
             let store = self.store();
             let job = store.get(job_id)?;
             let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
+            control_actions::check_reviewed_job(&job, reviewed)?;
             if !matches!(
                 job.state,
                 JobState::Failed | JobState::Canceled | JobState::NeedsInfo
@@ -3023,17 +3065,26 @@ impl Engine {
         }
         self.emit_job(queued_id);
         self.poll_now();
-        Ok(())
+        Ok(queued_id)
     }
 
     /// Records the desktop user's review of a legacy local result without changing its report.
     pub async fn record_local_completion(&self, job_id: i64) -> Result<()> {
+        self.record_local_completion_inner(job_id, None).await
+    }
+
+    async fn record_local_completion_inner(
+        &self,
+        job_id: i64,
+        reviewed: Option<&Job>,
+    ) -> Result<()> {
         let _cycle = self.inner.cycle.lock().await;
         {
             let store = self.store();
             let job = store
                 .get(job_id)?
                 .ok_or_else(|| anyhow!("job {job_id} not found"))?;
+            control_actions::check_reviewed_job(&job, reviewed)?;
             anyhow::ensure!(
                 job.needs_info_implementation() && job.finished_at.is_some(),
                 "job {job_id} is not a finished implementation waiting for information"
@@ -3061,12 +3112,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Marks an accepted run Done in Linear. Only the desktop panel calls this (spec 5.6);
-    /// IPC, CLI and MCP never expose it.
+    /// Marks an accepted run Done in Linear after desktop confirmation.
     pub async fn mark_done(&self, job_id: i64) -> Result<()> {
+        self.mark_done_inner(job_id, None).await
+    }
+
+    async fn mark_done_inner(
+        &self,
+        job_id: i64,
+        reviewed: Option<&control_actions::ReviewedCompletion>,
+    ) -> Result<()> {
         let _cycle = self.inner.cycle.lock().await;
         let job = self.store().get(job_id)?;
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
+        control_actions::check_reviewed_job(&job, reviewed.map(|snapshot| &snapshot.job))?;
         anyhow::ensure!(
             matches!(
                 job.state,
@@ -3077,7 +3136,7 @@ impl Engine {
         let settings = self.config().settings;
         {
             let store = self.store();
-            if job.state == JobState::LocalComplete {
+            if reviewed.is_some() || job.state == JobState::LocalComplete {
                 anyhow::ensure!(
                     store.latest_for_issue(&job.issue_uuid)?.map(|job| job.id) == Some(job_id),
                     "job {job_id} is not the latest run of {}",
@@ -3097,7 +3156,7 @@ impl Engine {
             }
         }
         let linear = self.linear();
-        if job.state == JobState::LocalComplete {
+        if reviewed.is_some() || job.state == JobState::LocalComplete {
             // A local result was not verified against Linear at exit. Confirm the current
             // state of this exact issue after the user clicks, before the only remote write.
             let issue = linear
@@ -3105,14 +3164,21 @@ impl Engine {
                 .await?
                 .filter(|issue| issue.uuid == job.issue_uuid)
                 .ok_or_else(|| anyhow!("the issue no longer exists in Linear"))?;
-            let in_testing = &settings.trigger.in_testing;
+            if let Some(reviewed) = reviewed {
+                self.check_reviewed_completion(reviewed, &linear, &issue, None)?;
+            }
+            let in_testing = reviewed.map_or(settings.trigger.in_testing.as_str(), |reviewed| {
+                reviewed.in_testing.as_str()
+            });
             anyhow::ensure!(
                 same_name(&issue.state, in_testing),
                 "the issue must be in {in_testing:?} in Linear before marking done"
             );
         }
-        let done = settings.trigger.done;
-        linear.set_state(&job.issue_uuid, &done).await?;
+        let done = reviewed.map_or(settings.trigger.done.as_str(), |reviewed| {
+            reviewed.target_state.as_str()
+        });
+        linear.set_state(&job.issue_uuid, done).await?;
         // Keep the transition conditional on the exact state that was checked above.
         let waiting = [job.state];
         let marked = self
@@ -3126,6 +3192,19 @@ impl Engine {
         }
         self.emit_job(job_id);
         Ok(())
+    }
+
+    /// Reads the selected executor's supported models using the engine's local environment.
+    pub async fn model_catalog(&self, kind: ExecutorKind) -> crate::model_catalog::ModelCatalog {
+        use crate::model_catalog as catalog;
+        if kind == ExecutorKind::Codex
+            && let Some(env) = self.inner.readiness.env()
+            && let Ok(program) = crate::executor::resolve_program_in(kind, env.path.as_deref())
+            && let Ok(models) = catalog::discover_codex(&program, &env).await
+        {
+            return models;
+        }
+        catalog::builtin_catalog(kind)
     }
 
     /// Checks the whole setup: executors (freshly, not from the cache), the Linear connection

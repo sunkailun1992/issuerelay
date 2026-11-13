@@ -136,13 +136,20 @@ impl Engine {
         Ok(progress)
     }
 
-    /// Closes a split plan once the user confirmed it in the panel: marks the plan issue done in
-    /// Linear, the same single write as `mark_done`, then the planning run done here. Only the
-    /// desktop panel calls this; IPC, CLI and MCP never expose it. Everything is checked again
+    /// Closes a split plan once the user confirms it in the panel: marks the plan issue done in
+    /// Linear, the same single write as `mark_done`, then the planning run done here. Everything is checked again
     /// after the click: the run (newest, open, not claimed, archived when a Wiki is configured),
     /// the plan issue (still there, not canceled) and every child (none open, one completed).
     /// When Linear already shows the plan completed, only the run is recorded.
     pub async fn complete_plan(&self, job_id: i64) -> Result<()> {
+        self.complete_plan_inner(job_id, None).await
+    }
+
+    pub(super) async fn complete_plan_inner(
+        &self,
+        job_id: i64,
+        reviewed: Option<&control_actions::ReviewedCompletion>,
+    ) -> Result<()> {
         let _cycle = self.inner.cycle.lock().await;
         let settings = self.config().settings;
         let job = {
@@ -150,6 +157,7 @@ impl Engine {
             let job = store
                 .get(job_id)?
                 .ok_or_else(|| anyhow!("job {job_id} not found"))?;
+            control_actions::check_reviewed_job(&job, reviewed.map(|snapshot| &snapshot.job))?;
             anyhow::ensure!(
                 posted_plan(&job) && job.state == JobState::NeedsInfo,
                 "job {job_id} is not a plan waiting to be closed"
@@ -185,7 +193,7 @@ impl Engine {
             issue.state_type.as_deref() != Some("canceled"),
             "the plan is canceled in Linear; settle it there"
         );
-        let children = linear.children(&job.issue_uuid).await?;
+        let children = control_actions::ordered_children(linear.children(&job.issue_uuid).await?);
         let progress = tally(job_id, &job.issue_uuid, &children, Utc::now());
         anyhow::ensure!(
             progress.closable,
@@ -194,9 +202,14 @@ impl Engine {
             progress.total,
             progress.completed
         );
-        let done = settings.trigger.done;
+        if let Some(reviewed) = reviewed {
+            self.check_reviewed_completion(reviewed, &linear, &issue, Some(&children))?;
+        }
+        let done = reviewed.map_or(settings.trigger.done.as_str(), |reviewed| {
+            reviewed.target_state.as_str()
+        });
         if issue.state_type.as_deref() != Some("completed") {
-            linear.set_state(&job.issue_uuid, &done).await?;
+            linear.set_state(&job.issue_uuid, done).await?;
         }
         // Conditional on the state checked above, as in `mark_done`.
         let closed =

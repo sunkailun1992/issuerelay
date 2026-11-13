@@ -242,6 +242,33 @@ async fn every_listed_method_is_dispatched() {
 }
 
 #[tokio::test]
+async fn reviewed_settings_round_trip_through_the_local_socket() {
+    let harness = Harness::new(2, false);
+    let (endpoint, shutdown) = start(&harness).await;
+    let previous = harness.engine.settings().max_concurrent;
+    let preview = client::call(
+        &endpoint,
+        "workflow.prepare_action",
+        json!({"action": {"action": "set_settings", "changes": {"max_concurrent": previous + 1}}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(harness.engine.settings().max_concurrent, previous);
+    let token = preview["token"].as_str().unwrap();
+    let applied = client::call(&endpoint, "workflow.commit_action", json!({"token": token}))
+        .await
+        .unwrap();
+    assert_eq!(applied["result"], "settings_updated");
+    assert_eq!(harness.engine.settings().max_concurrent, previous + 1);
+    assert!(
+        client::call(&endpoint, "workflow.commit_action", json!({"token": token}))
+            .await
+            .is_err()
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
 async fn answers_carry_json_rpc_codes_and_the_request_id() {
     let h = Harness::new(2, false);
     let unknown = handle(

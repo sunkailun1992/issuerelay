@@ -1,6 +1,6 @@
 //! IPC server: binds the endpoint (refusing to start when another host owns it) and answers
-//! requests by calling the engine.
-use std::time::Duration;
+//! requests by calling the engine or an explicitly installed host operation.
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::protocol::{METHOD_NOT_FOUND, METHODS, PARSE_ERROR, Request, Response, SERVER_ERROR};
 use crate::config::Binding;
 use crate::engine::Engine;
+use crate::host::HostReconnect;
 use crate::paths::IpcEndpoint;
 
 /// How long `run` waits after a failed accept before it accepts again, so a failure that lasts
@@ -48,17 +49,53 @@ pub struct AlreadyRunning;
 #[error("unknown method `{0}`")]
 struct UnknownMethod(String);
 
+/// The limited diagnostics implemented by a desktop host. A headless host has no provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopDiagnostic {
+    AutostartStatus,
+    CliPathStatus,
+    UpdateStatus,
+    CheckUpdate,
+}
+
+#[async_trait::async_trait]
+pub trait DesktopDiagnostics: Send + Sync {
+    /// Returns only the chat-safe projection of the desktop diagnostic.
+    async fn run(&self, diagnostic: DesktopDiagnostic) -> Result<Value>;
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HostActions {
+    pub(crate) reconnect: Option<HostReconnect>,
+    pub(crate) desktop: Option<Arc<dyn DesktopDiagnostics>>,
+}
+
+impl HostActions {
+    async fn desktop_diagnostic(&self, diagnostic: DesktopDiagnostic) -> Result<Value> {
+        let Some(desktop) = &self.desktop else {
+            return Ok(json!({"kind": "unavailable"}));
+        };
+        desktop
+            .run(diagnostic)
+            .await
+            .map_err(|_| anyhow::anyhow!("desktop diagnostic failed"))
+    }
+}
+
 /// Answers one request by calling the engine. A failure comes back as an error response.
 ///
 /// The method table is the gate: a method that `METHODS` does not list is refused here, before
-/// `dispatch` is asked, so an arm added to `dispatch` alone can never make an action the table
-/// leaves out (marking Done, retrying, cancelling) reachable.
+/// `dispatch` is asked. Lifecycle writes pass through the action preview and commit handlers.
 pub async fn handle(engine: &Engine, request: Request) -> Response {
+    handle_with_host(engine, &HostActions::default(), request).await
+}
+
+async fn handle_with_host(engine: &Engine, host: &HostActions, request: Request) -> Response {
     if !METHODS.contains(&request.method.as_str()) {
         let unknown = UnknownMethod(request.method);
         return Response::err(request.id, METHOD_NOT_FOUND, unknown.to_string());
     }
-    match dispatch(engine, &request.method, &request.params).await {
+    match dispatch(engine, host, &request.method, &request.params).await {
         Ok(value) => Response::ok(request.id, value),
         Err(e) if e.is::<UnknownMethod>() => {
             Response::err(request.id, METHOD_NOT_FOUND, e.to_string())
@@ -67,8 +104,36 @@ pub async fn handle(engine: &Engine, request: Request) -> Response {
     }
 }
 
-async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value> {
+async fn dispatch(
+    engine: &Engine,
+    host: &HostActions,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
     Ok(match method {
+        "app.info" => {
+            json!({"version": env!("CARGO_PKG_VERSION"), "platform": std::env::consts::OS})
+        }
+        "linear.reconnect" => match &host.reconnect {
+            Some(reconnect) => serde_json::to_value(reconnect.run().await)?,
+            None => json!({"kind": "unavailable"}),
+        },
+        "desktop.autostart_status" => {
+            host.desktop_diagnostic(DesktopDiagnostic::AutostartStatus)
+                .await?
+        }
+        "desktop.cli_path_status" => {
+            host.desktop_diagnostic(DesktopDiagnostic::CliPathStatus)
+                .await?
+        }
+        "desktop.update_status" => {
+            host.desktop_diagnostic(DesktopDiagnostic::UpdateStatus)
+                .await?
+        }
+        "desktop.check_update" => {
+            host.desktop_diagnostic(DesktopDiagnostic::CheckUpdate)
+                .await?
+        }
         "status" => serde_json::to_value(engine.status())?,
         "pause" => {
             engine.pause()?;
@@ -146,7 +211,58 @@ async fn dispatch(engine: &Engine, method: &str, params: &Value) -> Result<Value
                 )
                 .await?,
         )?,
+        "workflow.issues" => serde_json::to_value(engine.issues().await?)?,
+        "workflow.plan_progress" => serde_json::to_value(engine.plan_progress())?,
+        "workflow.refresh_plan_progress" => {
+            serde_json::to_value(engine.refresh_plan_progress(job_id_param(params)?).await?)?
+        }
+        "workflow.continuation_context" => {
+            serde_json::to_value(engine.continuation_context(job_id_param(params)?).await?)?
+        }
+        "workflow.supplement_continuation_context" => serde_json::to_value(
+            engine
+                .supplement_continuation_context(
+                    job_id_param(params)?,
+                    params
+                        .get("expected_revision")
+                        .and_then(Value::as_u64)
+                        .context("invalid expected_revision")?,
+                    string_param(params, "supplement")?,
+                )
+                .await?,
+        )?,
+        "workflow.development_issue_url" => {
+            json!({"url": engine.development_issue_url(job_id_param(params)?).await?})
+        }
+        "workflow.prepare_action" => {
+            let raw = params.get("action").cloned().context("missing action")?;
+            let action = serde_json::from_value(raw).context("invalid control action")?;
+            serde_json::to_value(engine.prepare_control_action(action).await?)?
+        }
+        "workflow.commit_action" => serde_json::to_value(
+            engine
+                .commit_control_action(string_param(params, "token")?)
+                .await?,
+        )?,
         "doctor" => serde_json::to_value(engine.doctor().await)?,
+        "settings.get" => serde_json::to_value(engine.settings())?,
+        "projects.list" => serde_json::to_value(engine.projects().await?)?,
+        "labels.list" => serde_json::to_value(engine.labels().await?)?,
+        "models.catalog" => {
+            let executor = crate::config::ExecutorKind::parse(string_param(params, "executor")?)
+                .context("invalid executor")?;
+            serde_json::to_value(engine.model_catalog(executor).await)?
+        }
+        "setup.control_registration" | "setup.linear_named" => {
+            let executor = crate::config::ExecutorKind::parse(string_param(params, "executor")?)
+                .context("invalid executor")?;
+            let state = if method == "setup.control_registration" {
+                engine.control_server_status(executor).await
+            } else {
+                engine.linear_server_status(executor).await
+            };
+            json!({"state": state})
+        }
         "bindings.list" => serde_json::to_value(engine.bindings())?,
         "bindings.add" => {
             let raw = params.get("binding").cloned().unwrap_or(Value::Null);
@@ -273,6 +389,16 @@ impl IpcServer {
     /// logged and retried after a short pause instead of ending the server: the CLI and MCP
     /// would otherwise lose the host until the app restarts.
     pub async fn run(self, engine: Engine, shutdown: CancellationToken) -> Result<()> {
+        self.run_with_host(engine, shutdown, HostActions::default())
+            .await
+    }
+
+    pub(crate) async fn run_with_host(
+        self,
+        engine: Engine,
+        shutdown: CancellationToken,
+        host: HostActions,
+    ) -> Result<()> {
         match self.listener {
             #[cfg(unix)]
             Listener::Unix {
@@ -290,7 +416,11 @@ impl IpcServer {
                     let Some(accepted) = accepted else { break };
                     match accepted {
                         Ok((stream, _)) => {
-                            connections.spawn(serve_connection(stream, engine.clone()));
+                            connections.spawn(serve_connection(
+                                stream,
+                                engine.clone(),
+                                host.clone(),
+                            ));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC accept failed; still serving");
@@ -346,7 +476,11 @@ impl IpcServer {
                     let mut trouble = false;
                     match result {
                         Ok(()) => {
-                            connections.spawn(serve_connection(server, engine.clone()));
+                            connections.spawn(serve_connection(
+                                server,
+                                engine.clone(),
+                                host.clone(),
+                            ));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC connect failed; still serving");
@@ -517,7 +651,7 @@ fn new_pipe_instance(
 
 /// Answers the request lines of one connection, one response per line, until the client hangs
 /// up, sends a line that is too long, or stays silent for `IDLE_TIMEOUT`.
-async fn serve_connection<S>(stream: S, engine: Engine) -> Result<()>
+async fn serve_connection<S>(stream: S, engine: Engine, host: HostActions) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -545,7 +679,7 @@ where
             Err(_) => Response::err(0, PARSE_ERROR, "invalid request: not valid UTF-8"),
             Ok(text) if text.trim().is_empty() => continue,
             Ok(text) => match serde_json::from_str::<Request>(text) {
-                Ok(request) => handle(&engine, request).await,
+                Ok(request) => handle_with_host(&engine, &host, request).await,
                 Err(e) => Response::err(0, PARSE_ERROR, format!("invalid request: {e}")),
             },
         };
@@ -567,16 +701,17 @@ where
 mod tests {
     use super::*;
 
-    // The method table gates what can be asked, but the hard rule is about what the server can
-    // do: nothing reachable over IPC may call the engine's panel-only operations, under any name.
+    // The IPC dispatcher must not bypass the shared control-action validation.
     #[test]
-    fn the_server_never_calls_a_panel_only_engine_method() {
+    fn the_server_uses_the_control_action_gate_for_lifecycle_writes() {
         let source = include_str!("server.rs");
         let production = source.split("\n#[cfg(test)]\n").next().unwrap();
         assert!(
             production.contains("engine.pause()"),
             "the scan must reach the dispatcher"
         );
+        assert!(production.contains(".prepare_control_action("));
+        assert!(production.contains(".commit_control_action("));
         for call in ["cancel_job", "retry_job", "mark_done", "complete_plan"] {
             assert!(
                 !production.contains(call),

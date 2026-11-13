@@ -1,5 +1,5 @@
 //! Closing a split plan (plan-closure design): the progress of a plan issue's direct children
-//! and the panel-only closure.
+//! and operator-confirmed closure.
 mod common;
 
 use chrono::Utc;
@@ -10,6 +10,7 @@ use common::{
 use issuerelay_core::{
     engine::{PLAN_PROGRESS_LIMIT, PlanProgress, tally},
     model::{ChildIssue, Issue, Job, JobState},
+    workflow::{ControlAction, ControlActionOutcome},
 };
 
 fn harness() -> Harness {
@@ -229,6 +230,38 @@ async fn completes_a_plan_when_every_child_has_ended() {
         [("1".to_string(), "Done".to_string())]
     );
     assert_eq!(h.latest("1").state, JobState::Done);
+}
+
+#[tokio::test]
+async fn chat_plan_closure_rejects_a_changed_child_set_even_if_still_closable() {
+    let h = harness();
+    let plan = planned(&h, "1").await;
+    h.linear.upsert(child("2", "1", "completed"));
+    let action = ControlAction::CompletePlan { job_id: plan.id };
+    let stale = h
+        .engine
+        .prepare_control_action(action.clone())
+        .await
+        .unwrap();
+    assert_eq!(stale.plan_progress.as_ref().unwrap().completed, 1);
+    h.linear.remove("2");
+    h.linear.upsert(child("3", "1", "completed"));
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert_untouched(&h, &plan);
+    let fresh = h.engine.prepare_control_action(action).await.unwrap();
+    assert_eq!(
+        h.engine
+            .commit_control_action(&fresh.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::PlanDone
+    );
+    assert_eq!(h.latest("1").state, JobState::Done);
+    assert_eq!(
+        h.linear.set_state_calls(),
+        [("1".to_string(), "Done".to_string())]
+    );
 }
 
 #[tokio::test]

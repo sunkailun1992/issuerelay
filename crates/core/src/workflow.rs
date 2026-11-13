@@ -7,9 +7,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{Effort, ExecutorKind, LeanStatus, PermissionProfile};
+use crate::config::{Binding, Effort, ExecutorKind, LeanStatus, PermissionProfile, Settings};
+use crate::engine::PlanProgress;
 use crate::executor::outcome::is_session_id;
-use crate::model::RunMode;
+use crate::model::{JobState, RunMode};
 use crate::text::is_invisible;
 
 const MAX_ISSUE_KEY_BYTES: usize = 64;
@@ -63,6 +64,7 @@ impl IssueContext {
 /// The exact brief and destination shown before desktop approval.
 #[derive(Debug, Clone, Serialize)]
 pub struct DispatchPreview {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub token: String,
     pub issue_uuid: String,
     pub issue_identifier: String,
@@ -73,6 +75,8 @@ pub struct DispatchPreview {
     pub directory: PathBuf,
     pub model: Option<String>,
     pub effort: Option<crate::config::Effort>,
+    pub permission: PermissionProfile,
+    pub lean: LeanStatus,
     pub wiki_root: Option<PathBuf>,
 }
 
@@ -103,6 +107,7 @@ pub enum ContinuationStrategy {
 /// The exact context and evidence shown before approving a continued run.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContinuationPreview {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub token: String,
     pub source_job_id: i64,
     pub issue_uuid: String,
@@ -116,10 +121,182 @@ pub struct ContinuationPreview {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub permission: PermissionProfile,
+    pub lean: LeanStatus,
     pub claude_ultracode: bool,
     pub context: Option<IssueContext>,
     pub wiki_root: Option<PathBuf>,
     pub evidence: String,
+}
+
+/// An operator action in the control service. Each variant names exactly one existing target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControlAction {
+    Dispatch { issue_identifier: String },
+    Continue { job_id: i64, executor: ExecutorKind },
+    Retry { job_id: i64 },
+    Stop { job_id: i64 },
+    RecordLocalCompletion { job_id: i64 },
+    MarkDone { job_id: i64 },
+    CompletePlan { job_id: i64 },
+    SaveBinding { binding: ControlBinding },
+    RemoveBinding { binding_id: String },
+    SetSettings { changes: ControlSettings },
+}
+
+/// Binding fields an operator can review in a chat. Prompt overrides stay with the desktop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlBinding {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub directory: PathBuf,
+    pub executor: Option<ExecutorKind>,
+    pub permission: Option<PermissionProfile>,
+    pub model: Option<String>,
+    #[serde(default = "control_default_lean")]
+    pub lean: bool,
+    pub effort: Option<Effort>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+fn control_default_lean() -> bool {
+    true
+}
+
+impl From<ControlBinding> for Binding {
+    fn from(binding: ControlBinding) -> Self {
+        Self {
+            id: binding.id,
+            project_id: binding.project_id,
+            project_name: binding.project_name,
+            directory: binding.directory,
+            executor: binding.executor,
+            permission: binding.permission,
+            model: binding.model,
+            prompt_override: None,
+            lean: binding.lean,
+            effort: binding.effort,
+            labels: binding.labels,
+        }
+    }
+}
+
+impl From<&Binding> for ControlBinding {
+    fn from(binding: &Binding) -> Self {
+        Self {
+            id: binding.id.clone(),
+            project_id: binding.project_id.clone(),
+            project_name: binding.project_name.clone(),
+            directory: binding.directory.clone(),
+            executor: binding.executor,
+            permission: binding.permission,
+            model: binding.model.clone(),
+            lean: binding.lean,
+            effort: binding.effort,
+            labels: binding.labels.clone(),
+        }
+    }
+}
+
+/// The settings that can be edited in chat. Security and machine settings are separate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSettings {
+    pub poll_interval_secs: Option<u64>,
+    pub max_concurrent: Option<usize>,
+    pub run_timeout_mins: Option<u64>,
+    pub stall_timeout_mins: Option<u64>,
+    pub language: Option<String>,
+}
+
+impl ControlSettings {
+    pub(crate) fn snapshot(settings: &Settings) -> Self {
+        Self {
+            poll_interval_secs: Some(settings.poll_interval_secs),
+            max_concurrent: Some(settings.max_concurrent),
+            run_timeout_mins: Some(settings.run_timeout_mins),
+            stall_timeout_mins: Some(settings.stall_timeout_mins),
+            language: Some(settings.language.clone()),
+        }
+    }
+
+    pub(crate) fn apply(&self, settings: &mut Settings) {
+        if let Some(value) = self.poll_interval_secs {
+            settings.poll_interval_secs = value;
+        }
+        if let Some(value) = self.max_concurrent {
+            settings.max_concurrent = value;
+        }
+        if let Some(value) = self.run_timeout_mins {
+            settings.run_timeout_mins = value;
+        }
+        if let Some(value) = self.stall_timeout_mins {
+            settings.stall_timeout_mins = value;
+        }
+        if let Some(value) = &self.language {
+            settings.language.clone_from(value);
+        }
+    }
+}
+
+/// Only the configuration fields relevant to this operation are shown in the preview.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ControlConfigChange {
+    Binding {
+        before: Option<ControlBinding>,
+        after: Option<ControlBinding>,
+        effective_permission: Option<PermissionProfile>,
+        effective_lean: Option<LeanStatus>,
+    },
+    Settings {
+        before: ControlSettings,
+        after: ControlSettings,
+    },
+}
+
+/// An action awaiting approval. The control adapter keeps the token out of the model response.
+#[derive(Debug, Serialize)]
+pub struct ControlActionPreview {
+    pub token: String,
+    pub action: ControlAction,
+    pub issue_identifier: String,
+    pub job_id: Option<i64>,
+    pub current_state: Option<JobState>,
+    pub dispatch: Option<DispatchPreview>,
+    pub continuation: Option<ContinuationPreview>,
+    pub linear_current_state: Option<String>,
+    pub linear_target_state: Option<String>,
+    pub plan_progress: Option<PlanProgress>,
+    pub config_change: Option<ControlConfigChange>,
+    pub expires_in_seconds: u64,
+}
+
+/// What the host actually accepted. Starting and stopping executors remain asynchronous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlActionOutcome {
+    DispatchApproved,
+    ContinuationQueued,
+    RetryQueuedForReview,
+    StopRequested,
+    LocalCompletionRecorded,
+    Done,
+    PlanDone,
+    BindingSaved,
+    BindingRemoved,
+    SettingsUpdated,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ControlActionResult {
+    pub action: ControlAction,
+    pub issue_identifier: String,
+    pub job_id: Option<i64>,
+    pub result: ControlActionOutcome,
 }
 
 /// The reviewed evidence and destination saved for a single continuation.

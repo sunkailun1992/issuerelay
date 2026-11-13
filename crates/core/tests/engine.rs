@@ -32,8 +32,10 @@ use issuerelay_core::{
     linear::{Disconnected, LinearApi, Project, Team, Viewer},
     model::{ChildIssue, Issue, Job, JobState, RunMode, RunUsage},
     runner::{ExitKind, RunLimits},
+    setup::McpRegistration,
     store::{NewJob, Store},
     trigger::WaitReasonView,
+    workflow::{ControlAction, ControlActionOutcome, ControlBinding, ControlSettings},
 };
 #[cfg(target_os = "macos")]
 use issuerelay_core::{model::ProcessTag, runner, store::Leftover};
@@ -3431,6 +3433,238 @@ async fn mark_done_waits_for_linear_and_uses_the_configured_status_name() {
         [("1".to_string(), "Released".to_string())]
     );
     assert!(h.engine.mark_done(9999).await.is_err());
+}
+
+#[tokio::test]
+async fn chat_done_rechecks_the_exact_linear_issue_and_commits_once() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    let action = ControlAction::MarkDone { job_id: job.id };
+    let stale = h
+        .engine
+        .prepare_control_action(action.clone())
+        .await
+        .unwrap();
+    assert_eq!(stale.linear_current_state.as_deref(), Some("In Testing"));
+    assert_eq!(stale.linear_target_state.as_deref(), Some("Done"));
+    assert!(h.linear.set_state_calls().is_empty());
+    h.linear
+        .update("1", |issue| issue.title = "An updated issue".into());
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert_eq!(h.latest("1").state, JobState::AwaitingAcceptance);
+    assert!(h.linear.set_state_calls().is_empty());
+    let fresh = h.engine.prepare_control_action(action).await.unwrap();
+    assert_eq!(
+        h.engine
+            .commit_control_action(&fresh.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::Done
+    );
+    assert!(h.engine.commit_control_action(&fresh.token).await.is_err());
+    assert_eq!(h.latest("1").state, JobState::Done);
+    assert_eq!(
+        h.linear.set_state_calls(),
+        [("1".to_string(), "Done".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn chat_stop_targets_only_the_reviewed_running_attempt() {
+    let h = Harness::new(2, true);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    let job = h.latest("1");
+    let stale = h
+        .engine
+        .prepare_control_action(ControlAction::Stop { job_id: job.id })
+        .await
+        .unwrap();
+    assert_eq!(stale.current_state, Some(JobState::Running));
+    h.engine.cancel_job(job.id).unwrap();
+    h.settle().await;
+    h.engine.retry_job(job.id).unwrap();
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert_eq!(h.latest("1").state, JobState::Queued);
+    let fresh = h
+        .engine
+        .prepare_control_action(ControlAction::Stop { job_id: job.id })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.engine
+            .commit_control_action(&fresh.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::StopRequested
+    );
+    assert_eq!(h.latest("1").state, JobState::Canceled);
+}
+
+#[tokio::test]
+async fn chat_settings_rechecks_config_and_cannot_accept_permission_fields() {
+    let h = Harness::new(2, false);
+    let action = ControlAction::SetSettings {
+        changes: ControlSettings {
+            poll_interval_secs: Some(60),
+            ..ControlSettings::default()
+        },
+    };
+    assert!(
+        serde_json::from_value::<ControlAction>(serde_json::json!({
+            "action":"set_settings", "changes":{"full_access_acknowledged":true}
+        }))
+        .is_err()
+    );
+    let stale = h
+        .engine
+        .prepare_control_action(action.clone())
+        .await
+        .unwrap();
+    assert_eq!(h.engine.settings().poll_interval_secs, 30);
+    let mut settings = h.engine.settings();
+    settings.language = "zh-CN".into();
+    h.engine.update_settings(settings).unwrap();
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert_eq!(h.engine.settings().poll_interval_secs, 30);
+    let fresh = h.engine.prepare_control_action(action).await.unwrap();
+    assert_eq!(
+        h.engine
+            .commit_control_action(&fresh.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::SettingsUpdated
+    );
+    let settings = h.engine.settings();
+    assert_eq!(settings.poll_interval_secs, 60);
+    assert_eq!(settings.language, "zh-CN");
+    assert!(!settings.full_access_acknowledged);
+}
+
+#[tokio::test]
+async fn chat_binding_requires_explicit_safe_permission_and_preserves_prompt_override() {
+    let h = Harness::new(2, false);
+    let directory = h.root.path().join("repo");
+    std::fs::create_dir(&directory).unwrap();
+    let mut binding = ControlBinding {
+        id: "proj-1".into(),
+        project_id: "proj-1".into(),
+        project_name: "Demo".into(),
+        directory,
+        executor: Some(ExecutorKind::Codex),
+        permission: None,
+        model: None,
+        lean: true,
+        effort: None,
+        labels: Vec::new(),
+    };
+    let save = |binding: &ControlBinding| ControlAction::SaveBinding {
+        binding: binding.clone(),
+    };
+    // The configured fallback would silently make this new binding Full Access.
+    assert!(
+        h.engine
+            .prepare_control_action(save(&binding))
+            .await
+            .is_err()
+    );
+    binding.permission = Some(PermissionProfile::Auto);
+    let first = h
+        .engine
+        .prepare_control_action(save(&binding))
+        .await
+        .unwrap();
+    assert!(h.engine.bindings().is_empty());
+    assert_eq!(
+        h.engine
+            .commit_control_action(&first.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::BindingSaved
+    );
+    let mut desktop = h.engine.bindings().remove(0);
+    desktop.prompt_override = Some("Preserve the approved prompt.".into());
+    h.engine.add_binding(desktop.clone()).unwrap();
+    binding.project_name = "New display name".into();
+    let edit = h
+        .engine
+        .prepare_control_action(save(&binding))
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&edit)
+            .unwrap()
+            .contains("Preserve the approved prompt.")
+    );
+    h.engine.commit_control_action(&edit.token).await.unwrap();
+    assert_eq!(
+        h.engine.bindings()[0].prompt_override,
+        desktop.prompt_override
+    );
+    let removal = h
+        .engine
+        .prepare_control_action(ControlAction::RemoveBinding {
+            binding_id: binding.id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.engine
+            .commit_control_action(&removal.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::BindingRemoved
+    );
+    assert!(h.engine.bindings().is_empty());
+}
+
+#[tokio::test]
+async fn chat_registration_is_unknown_without_a_resolved_executor_environment() {
+    let h = Harness::new(2, false);
+    for executor in [ExecutorKind::Claude, ExecutorKind::Codex] {
+        assert_eq!(
+            h.engine.control_server_status(executor).await,
+            McpRegistration::Unknown
+        );
+        assert_eq!(
+            h.engine.linear_server_status(executor).await,
+            McpRegistration::Unknown
+        );
+    }
+    assert!(h.runner.started().is_empty());
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn chat_cannot_remove_a_label_that_would_expose_a_full_access_route() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "full-default");
+    let mut safe = h.engine.bindings().remove(0);
+    safe.id = "proj-1#safe".into();
+    safe.labels = vec!["safe".into()];
+    safe.permission = Some(PermissionProfile::Auto);
+    h.engine.add_binding(safe).unwrap();
+    let err = h
+        .engine
+        .prepare_control_action(ControlAction::RemoveBinding {
+            binding_id: "proj-1#safe".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Full Access"));
+    assert_eq!(h.engine.bindings().len(), 2);
 }
 
 #[tokio::test]

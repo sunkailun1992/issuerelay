@@ -29,7 +29,7 @@
 //! changes is held across their awaits, and `stop` never takes it.
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ use crate::config::ExecutorKind;
 use crate::doctor::{self, LeanCheckPaths, ReadinessProbe, SystemReadiness};
 use crate::engine::{Engine, EngineDeps, JobRunner, ProcessJobRunner, display_viewer};
 use crate::env::{ExecEnv, SharedEnv};
-use crate::ipc::server::IpcServer;
+use crate::ipc::server::{DesktopDiagnostics, HostActions, IpcServer};
 use crate::linear::mcp::{LinearError, McpLinear};
 use crate::linear::{Disconnected, LinearApi, Viewer, auth};
 use crate::model::JobState;
@@ -65,6 +65,9 @@ const RETRY_EVERY: Duration = Duration::from_secs(60);
 /// take that long too, since each request after the read may take up to 30 s (`auth.rs`,
 /// `mcp.rs`), and the log line names both.
 const SLOW_CONNECTION: Duration = Duration::from_secs(60);
+
+/// An IPC client must receive a result even when the OS keychain prompt is left unanswered.
+const IPC_RECONNECT_LIMIT: Duration = Duration::from_secs(45);
 
 /// How long `stop` waits for the runs to end after the engine's task died. Stopping a run takes a
 /// few seconds (the executor gets five to end the processes it started) and recording it one
@@ -104,6 +107,32 @@ pub enum LinearSetup {
     InterfaceChanged { message: String },
     /// Credentials exist but connecting failed; tried again every minute.
     ConnectFailed { message: String },
+}
+
+/// Safe chat projection of the stored-credential reconnect attempt.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ReconnectStatus {
+    Connecting,
+    Connected { method: AuthMethod },
+    NotConfigured,
+    InterfaceChanged,
+    ConnectFailed,
+    Busy,
+    TimedOut,
+    Unavailable,
+}
+
+impl From<LinearSetup> for ReconnectStatus {
+    fn from(setup: LinearSetup) -> Self {
+        match setup {
+            LinearSetup::Connecting => Self::Connecting,
+            LinearSetup::Connected { method } => Self::Connected { method },
+            LinearSetup::NotConfigured => Self::NotConfigured,
+            LinearSetup::InterfaceChanged { .. } => Self::InterfaceChanged,
+            LinearSetup::ConnectFailed { .. } => Self::ConnectFailed,
+        }
+    }
 }
 
 /// How `Host::stop` treats the runs in progress (design section 6.2).
@@ -224,6 +253,8 @@ pub struct HostParts {
     /// How long `stop` waits for the runs to end after the engine's task died; `DEAD_ENGINE_WAIT`
     /// by default.
     pub dead_engine_wait: Option<Duration>,
+    /// Desktop-only diagnostics served on the host endpoint, absent in the headless host.
+    pub desktop_diagnostics: Option<Arc<dyn DesktopDiagnostics>>,
 }
 
 /// The Linear connection as the host reports it. It changes together with the engine's
@@ -247,6 +278,8 @@ struct Inner {
     /// Held for the whole of a `login`, `use_api_key` or `logout`: one change of the login at a
     /// time, so that the keychain and the host end with the same one. `stop` never takes it.
     user_actions: tokio::sync::Mutex<()>,
+    /// Keep at most one reconnect from local IPC in flight without blocking the desktop.
+    ipc_reconnect: tokio::sync::Mutex<()>,
     /// Ends the engine's loop, which tells the runs in progress to stop, and the retries of a
     /// failed connection.
     engine_shutdown: CancellationToken,
@@ -269,6 +302,33 @@ struct Inner {
 #[derive(Clone)]
 pub struct Host {
     inner: Arc<Inner>,
+}
+
+/// Weak because the IPC task is owned by this same host.
+#[derive(Clone)]
+pub(crate) struct HostReconnect(Weak<Inner>);
+
+impl HostReconnect {
+    pub(crate) async fn run(&self) -> ReconnectStatus {
+        let Some(inner) = self.0.upgrade() else {
+            return ReconnectStatus::Unavailable;
+        };
+        let host = Host { inner };
+        if host.inner.engine_shutdown.is_cancelled() || host.engine().status().draining {
+            return ReconnectStatus::Unavailable;
+        }
+        let Ok(_running) = host.inner.ipc_reconnect.try_lock() else {
+            return ReconnectStatus::Busy;
+        };
+        tokio::select! {
+            biased;
+            () = host.inner.engine_shutdown.cancelled() => ReconnectStatus::Unavailable,
+            outcome = tokio::time::timeout(IPC_RECONNECT_LIMIT, host.reconnect()) => match outcome {
+                Ok(setup) => setup.into(),
+                Err(_) => ReconnectStatus::TimedOut,
+            },
+        }
+    }
 }
 
 /// Whether connecting failed because Linear's tools or arguments changed.
@@ -441,7 +501,6 @@ impl Host {
         })?;
         let engine_shutdown = CancellationToken::new();
         let ipc_shutdown = CancellationToken::new();
-        let ipc = tokio::spawn(server.run(engine.clone(), ipc_shutdown.clone()));
         // `run_forever`, not a bare loop: it ends the executors an earlier host left running
         // before anything new starts.
         let worker_ended = CancellationToken::new();
@@ -467,15 +526,26 @@ impl Host {
                     current_from: 0,
                 }),
                 user_actions: tokio::sync::Mutex::new(()),
+                ipc_reconnect: tokio::sync::Mutex::new(()),
                 engine_shutdown,
                 ipc_shutdown,
                 worker: tokio::sync::Mutex::new(Some(worker)),
                 worker_ended,
-                ipc: tokio::sync::Mutex::new(Some(ipc)),
+                ipc: tokio::sync::Mutex::new(None),
                 engine_failure: Mutex::new(None),
                 dead_engine_wait: parts.dead_engine_wait.unwrap_or(DEAD_ENGINE_WAIT),
             }),
         };
+        let actions = HostActions {
+            reconnect: Some(HostReconnect(Arc::downgrade(&host.inner))),
+            desktop: parts.desktop_diagnostics,
+        };
+        let ipc = tokio::spawn(server.run_with_host(
+            host.engine().clone(),
+            host.inner.ipc_shutdown.clone(),
+            actions,
+        ));
+        *host.inner.ipc.lock().await = Some(ipc);
         tokio::spawn(host.clone().connect_in_the_background(
             parts.retry_every.unwrap_or(RETRY_EVERY),
             parts.slow_connection.unwrap_or(SLOW_CONNECTION),
@@ -979,6 +1049,7 @@ mod tests {
                 user_actions: tokio::sync::Mutex::new(()),
                 engine_shutdown,
                 ipc_shutdown: CancellationToken::new(),
+                ipc_reconnect: tokio::sync::Mutex::new(()),
                 worker: tokio::sync::Mutex::new(Some(worker)),
                 worker_ended: CancellationToken::new(),
                 ipc: tokio::sync::Mutex::new(None),

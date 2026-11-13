@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.92"
 chrono = { version = "0.4.45", features = ["serde"] }
 issuerelay-core = { version = "0.5.0", path = "../../crates/core" }
 semver = "1.0.28"

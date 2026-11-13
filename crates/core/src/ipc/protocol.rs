@@ -2,9 +2,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Methods the engine answers over IPC. Marking an issue Done, retrying and cancelling are
-/// deliberately absent: only the desktop panel may do those (spec 5.6, 10.3).
-pub const METHODS: [&str; 17] = [
+/// Methods the engine answers over the current user's local IPC endpoint.
+/// Lifecycle writes use the typed prepare/commit pair.
+pub const METHODS: [&str; 37] = [
+    "app.info",
     "status",
     "pause",
     "resume",
@@ -22,6 +23,25 @@ pub const METHODS: [&str; 17] = [
     "workflow.claim",
     "workflow.release",
     "workflow.archive",
+    "workflow.issues",
+    "workflow.plan_progress",
+    "workflow.refresh_plan_progress",
+    "workflow.continuation_context",
+    "workflow.supplement_continuation_context",
+    "workflow.development_issue_url",
+    "workflow.prepare_action",
+    "workflow.commit_action",
+    "settings.get",
+    "projects.list",
+    "labels.list",
+    "models.catalog",
+    "setup.control_registration",
+    "setup.linear_named",
+    "linear.reconnect",
+    "desktop.autostart_status",
+    "desktop.cli_path_status",
+    "desktop.update_status",
+    "desktop.check_update",
 ];
 
 /// The request line was not a valid request.
@@ -98,7 +118,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn method_table_never_exposes_panel_only_actions() {
+    fn lifecycle_writes_require_the_typed_action_pair() {
+        assert!(METHODS.contains(&"workflow.prepare_action"));
+        assert!(METHODS.contains(&"workflow.commit_action"));
         for forbidden in [
             "mark_done",
             "retry_job",
@@ -108,7 +130,7 @@ mod tests {
         ] {
             assert!(
                 !METHODS.contains(&forbidden),
-                "{forbidden} must stay panel-only"
+                "{forbidden} must not bypass the action pair"
             );
         }
         // Other spellings count too: `retry`, `job.cancel`, `markDone`, ...
@@ -117,7 +139,7 @@ mod tests {
             for word in ["done", "retry", "cancel", "complete"] {
                 assert!(
                     !lower.contains(word),
-                    "`{method}` looks like a panel-only action"
+                    "`{method}` looks like a direct lifecycle write"
                 );
             }
         }

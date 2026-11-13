@@ -14,6 +14,7 @@ use issuerelay_core::{
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
+    diagnostics::DesktopDiagnosticProvider,
     events, logging,
     state::{AppState, StartupCode, StartupFailure, StartupState},
     tray, window,
@@ -40,7 +41,12 @@ pub async fn start(app: AppHandle, panel_requested: bool) {
     let result = match AppPaths::system() {
         Ok(paths) => {
             let state_db = paths.state_db();
-            Host::start(paths, Arc::new(SystemConnector), HostParts::default())
+            let parts = HostParts {
+                // Only the IPC task retains this handle. Host::stop joins that task on exit.
+                desktop_diagnostics: Some(Arc::new(DesktopDiagnosticProvider::new(app.clone()))),
+                ..HostParts::default()
+            };
+            Host::start(paths, Arc::new(SystemConnector), parts)
                 .await
                 .map_err(|error| failure(&error, &state_db))
         }

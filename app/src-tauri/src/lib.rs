@@ -2,6 +2,7 @@
 // Every module is `pub`: only this crate's own executable uses the library, and an item that only
 // one platform uses (the macOS application menu's texts, say) is then not dead code on the other.
 pub mod commands;
+mod diagnostics;
 pub mod events;
 pub mod i18n;
 pub mod logging;

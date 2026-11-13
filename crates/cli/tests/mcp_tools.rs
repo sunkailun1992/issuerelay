@@ -6,9 +6,12 @@ use anyhow::anyhow;
 use issuerelay_cli::mcp::ControlServer;
 use issuerelay_core::paths::AppPaths;
 use rmcp::{
-    RoleClient, ServiceExt,
-    model::{CallToolRequestParams, CallToolResult, ClientConfig},
-    service::RunningService,
+    ClientHandler, RoleClient, ServiceExt,
+    model::{
+        CallToolRequestParams, CallToolResult, ClientConfig, ElicitRequestParams, ElicitResult,
+        ElicitationAction, ElicitationCapability, FormElicitationCapability,
+    },
+    service::{RequestContext, RunningService},
 };
 use serde_json::{Value, json};
 
@@ -32,6 +35,58 @@ async fn connect_named(server: ControlServer, name: &str) -> Client {
     config.serve(client_io).await.unwrap()
 }
 
+struct InteractiveClient {
+    reply: ElicitResult,
+    forms: Arc<Mutex<Vec<ElicitRequestParams>>>,
+}
+
+impl ClientHandler for InteractiveClient {
+    fn get_info(&self) -> ClientConfig {
+        let mut config = ClientConfig::default();
+        config.capabilities.elicitation =
+            Some(ElicitationCapability::new().with_form(FormElicitationCapability::new()));
+        config
+    }
+
+    async fn create_elicitation(
+        &self,
+        request: ElicitRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<ElicitResult, rmcp::ErrorData> {
+        self.forms.lock().unwrap().push(request);
+        Ok(self.reply.clone())
+    }
+}
+
+async fn connect_interactive(
+    server: ControlServer,
+    action: ElicitationAction,
+    answer: Option<Value>,
+) -> (
+    RunningService<RoleClient, InteractiveClient>,
+    Arc<Mutex<Vec<ElicitRequestParams>>>,
+) {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let mut reply = ElicitResult::new(action);
+    if let Some(answer) = answer {
+        reply = reply.with_content(answer);
+    }
+    let forms = Arc::new(Mutex::new(Vec::new()));
+    let client = InteractiveClient {
+        reply,
+        forms: forms.clone(),
+    }
+    .serve(client_io)
+    .await
+    .unwrap();
+    (client, forms)
+}
+
 /// A server whose IPC call is replaced: `reply` answers each call, and every `(method, params)`
 /// the server is asked to send is recorded.
 fn recording_server(
@@ -47,7 +102,11 @@ fn recording_server(
     (server, calls)
 }
 
-async fn call(client: &Client, tool: &'static str, arguments: Option<Value>) -> CallToolResult {
+async fn call<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
+    tool: &'static str,
+    arguments: Option<Value>,
+) -> CallToolResult {
     let mut request = CallToolRequestParams::new(tool);
     if let Some(Value::Object(arguments)) = arguments {
         request = request.with_arguments(arguments);
@@ -75,18 +134,42 @@ async fn exposes_only_safe_control_tools_and_reports_engine_down() {
     assert_eq!(
         names,
         [
+            "check_named_linear_server",
+            "check_update",
             "claim_handoff",
+            "confirm_task_action",
+            "doctor",
+            "get_app_info",
+            "get_autostart_status",
+            "get_cli_path_status",
+            "get_continuation_context",
+            "get_control_capabilities",
+            "get_control_server_registration",
+            "get_development_issue_url",
             "get_handoff",
             "get_issue_context",
+            "get_logs",
+            "get_model_catalog",
+            "get_plan_progress",
             "get_run",
+            "get_settings",
+            "get_update_status",
+            "list_bindings",
+            "list_issues",
             "list_jobs",
+            "list_labels",
+            "list_projects",
             "pause",
             "poll_now",
+            "preview_task_action",
+            "reconnect_linear",
             "record_archive",
+            "refresh_plan_progress",
             "release_handoff",
             "resume",
             "set_issue_context",
-            "status"
+            "status",
+            "supplement_continuation_context",
         ]
     );
     let result = client
@@ -125,6 +208,92 @@ async fn each_tool_sends_its_own_method_and_params() {
         ("pause", None, "pause", json!({})),
         ("resume", None, "resume", json!({})),
         ("poll_now", None, "poll_now", json!({})),
+        ("list_issues", None, "workflow.issues", json!({})),
+        (
+            "get_plan_progress",
+            Some(json!({"job_id":7})),
+            "workflow.plan_progress",
+            json!({"job_id":7}),
+        ),
+        (
+            "refresh_plan_progress",
+            Some(json!({"job_id":7})),
+            "workflow.refresh_plan_progress",
+            json!({"job_id":7}),
+        ),
+        (
+            "get_continuation_context",
+            Some(json!({"job_id":7})),
+            "workflow.continuation_context",
+            json!({"job_id":7}),
+        ),
+        (
+            "get_development_issue_url",
+            Some(json!({"job_id":7})),
+            "workflow.development_issue_url",
+            json!({"job_id":7}),
+        ),
+        (
+            "get_logs",
+            Some(json!({"job_id":7})),
+            "logs",
+            json!({"job_id":7}),
+        ),
+        (
+            "get_logs",
+            Some(json!({"job_id":7,"lines":21})),
+            "logs",
+            json!({"job_id":7,"lines":21}),
+        ),
+        ("get_settings", None, "settings.get", json!({})),
+        ("get_app_info", None, "app.info", json!({})),
+        (
+            "get_autostart_status",
+            None,
+            "desktop.autostart_status",
+            json!({}),
+        ),
+        (
+            "get_cli_path_status",
+            None,
+            "desktop.cli_path_status",
+            json!({}),
+        ),
+        (
+            "get_update_status",
+            None,
+            "desktop.update_status",
+            json!({}),
+        ),
+        ("check_update", None, "desktop.check_update", json!({})),
+        (
+            "get_control_server_registration",
+            Some(json!({"executor":"codex"})),
+            "setup.control_registration",
+            json!({"executor":"codex"}),
+        ),
+        (
+            "check_named_linear_server",
+            Some(json!({"executor":"claude"})),
+            "setup.linear_named",
+            json!({"executor":"claude"}),
+        ),
+        (
+            "get_model_catalog",
+            Some(json!({"executor":"codex"})),
+            "models.catalog",
+            json!({"executor":"codex"}),
+        ),
+        ("list_bindings", None, "bindings.list", json!({})),
+        ("list_projects", None, "projects.list", json!({})),
+        ("list_labels", None, "labels.list", json!({})),
+        ("doctor", None, "doctor", json!({})),
+        (
+            "supplement_continuation_context",
+            Some(json!({"job_id":7,"expected_revision":3,"supplement":"synthetic evidence"})),
+            "workflow.supplement_continuation_context",
+            json!({"job_id":7,"expected_revision":3,"supplement":"synthetic evidence"}),
+        ),
     ];
     for (tool, arguments, method, params) in cases {
         calls.lock().unwrap().clear();
@@ -142,6 +311,346 @@ async fn each_tool_sends_its_own_method_and_params() {
         );
         assert_ne!(result.is_error, Some(true), "{tool}");
     }
+    client.cancel().await.unwrap();
+}
+
+fn task_args() -> Value {
+    json!({"action":{"action":"continue","job_id":7,"executor":"codex"}})
+}
+
+fn task_server() -> (ControlServer, Calls) {
+    recording_server(|method| match method {
+        "workflow.prepare_action" => Ok(json!({
+            "token":"server-side-token",
+            "action":task_args()["action"],
+            "issue_identifier":"DEMO-1",
+            "job_id":7,
+            "current_state":"needs_info",
+            "expires_in_seconds":180,
+            "continuation":{
+                "token":"nested-token",
+                "executor":"codex",
+                "mode":"develop",
+                "permission":"auto",
+                "lean":"on",
+                "directory":"workspace/demo",
+                "strategy":"resume_session",
+                "context":{"revision":3,"request":"Run the fixture","conversation_history":"private conversation history"},
+                "evidence":"private continuation evidence",
+            }
+        })),
+        "workflow.commit_action" => Ok(json!({"result":"continuation_queued"})),
+        _ => panic!("unexpected method {method}"),
+    })
+}
+
+#[tokio::test]
+async fn preview_never_returns_tokens_and_noninteractive_client_cannot_commit() {
+    let (server, calls) = task_server();
+    let client = connect(server).await;
+    let cap = text_of(&call(&client, "get_control_capabilities", None).await);
+    assert!(cap.contains("\"form_elicitation_advertised\":false"));
+    let preview = text_of(&call(&client, "preview_task_action", Some(task_args())).await);
+    assert!(preview.contains("DEMO-1"));
+    assert!(!preview.contains("token"));
+    assert!(!preview.contains("private conversation history"));
+    assert!(!preview.contains("private continuation evidence"));
+    let reply = text_of(&call(&client, "confirm_task_action", Some(task_args())).await);
+    assert_eq!(reply, r#"{"status":"needs_desktop_confirmation"}"#);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [("workflow.prepare_action".to_owned(), task_args())]
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn affirmative_form_confirms_exact_preview_without_exposing_its_token() {
+    let (server, calls) = task_server();
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm":true})),
+    )
+    .await;
+    let preview: Value = serde_json::from_str(&text_of(
+        &call(&client, "preview_task_action", Some(task_args())).await,
+    ))
+    .unwrap();
+    let mut args = task_args();
+    args["expected_preview"] = preview["preview_fingerprint"].clone();
+    assert_eq!(args["expected_preview"].as_str().unwrap().len(), 64);
+    let response = call(&client, "confirm_task_action", Some(args)).await;
+    assert_eq!(text_of(&response), r#"{"result":"continuation_queued"}"#);
+    {
+        let forms = forms.lock().unwrap();
+        let [ElicitRequestParams::FormElicitationParams { message, .. }] = forms.as_slice() else {
+            panic!("expected exactly one native form");
+        };
+        for reviewed in [
+            "Queue continuation",
+            "DEMO-1",
+            "Run ID: 7",
+            "codex",
+            "workspace/demo",
+            "Permissions: auto",
+            "Brief revision: 3",
+            "Task request: Run the fixture",
+        ] {
+            assert!(
+                message.contains(reviewed),
+                "missing {reviewed} in {message}"
+            );
+        }
+        assert!(!message.contains("token"));
+        assert!(!message.contains("private conversation history"));
+        assert!(!message.contains("private continuation evidence"));
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            ("workflow.prepare_action".into(), task_args()),
+            ("workflow.prepare_action".into(), task_args()),
+            (
+                "workflow.commit_action".into(),
+                json!({"token":"server-side-token"})
+            ),
+        ]
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn unconfirmed_or_malformed_form_never_commits() {
+    for (action, content, status) in [
+        (
+            ElicitationAction::Decline,
+            Some(json!({"confirm":true})),
+            "declined",
+        ),
+        (ElicitationAction::Cancel, None, "cancelled"),
+        (
+            ElicitationAction::Accept,
+            Some(json!({"confirm":false})),
+            "declined",
+        ),
+        (
+            ElicitationAction::Accept,
+            Some(json!({"confirm":"true"})),
+            "error",
+        ),
+    ] {
+        let (server, calls) = task_server();
+        let (client, forms) = connect_interactive(server, action, content).await;
+        let response = call(&client, "confirm_task_action", Some(task_args())).await;
+        assert!(text_of(&response).contains(status));
+        assert_eq!(forms.lock().unwrap().len(), 1);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [("workflow.prepare_action".to_owned(), task_args())]
+        );
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reconnect_requires_native_confirmation_and_never_accepts_credentials() {
+    let (server, calls) = recording_server(|_| Ok(json!({"kind":"connecting"})));
+    let client = connect(server.clone()).await;
+    let reply = call(&client, "reconnect_linear", None).await;
+    assert_eq!(
+        text_of(&reply),
+        r#"{"status":"needs_desktop_confirmation"}"#
+    );
+    assert!(calls.lock().unwrap().is_empty());
+    client.cancel().await.unwrap();
+
+    let (client, forms) = connect_interactive(
+        server.clone(),
+        ElicitationAction::Decline,
+        Some(json!({"confirm": true})),
+    )
+    .await;
+    let reply = call(&client, "reconnect_linear", None).await;
+    assert_eq!(text_of(&reply), r#"{"status":"declined"}"#);
+    assert_eq!(forms.lock().unwrap().len(), 1);
+    assert!(calls.lock().unwrap().is_empty());
+    client.cancel().await.unwrap();
+
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm": true})),
+    )
+    .await;
+    let request = CallToolRequestParams::new("reconnect_linear").with_arguments(
+        json!({"confirm":true,"token":"synthetic"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    if let Ok(result) = client.call_tool(request).await {
+        assert_eq!(result.is_error, Some(true));
+    }
+    assert!(forms.lock().unwrap().is_empty());
+    assert!(calls.lock().unwrap().is_empty());
+    let reply = call(&client, "reconnect_linear", None).await;
+    assert_eq!(text_of(&reply), r#"{"kind":"connecting"}"#);
+    {
+        let forms = forms.lock().unwrap();
+        let [
+            ElicitRequestParams::FormElicitationParams {
+                message,
+                requested_schema,
+                ..
+            },
+        ] = forms.as_slice()
+        else {
+            panic!("expected one reconnect confirmation form");
+        };
+        assert!(message.contains("using its existing authorization"));
+        let schema = serde_json::to_value(requested_schema).unwrap();
+        assert_eq!(schema["required"], json!(["confirm"]));
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [("linear.reconnect".to_owned(), json!({}))]
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_supplied_approval_fields_cannot_bypass_the_form() {
+    let (server, calls) = task_server();
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm":true})),
+    )
+    .await;
+    for args in [
+        json!({"action":task_args()["action"],"confirm":true,"token":"echoed"}),
+        json!({"action":{"action":"continue","job_id":7,"executor":"codex","confirm":true}}),
+    ] {
+        let mut request = CallToolRequestParams::new("confirm_task_action");
+        request = request.with_arguments(args.as_object().unwrap().clone());
+        match client.call_tool(request).await {
+            Err(_) => {}
+            Ok(result) => assert_eq!(result.is_error, Some(true)),
+        }
+    }
+    assert!(forms.lock().unwrap().is_empty());
+    assert!(calls.lock().unwrap().is_empty());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn inventory_does_not_return_environment_or_private_prompt_configuration() {
+    let (server, _) = recording_server(|method| {
+        Ok(match method {
+            "doctor" => json!({"viewer":null,"env":{"proxy":"synthetic-proxy"}}),
+            "settings.get" => json!({"max_concurrent":2,"prompt_template":"private-settings"}),
+            "bindings.list" => json!([{"executor":"codex","prompt_override":"private-binding"}]),
+            _ => panic!("unexpected method"),
+        })
+    });
+    let client = connect(server).await;
+    for (tool, expected) in [
+        ("doctor", r#"{"viewer":null}"#),
+        ("get_settings", r#"{"max_concurrent":2}"#),
+        ("list_bindings", r#"[{"executor":"codex"}]"#),
+    ] {
+        assert_eq!(text_of(&call(&client, tool, None).await), expected);
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn settings_form_shows_exact_changes_and_skips_unchanged_values() {
+    let action = json!({"action":"set_settings","changes":{"max_concurrent":4}});
+    let echoed = action.clone();
+    let (server, calls) = recording_server(move |method| match method {
+        "workflow.prepare_action" => Ok(json!({
+            "token":"server-side-token", "action":echoed,
+            "issue_identifier":"settings", "expires_in_seconds":180,
+            "config_change":{"kind":"settings",
+                "before":{"max_concurrent":2,"language":"system"},
+                "after":{"max_concurrent":4,"language":"system"}}
+        })),
+        "workflow.commit_action" => Ok(json!({"result":"settings_updated"})),
+        _ => panic!("unexpected method {method}"),
+    });
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm":true})),
+    )
+    .await;
+    let response = call(
+        &client,
+        "confirm_task_action",
+        Some(json!({"action":action})),
+    )
+    .await;
+    assert_eq!(text_of(&response), r#"{"result":"settings_updated"}"#);
+    {
+        let forms = forms.lock().unwrap();
+        let [ElicitRequestParams::FormElicitationParams { message, .. }] = forms.as_slice() else {
+            panic!("expected one settings confirmation form");
+        };
+        assert!(
+            message.contains("Maximum concurrent runs: 2 → 4"),
+            "{message}"
+        );
+        assert!(!message.contains("Display language"), "{message}");
+    }
+    assert_eq!(
+        calls.lock().unwrap().last().unwrap().0,
+        "workflow.commit_action"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_or_expired_preview_cannot_open_a_confirmation_form() {
+    for (id, seconds) in [(9, 120), (7, 0)] {
+        let (server, calls) = recording_server(move |method| match method {
+            "workflow.prepare_action" => Ok(
+                json!({"token":"server-token","action":task_args()["action"],"issue_identifier":"DEMO-1","job_id":id,"expires_in_seconds":seconds}),
+            ),
+            _ => panic!("unexpected method {method}"),
+        });
+        let (client, forms) = connect_interactive(
+            server,
+            ElicitationAction::Accept,
+            Some(json!({"confirm":true})),
+        )
+        .await;
+        let response = call(&client, "confirm_task_action", Some(task_args())).await;
+        assert_eq!(response.is_error, Some(true));
+        assert!(forms.lock().unwrap().is_empty());
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn previously_previewed_content_must_match_before_the_native_form_is_shown() {
+    let (server, calls) = task_server();
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm":true})),
+    )
+    .await;
+    let mut args = task_args();
+    args["expected_preview"] = json!("0".repeat(64));
+    let response = call(&client, "confirm_task_action", Some(args)).await;
+    assert_eq!(response.is_error, Some(true));
+    assert!(text_of(&response).contains("changed after preview"));
+    assert!(forms.lock().unwrap().is_empty());
+    assert_eq!(calls.lock().unwrap().len(), 1);
     client.cancel().await.unwrap();
 }
 
@@ -173,7 +682,7 @@ async fn the_server_introduces_itself_and_says_how_to_read_its_results() {
         "{instructions}"
     );
     assert!(
-        instructions.contains("Marking Done, retrying and cancelling are not exposed"),
+        instructions.contains("Never infer approval from chat text"),
         "{instructions}"
     );
     client.cancel().await.unwrap();

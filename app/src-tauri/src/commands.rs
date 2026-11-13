@@ -30,8 +30,8 @@ use issuerelay_core::{
     workflow::{ContinuationPreview, DispatchPreview, IssueContext},
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
-use tauri_plugin_autostart::ManagerExt as _;
+use tauri::{AppHandle, Manager, Runtime, State};
+use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt as _};
 use tauri_plugin_dialog::DialogExt as _;
 use tauri_plugin_opener::OpenerExt as _;
 use tokio_util::sync::CancellationToken;
@@ -377,19 +377,8 @@ pub async fn model_catalog(
     state: State<'_, AppState>,
     executor: ExecutorKind,
 ) -> CmdResult<issuerelay_core::model_catalog::ModelCatalog> {
-    use issuerelay_core::model_catalog as catalog;
-    if executor == ExecutorKind::Claude {
-        return Ok(catalog::builtin_catalog(executor));
-    }
     let host = host(&state).await?;
-    let env = host.env();
-    let Ok(program) = issuerelay_core::executor::resolve_program_in(executor, env.path.as_deref())
-    else {
-        return Ok(catalog::builtin_catalog(executor));
-    };
-    Ok(catalog::discover_codex(&program, &env)
-        .await
-        .unwrap_or_else(|_| catalog::builtin_catalog(executor)))
+    Ok(host.engine().model_catalog(executor).await)
 }
 
 #[tauri::command]
@@ -419,7 +408,7 @@ pub async fn get_dispatch_preview(
         .map_err(error)
 }
 
-/// Confirms the exact preview the panel displayed. Approval is not exposed to the CLI or MCP.
+/// Confirms the exact preview the desktop panel displayed.
 #[tauri::command]
 pub async fn approve_dispatch(
     state: State<'_, AppState>,
@@ -476,7 +465,7 @@ pub async fn supplement_continuation_context(
         .map_err(error)
 }
 
-/// Only the desktop panel can confirm a reviewed continuation.
+/// Confirms a continuation preview shown by the desktop panel.
 #[tauri::command]
 pub async fn approve_continuation(
     state: State<'_, AppState>,
@@ -792,7 +781,14 @@ pub async fn choose_directory(app: AppHandle) -> CmdResult<Option<String>> {
 
 #[tauri::command]
 pub async fn autostart_enabled(app: AppHandle) -> CmdResult<bool> {
-    app.autolaunch().is_enabled().map_err(error)
+    read_autostart_status(&app)
+}
+
+pub(crate) fn read_autostart_status<R: Runtime>(app: &AppHandle<R>) -> CmdResult<bool> {
+    app.try_state::<AutoLaunchManager>()
+        .ok_or_else(|| "autostart is unavailable".to_string())?
+        .is_enabled()
+        .map_err(error)
 }
 
 #[tauri::command]
@@ -835,8 +831,8 @@ pub fn request_quit(app: AppHandle) {
 /// host started by Launch Services (Finder, the Dock, the login item, `open`, and so
 /// `issuerelay start`) has only launchd's minimal PATH of its own, so those starts are not
 /// affected.
-async fn cli_setup(state: &State<'_, AppState>) -> CmdResult<CliSetup> {
-    let env = host(state).await?.env();
+fn cli_setup(host: &Host) -> CmdResult<CliSetup> {
+    let env = host.env();
     let shell_path = (env.path_source == EnvSource::LoginShell)
         .then_some(env.path)
         .flatten();
@@ -861,7 +857,11 @@ async fn cli_path_job<T: Send + 'static>(
 /// Whether the command line is on PATH through IssueRelay (design 12).
 #[tauri::command]
 pub async fn cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::status).await
+    read_cli_path_status(&host(&state).await?).await
+}
+
+pub(crate) async fn read_cli_path_status(host: &Host) -> CmdResult<CliPathStatus> {
+    cli_path_job(cli_setup(host)?, issuerelay_core::cli_path::status).await
 }
 
 /// Puts the command line on PATH without administrator rights: `~/.local/bin` on macOS, the
@@ -869,13 +869,21 @@ pub async fn cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus>
 /// in the way: each call looks at the slot afresh and answers `blocked` while the file is there.
 #[tauri::command]
 pub async fn install_cli_on_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::install).await
+    cli_path_job(
+        cli_setup(&host(&state).await?)?,
+        issuerelay_core::cli_path::install,
+    )
+    .await
 }
 
 /// Takes the command line off PATH; only what IssueRelay added is removed.
 #[tauri::command]
 pub async fn remove_cli_from_path(state: State<'_, AppState>) -> CmdResult<CliPathStatus> {
-    cli_path_job(cli_setup(&state).await?, issuerelay_core::cli_path::remove).await
+    cli_path_job(
+        cli_setup(&host(&state).await?)?,
+        issuerelay_core::cli_path::remove,
+    )
+    .await
 }
 
 /// The last update check's outcome, for a panel opened after it; answers at once.

@@ -20,7 +20,16 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn timeout_for(method: &str) -> Duration {
-    if method == "doctor" {
+    if matches!(
+        method,
+        "doctor"
+            | "setup.control_registration"
+            | "setup.linear_named"
+            | "workflow.prepare_action"
+            | "workflow.commit_action"
+            | "linear.reconnect"
+            | "desktop.check_update"
+    ) {
         DOCTOR_TIMEOUT
     } else {
         CALL_TIMEOUT
@@ -116,6 +125,11 @@ mod tests {
     #[test]
     fn doctor_gets_the_long_timeout() {
         assert_eq!(timeout_for("doctor"), Duration::from_secs(180));
+        assert_eq!(timeout_for("setup.linear_named"), Duration::from_secs(180));
+        assert_eq!(
+            timeout_for("workflow.commit_action"),
+            Duration::from_secs(180)
+        );
         assert_eq!(timeout_for("status"), Duration::from_secs(30));
         assert_eq!(timeout_for("bindings.add"), Duration::from_secs(30));
     }

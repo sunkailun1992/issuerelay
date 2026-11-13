@@ -32,8 +32,8 @@ IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务�
 1. 在 Linear 写清目标与验收条件，指派给自己并设为 `Todo`。从聊天发起时，让主控会话整理本次任务的摘要和完整任务相关历史，保留相关的复现命令、报错、版本、决定和未决事项，附上 Wiki 页面或小节引用，再通过 IssueRelay MCP 提交上下文草稿。再由你或已授权的流程添加 `ai-ready` 或 `ai-plan`。
 2. IssueRelay 发现候选需求。在桌面面板「需求」找到等待派发确认的任务，打开预览核对会话摘要、相关历史、范围、验收条件、配置的 Wiki 目录和引用，以及运行模式和执行去向。直接在 Linear 创建、没有前序会话的需求可确认空的会话上下文；提交了任务上下文的需求必须带任务相关历史。确认后，IssueRelay 将获准的上下文写入本机任务记录。
 3. 确认后按项目绑定、目录、执行者就绪状态与依赖排队。同一目录一次只执行一条，同时受总并发上限约束。实现任务被未完成的 Linear 需求阻塞时先等待，方案模式不等待这些依赖。
-4. 开跑前再次核对 Linear 需求和派发条件。需求、草稿或实际执行去向已变化时，回到面板重新预览。启动后，运行详情显示本轮使用的执行者和已确认的任务快照。
-5. 实现交付后，审阅 diff、测试和实际行为。对「待验收」的运行，配置了 Wiki 目录时，按该库规则写入归档并登记回执。验收通过后，你在面板点「标记完成」，IssueRelay 才会把 Linear 状态设为 `Done`。
+4. 开跑前再次核对 Linear 需求和派发条件。需求、草稿或实际执行去向已变化时，重新预览。启动后，运行详情显示本轮使用的执行者和已确认的任务快照。
+5. 实现交付后，审阅 diff、测试和实际行为。对「待验收」的运行，配置了 Wiki 目录时，按该库规则写入归档并登记回执。验收通过后，你可在面板或支持表单的会话中确认「标记完成」，IssueRelay 再把 Linear 状态设为 `Done`。
 
 ### 只做本地实现与验证
 
@@ -53,7 +53,7 @@ IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务�
 
 子需求全部结束（完成或取消）且至少一个完成时，运行显示「可收口」，详情出现「完成方案」。确认后，IssueRelay 重新核对：该运行仍是这条需求的最新一轮且没有交接领取；配置了 Wiki 时已有归档回执；方案需求在 Linear 中存在且未取消；子需求仍全部结束。核对通过后，把方案需求设为配置的完成状态，并把方案运行记为已完成。Linear 中方案已是完成状态时只补本地记录。子需求不会被改动。
 
-子需求读取失败时，详情显示原因，并保留原来的「执行开发」入口。子需求全部取消时不能在这里收口，请在 Linear 处理方案需求。收口只能在桌面面板确认，命令行和 MCP 都不提供。收口后又出现未结束的子需求时，详情会提示，不会自动重开。
+子需求读取失败时，详情显示原因，并保留原来的「执行开发」入口。子需求全部取消时不能在这里收口，请在 Linear 处理方案需求。可在桌面面板或支持原生确认的 MCP 会话里确认收口。收口后又出现未结束的子需求时，详情会提示，不会自动重开。
 
 ## 执行者、模型与推理力度
 
@@ -97,12 +97,34 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 | `claim_handoff` | 传 `job_id` 和 `executor`（`codex` 或 `claude`）。保留本机工作目录，直接返回包含本次 `claim_id` 的交接对象 |
 | `release_handoff` | 传 `job_id` 和自己领取时取得的 `claim_id`，释放该次目录保留 |
 | `record_archive` | 传 `job_id` 和相对当前 Wiki 根的 `page`，Git Wiki 还要传完整 `commit` SHA。登记与当前 Wiki 根绑定的回执 |
+| `list_issues` / `get_plan_progress` / `refresh_plan_progress` | 查看候选需求、方案子需求进度及当前阻塞原因，刷新方案时传 `job_id` |
+| `get_continuation_context` / `supplement_continuation_context` | 按 `job_id` 读续作材料或按 `expected_revision` 追加 `supplement` |
+| `get_development_issue_url` | 按 `job_id` 取得方案转开发所需需求链接 |
+| `get_logs` | 按 `job_id` 读取日志尾部，`lines` 可选。先核对当前会话的数据访问范围 |
+| `list_bindings` / `get_settings` / `list_projects` / `list_labels` / `doctor` | 查询绑定、设置、项目、标签或执行器就绪状态 |
+| `get_app_info` / `get_model_catalog` | 查询宿主版本、平台或指定 `executor` 的模型与推理档位 |
+| `get_control_server_registration` / `check_named_linear_server` | 按 `executor` 查询 IssueRelay 控制服务或精简运行所需 Linear 服务的注册状态 |
+| `get_autostart_status` / `get_cli_path_status` | 读取自启和 CLI 是否可用，不返回 PATH 或安装目录 |
+| `get_update_status` / `check_update` | 读取上次检查或主动检查更新。安装和重启由桌面处理 |
+| `reconnect_linear` | 经原生表单确认，用已保存的授权尝试重连，只返回状态 |
+| `get_control_capabilities` | 查看支持的动作与客户端是否声明了确认表单 |
+| `preview_task_action` / `confirm_task_action` | 传类型固定的 `action`，预览后在客户端原生表单确认。确认时可传 `expected_preview` 校验预览指纹 |
 
 用 Linear 需求编号调用 `get_run`、`get_issue_context` 或 `set_issue_context` 时，IssueRelay 会通过当前已连接的 Linear 解析需求的内部身份。不同工作区的同名编号按各自的需求处理。已知本地运行 ID 时，`get_run` 只传 `id` 即可完全在本机读取。
 
 首次登记用 `expected_revision: 0`。修改前用 `get_issue_context` 取当前 `revision`，再把它传给 `expected_revision`。修订号冲突时，先重读并核对修改。`request` 写目标和脱敏摘要。`conversation_history` 写本次任务相关的完整会话内容，保留有关的命令、报错原文、版本、已作决定和未决事项。旧任务上下文缺少这段文字时仍可查看，重新派发或续作前须由主控补齐并重新预览确认。`scope` 写允许的范围。`acceptance` 和 `source_refs` 分别记录验收条件和来源引用。`preferred_executor` 只在用户明确选择时设置，入口由 MCP 客户端识别。草稿不随宿主重启保留，添加标签只让需求成为候选。
 
-「确认派发」「记录本地完成」「标记完成」「完成方案」「重新运行」「停止」需要到面板操作。MCP 与命令行不提供这些接口。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+派发、续作、记录本地完成、标记完成、完成方案、重新运行和停止可先调用 `preview_task_action`。随后调用 `confirm_task_action`，由客户端原生表单展示本次操作并请用户确认。表单不可用时可以在桌面完成。可用工具和系统授权交接见[聊天控制覆盖表](chat-controls.md)。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+
+### 在会话中执行操作
+
+例如要继续第 42 次运行，调用 `preview_task_action` 传入 `{"action":{"action":"continue","job_id":42,"executor":"codex"}}`。然后调用 `confirm_task_action`，沿用同一 `action`，把刚收到的 `preview_fingerprint` 作为 `expected_preview`。确认表单展示执行去向与任务范围。表单取消、过期、内容过长、客户端不支持或预览已经变化时，宿主保留原状态。较长的预览可在桌面审核。
+
+- `dispatch` 用 `issue_identifier`。`continue` 用 `job_id` 和 `executor`。`retry`、`stop`、`record_local_completion`、`mark_done`、`complete_plan` 用 `job_id`。重试后仍须复核派发，停止后用 `get_run` 查询终态。
+- `save_binding` 用 `binding`，`remove_binding` 用 `binding_id`。需要扩大完全访问权限或覆盖另一条绑定时，由桌面处理。
+- `set_settings` 用 `changes`，可修改 `poll_interval_secs`、`max_concurrent`、`run_timeout_mins`、`stall_timeout_mins`、`language`。
+
+会话确认依赖 MCP 客户端的原生表单。精简后台执行器仍按目标仓库的规则执行。用户可以在已注册 IssueRelay MCP 的主控会话里处理调度和验收。任务上下文与回执由宿主保存，本机的会话材料和日志不放进 Git。
 
 ## 查看需求与历次运行
 
@@ -129,7 +151,7 @@ Claude Desktop 的 Code 会话也可以在侧栏菜单归档。归档前先保�
 
 1. **接手续作。** 在最近一次已结束、尚未完成的运行详情，选择执行者并点「领取交接」，或调用 `claim_handoff`。IssueRelay 会保留该本地目录，避免调度器再向它派工。点「复制交接提示词」，自己打开所选执行者的新会话，在同一目录核对工作树再继续。会话停止写入后，点「释放交接」或调用 `release_handoff`。用 MCP 操作时，请保存自己领取时返回的 `claim_id`，释放时传这个值。这样即使请求迟到，也不会清除后来重新领取的保留。
 2. **独立复核。** 在运行详情点「复制独立复核提示词」，交给一个新会话。复核者依据需求与验收条件核对 diff、执行者报告的验证、剩余风险，并按授权做验证。最终是否验收通过由你判断。
-3. **Wiki 归档。** 在「设置 → 高级 → 归档」选择已有的 LLM-Wiki 目录。留空时，完成运行无需归档回执。配置后，从运行详情复制 Wiki 归档材料，由有权限的主控会话按目标 Wiki 的规则写入、核对页面，并按要求提交和推送。然后调用 `record_archive`，填写运行 `job_id`、相对当前 Wiki 根的页面路径（使用 `/`）和 Git Wiki 要求的完整提交 SHA。IssueRelay 核对路径和回执格式，远端推送结果由主控会话在目标仓库实际读回。回执绑定登记时的 Wiki 根。换根或页面消失后，需要在当前目录重新登记。领取交接会清除旧回执，释放交接后才可重新登记。通过验收并取得有效回执后，才能在面板「标记完成」。
+3. **Wiki 归档。** 在「设置 → 高级 → 归档」选择已有的 LLM-Wiki 目录。留空时，完成运行无需归档回执。配置后，从运行详情复制 Wiki 归档材料，由有权限的主控会话按目标 Wiki 的规则写入、核对页面，并按要求提交和推送。然后调用 `record_archive`，填写运行 `job_id`、相对当前 Wiki 根的页面路径（使用 `/`）和 Git Wiki 要求的完整提交 SHA。IssueRelay 核对路径和回执格式，远端推送结果由主控会话在目标仓库实际读回。回执绑定登记时的 Wiki 根。换根或页面消失后，需要在当前目录重新登记。领取交接会清除旧回执，释放交接后才可重新登记。通过验收并取得有效回执后，可在面板或支持确认的会话中「标记完成」。
 
 ## 常见误解
 

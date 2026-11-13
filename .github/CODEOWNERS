@@ -13,6 +13,7 @@
 /crates/core/src/prompt.rs         @sunkailun1992
 /crates/core/src/config.rs         @sunkailun1992
 /crates/core/src/engine.rs         @sunkailun1992
+/crates/core/src/engine/control_actions.rs @sunkailun1992
 /crates/core/src/engine/dispatch_review.rs @sunkailun1992
 /crates/core/src/engine/plan_closure.rs @sunkailun1992
 /crates/core/src/provider_sessions.rs @sunkailun1992
@@ -24,6 +25,7 @@
 /crates/core/src/cli_path.rs       @sunkailun1992
 /crates/core/src/linear/auth.rs    @sunkailun1992
 /crates/core/src/ipc/protocol.rs   @sunkailun1992
+/crates/core/src/ipc/client.rs     @sunkailun1992
 /crates/core/src/ipc/pipe_security.rs @sunkailun1992
 /crates/core/src/ipc/server.rs     @sunkailun1992
 /crates/core/src/text.rs           @sunkailun1992

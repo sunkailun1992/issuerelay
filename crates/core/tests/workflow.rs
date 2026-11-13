@@ -22,7 +22,9 @@ use issuerelay_core::{
     runner::{self, RunHooks, RunLimits, RunOutput, SpawnHook},
     store::Store,
     trigger::WaitReasonView,
-    workflow::{ContinuationStrategy, ExecutorSource, IssueContext},
+    workflow::{
+        ContinuationStrategy, ControlAction, ControlActionOutcome, ExecutorSource, IssueContext,
+    },
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -160,6 +162,33 @@ async fn records_verified_legacy_completion_locally_without_resuming_or_touching
     assert_eq!(h.runner.started(), ["DEMO-1"]);
     assert!(h.engine.retry_job(before.id).is_err());
     assert!(h.engine.record_local_completion(before.id).await.is_err());
+}
+
+#[tokio::test]
+async fn chat_records_local_completion_without_mutating_linear() {
+    let h = Harness::new(1, false);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.queue("DEMO-1", vec![Script::needs_info()]);
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let before = h.latest("1");
+    let preview = h
+        .engine
+        .prepare_control_action(ControlAction::RecordLocalCompletion { job_id: before.id })
+        .await
+        .unwrap();
+    assert_eq!(h.latest("1"), before);
+    let result = h
+        .engine
+        .commit_control_action(&preview.token)
+        .await
+        .unwrap();
+    assert_eq!(result.result, ControlActionOutcome::LocalCompletionRecorded);
+    let after = h.latest("1");
+    assert_eq!(after.state, JobState::LocalComplete);
+    assert_eq!(after.report, before.report);
+    assert!(h.linear.set_state_calls().is_empty());
 }
 
 #[tokio::test]
@@ -405,6 +434,45 @@ async fn explicit_cross_executor_continuation_gets_reviewed_history_in_the_same_
             .contains("Original decision: keep the demo output stable.")
     );
     assert_eq!(h.engine.handoff(child_id).unwrap().context, Some(confirmed));
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn chat_continuation_rejects_old_context_and_queues_only_the_confirmed_snapshot() {
+    let h = Harness::with_dispatch_review();
+    let (source, first) = interrupted_implementation(&h).await;
+    let action = ControlAction::Continue {
+        job_id: source.id,
+        executor: ExecutorKind::Codex,
+    };
+    let stale = h
+        .engine
+        .prepare_control_action(action.clone())
+        .await
+        .unwrap();
+    let snapshot = serde_json::to_value(&stale).unwrap();
+    assert!(snapshot["continuation"].get("token").is_none());
+    assert_eq!(snapshot["continuation"]["strategy"], "handoff");
+    h.engine
+        .set_issue_context("DEMO-1", first.revision, brief("new reviewed work"))
+        .await
+        .unwrap();
+    assert!(h.engine.commit_control_action(&stale.token).await.is_err());
+    assert_eq!(h.runner.started().len(), 1);
+    assert_eq!(h.latest("1").id, source.id);
+    let fresh = h.engine.prepare_control_action(action).await.unwrap();
+    let result = h.engine.commit_control_action(&fresh.token).await.unwrap();
+    assert_eq!(result.result, ControlActionOutcome::ContinuationQueued);
+    let continued = result.job_id.unwrap();
+    assert_ne!(continued, source.id);
+    assert!(h.engine.commit_control_action(&fresh.token).await.is_err());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.latest("1").id, continued);
+    assert_eq!(
+        *h.runner.kinds.lock().unwrap(),
+        [ExecutorKind::Claude, ExecutorKind::Codex]
+    );
     assert!(h.linear.set_state_calls().is_empty());
 }
 
@@ -943,6 +1011,59 @@ async fn linear_only_dispatch_and_manual_retry_each_require_approval() {
     assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1"]);
     assert_eq!(h.latest("1").id, failed.id);
     assert!(h.engine.handoff(failed.id).unwrap().context.is_none());
+}
+
+#[tokio::test]
+async fn chat_retry_and_dispatch_require_distinct_one_use_reviews() {
+    let h = Harness::with_dispatch_review();
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner
+        .queue("DEMO-1", vec![Script::exit_code(1), Script::success()]);
+    let dispatch = ControlAction::Dispatch {
+        issue_identifier: "DEMO-1".into(),
+    };
+    let first = h
+        .engine
+        .prepare_control_action(dispatch.clone())
+        .await
+        .unwrap();
+    assert!(
+        serde_json::to_value(&first).unwrap()["dispatch"]
+            .get("token")
+            .is_none()
+    );
+    h.engine.tick().await.unwrap();
+    assert!(h.runner.started().is_empty());
+    assert_eq!(
+        h.engine
+            .commit_control_action(&first.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::DispatchApproved
+    );
+    assert!(h.engine.commit_control_action(&first.token).await.is_err());
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let failed = h.latest("1");
+    assert_eq!(failed.state, JobState::Failed);
+    let retry = h
+        .engine
+        .prepare_control_action(ControlAction::Retry { job_id: failed.id })
+        .await
+        .unwrap();
+    let result = h.engine.commit_control_action(&retry.token).await.unwrap();
+    assert_eq!(result.result, ControlActionOutcome::RetryQueuedForReview);
+    assert_eq!(result.job_id, Some(failed.id));
+    assert!(h.engine.dispatch().await.unwrap().is_empty());
+    assert_eq!(h.runner.started(), ["DEMO-1"]);
+    let fresh = h.engine.prepare_control_action(dispatch).await.unwrap();
+    h.engine.commit_control_action(&fresh.token).await.unwrap();
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    assert_eq!(h.runner.started(), ["DEMO-1", "DEMO-1"]);
+    assert!(h.linear.set_state_calls().is_empty());
 }
 
 #[tokio::test]

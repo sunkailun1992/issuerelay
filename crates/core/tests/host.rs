@@ -28,13 +28,14 @@ use issuerelay_core::{
     host::{AuthMethod, Connector, Host, HostParts, LinearSetup, OpenUrl, StopMode},
     ipc::{
         client::{self, NotRunning},
-        server::AlreadyRunning,
+        server::{AlreadyRunning, DesktopDiagnostic, DesktopDiagnostics},
     },
     linear::{LinearApi, mcp::LinearError},
     model::JobState,
     paths::AppPaths,
     runner::{ExitKind, RunLimits, RunOutput, SpawnHook},
 };
+use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -368,6 +369,133 @@ async fn reconnecting_after_an_update_picks_up_the_fixed_interface() {
         assert_eq!(host.linear_setup(), connected);
         host.engine().poll_once().await.unwrap();
         stop_now(&host).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn local_ipc_reconnect_reuses_the_host_connection_without_exporting_details() {
+    bounded(async {
+        let linear = FakeLinear::new("user-1");
+        let gate = Arc::new(Semaphore::new(0));
+        let connector = FakeConnector::new(vec![
+            Stored::Nothing,
+            Stored::After(
+                gate.clone(),
+                Box::new(Stored::Works(linear, AuthMethod::OAuth)),
+            ),
+            Stored::InterfaceChanged,
+        ]);
+        let (host, _root) = host(connector.clone(), None).await;
+        let endpoint = host.paths().ipc_endpoint();
+        let first = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move { client::call(&endpoint, "linear.reconnect", json!({})).await }
+        });
+        eventually("the reconnect never started", || {
+            connector.stored_calls() >= 2
+        })
+        .await;
+        assert_eq!(
+            client::call(&endpoint, "linear.reconnect", json!({}))
+                .await
+                .unwrap(),
+            json!({"kind": "busy"})
+        );
+        gate.add_permits(1);
+        assert_eq!(
+            within_five_secs("reconnect did not finish", first)
+                .await
+                .unwrap()
+                .unwrap(),
+            json!({"kind": "connected", "method": "oauth"})
+        );
+        host.engine().poll_once().await.unwrap();
+        assert_eq!(
+            client::call(&endpoint, "linear.reconnect", json!({}))
+                .await
+                .unwrap(),
+            json!({"kind": "interface_changed"})
+        );
+        assert!(matches!(
+            host.linear_setup(),
+            LinearSetup::InterfaceChanged { .. }
+        ));
+        stop_now(&host).await;
+    })
+    .await;
+}
+
+struct FakeDesktopDiagnostics(Mutex<Vec<DesktopDiagnostic>>);
+
+#[async_trait::async_trait]
+impl DesktopDiagnostics for FakeDesktopDiagnostics {
+    async fn run(&self, diagnostic: DesktopDiagnostic) -> Result<Value> {
+        self.0.lock().unwrap().push(diagnostic);
+        match diagnostic {
+            DesktopDiagnostic::AutostartStatus => Ok(json!({"enabled": true})),
+            DesktopDiagnostic::CliPathStatus => Ok(json!({"kind": "off"})),
+            DesktopDiagnostic::UpdateStatus => Ok(json!({"kind": "unchecked"})),
+            DesktopDiagnostic::CheckUpdate => Err(anyhow!("the detail is not chat-safe")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_ipc_desktop_diagnostics_are_optional_and_exclude_callback_errors() {
+    bounded(async {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = AppPaths::under(root.path()).ipc_endpoint();
+        let headless = start(
+            root.path(),
+            FakeConnector::new(vec![Stored::Nothing]),
+            parts(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            client::call(&endpoint, "desktop.update_status", json!({}))
+                .await
+                .unwrap(),
+            json!({"kind": "unavailable"})
+        );
+        stop_now(&headless).await;
+
+        let provider = Arc::new(FakeDesktopDiagnostics(Mutex::new(Vec::new())));
+        let desktop = start(
+            root.path(),
+            FakeConnector::new(vec![Stored::Nothing]),
+            HostParts {
+                desktop_diagnostics: Some(provider.clone()),
+                ..parts(None)
+            },
+        )
+        .await
+        .unwrap();
+        for (method, expected) in [
+            ("desktop.autostart_status", json!({"enabled": true})),
+            ("desktop.cli_path_status", json!({"kind": "off"})),
+            ("desktop.update_status", json!({"kind": "unchecked"})),
+        ] {
+            assert_eq!(
+                client::call(&endpoint, method, json!({})).await.unwrap(),
+                expected
+            );
+        }
+        let err = client::call(&endpoint, "desktop.check_update", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{err:#}"), "desktop diagnostic failed");
+        assert_eq!(
+            *provider.0.lock().unwrap(),
+            [
+                DesktopDiagnostic::AutostartStatus,
+                DesktopDiagnostic::CliPathStatus,
+                DesktopDiagnostic::UpdateStatus,
+                DesktopDiagnostic::CheckUpdate,
+            ]
+        );
+        stop_now(&desktop).await;
     })
     .await;
 }

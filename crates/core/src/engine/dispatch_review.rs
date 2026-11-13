@@ -279,6 +279,8 @@ impl Engine {
             directory: input.destination.canonical_directory.clone(),
             model: input.destination.model.clone(),
             effort: input.destination.effort,
+            permission: input.destination.permission,
+            lean: input.destination.lean,
             wiki_root: input.destination.wiki_root.clone(),
         };
         review.preview = Some(OpenPreview {
@@ -314,8 +316,21 @@ impl Engine {
 
     /// Saves the reviewed context and approval together, then requests normal scheduling.
     pub async fn approve_dispatch(&self, identifier: &str, token: &str) -> Result<()> {
+        self.approve_dispatch_inner(identifier, token, None).await
+    }
+
+    pub(super) async fn approve_dispatch_inner(
+        &self,
+        identifier: &str,
+        token: &str,
+        reviewed_linear: Option<&Arc<dyn LinearApi>>,
+    ) -> Result<()> {
         let _cycle = self.inner.cycle.lock().await;
         let (issue, mode, cfg) = self.review_candidate(identifier).await?;
+        anyhow::ensure!(
+            reviewed_linear.is_none_or(|linear| Arc::ptr_eq(linear, &self.linear())),
+            "Linear connection changed; reopen the dispatch preview"
+        );
         {
             let store = self.store();
             let mut review = self
@@ -566,6 +581,7 @@ impl Engine {
             model: input.intent.destination.model.clone(),
             effort: input.intent.destination.effort,
             permission: input.intent.destination.permission,
+            lean: input.intent.destination.lean,
             claude_ultracode: input.intent.destination.claude_ultracode,
             context: input.review.context.clone(),
             wiki_root: input.intent.destination.wiki_root.clone(),
@@ -582,8 +598,21 @@ impl Engine {
 
     /// Creates or adopts an unstarted attempt without modifying the source run or Linear.
     pub async fn approve_continuation(&self, id: i64, token: &str) -> Result<i64> {
+        self.approve_continuation_inner(id, token, None).await
+    }
+
+    pub(super) async fn approve_continuation_inner(
+        &self,
+        id: i64,
+        token: &str,
+        reviewed_linear: Option<&Arc<dyn LinearApi>>,
+    ) -> Result<i64> {
         let _cycle = self.inner.cycle.lock().await;
         let (issue, cfg) = self.continuation_candidate(id).await?;
+        anyhow::ensure!(
+            reviewed_linear.is_none_or(|linear| Arc::ptr_eq(linear, &self.linear())),
+            "Linear connection changed; reopen the continuation preview"
+        );
         let job_id = {
             let store = self.store();
             let mut review = self

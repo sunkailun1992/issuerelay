@@ -23,6 +23,26 @@ use crate::text::{clean_text, strip_ansi};
 /// The name IssueRelay's control server is registered under.
 pub const CONTROL_SERVER_NAME: &str = "issuerelay";
 
+/// What the fixed read-only `mcp get` check established. Registration is not OAuth readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRegistration {
+    Registered,
+    NotRegistered,
+    NotInstalled,
+    Unknown,
+}
+
+impl From<Result<bool>> for McpRegistration {
+    fn from(result: Result<bool>) -> Self {
+        match result {
+            Ok(true) => Self::Registered,
+            Ok(false) => Self::NotRegistered,
+            Err(_) => Self::Unknown,
+        }
+    }
+}
+
 /// A setup step the user can start with one click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "executor", rename_all = "snake_case")]
@@ -39,6 +59,14 @@ pub enum SetupAction {
 
 fn owned(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
+}
+
+/// The exact name used by both executor login and named registration checks.
+fn linear_server_name(kind: ExecutorKind) -> &'static str {
+    match kind {
+        ExecutorKind::Claude => CLAUDE_LINEAR_NAME,
+        ExecutorKind::Codex => CODEX_LINEAR_NAME,
+    }
 }
 
 /// The arguments for `action`, after the executor's program: fixed literals, except that
@@ -62,8 +90,7 @@ pub fn arguments(action: SetupAction, cli: Option<&Path>) -> Result<Vec<String>>
         SetupAction::AddLinearMcp(Codex) => {
             owned(&["mcp", "add", CODEX_LINEAR_NAME, "--url", LINEAR_MCP_URL])
         }
-        SetupAction::LoginLinearMcp(Claude) => owned(&["mcp", "login", CLAUDE_LINEAR_NAME]),
-        SetupAction::LoginLinearMcp(Codex) => owned(&["mcp", "login", CODEX_LINEAR_NAME]),
+        SetupAction::LoginLinearMcp(kind) => owned(&["mcp", "login", linear_server_name(kind)]),
         SetupAction::RegisterControlServer(kind) => {
             let cli =
                 cli.ok_or_else(|| anyhow!("IssueRelay's command-line program was not found"))?;
@@ -185,7 +212,24 @@ pub async fn run(
 /// was ended by a signal, or that cannot run to completion, says nothing about the registration:
 /// it is an error.
 pub async fn control_server_registered(program: &Path, runner: &dyn CommandRunner) -> Result<bool> {
-    let args = ["mcp", "get", CONTROL_SERVER_NAME];
+    named_server_registered(program, CONTROL_SERVER_NAME, runner).await
+}
+
+/// Whether the executor has a server under the exact name used by its Linear login.
+pub async fn linear_server_named(
+    executor: ExecutorKind,
+    program: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<bool> {
+    named_server_registered(program, linear_server_name(executor), runner).await
+}
+
+async fn named_server_registered(
+    program: &Path,
+    name: &str,
+    runner: &dyn CommandRunner,
+) -> Result<bool> {
+    let args = ["mcp", "get", name];
     let command = format!("{} {}", program.display(), args.join(" "));
     let output = runner
         .run_limited(program, &args, COMMAND_LIMIT)
@@ -416,6 +460,40 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn named_linear_registration_uses_each_executors_fixed_login_name() {
+        for (executor, program, expected_name) in [
+            (ExecutorKind::Claude, "/fake/claude", "linear-server"),
+            (ExecutorKind::Codex, "/fake/codex", "linear"),
+        ] {
+            let runner = Recorder::new(0, "unused provider output", "");
+            let status = McpRegistration::from(
+                linear_server_named(executor, Path::new(program), &runner).await,
+            );
+            assert_eq!(serde_json::to_value(status).unwrap(), "registered");
+            let calls = runner.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].1, ["mcp", "get", expected_name]);
+            assert_eq!(calls[0].2, Duration::from_secs(60));
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_diagnostic_never_exports_provider_output() {
+        let program = Path::new("/fake/codex");
+        for (runner, expected) in [
+            (
+                Recorder::new(1, "unused output", "unused error"),
+                "not_registered",
+            ),
+            (Recorder::unrunnable("do not export this detail"), "unknown"),
+            (Recorder::signalled(), "unknown"),
+        ] {
+            let status = McpRegistration::from(control_server_registered(program, &runner).await);
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
     }
 
     /// What `run` reports when adding Linear's server fails, given the command's `reply`.
