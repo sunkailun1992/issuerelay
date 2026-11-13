@@ -1,6 +1,9 @@
 //! The MCP control server offers only the safe control tools, sends the engine what each tool
 //! means, and reports failures as tool errors that keep their cause.
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::anyhow;
 use issuerelay_cli::mcp::ControlServer;
@@ -14,6 +17,7 @@ use rmcp::{
     service::{RequestContext, RunningService},
 };
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 type Client = RunningService<RoleClient, ClientConfig>;
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
@@ -342,6 +346,129 @@ fn task_server() -> (ControlServer, Calls) {
         "workflow.commit_action" => Ok(json!({"result":"continuation_queued"})),
         _ => panic!("unexpected method {method}"),
     })
+}
+
+async fn send_wire_message(client: &mut BufReader<DuplexStream>, message: Value) {
+    client
+        .write_all(format!("{message}\n").as_bytes())
+        .await
+        .unwrap();
+}
+
+async fn receive_wire_message(client: &mut BufReader<DuplexStream>) -> Value {
+    let mut line = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(3), client.read_line(&mut line))
+        .await
+        .expect("MCP did not send the expected message")
+        .unwrap();
+    assert!(read > 0, "MCP transport closed");
+    serde_json::from_str(&line).unwrap()
+}
+
+#[tokio::test]
+async fn client_can_fall_back_from_stateless_discovery_to_native_confirmation() {
+    let (server, calls) = task_server();
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let server =
+        tokio::spawn(async move { server.serve(server_io).await.unwrap().waiting().await });
+    let mut client = BufReader::new(client_io);
+    // Claude Code 2.1.319 probes the stateless lifecycle before initialize.
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name":"claude-code","version":"2.1.319"},
+        "io.modelcontextprotocol/clientCapabilities": {"elicitation":{"form":{},"url":{}}},
+    });
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":"discover","method":"server/discover","params":{"_meta":meta}}),
+    )
+    .await;
+    let discovery = receive_wire_message(&mut client).await;
+    assert_eq!(discovery["id"], "discover");
+    assert_eq!(discovery["error"]["code"], -32022, "{discovery}");
+    assert_eq!(discovery["error"]["data"]["requested"], "2026-07-28");
+    assert_eq!(
+        discovery["error"]["data"]["supported"],
+        json!(["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"])
+    );
+
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"confirm_task_action","arguments":task_args(),"_meta":meta
+        }}),
+    )
+    .await;
+    let refused = receive_wire_message(&mut client).await;
+    assert_eq!(refused["id"], 1);
+    assert_eq!(refused["error"]["code"], -32022, "{refused}");
+    assert!(calls.lock().unwrap().is_empty());
+
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25",
+            "clientInfo":{"name":"claude-code","version":"2.1.319"},
+            "capabilities":{"elicitation":{"form":{},"url":{}}},
+        }}),
+    )
+    .await;
+    let initialized = receive_wire_message(&mut client).await;
+    assert_eq!(initialized["id"], 2);
+    assert_eq!(
+        initialized["result"]["protocolVersion"], "2025-11-25",
+        "{initialized}"
+    );
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
+
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"confirm_task_action","arguments":task_args()
+        }}),
+    )
+    .await;
+    let form = receive_wire_message(&mut client).await;
+    assert_eq!(form["method"], "elicitation/create", "{form}");
+    assert_eq!(form["params"]["mode"], "form");
+    assert!(
+        form["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("DEMO-1"),
+        "{form}"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [("workflow.prepare_action".to_owned(), task_args())]
+    );
+    send_wire_message(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":form["id"],"result":{"action":"accept","content":{"confirm":true}}}),
+    )
+    .await;
+    let result = receive_wire_message(&mut client).await;
+    assert_eq!(result["id"], 3);
+    assert_eq!(
+        result["result"]["content"][0]["text"],
+        r#"{"result":"continuation_queued"}"#
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            ("workflow.prepare_action".to_owned(), task_args()),
+            (
+                "workflow.commit_action".to_owned(),
+                json!({"token":"server-side-token"})
+            ),
+        ]
+    );
+    drop(client);
+    server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
