@@ -234,7 +234,7 @@
     "open_issue_in_linear": "Open {{identifier}} in Linear",
     "poll_now": "Check now",
     "confirm": "Confirm",
-    "mark_done_confirm": "Set {{identifier}} to {{done}}? This is the only change IssueRelay makes in Linear.",
+    "mark_done_confirm": "Set {{identifier}} to {{done}}? IssueRelay changes Linear only this way: it sets an issue to done when you confirm.",
     "failed": {
       "pause": "Could not pause monitoring",
       "resume": "Could not resume monitoring",
@@ -738,7 +738,7 @@
     },
     "trigger_note": "Monitoring must not be paused either. The Issues page says why an issue was not picked up.",
     "flow_title": "How an issue moves",
-    "flow_text": "You put an issue in {{todo}}. When it starts, the AI sets {{in_progress}}, and {{in_testing}} once its work is on the test branch. You look at the result and mark the issue done in the panel, which sets {{done}} in Linear: the only change IssueRelay makes in Linear.",
+    "flow_text": "You put an issue in {{todo}}. When it starts, the AI sets {{in_progress}}, and {{in_testing}} once its work is on the test branch. You look at the result and mark the issue done in the panel, which sets {{done}} in Linear. That, and completing a plan the same way, are the only changes IssueRelay makes in Linear.",
     "flow_steps": "The statuses of an issue in Linear",
     "flow_mark_done": "Marked done in the panel",
     "states_title": "What the statuses in the panel mean",
@@ -827,7 +827,7 @@
     },
     "description": {
       "language": "The panel, the tray menu and the notifications use it. You can change it later in Settings.",
-      "linear": "IssueRelay reads your issues through your Linear account. Marking an issue done in the panel is the only change it makes there. You authorize it in your browser.",
+      "linear": "IssueRelay reads your issues through your Linear account. It changes Linear only when you mark an issue done or complete a plan in the panel. You authorize it in your browser.",
       "workspace": "IssueRelay needs the {{label}} label, and the statuses it moves an issue through, in your Linear workspace. It does not create them for you.",
       "executors": "IssueRelay hands each issue to Claude Code or Codex. At least one of them has to be installed, logged in and connected to Linear.",
       "binding": "Tell IssueRelay which folder on this computer belongs to a Linear project. Bindings can be added, edited and removed later on the Bindings page.",

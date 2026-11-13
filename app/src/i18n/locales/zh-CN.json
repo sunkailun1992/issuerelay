@@ -234,7 +234,7 @@
     "open_issue_in_linear": "在 Linear 中打开 {{identifier}}",
     "poll_now": "立即检查",
     "confirm": "确认",
-    "mark_done_confirm": "把 {{identifier}} 设为 {{done}}？这是 IssueRelay 唯一会改动 Linear 的操作。",
+    "mark_done_confirm": "把 {{identifier}} 设为 {{done}}？IssueRelay 只在你确认时把需求设为完成，不会以别的方式改动 Linear。",
     "failed": {
       "pause": "无法暂停监控",
       "resume": "无法恢复监控",
@@ -738,7 +738,7 @@
     },
     "trigger_note": "监控也不能处于暂停。「需求」页会写明某条需求为什么没被接走。",
     "flow_title": "需求怎样流转",
-    "flow_text": "你把需求放进 {{todo}}。开始处理时 AI 把状态改为 {{in_progress}}，工作推到测试分支后改为 {{in_testing}}。你看过结果，在面板上标记完成，才会在 Linear 里改为 {{done}}——这是 IssueRelay 在 Linear 里做的唯一改动。",
+    "flow_text": "你把需求放进 {{todo}}。开始处理时 AI 把状态改为 {{in_progress}}，工作推到测试分支后改为 {{in_testing}}。你看过结果，在面板上标记完成，才会在 Linear 里改为 {{done}}。这一步和完成方案，是 IssueRelay 在 Linear 里仅有的改动。",
     "flow_steps": "需求在 Linear 里的状态",
     "flow_mark_done": "在面板上标记完成",
     "states_title": "面板上各个状态的含义",
@@ -827,7 +827,7 @@
     },
     "description": {
       "language": "面板、托盘菜单和通知都会使用它，之后可以在「设置」里修改。",
-      "linear": "IssueRelay 通过你的 Linear 账号读取需求；在面板里标记完成，是它在 Linear 里做的唯一改动。授权在浏览器里完成。",
+      "linear": "IssueRelay 通过你的 Linear 账号读取需求；在面板里标记完成或完成方案，是它在 Linear 里仅有的改动。授权在浏览器里完成。",
       "workspace": "IssueRelay 需要你的 Linear 工作区里有 {{label}} 标签，以及它流转需求时用到的状态。程序不会替你创建。",
       "executors": "IssueRelay 把每条需求交给 Claude Code 或 Codex 去完成。至少要有一个已安装、已登录，并且连上了 Linear。",
       "binding": "告诉 IssueRelay，Linear 的哪个项目对应本机的哪个目录。之后可以在「项目绑定」页添加、修改和移除绑定。",

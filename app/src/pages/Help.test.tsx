@@ -83,7 +83,7 @@ test("with the settings read there is no note about default names", async () => 
   expect(screen.queryByText(/Showing the default names/)).not.toBeInTheDocument();
 });
 
-test("the way an issue moves names the statuses of the settings and the one change IssueRelay makes in Linear", async () => {
+test("the way an issue moves names the statuses of the settings and the only changes IssueRelay makes in Linear", async () => {
   const backend = await backendNaming({ todo: "Backlog", in_progress: "Doing", in_testing: "Review", done: "Shipped" });
   await renderWithProviders(<Help />, { backend });
   const flow = await screen.findByRole("region", { name: "How an issue moves" });
@@ -96,7 +96,9 @@ test("the way an issue moves names the statuses of the settings and the one chan
     "Marked done in the panel",
     "Shipped",
   ]);
-  expect(within(flow).getByText(/the only change IssueRelay makes in Linear/)).toBeInTheDocument();
+  expect(
+    within(flow).getByText(/That, and completing a plan the same way, are the only changes IssueRelay makes in Linear/),
+  ).toBeInTheDocument();
 });
 
 test("the default names are the ones the flow shows without settings", async () => {

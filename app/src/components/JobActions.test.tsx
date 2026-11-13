@@ -136,9 +136,10 @@ test("cancelling the question marks nothing done", async () => {
   const markDone = vi.spyOn(backend, "markDone");
   await renderWithProviders(<JobActions job={job} />, { backend });
   await userEvent.click(screen.getByRole("button", { name: "Mark done" }));
+  expect(await screen.findByText(/IssueRelay changes Linear only this way/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(markDone).not.toHaveBeenCalled();
-  expect(screen.queryByText(/only change IssueRelay makes in Linear/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/IssueRelay changes Linear only this way/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
 });
 

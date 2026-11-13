@@ -234,7 +234,7 @@
     "open_issue_in_linear": "{{identifier}} を Linear で開く",
     "poll_now": "今すぐチェック",
     "confirm": "確認",
-    "mark_done_confirm": "{{identifier}} を {{done}} にしますか？これは IssueRelay が Linear に加える唯一の変更です。",
+    "mark_done_confirm": "{{identifier}} を {{done}} にしますか？IssueRelay が Linear を変更するのは、確認を受けて課題を完了にするときだけです。",
     "failed": {
       "pause": "監視を一時停止できませんでした",
       "resume": "監視を再開できませんでした",
@@ -738,7 +738,7 @@
     },
     "trigger_note": "監視が一時停止中でないことも必要です。引き受けられなかった理由は「課題」ページに表示されます。",
     "flow_title": "課題の進み方",
-    "flow_text": "課題を {{todo}} にします。処理が始まると AI がステータスを {{in_progress}} にし、作業をテストブランチに反映したら {{in_testing}} にします。結果を確認してパネルで完了にすると、Linear のステータスが {{done}} になります。これが IssueRelay が Linear に対して行う唯一の変更です。",
+    "flow_text": "課題を {{todo}} にします。処理が始まると AI がステータスを {{in_progress}} にし、作業をテストブランチに反映したら {{in_testing}} にします。結果を確認してパネルで完了にすると、Linear のステータスが {{done}} になります。これとプランの完了が、IssueRelay が Linear に対して行う変更のすべてです。",
     "flow_steps": "Linear での課題のステータス",
     "flow_mark_done": "パネルで完了にする",
     "states_title": "パネルに表示されるステータスの意味",
@@ -827,7 +827,7 @@
     },
     "description": {
       "language": "パネル、トレイメニュー、通知で使われます。あとから「設定」で変更できます。",
-      "linear": "IssueRelay は Linear のアカウントを通じて課題を読み取ります。パネルで完了にすることが、Linear に対して行う唯一の変更です。認可はブラウザーで行います。",
+      "linear": "IssueRelay は Linear のアカウントを通じて課題を読み取ります。Linear に対して行う変更は、パネルで完了にすることとプランを完了することだけです。認可はブラウザーで行います。",
       "workspace": "IssueRelay には、Linear のワークスペースに {{label}} ラベルと、課題を進めるときに使うステータスが必要です。これらは自動では作成されません。",
       "executors": "IssueRelay は課題を Claude Code か Codex に渡して処理します。どちらか一方は、インストールとログインを済ませ、Linear に接続されている必要があります。",
       "binding": "Linear のどのプロジェクトが、このコンピューターのどのフォルダーに対応するかを IssueRelay に伝えます。紐付けは、あとから「プロジェクト紐付け」ページで追加・編集・削除できます。",
