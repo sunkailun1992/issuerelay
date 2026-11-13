@@ -9,7 +9,11 @@ use issuerelay_core::{
 use rmcp::{
     RoleServer, ServiceExt,
     handler::server::wrapper::Parameters,
-    service::{ElicitationError, ElicitationMode, RequestContext},
+    model::{
+        BooleanSchema, ElicitRequestParams, ElicitationAction, ElicitationSchema,
+        PrimitiveSchemaDefinition,
+    },
+    service::{ElicitationMode, RequestContext},
     transport::stdio,
 };
 use serde::Deserialize;
@@ -230,14 +234,11 @@ impl TaskAction {
     }
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActionApproval {
-    /// Select true only if you want IssueRelay to perform the action shown above.
     confirm: bool,
 }
-
-rmcp::elicit_safe!(ActionApproval);
 
 const TASK_ACTIONS: [&str; 10] = [
     "dispatch",
@@ -269,31 +270,51 @@ async fn request_approval(
     message: String,
     timeout: Duration,
 ) -> Result<ApprovalDecision, String> {
-    let form = context
-        .peer
-        .elicit_with_timeout::<ActionApproval>(message, Some(timeout));
+    if !can_elicit(context) {
+        return Ok(ApprovalDecision::NotApproved("needs_desktop_confirmation"));
+    }
+    // The spec's flat form schema is narrower than general JSON Schema. In particular,
+    // Codex rejects root title and additionalProperties emitted by the derive helper.
+    let schema = ElicitationSchema::builder()
+        .required_property(
+            "confirm",
+            PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
+        )
+        .build()
+        .map_err(|_| "error: could not build the interactive confirmation form")?;
+    let form = context.peer.create_elicitation_with_timeout(
+        ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message,
+            requested_schema: schema,
+        },
+        Some(timeout),
+    );
     let result = tokio::select! {
         biased;
         _ = context.ct.cancelled() => return Ok(ApprovalDecision::NotApproved("cancelled")),
         result = form => result,
     };
-    match result {
-        Ok(Some(ActionApproval { confirm: true })) if !context.ct.is_cancelled() => {
-            Ok(ApprovalDecision::Approved)
+    let no_approval =
+        "error: no usable interactive approval; open the desktop panel to review this action";
+    let result = result.map_err(|_| no_approval)?;
+    match result.action {
+        ElicitationAction::Decline => Ok(ApprovalDecision::NotApproved("declined")),
+        ElicitationAction::Cancel => Ok(ApprovalDecision::NotApproved("cancelled")),
+        ElicitationAction::Accept => {
+            let response = result
+                .content
+                .and_then(|content| serde_json::from_value::<ActionApproval>(content).ok())
+                .ok_or(no_approval)?;
+            if context.ct.is_cancelled() {
+                Ok(ApprovalDecision::NotApproved("cancelled"))
+            } else if response.confirm {
+                Ok(ApprovalDecision::Approved)
+            } else {
+                Ok(ApprovalDecision::NotApproved("declined"))
+            }
         }
-        Ok(Some(ActionApproval { confirm: false })) | Err(ElicitationError::UserDeclined) => {
-            Ok(ApprovalDecision::NotApproved("declined"))
-        }
-        Ok(Some(_)) | Err(ElicitationError::UserCancelled) => {
-            Ok(ApprovalDecision::NotApproved("cancelled"))
-        }
-        Err(ElicitationError::CapabilityNotSupported) => {
-            Ok(ApprovalDecision::NotApproved("needs_desktop_confirmation"))
-        }
-        Ok(None) | Err(_) => Err(
-            "error: no usable interactive approval; open the desktop panel to review this action"
-                .into(),
-        ),
+        _ => Err(no_approval.into()),
     }
 }
 

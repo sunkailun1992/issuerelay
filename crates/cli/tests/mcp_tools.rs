@@ -510,8 +510,16 @@ async fn reconnect_requires_native_confirmation_and_never_accepts_credentials() 
         };
         assert!(message.contains("using its existing authorization"));
         let schema = serde_json::to_value(requested_schema).unwrap();
-        assert_eq!(schema["required"], json!(["confirm"]));
-        assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+        // Codex's native form parser rejects general JSON Schema fields such as root title
+        // and additionalProperties. Keep the exact flat MCP schema on the wire.
+        assert_eq!(
+            schema,
+            json!({
+                "type": "object",
+                "properties": {"confirm": {"type": "boolean"}},
+                "required": ["confirm"],
+            })
+        );
     }
     assert_eq!(
         *calls.lock().unwrap(),
