@@ -3477,6 +3477,111 @@ async fn chat_done_rechecks_the_exact_linear_issue_and_commits_once() {
 }
 
 #[tokio::test]
+async fn typed_confirmation_is_opt_in_bound_to_chat_and_single_use() {
+    const CHAT: &str = "01a10000-0000-7000-8000-000000000001";
+    const OTHER_CHAT: &str = "01a10000-0000-7000-8000-000000000002";
+    const TURN: &str = "01a10000-0000-7000-8000-000000000003";
+    let off = Harness::new(2, false);
+    assert!(off.engine.arm_chat_confirmation("unused", CHAT).is_err());
+
+    let mut cfg = Config::default();
+    cfg.settings.codex_chat_confirmation = true;
+    let h = Harness::with_config(cfg, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let action = ControlAction::MarkDone {
+        job_id: h.latest("1").id,
+    };
+    let first = h
+        .engine
+        .prepare_control_action(action.clone())
+        .await
+        .unwrap();
+    let first_code = h.engine.arm_chat_confirmation(&first.token, CHAT).unwrap();
+    let preview = h.engine.prepare_control_action(action).await.unwrap();
+    let code = h
+        .engine
+        .arm_chat_confirmation(&preview.token, CHAT)
+        .unwrap();
+    assert_ne!(code.code, preview.token);
+    assert!(
+        h.engine
+            .confirm_chat_action(CHAT, TURN, &first_code.code)
+            .await
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .commit_control_action(&preview.token)
+            .await
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .confirm_chat_action(OTHER_CHAT, TURN, &code.code)
+            .await
+            .is_err()
+    );
+    assert!(h.linear.set_state_calls().is_empty());
+    assert_eq!(
+        h.engine
+            .confirm_chat_action(CHAT, TURN, &code.code)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::Done
+    );
+    assert!(
+        h.engine
+            .confirm_chat_action(CHAT, TURN, &code.code)
+            .await
+            .is_err()
+    );
+    assert_eq!(h.linear.set_state_calls().len(), 1);
+}
+
+#[tokio::test]
+async fn typed_confirmation_rechecks_the_reviewed_issue_before_writing() {
+    const CHAT: &str = "01a10000-0000-7000-8000-000000000001";
+    const TURN: &str = "01a10000-0000-7000-8000-000000000003";
+    let mut cfg = Config::default();
+    cfg.settings.codex_chat_confirmation = true;
+    let h = Harness::with_config(cfg, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let preview = h
+        .engine
+        .prepare_control_action(ControlAction::MarkDone {
+            job_id: h.latest("1").id,
+        })
+        .await
+        .unwrap();
+    let code = h
+        .engine
+        .arm_chat_confirmation(&preview.token, CHAT)
+        .unwrap();
+    h.linear
+        .update("1", |issue| issue.title = "Changed issue".into());
+    assert!(
+        h.engine
+            .confirm_chat_action(CHAT, TURN, &code.code)
+            .await
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .confirm_chat_action(CHAT, TURN, &code.code)
+            .await
+            .is_err()
+    );
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
 async fn chat_stop_targets_only_the_reviewed_running_attempt() {
     let h = Harness::new(2, true);
     h.bind("proj-1", "a");

@@ -27,6 +27,7 @@ fn timeout_for(method: &str) -> Duration {
             | "setup.linear_named"
             | "workflow.prepare_action"
             | "workflow.commit_action"
+            | "workflow.confirm_chat_action"
             | "linear.reconnect"
             | "desktop.check_update"
     ) {

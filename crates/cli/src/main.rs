@@ -1,5 +1,7 @@
 //! The `issuerelay` command: sends each subcommand to the running engine host over local IPC,
 //! or serves the MCP control tools with `issuerelay mcp`.
+mod chat_confirmation;
+
 use std::{
     future::Future,
     io::{self, IsTerminal, Write},
@@ -65,6 +67,8 @@ enum Command {
     Start,
     /// Run the MCP control server on stdio (for Claude Code / Codex).
     Mcp,
+    /// Handle a typed confirmation from a Codex UserPromptSubmit hook on stdin.
+    ConfirmCodexInput,
 }
 
 #[derive(Subcommand)]
@@ -204,7 +208,9 @@ fn request(command: &Command) -> Result<(&'static str, Value)> {
             };
             ("bindings.add", json!({"binding": binding}))
         }
-        Command::Mcp | Command::Start => unreachable!("handled before sending a request"),
+        Command::Mcp | Command::Start | Command::ConfirmCodexInput => {
+            unreachable!("handled before sending a request")
+        }
     })
 }
 
@@ -344,6 +350,17 @@ fn launch_app() -> Result<()> {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::ConfirmCodexInput) {
+        if let Some(output) =
+            chat_confirmation::handle(io::stdin().lock(), |method, params| async {
+                client::call(&AppPaths::system()?.ipc_endpoint(), method, params).await
+            })
+            .await?
+        {
+            write_line(&mut io::stdout().lock(), &output.to_string())?;
+        }
+        return Ok(());
+    }
     let endpoint = AppPaths::system()?.ipc_endpoint();
     // The MCP server never starts the tray app: an AI must not start a program with full access
     // by itself; a stopped app is an error the AI passes on to the user.
@@ -392,6 +409,17 @@ mod tests {
     fn parse(args: &[&str]) -> Cli {
         let argv = std::iter::once("issuerelay").chain(args.iter().copied());
         Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?} should parse: {e}"))
+    }
+
+    #[test]
+    fn codex_confirmation_hook_takes_no_action_arguments() {
+        assert!(matches!(
+            parse(&["confirm-codex-input"]).command,
+            Command::ConfirmCodexInput
+        ));
+        assert!(
+            Cli::try_parse_from(["issuerelay", "confirm-codex-input", "confirm", "extra"]).is_err()
+        );
     }
 
     fn bind_add(dir: &Path) -> Command {

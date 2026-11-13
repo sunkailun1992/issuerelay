@@ -168,6 +168,7 @@ async fn exposes_only_safe_control_tools_and_reports_engine_down() {
             "list_projects",
             "pause",
             "poll_now",
+            "prepare_chat_confirmation",
             "preview_task_action",
             "reconnect_linear",
             "record_archive",
@@ -328,7 +329,14 @@ fn task_args() -> Value {
 
 fn task_server() -> (ControlServer, Calls) {
     recording_server(|method| match method {
-        "workflow.prepare_action" => Ok(json!({
+        "workflow.prepare_action" => Ok(task_preview()),
+        "workflow.commit_action" => Ok(json!({"result":"continuation_queued"})),
+        _ => panic!("unexpected method {method}"),
+    })
+}
+
+fn task_preview() -> Value {
+    json!({
             "token":"server-side-token",
             "action":task_args()["action"],
             "issue_identifier":"DEMO-1",
@@ -346,9 +354,6 @@ fn task_server() -> (ControlServer, Calls) {
                 "context":{"revision":3,"request":"Run the fixture","conversation_history":"private conversation history"},
                 "evidence":"private continuation evidence",
             }
-        })),
-        "workflow.commit_action" => Ok(json!({"result":"continuation_queued"})),
-        _ => panic!("unexpected method {method}"),
     })
 }
 
@@ -496,6 +501,70 @@ async fn preview_never_returns_tokens_and_noninteractive_client_cannot_commit() 
         [("workflow.prepare_action".to_owned(), task_args())]
     );
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_confirmation_uses_codex_metadata_and_the_reviewed_preview() {
+    const CHAT: &str = "01a10000-0000-7000-8000-000000000001";
+    const CODE: &str = "11111111111111111111111111111111";
+    let (server, calls) = recording_server(|method| match method {
+        "workflow.prepare_action" => Ok(task_preview()),
+        "workflow.arm_chat_confirmation" => Ok(json!({
+            "code": CODE, "expires_in_seconds": 179,
+        })),
+        _ => panic!("unexpected {method}"),
+    });
+    let client = connect_named(server, "codex-mcp-client").await;
+    let preview: Value = serde_json::from_str(&text_of(
+        &call(&client, "preview_task_action", Some(task_args())).await,
+    ))
+    .unwrap();
+    let mut args = task_args();
+    args["expected_preview"] = json!("wrong");
+    assert!(
+        call(&client, "prepare_chat_confirmation", Some(args.clone()))
+            .await
+            .is_error
+            .unwrap()
+    );
+    let mut req = CallToolRequestParams::new("prepare_chat_confirmation")
+        .with_arguments(args.as_object().unwrap().clone());
+    req.meta = Some(
+        json!({"sessionId":CHAT,"threadId":CHAT})
+            .as_object()
+            .unwrap()
+            .clone()
+            .into(),
+    );
+    assert!(
+        client
+            .call_tool(req.clone())
+            .await
+            .unwrap()
+            .is_error
+            .unwrap()
+    );
+    args["expected_preview"] = preview["preview_fingerprint"].clone();
+    req.arguments = args.as_object().cloned();
+    let reply = client.call_tool(req).await.unwrap();
+    assert_ne!(reply.is_error, Some(true));
+    let reply: Value = serde_json::from_str(&text_of(&reply)).unwrap();
+    assert_eq!(reply["code"], CODE);
+    assert_eq!(reply["confirmation_text"], format!("确认 {CODE}"));
+    assert_eq!(reply["preview_fingerprint"], preview["preview_fingerprint"]);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "workflow.arm_chat_confirmation")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls.lock().unwrap().last().unwrap().1,
+        json!({"token":"server-side-token","session_id":CHAT})
+    );
 }
 
 #[tokio::test]

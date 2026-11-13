@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use super::*;
 use crate::config::{PermissionProfile, binding_id_for, bindings_overlap};
+use crate::executor::outcome::is_session_id;
 use crate::model::ChildIssue;
 use crate::workflow::{
     ArchiveReceipt, ControlAction, ControlActionOutcome, ControlActionPreview, ControlActionResult,
@@ -23,6 +24,13 @@ struct PendingAction {
     issue_identifier: String,
     prepared_at: Instant,
     check: ActionCheck,
+    chat_session: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ChatConfirmation {
+    pub code: String,
+    pub expires_in_seconds: u64,
 }
 
 enum ActionCheck {
@@ -235,6 +243,7 @@ impl Engine {
                 issue_identifier: preview.issue_identifier.clone(),
                 prepared_at: Instant::now(),
                 check,
+                chat_session: None,
             },
         );
         preview.token = token;
@@ -497,25 +506,125 @@ impl Engine {
         Ok(())
     }
 
+    fn require_chat_confirmation_enabled(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.settings().codex_chat_confirmation,
+            "Codex chat confirmation is disabled in IssueRelay settings"
+        );
+        Ok(())
+    }
+
+    /// Replaces a reviewed preview token with a one-time code for this Codex conversation.
+    pub fn arm_chat_confirmation(&self, token: &str, session_id: &str) -> Result<ChatConfirmation> {
+        self.require_chat_confirmation_enabled()?;
+        anyhow::ensure!(is_session_id(session_id), "invalid Codex session ID");
+        let session_id = session_id.to_ascii_lowercase();
+        let code: String = self.store().workflow_connection().query_row(
+            "SELECT lower(hex(randomblob(16)))",
+            [],
+            |row| row.get(0),
+        )?;
+        let mut actions = self
+            .inner
+            .control_actions
+            .lock()
+            .expect("control action lock");
+        let pending = actions
+            .0
+            .get(token)
+            .context("action preview expired or was already used")?;
+        anyhow::ensure!(
+            pending.chat_session.is_none()
+                && !matches!(
+                    pending.action,
+                    ControlAction::SaveBinding { .. }
+                        | ControlAction::RemoveBinding { .. }
+                        | ControlAction::SetSettings { .. }
+                ),
+            "this action requires the native confirmation form"
+        );
+        let expires_in_seconds = PREVIEW_TTL
+            .saturating_sub(pending.prepared_at.elapsed())
+            .as_secs();
+        anyhow::ensure!(expires_in_seconds > 0, "action preview expired");
+        anyhow::ensure!(
+            !actions.0.contains_key(&code),
+            "could not generate a new confirmation code"
+        );
+        let mut pending = actions
+            .0
+            .remove(token)
+            .expect("preview under the same lock");
+        actions
+            .0
+            .retain(|_, entry| entry.chat_session.as_deref() != Some(&session_id));
+        pending.chat_session = Some(session_id);
+        actions.0.insert(code.clone(), pending);
+        Ok(ChatConfirmation {
+            code,
+            expires_in_seconds,
+        })
+    }
+
+    /// Receives the exact reply via the opted-in local Codex input hook.
+    pub async fn confirm_chat_action(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        code: &str,
+    ) -> Result<ControlActionResult> {
+        self.require_chat_confirmation_enabled()?;
+        anyhow::ensure!(
+            is_session_id(session_id) && is_session_id(turn_id),
+            "invalid Codex session or turn ID"
+        );
+        let session_id = session_id.to_ascii_lowercase();
+        let pending = self.take_control_action(code, Some(&session_id))?;
+        self.apply_control_action(pending).await
+    }
+
     /// Consumes the selected preview after operator approval. A stale or failed attempt also
     /// consumes it, so callers must read back the current state before preparing a new action.
     pub async fn commit_control_action(&self, token: &str) -> Result<ControlActionResult> {
+        let pending = self.take_control_action(token, None)?;
+        self.apply_control_action(pending).await
+    }
+
+    fn take_control_action(
+        &self,
+        token: &str,
+        chat_session: Option<&str>,
+    ) -> Result<PendingAction> {
         anyhow::ensure!(
             token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "invalid action preview token"
         );
-        let pending = self
+        let mut actions = self
             .inner
             .control_actions
             .lock()
-            .expect("control action lock")
+            .expect("control action lock");
+        let missing =
+            "action preview expired, was already used, or belongs to another confirmation channel";
+        anyhow::ensure!(
+            actions
+                .0
+                .get(token)
+                .is_some_and(|entry| entry.chat_session.as_deref() == chat_session),
+            missing
+        );
+        let pending = actions
             .0
             .remove(token)
-            .context("action preview expired or was already used")?;
+            .expect("preview under the same lock");
         anyhow::ensure!(
             pending.prepared_at.elapsed() < PREVIEW_TTL,
             "action preview expired"
         );
+        Ok(pending)
+    }
+
+    async fn apply_control_action(&self, pending: PendingAction) -> Result<ControlActionResult> {
         let (job_id, result) = match (&pending.action, pending.check) {
             (
                 ControlAction::Dispatch { issue_identifier },

@@ -110,12 +110,13 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 | `get_control_capabilities` | 查看支持的动作与客户端是否声明了确认表单 |
 | `test_confirmation_form` | 打开无副作用的测试表单，确认、拒绝和取消都不会修改数据或联系宿主 |
 | `preview_task_action` / `confirm_task_action` | 传类型固定的 `action`，预览后在客户端原生表单确认。确认时可传 `expected_preview` 校验预览指纹 |
+| `prepare_chat_confirmation` | 本机 Codex 聊天确认已启用时，传同一 `action` 和已展示预览的指纹 `expected_preview`，取得一次性确认码与时限 |
 
 用 Linear 需求编号调用 `get_run`、`get_issue_context` 或 `set_issue_context` 时，IssueRelay 会通过当前已连接的 Linear 解析需求的内部身份。不同工作区的同名编号按各自的需求处理。已知本地运行 ID 时，`get_run` 只传 `id` 即可完全在本机读取。
 
 首次登记用 `expected_revision: 0`。修改前用 `get_issue_context` 取当前 `revision`，再把它传给 `expected_revision`。修订号冲突时，先重读并核对修改。`request` 写目标和脱敏摘要。`conversation_history` 写本次任务相关的完整会话内容，保留有关的命令、报错原文、版本、已作决定和未决事项。旧任务上下文缺少这段文字时仍可查看，重新派发或续作前须由主控补齐并重新预览确认。`scope` 写允许的范围。`acceptance` 和 `source_refs` 分别记录验收条件和来源引用。`preferred_executor` 只在用户明确选择时设置，入口由 MCP 客户端识别。草稿不随宿主重启保留，添加标签只让需求成为候选。
 
-派发、续作、记录本地完成、标记完成、完成方案、重新运行和停止可先调用 `preview_task_action`。随后调用 `confirm_task_action`，由客户端原生表单展示本次操作并请用户确认。表单不可用时可以在桌面完成。可用工具和系统授权交接见[聊天控制覆盖表](chat-controls.md)。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+派发、续作、记录本地完成、标记完成、完成方案、重试和停止先调用 `preview_task_action`。随后通过 `confirm_task_action` 的原生表单确认，或者使用已启用的[本机 Codex 聊天确认](#本机-codex-聊天确认)。原生表单不可用时也可以在桌面面板完成。可用工具和系统授权交接见[聊天控制覆盖表](chat-controls.md)。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
 
 ### 在会话中执行操作
 
@@ -128,7 +129,24 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 - `list_labels` 和桌面绑定页读取工作区标签和可见项目关联团队的标签，并合并同名标签。
 - `set_settings` 用 `changes`，可修改 `poll_interval_secs`、`max_concurrent`、`run_timeout_mins`、`stall_timeout_mins`、`language`。
 
-会话确认依赖 MCP 客户端的原生表单。精简后台执行器仍按目标仓库的规则执行。用户可以在已注册 IssueRelay MCP 的主控会话里处理调度和验收。任务上下文与回执由宿主保存，本机的会话材料和日志不放进 Git。
+精简后台执行器仍按目标仓库的规则执行。用户可以在已注册 IssueRelay MCP 的主控会话里处理调度和验收。任务上下文与回执由宿主保存，本机的会话材料和日志不放进 Git。
+
+### 本机 Codex 聊天确认
+
+支持 `UserPromptSubmit` 提交钩子的本机 Codex 可以在聊天中直接确认任务操作，包括「完全访问」模式。此入口默认关闭。先注册 IssueRelay MCP，再按下面的步骤启用。 [Codex 提交钩子](https://learn.chatgpt.com/docs/hooks#userpromptsubmit)
+
+1. 正常退出 IssueRelay。打开 IssueRelay 自己的 `config.toml`，macOS 位于 `~/Library/Application Support/com.sunkailun.issuerelay/`，Windows 位于 `%APPDATA%\com.sunkailun.issuerelay\`。在现有的 `[settings]` 下加入 `codex_chat_confirmation = true`，保存后重新打开 IssueRelay。
+2. 在仓库目录运行下方的安装脚本。把占位值替换为安装包里 `issuerelay` 或 `issuerelay.exe` 的绝对路径，命令行程序与 IssueRelay 应用的主可执行文件同目录。脚本把一个固定命令加入 Codex 的 `hooks.json`，保留已有钩子。Windows 可用 `py -3` 代替 `python3`，脚本需要 Python 3.8 或更新版本。安装或移除时，先保存其他正在编辑的钩子配置。
+
+   ```sh
+   python3 scripts/install-codex-chat-confirmation-hook.py "<ISSUERELAY_CLI>"
+   ```
+
+3. 在 Codex 桌面设置的「Hooks」中审核并信任这条 `UserPromptSubmit` 钩子，也可在 Codex CLI 运行 `/hooks`。核对钩子的固定命令确实指向已安装的 IssueRelay。需要时重新打开 Codex 以加载新配置。
+
+启用后，让 Codex 先用 `preview_task_action` 展示完整预览，再用 `prepare_chat_confirmation` 准备同一操作，把 `preview_fingerprint` 传为 `expected_preview`。核对目标、执行去向和影响后，在**同一个聊天**里原样发送返回的 `confirmation_text`。它的格式是 `确认 <32 位小写十六进制码>` 或 `confirm <32 位小写十六进制码>`。无需再点表单。钩子将宿主结果带回聊天。确认只对本次预览有效，过期、重新生成或预览变化后应重新核对。关闭开关或未安装可信钩子时，仍可使用原生表单或面板。
+
+此入口适用于派发、续作、重试、停止、记录本地完成、标记完成和完成方案。绑定与设置变更、Linear 重连仍通过原生表单。它依赖可信的 Codex 客户端和本机账户，和同一账户下有完全访问权限的进程共享系统权限边界。停用时，在 IssueRelay 的 `[settings]` 将 `codex_chat_confirmation` 设为 `false` 并重启，可用安装脚本的 `--remove` 参数移除与原 CLI 路径匹配的钩子项。
 
 ## 查看需求与历次运行
 

@@ -244,6 +244,19 @@ async fn dispatch(
                 .commit_control_action(string_param(params, "token")?)
                 .await?,
         )?,
+        "workflow.arm_chat_confirmation" => serde_json::to_value(engine.arm_chat_confirmation(
+            string_param(params, "token")?,
+            string_param(params, "session_id")?,
+        )?)?,
+        "workflow.confirm_chat_action" => serde_json::to_value(
+            engine
+                .confirm_chat_action(
+                    string_param(params, "session_id")?,
+                    string_param(params, "turn_id")?,
+                    string_param(params, "code")?,
+                )
+                .await?,
+        )?,
         "doctor" => serde_json::to_value(engine.doctor().await)?,
         "settings.get" => serde_json::to_value(engine.settings())?,
         "projects.list" => serde_json::to_value(engine.projects().await?)?,

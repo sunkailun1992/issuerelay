@@ -7,6 +7,7 @@
 /scripts/check-secrets-self-test.sh @sunkailun1992
 /scripts/stage-cli.sh                 @sunkailun1992
 /scripts/stage-cli.ps1                @sunkailun1992
+/scripts/install-codex-chat-confirmation-hook.py @sunkailun1992
 /scripts/verify-update-signature.mjs  @sunkailun1992
 /scripts/release-checks.mjs           @sunkailun1992
 /.github/                          @sunkailun1992
@@ -33,6 +34,7 @@
 /crates/cli/src/main.rs            @sunkailun1992
 /crates/cli/src/format.rs          @sunkailun1992
 /crates/cli/src/mcp.rs             @sunkailun1992
+/crates/cli/src/chat_confirmation.rs @sunkailun1992
 /crates/cli/tests/mcp_tools.rs     @sunkailun1992
 /crates/devhost/src/main.rs        @sunkailun1992
 /app/src-tauri/src/                @sunkailun1992

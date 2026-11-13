@@ -4,7 +4,7 @@ use serde_json::Value;
 
 /// Methods the engine answers over the current user's local IPC endpoint.
 /// Lifecycle writes use the typed prepare/commit pair.
-pub const METHODS: [&str; 37] = [
+pub const METHODS: [&str; 39] = [
     "app.info",
     "status",
     "pause",
@@ -31,6 +31,8 @@ pub const METHODS: [&str; 37] = [
     "workflow.development_issue_url",
     "workflow.prepare_action",
     "workflow.commit_action",
+    "workflow.arm_chat_confirmation",
+    "workflow.confirm_chat_action",
     "settings.get",
     "projects.list",
     "labels.list",

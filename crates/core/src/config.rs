@@ -206,6 +206,9 @@ pub struct Settings {
     pub onboarding_completed: bool,
     /// The user confirmed the full-access warning (design section 14) once.
     pub full_access_acknowledged: bool,
+    /// Trust this OS user's Codex input hook to confirm reviewed task actions.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub codex_chat_confirmation: bool,
     /// Keep the app's icon in the macOS Dock for as long as it runs, so that it is easy to find
     /// (design 4.1). Off: the icon shows only while the panel is open; the menu bar icon always
     /// stays. Windows has no Dock (a window's taskbar button follows the window), so it ignores
@@ -248,6 +251,7 @@ impl Default for Settings {
             auto_update: true,
             onboarding_completed: false,
             full_access_acknowledged: false,
+            codex_chat_confirmation: false,
             show_in_dock: true,
             default_effort: None,
             default_codex_model: String::new(),
