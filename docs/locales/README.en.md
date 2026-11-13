@@ -52,7 +52,7 @@ Register the IssueRelay MCP from **Settings → MCP control server**. Both clien
 | `claim_handoff`, `release_handoff` | Reserve the directory for a handoff and release it using the `job_id` and that claim's `claim_id` |
 | `record_archive` | Record an existing archive page and its commit receipt for the configured Wiki |
 
-A run ID reads local history even when Linear is offline. A Linear issue number is resolved against the currently connected workspace. The IssueRelay host must be running. Use the desktop panel to approve dispatch, mark an issue done, rerun it or stop it. Approval saves the reviewed context and passes it to the chosen executor at launch. Drafts are cleared on host restart. The [MCP guide](../usage.md#用-mcp-连接主控会话) has the parameters and registration steps.
+A run ID reads local history even when Linear is offline. A Linear issue number is resolved against the currently connected workspace. The IssueRelay host must be running. Use the desktop panel to approve dispatch, mark an issue done, complete a plan, rerun it or stop it. Approval saves the reviewed context and passes it to the chosen executor at launch. Drafts are cleared on host restart. The [MCP guide](../usage.md#用-mcp-连接主控会话) has the parameters and registration steps.
 
 ## Models, handoff and review
 
