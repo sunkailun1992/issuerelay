@@ -262,24 +262,49 @@ fn can_elicit(context: &RequestContext<RoleServer>) -> bool {
 
 enum ApprovalDecision {
     Approved,
-    NotApproved(&'static str),
+    NotApproved {
+        status: &'static str,
+        reason: &'static str,
+    },
+}
+
+impl ApprovalDecision {
+    fn cancelled() -> Self {
+        Self::NotApproved {
+            status: "cancelled",
+            reason: "cancelled",
+        }
+    }
+
+    fn without_form() -> Self {
+        Self::NotApproved {
+            status: "needs_desktop_confirmation",
+            reason: "form_not_advertised",
+        }
+    }
+
+    fn result(&self) -> String {
+        match self {
+            Self::Approved => json!({"status": "confirmed"}),
+            Self::NotApproved { status, reason } => json!({"status": status, "reason": reason}),
+        }
+        .to_string()
+    }
 }
 
 async fn request_approval(
     context: &RequestContext<RoleServer>,
     message: String,
+    checkbox: BooleanSchema,
     timeout: Duration,
 ) -> Result<ApprovalDecision, String> {
     if !can_elicit(context) {
-        return Ok(ApprovalDecision::NotApproved("needs_desktop_confirmation"));
+        return Ok(ApprovalDecision::without_form());
     }
     // The spec's flat form schema is narrower than general JSON Schema. In particular,
     // Codex rejects root title and additionalProperties emitted by the derive helper.
     let schema = ElicitationSchema::builder()
-        .required_property(
-            "confirm",
-            PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
-        )
+        .required_property("confirm", PrimitiveSchemaDefinition::Boolean(checkbox))
         .build()
         .map_err(|_| "error: could not build the interactive confirmation form")?;
     let form = context.peer.create_elicitation_with_timeout(
@@ -292,26 +317,32 @@ async fn request_approval(
     );
     let result = tokio::select! {
         biased;
-        _ = context.ct.cancelled() => return Ok(ApprovalDecision::NotApproved("cancelled")),
+        _ = context.ct.cancelled() => return Ok(ApprovalDecision::cancelled()),
         result = form => result,
     };
     let no_approval =
         "error: no usable interactive approval; open the desktop panel to review this action";
     let result = result.map_err(|_| no_approval)?;
     match result.action {
-        ElicitationAction::Decline => Ok(ApprovalDecision::NotApproved("declined")),
-        ElicitationAction::Cancel => Ok(ApprovalDecision::NotApproved("cancelled")),
+        ElicitationAction::Decline => Ok(ApprovalDecision::NotApproved {
+            status: "declined",
+            reason: "client_declined",
+        }),
+        ElicitationAction::Cancel => Ok(ApprovalDecision::cancelled()),
         ElicitationAction::Accept => {
             let response = result
                 .content
                 .and_then(|content| serde_json::from_value::<ActionApproval>(content).ok())
                 .ok_or(no_approval)?;
             if context.ct.is_cancelled() {
-                Ok(ApprovalDecision::NotApproved("cancelled"))
+                Ok(ApprovalDecision::cancelled())
             } else if response.confirm {
                 Ok(ApprovalDecision::Approved)
             } else {
-                Ok(ApprovalDecision::NotApproved("declined"))
+                Ok(ApprovalDecision::NotApproved {
+                    status: "declined",
+                    reason: "confirmation_not_checked",
+                })
             }
         }
         _ => Err(no_approval.into()),
@@ -425,8 +456,15 @@ fn add_config_changes(
     Ok(())
 }
 
-fn confirmation_message(action: &TaskAction, preview: &Value) -> Result<String, String> {
+const MAX_FORM_BYTES: usize = 4_096;
+
+fn confirmation_message(
+    action: &TaskAction,
+    preview: &Value,
+    reviewed_fingerprint: Option<&str>,
+) -> Result<(String, BooleanSchema), String> {
     let mut lines = vec![format!("{}?", action.description())];
+    let mut brief_lines = Vec::new();
     if matches!(
         action,
         TaskAction::SaveBinding { .. }
@@ -494,7 +532,7 @@ fn confirmation_message(action: &TaskAction, preview: &Value) -> Result<String, 
                     ("Wiki references", "source_refs"),
                 ] {
                     if !brief[key].is_null() {
-                        lines.push(format!("{label}: {}", display_value(&brief[key])));
+                        brief_lines.push(format!("{label}: {}", display_value(&brief[key])));
                     }
                 }
                 if brief["conversation_history"]
@@ -527,13 +565,31 @@ fn confirmation_message(action: &TaskAction, preview: &Value) -> Result<String, 
             }
         }
     }
-    let message = lines.join("\n");
-    if message.len() > 4_096 {
-        return Err(
-            "error: the review is too long for a chat form; review it in the desktop panel".into(),
-        );
+    let mut message = lines
+        .iter()
+        .chain(&brief_lines)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if message.len() <= MAX_FORM_BYTES {
+        return Ok((message, BooleanSchema::new()));
     }
-    Ok(message)
+    if !brief_lines.is_empty() {
+        let fingerprint = reviewed_fingerprint.ok_or(
+            "error: the task brief is too long for the form; review the full preview in chat and confirm again with its expected_preview fingerprint",
+        )?;
+        lines.push("Review the request, scope, acceptance criteria and references in the preceding chat preview. If they are not visible to you, cancel and ask to see the preview or use the desktop panel.".into());
+        lines.push(format!("Preview fingerprint: {fingerprint}"));
+        message = lines.join("\n");
+        if message.len() <= MAX_FORM_BYTES {
+            return Ok((
+                message,
+                BooleanSchema::new()
+                    .title("I reviewed the preceding preview and approve this action"),
+            ));
+        }
+    }
+    Err("error: the execution or configuration details are too long for a chat form; review them in the desktop panel".into())
 }
 
 fn entry_executor(name: &str) -> Option<&'static str> {
@@ -654,6 +710,28 @@ impl ControlServer {
     }
 
     #[rmcp::tool(
+        description = "Test whether this chat can display an IssueRelay confirmation form. Call only when the user requests a test. It does not contact the IssueRelay host or change any data, even if the user confirms",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn test_confirmation_form(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(_): Parameters<EmptyArgs>,
+    ) -> Result<String, String> {
+        let decision = request_approval(
+            &context,
+            "Test the IssueRelay confirmation form? This is a test only. Either answer leaves tasks, settings and Linear unchanged.".into(),
+            BooleanSchema::new().title("Confirm this test"),
+            Duration::from_secs(120),
+        ).await?;
+        Ok(decision.result())
+    }
+
+    #[rmcp::tool(
         description = "Preview one IssueRelay action and its exact target. This does not approve or execute it. Use before asking for interactive confirmation",
         annotations(read_only_hint = true)
     )]
@@ -668,7 +746,7 @@ impl ControlServer {
     }
 
     #[rmcp::tool(
-        description = "Ask the user to confirm one exact IssueRelay task action in the MCP client's own interactive form. Call only when the user requested this action. Without an interactive form, use the desktop panel",
+        description = "Ask the user to confirm one exact IssueRelay task action in the MCP client's own interactive form. Call only when the user requested this action. Show the full preview to the user before passing its fingerprint; for a long brief the form references that preview. Without an interactive form, use the desktop panel",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -681,11 +759,11 @@ impl ControlServer {
         Parameters(args): Parameters<ConfirmTaskActionArgs>,
     ) -> Result<String, String> {
         if !can_elicit(&context) {
-            return Ok(json!({"status": "needs_desktop_confirmation"}).to_string());
+            return Ok(ApprovalDecision::without_form().result());
         }
         let (token, preview) = self.prepare(&args.action).await?;
-        if let Some(expected) = args.expected_preview
-            && expected != preview_fingerprint(&preview)
+        if let Some(expected) = &args.expected_preview
+            && *expected != preview_fingerprint(&preview)
         {
             return Err(
                 "error: the action changed after preview; review a new preview before confirming"
@@ -695,9 +773,12 @@ impl ControlServer {
         let Some(seconds) = preview["expires_in_seconds"].as_u64().filter(|n| *n > 0) else {
             return Err("error: the host did not return an approval expiry".into());
         };
+        let (message, checkbox) =
+            confirmation_message(&args.action, &preview, args.expected_preview.as_deref())?;
         match request_approval(
             &context,
-            confirmation_message(&args.action, &preview)?,
+            message,
+            checkbox,
             Duration::from_secs(seconds.min(120)),
         )
         .await?
@@ -706,7 +787,7 @@ impl ControlServer {
                 self.forward("workflow.commit_action", json!({"token": token}))
                     .await
             }
-            ApprovalDecision::NotApproved(status) => Ok(json!({"status": status}).to_string()),
+            decision => Ok(decision.result()),
         }
     }
 
@@ -969,12 +1050,13 @@ impl ControlServer {
         match request_approval(
             &context,
             "Reconnect this IssueRelay app to Linear using its existing authorization? This will not change issues or sign in to a different account.".into(),
+            BooleanSchema::new(),
             Duration::from_secs(120),
         )
         .await?
         {
             ApprovalDecision::Approved => self.forward("linear.reconnect", json!({})).await,
-            ApprovalDecision::NotApproved(status) => Ok(json!({"status": status}).to_string()),
+            decision => Ok(decision.result()),
         }
     }
 

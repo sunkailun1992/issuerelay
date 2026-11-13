@@ -108,6 +108,7 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 | `get_update_status` / `check_update` | 读取上次检查或主动检查更新。安装和重启由桌面处理 |
 | `reconnect_linear` | 经原生表单确认，用已保存的授权尝试重连，只返回状态 |
 | `get_control_capabilities` | 查看支持的动作与客户端是否声明了确认表单 |
+| `test_confirmation_form` | 打开无副作用的测试表单，确认、拒绝和取消都不会修改数据或联系宿主 |
 | `preview_task_action` / `confirm_task_action` | 传类型固定的 `action`，预览后在客户端原生表单确认。确认时可传 `expected_preview` 校验预览指纹 |
 
 用 Linear 需求编号调用 `get_run`、`get_issue_context` 或 `set_issue_context` 时，IssueRelay 会通过当前已连接的 Linear 解析需求的内部身份。不同工作区的同名编号按各自的需求处理。已知本地运行 ID 时，`get_run` 只传 `id` 即可完全在本机读取。
@@ -118,10 +119,13 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 ### 在会话中执行操作
 
-例如要继续第 42 次运行，调用 `preview_task_action` 传入 `{"action":{"action":"continue","job_id":42,"executor":"codex"}}`。然后调用 `confirm_task_action`，沿用同一 `action`，把刚收到的 `preview_fingerprint` 作为 `expected_preview`。确认表单展示执行去向与任务范围。表单取消、过期、内容过长、客户端不支持或预览已经变化时，宿主保留原状态。较长的预览可在桌面审核。
+例如要继续第 42 次运行，调用 `preview_task_action` 传入 `{"action":{"action":"continue","job_id":42,"executor":"codex"}}`。先在会话里让用户核对完整预览，再调用 `confirm_task_action`，沿用同一 `action`，把刚收到的 `preview_fingerprint` 作为 `expected_preview`。简报较长时，表单保留目标、执行去向、简报修订号和指纹，并指向会话里的完整预览。只有指纹匹配才能使用这种表单，传给执行者的简报仍是完整版本。执行去向或配置差异本身过长时，转桌面审核。表单取消、过期、客户端不支持或预览已变化时，宿主保留原状态。
+
+可以先用 `test_confirmation_form` 验证客户端能否显示原生表单。该工具不联系 IssueRelay 宿主。客户端声明支持表单并不保证当前会话允许弹出表单。`client_declined` 表示客户端回传了拒绝，可能是审批策略直接拒绝，也可能是用户拒绝。`confirmation_not_checked` 表示表单已提交，但没有勾选确认。Codex 会话应使用允许 MCP 交互表单的审批策略，并保留用户审核。
 
 - `dispatch` 用 `issue_identifier`。`continue` 用 `job_id` 和 `executor`。`retry`、`stop`、`record_local_completion`、`mark_done`、`complete_plan` 用 `job_id`。重试后仍须复核派发，停止后用 `get_run` 查询终态。
 - `save_binding` 用 `binding`，`remove_binding` 用 `binding_id`。需要扩大完全访问权限或覆盖另一条绑定时，由桌面处理。
+- `list_labels` 和桌面绑定页读取工作区标签和可见项目关联团队的标签，并合并同名标签。
 - `set_settings` 用 `changes`，可修改 `poll_interval_secs`、`max_concurrent`、`run_timeout_mins`、`stall_timeout_mins`、`language`。
 
 会话确认依赖 MCP 客户端的原生表单。精简后台执行器仍按目标仓库的规则执行。用户可以在已注册 IssueRelay MCP 的主控会话里处理调度和验收。任务上下文与回执由宿主保存，本机的会话材料和日志不放进 Git。

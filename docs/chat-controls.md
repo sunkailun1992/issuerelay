@@ -4,6 +4,8 @@
 
 本轮的任务操作通过类型固定的预览和确认流程进入同一个引擎。`preview_task_action` 展示目标、影响和需核对的状态，`confirm_task_action` 打开客户端原生确认表单，由用户确认。客户端不支持表单时，回到桌面面板。审批凭据由宿主与控制服务保管，权限、归属、版本和运行状态仍由宿主校验。执行回执区分请求受理和实际开始、停止或完成。`get_control_capabilities` 显示可预览的操作和客户端声明的表单能力。接入范围以 [控制服务](../crates/cli/src/mcp.rs) 和 [宿主 IPC](../crates/core/src/ipc/server.rs) 为准。
 
+`test_confirmation_form` 验证当前会话的表单链路，不联系宿主。长简报的确认表单可以引用会话里的完整预览，前提是 `expected_preview` 仍与当前动作匹配。审批后的宿主复核和一次性提交照常执行。
+
 ## 面板命令覆盖
 
 新增桌面命令时，在表中添加一行，并交付对应的聊天操作或写清系统授权、纯展示的理由。命令名须与 [面板命令登记表](../app/src-tauri/build.rs) 一致。覆盖测试核对登记，并检查标为支持的行引用了已实现的 MCP 工具或固定动作。授权、工具行为和实机结果分别验收。
@@ -44,7 +46,7 @@
 | `save_binding` | 本轮接入 | `save_binding` 预览并确认一个项目绑定的变更，显示实际权限与精简模式。校验绝对目录、路由重叠及权限。新增或扩大完全访问权限仍需在桌面处理，原有自定义提示词保留。 [绑定校验](../crates/core/src/engine/control_actions.rs#L301) |
 | `remove_binding` | 本轮接入 | `remove_binding` 按 `binding_id` 预览并确认删除一个绑定。配置自预览后变化时，宿主要求重新预览。 [变更与复核](../crates/core/src/engine/control_actions.rs#L242) |
 | `projects` | 本轮接入 | `list_projects` 通过当前 Linear 连接查询绑定可用项目。 |
-| `labels` | 本轮接入 | `list_labels` 查询当前 Linear 工作区的路由标签。 |
+| `labels` | 本轮接入 | `list_labels` 查询当前 Linear 工作区和可见项目关联团队的路由标签。 |
 | `settings` | 本轮接入 | `get_settings` 读取宿主配置，返回值省略提示词模板。凭据由系统钥匙串管理。 |
 | `save_settings` | 本轮接入 | `set_settings` 预览并确认轮询间隔、总并发上限、运行超时、无输出超时和界面语言这五项。默认权限、完全访问确认、Wiki 根目录和提示词模板继续由桌面处理。 [字段白名单](../crates/core/src/workflow.rs#L207) |
 | `doctor` | 本轮接入 | `doctor` 返回宿主与执行者就绪状态及诊断计数。环境变量和原始诊断文字留给桌面或 `issuerelay doctor`。 [聊天诊断输出](../crates/cli/src/mcp.rs#L760) |

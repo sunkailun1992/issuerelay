@@ -15,6 +15,7 @@ use common::orphan::Orphan;
 use common::{
     engine_kit::{FakeReadiness, FullOnlyReadiness, Harness, Homes, Script, ScriptedRunner},
     fake_linear::FakeLinear,
+    fake_server::{FakeLinearServer, Reply, connect_full},
     issue,
 };
 use issuerelay_core::{
@@ -29,7 +30,7 @@ use issuerelay_core::{
     },
     env::{EnvSource, ExecEnv},
     executor::CommandSpec,
-    linear::{Disconnected, LinearApi, Project, Team, Viewer},
+    linear::{Disconnected, LinearApi, Project, Team, Viewer, mcp::McpLinear},
     model::{ChildIssue, Issue, Job, JobState, RunMode, RunUsage},
     runner::{ExitKind, RunLimits},
     setup::McpRegistration,
@@ -6701,6 +6702,48 @@ async fn label_names_are_shown_clean_once_each_in_alphabetical_order() {
     assert_eq!(
         h.engine.labels().await.unwrap(),
         ["ai-ready", "bug", "Docs", "Frontend"]
+    );
+}
+
+#[tokio::test]
+async fn routing_labels_include_workspace_and_paged_project_team_labels() {
+    let server = FakeLinearServer::default();
+    server.reply(
+        "list_projects",
+        Reply::Text(
+            serde_json::json!({"projects": [
+                {"uuid": "project-1", "teams": [{"id": "team-1"}]},
+                {"uuid": "project-2", "teams": [{"id": "team-1"}, {"id": "team-2"}]}
+            ], "hasNextPage": false})
+            .to_string(),
+        ),
+    );
+    let linear = McpLinear::new(connect_full(server.clone()).await)
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let engine = build_engine(
+        root.path(),
+        &Config::default(),
+        Arc::new(linear),
+        Arc::new(FakeReadiness),
+        Arc::new(ScriptedRunner::new(FakeLinear::new("user-1"), false)),
+    );
+
+    assert_eq!(
+        engine.labels().await.unwrap(),
+        ["ai-ready", "Backend", "Bug", "Docs", "Frontend"]
+    );
+    let calls = server.calls_to("list_issue_labels");
+    assert_eq!(
+        calls.len(),
+        4,
+        "each scope should be read once, with pagination"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|args| { args["team"] == "team-1" && args["cursor"] == "next-team-label" })
     );
 }
 

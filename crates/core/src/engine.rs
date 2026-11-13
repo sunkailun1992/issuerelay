@@ -1186,7 +1186,7 @@ impl Engine {
     /// the case.
     pub async fn labels(&self) -> Result<Vec<String>> {
         let mut labels: Vec<String> = Vec::new();
-        for label in self.linear().labels().await? {
+        for label in self.linear().routing_labels().await? {
             let label = clean_text(&label).trim().to_string();
             if !label.is_empty() && !labels.iter().any(|seen| same_name(seen, &label)) {
                 labels.push(label);

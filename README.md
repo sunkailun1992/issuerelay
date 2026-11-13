@@ -78,6 +78,7 @@ IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队
 | `claim_handoff` / `release_handoff` | 手动接手前保留目录。接手会话结束后，用 `job_id` 和自己取得的本次 `claim_id` 释放 |
 | `record_archive` | 为当前 Wiki 目录登记已写入的页面及提交回执 |
 | `get_control_capabilities` | 查看会话可用操作及客户端声明的表单能力 |
+| `test_confirmation_form` | 测试会话能否显示确认表单，不修改数据 |
 | `preview_task_action` / `confirm_task_action` | 预览、确认派发、续作、重试、停止、完成、项目绑定和部分运行设置 |
 
 `resume` 恢复监控。用户确认后，任务相关上下文随获准的运行快照传给执行者。主控会话可提供复现命令、报错原文、版本和决定。请排除整段聊天、原始截图和凭据。会话中的任务操作使用客户端原生表单确认，宿主随后重新核对当前状态。参数和可用范围见[使用指南](docs/usage.md#用-mcp-连接主控会话)和[聊天控制覆盖表](docs/chat-controls.md)。

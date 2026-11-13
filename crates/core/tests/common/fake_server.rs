@@ -163,6 +163,14 @@ pub struct PageArgs {
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct LabelPageArgs {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub team: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TeamArgs {
     pub team: String,
 }
@@ -339,10 +347,17 @@ impl FakeLinearServer {
     #[rmcp::tool(description = "List labels")]
     async fn list_issue_labels(
         &self,
-        Parameters(args): Parameters<PageArgs>,
+        Parameters(args): Parameters<LabelPageArgs>,
     ) -> Result<String, String> {
         self.answer("list_issue_labels", &args, || {
-            Ok(json!({"labels": [{"id": "l1", "name": "ai-ready"}, {"id": "l2", "name": "Bug"}], "hasNextPage": false}).to_string())
+            let page = match (args.team.as_deref(), args.cursor.as_deref()) {
+                (None, None) => json!({"labels": [{"id": "l1", "name": "ai-ready"}, {"id": "l2", "name": "Bug"}], "hasNextPage": false}),
+                (Some("team-1"), None) => json!({"labels": [{"id": "l2", "name": "Bug"}, {"id": "l3", "name": "Frontend"}], "hasNextPage": true, "cursor": "next-team-label"}),
+                (Some("team-1"), Some("next-team-label")) => json!({"labels": [{"id": "l4", "name": "Backend"}], "hasNextPage": false}),
+                (Some("team-2"), None) => json!({"labels": [{"id": "l5", "name": "  bug "}, {"id": "l6", "name": "Docs"}], "hasNextPage": false}),
+                _ => return Err("Unexpected label query".into()),
+            };
+            Ok(page.to_string())
         })
         .await
     }

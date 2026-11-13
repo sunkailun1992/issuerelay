@@ -1,5 +1,5 @@
 //! LinearApi backed by Linear's MCP server through rmcp.
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use rmcp::{
@@ -282,6 +282,36 @@ impl LinearApi for McpLinear {
             parse::parse_labels,
         )
         .await
+    }
+
+    async fn routing_labels(&self) -> Result<Vec<String>> {
+        // The binding picker can select any visible project, including one not yet bound.
+        // Projects can share teams; read each team's label pages once by its Linear ID.
+        tokio::time::timeout(self.call_timeout, async {
+            let (mut labels, projects) = tokio::try_join!(self.labels(), self.projects())?;
+            let teams: BTreeSet<_> = projects
+                .into_iter()
+                .flat_map(|project| project.team_ids)
+                .collect();
+            for team in teams {
+                let team_labels = self
+                    .all_pages(
+                        "list_issue_labels",
+                        json!({"limit": 100, "team": team}),
+                        parse::parse_labels,
+                    )
+                    .await?;
+                labels.extend(team_labels);
+            }
+            Ok(labels)
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "reading Linear routing labels exceeded {:?}",
+                self.call_timeout
+            )
+        })?
     }
 
     async fn teams(&self) -> Result<Vec<Team>> {

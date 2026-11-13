@@ -1,7 +1,10 @@
 //! The MCP control server offers only the safe control tools, sends the engine what each tool
 //! means, and reports failures as tool errors that keep their cause.
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -174,6 +177,7 @@ async fn exposes_only_safe_control_tools_and_reports_engine_down() {
             "set_issue_context",
             "status",
             "supplement_continuation_context",
+            "test_confirmation_form",
         ]
     );
     let result = client
@@ -483,7 +487,10 @@ async fn preview_never_returns_tokens_and_noninteractive_client_cannot_commit() 
     assert!(!preview.contains("private conversation history"));
     assert!(!preview.contains("private continuation evidence"));
     let reply = text_of(&call(&client, "confirm_task_action", Some(task_args())).await);
-    assert_eq!(reply, r#"{"status":"needs_desktop_confirmation"}"#);
+    assert_eq!(
+        reply,
+        r#"{"reason":"form_not_advertised","status":"needs_desktop_confirmation"}"#
+    );
     assert_eq!(
         *calls.lock().unwrap(),
         [("workflow.prepare_action".to_owned(), task_args())]
@@ -553,13 +560,13 @@ async fn unconfirmed_or_malformed_form_never_commits() {
         (
             ElicitationAction::Decline,
             Some(json!({"confirm":true})),
-            "declined",
+            "client_declined",
         ),
         (ElicitationAction::Cancel, None, "cancelled"),
         (
             ElicitationAction::Accept,
             Some(json!({"confirm":false})),
-            "declined",
+            "confirmation_not_checked",
         ),
         (
             ElicitationAction::Accept,
@@ -581,13 +588,134 @@ async fn unconfirmed_or_malformed_form_never_commits() {
 }
 
 #[tokio::test]
+async fn confirmation_probe_never_calls_the_host() {
+    let (server, calls) = recording_server(|_| panic!("probe contacted the host"));
+    let client = connect(server.clone()).await;
+    let reply = call(&client, "test_confirmation_form", None).await;
+    assert!(text_of(&reply).contains("form_not_advertised"));
+    client.cancel().await.unwrap();
+
+    for (action, answer, status) in [
+        (
+            ElicitationAction::Accept,
+            Some(json!({"confirm":true})),
+            "confirmed",
+        ),
+        (ElicitationAction::Decline, None, "declined"),
+        (ElicitationAction::Cancel, None, "cancelled"),
+    ] {
+        let (client, forms) = connect_interactive(server.clone(), action, answer).await;
+        let reply = call(&client, "test_confirmation_form", None).await;
+        let result: Value = serde_json::from_str(&text_of(&reply)).unwrap();
+        assert_eq!(result["status"], status);
+        let forms = forms.lock().unwrap().clone();
+        let [ElicitRequestParams::FormElicitationParams { message, .. }] = forms.as_slice() else {
+            panic!("expected a native test form");
+        };
+        assert!(message.contains("test only"));
+        client.cancel().await.unwrap();
+    }
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn long_brief_requires_matching_full_preview_and_keeps_the_execution_details() {
+    let request = "核对完整方案".repeat(600);
+    let changed = Arc::new(AtomicBool::new(false));
+    let edit = changed.clone();
+    let (server, calls) = recording_server(move |method| match method {
+        "workflow.prepare_action" => Ok(json!({
+            "token":"server-side-token", "action":task_args()["action"],
+            "issue_identifier":"DEMO-1", "job_id":7, "expires_in_seconds":180,
+            "continuation":{
+                "executor":"codex", "mode":"develop", "permission":"auto", "lean":"on",
+                "directory":"workspace/demo", "strategy":"resume_session",
+                "context":{"revision":3,"request":if edit.load(Ordering::SeqCst) { format!("{request}尾部已改") } else { request.clone() },"scope":"the full scope","source_refs":["wiki/fixture.md"]}
+            }
+        })),
+        "workflow.commit_action" => Ok(json!({"result":"continuation_queued"})),
+        _ => panic!("unexpected method {method}"),
+    });
+    let (client, forms) = connect_interactive(
+        server,
+        ElicitationAction::Accept,
+        Some(json!({"confirm":true})),
+    )
+    .await;
+    let reply = call(&client, "confirm_task_action", Some(task_args())).await;
+    assert_eq!(reply.is_error, Some(true));
+    assert!(text_of(&reply).contains("expected_preview"));
+    assert!(forms.lock().unwrap().is_empty());
+
+    let preview: Value = serde_json::from_str(&text_of(
+        &call(&client, "preview_task_action", Some(task_args())).await,
+    ))
+    .unwrap();
+    assert_eq!(
+        preview["continuation"]["context"]["request"],
+        "核对完整方案".repeat(600)
+    );
+    let mut args = task_args();
+    args["expected_preview"] = preview["preview_fingerprint"].clone();
+    changed.store(true, Ordering::SeqCst);
+    let stale = call(&client, "confirm_task_action", Some(args.clone())).await;
+    assert!(text_of(&stale).contains("changed after preview"));
+    assert!(forms.lock().unwrap().is_empty());
+    let preview: Value = serde_json::from_str(&text_of(
+        &call(&client, "preview_task_action", Some(task_args())).await,
+    ))
+    .unwrap();
+    args["expected_preview"] = preview["preview_fingerprint"].clone();
+    let reply = call(&client, "confirm_task_action", Some(args)).await;
+    assert_eq!(text_of(&reply), r#"{"result":"continuation_queued"}"#);
+    let captured = forms.lock().unwrap().clone();
+    let [
+        ElicitRequestParams::FormElicitationParams {
+            message,
+            requested_schema,
+            ..
+        },
+    ] = captured.as_slice()
+    else {
+        panic!("expected one compact native form");
+    };
+    for field in [
+        "DEMO-1",
+        "Run ID: 7",
+        "Permissions: auto",
+        "workspace/demo",
+        "Brief revision: 3",
+        "preceding chat preview",
+    ] {
+        assert!(message.contains(field), "missing {field} in {message}");
+    }
+    assert!(message.contains(preview["preview_fingerprint"].as_str().unwrap()));
+    assert!(message.len() <= 4_096);
+    assert!(!message.contains("server-side-token"));
+    assert_eq!(
+        serde_json::to_value(requested_schema).unwrap()["properties"]["confirm"]["title"],
+        "I reviewed the preceding preview and approve this action"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "workflow.commit_action")
+            .count(),
+        1
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn reconnect_requires_native_confirmation_and_never_accepts_credentials() {
     let (server, calls) = recording_server(|_| Ok(json!({"kind":"connecting"})));
     let client = connect(server.clone()).await;
     let reply = call(&client, "reconnect_linear", None).await;
     assert_eq!(
         text_of(&reply),
-        r#"{"status":"needs_desktop_confirmation"}"#
+        r#"{"reason":"form_not_advertised","status":"needs_desktop_confirmation"}"#
     );
     assert!(calls.lock().unwrap().is_empty());
     client.cancel().await.unwrap();
@@ -599,7 +727,10 @@ async fn reconnect_requires_native_confirmation_and_never_accepts_credentials() 
     )
     .await;
     let reply = call(&client, "reconnect_linear", None).await;
-    assert_eq!(text_of(&reply), r#"{"status":"declined"}"#);
+    assert_eq!(
+        text_of(&reply),
+        r#"{"reason":"client_declined","status":"declined"}"#
+    );
     assert_eq!(forms.lock().unwrap().len(), 1);
     assert!(calls.lock().unwrap().is_empty());
     client.cancel().await.unwrap();

@@ -538,7 +538,7 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
         "list_projects",
         two_pages(
             "projects",
-            serde_json::json!({"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project"}),
+            serde_json::json!({"id": "P-DEMO-1", "uuid": "proj-1", "name": "Demo Project", "teams": [{"id": "team-1"}]}),
         ),
     );
     server.reply(
@@ -555,8 +555,7 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
     linear.labeled_issues("ai-ready").await.unwrap();
     linear.issue("DEMO-1").await.unwrap();
     linear.set_state("uuid-9", "Done").await.unwrap();
-    linear.projects().await.unwrap();
-    linear.labels().await.unwrap();
+    linear.routing_labels().await.unwrap();
     linear.teams().await.unwrap();
     linear.statuses("team-1").await.unwrap();
     linear.children("uuid-1").await.unwrap();
@@ -585,7 +584,7 @@ async fn the_arguments_sent_per_tool_are_exactly_the_ones_in_required_arguments(
     for (tool, calls) in [
         ("list_issues", 5),
         ("list_projects", 2),
-        ("list_issue_labels", 2),
+        ("list_issue_labels", 3),
         ("list_teams", 2),
     ] {
         assert_eq!(server.calls_to(tool).len(), calls, "{tool}");

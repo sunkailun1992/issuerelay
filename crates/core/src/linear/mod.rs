@@ -69,7 +69,7 @@ pub const REQUIRED_ARGUMENTS: &[(&str, &[&str])] = &[
     ("save_issue", &["id", "state"]),
     ("get_user", &["query"]),
     ("list_projects", &["limit", "fields", "cursor"]),
-    ("list_issue_labels", &["limit", "cursor"]),
+    ("list_issue_labels", &["limit", "cursor", "team"]),
     ("list_teams", &["limit", "cursor"]),
     ("list_issue_statuses", &["team"]),
 ];
@@ -145,8 +145,12 @@ pub trait LinearApi: Send + Sync {
     async fn children(&self, parent_uuid: &str) -> Result<Vec<ChildIssue>>;
     /// All projects, each identified by its uuid and carrying the ids of its teams.
     async fn projects(&self) -> Result<Vec<Project>>;
-    /// The names of all issue labels.
+    /// The names of workspace issue labels.
     async fn labels(&self) -> Result<Vec<String>>;
+    /// Issue label names available for routing across the visible projects, including their teams.
+    async fn routing_labels(&self) -> Result<Vec<String>> {
+        self.labels().await
+    }
     /// All teams.
     async fn teams(&self) -> Result<Vec<Team>>;
     /// The names of the statuses of the team with id `team_id`.
