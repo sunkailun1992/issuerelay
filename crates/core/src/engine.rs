@@ -20,6 +20,7 @@
 //! they hold the async cycle lock), except by `emit_job`, which reads a job's row and sends it
 //! under one store guard so that the last event for a job carries its newest row (sending never
 //! blocks and runs no subscriber code); its callers must not hold the store guard.
+mod acceptance;
 mod control_actions;
 mod dispatch_review;
 mod plan_closure;
@@ -1652,6 +1653,11 @@ impl Engine {
             // active rows.
             let store = self.store();
             let latest = store.latest_for_issue(&issue.uuid)?;
+            if let Some(job) = &latest
+                && !Self::acceptance_allows_development(&store, job, issue)?
+            {
+                continue;
+            }
             if let Some((expected, _)) = continuations.pending.get(&issue.uuid)
                 && !latest
                     .as_ref()
@@ -1715,17 +1721,52 @@ impl Engine {
                     if trigger::should_enqueue(latest.as_ref(), issue) {
                         // An issue that comes back continues the session of its latest run that
                         // had one, if the settings allow it; the start checks that it still can.
+                        let conn = store.workflow_connection();
+                        let repair = latest
+                            .as_ref()
+                            .filter(|_| mode == RunMode::Implement)
+                            .map(|source| {
+                                let direct =
+                                    crate::acceptance_store::latest_for_source(conn, source.id)?;
+                                if direct.is_some() {
+                                    return Ok::<_, anyhow::Error>(
+                                        direct.filter(|run| run.returned.is_some()),
+                                    );
+                                }
+                                crate::acceptance_store::latest_by_repair(conn, source.id)
+                            })
+                            .transpose()?
+                            .flatten()
+                            .filter(|run| run.returned.is_some());
                         let resume = match latest {
-                            Some(_) if cfg.settings.resume_sessions => store
+                            Some(_) if cfg.settings.resume_sessions && repair.is_none() => store
                                 .latest_with_session(&issue.uuid)?
                                 .map(|previous| previous.id),
                             _ => None,
                         };
+                        let tx = conn.unchecked_transaction()?;
                         if let Some(id) =
                             Self::enqueue(&store, issue, &routed, eligibility, mode, resume)?
                         {
+                            if let Some(mut repair) = repair {
+                                if let Some(previous) = repair.repair_job_id {
+                                    crate::acceptance_store::link_repair(
+                                        &tx,
+                                        previous,
+                                        repair.verification_job_id,
+                                    )?;
+                                }
+                                crate::acceptance_store::link_repair(
+                                    &tx,
+                                    id,
+                                    repair.verification_job_id,
+                                )?;
+                                repair.repair_job_id = Some(id);
+                                crate::acceptance_store::update(&tx, &repair)?;
+                            }
                             changed.push(id);
                         }
+                        tx.commit()?;
                     }
                 }
             }
@@ -1734,7 +1775,10 @@ impl Engine {
             .store()
             .list_by_state(&[JobState::Queued, JobState::WaitingBinding])?;
         let waiting = [JobState::Queued, JobState::WaitingBinding];
-        for job in pending.iter().filter(|j| !seen.contains(&j.issue_uuid)) {
+        for job in pending
+            .iter()
+            .filter(|j| j.mode != RunMode::Verify && !seen.contains(&j.issue_uuid))
+        {
             // Only while it still waits: the user may have stopped or retried it since the list
             // was read.
             let canceled = self.store().set_state_if(
@@ -2051,6 +2095,11 @@ impl Engine {
         reports: &[ExecutorReport],
         job: Job,
     ) -> Result<bool> {
+        if job.mode == RunMode::Verify {
+            return self
+                .start_verification_job(linear, cfg, me, reports, job)
+                .await;
+        }
         // The issue may have changed while queued; re-read it right before starting. The user can
         // stop the job, pause the engine or change the configuration while this waits, so every
         // write below is conditional on the row still being queued, and the run only starts if
@@ -2232,6 +2281,7 @@ impl Engine {
             let rendered = match mode {
                 RunMode::Implement => prompt::render(&input),
                 RunMode::Plan => prompt::render_plan(&input),
+                RunMode::Verify => unreachable!("verification uses its own launcher"),
             };
             prompt::with_workflow_context(
                 rendered,
@@ -2239,12 +2289,15 @@ impl Engine {
                 cfg.settings.wiki_root.as_deref(),
             )
         };
-        let prompt_text = match &intent {
+        let mut prompt_text = match &intent {
             Some(intent) => {
                 prompt::with_continuation_evidence(prompt_for(Continuation::None), &intent.evidence)
             }
             None => prompt_for(continuation),
         };
+        if let Some(evidence) = Self::repair_evidence(&self.store(), job.id)? {
+            prompt_text = prompt::with_continuation_evidence(prompt_text, &evidence);
+        }
         // The user-level CLAUDE.md a lean Claude run leaves out; a path that cannot go into the
         // arguments is not passed, and the run log says so (lean-run design, section 5.1).
         let instructions =
@@ -2257,6 +2310,7 @@ impl Engine {
                 cfg.permission_for(&binding) != crate::config::PermissionProfile::Personal
             }
             RunMode::Implement => cfg.lean_for(&binding, self.home()).applies(),
+            RunMode::Verify => unreachable!("verification uses its own launcher"),
         };
         let options = executor::RunOptions {
             profile: cfg.permission_for(&binding),
@@ -2678,6 +2732,7 @@ impl Engine {
                             &names,
                         ),
                         RunMode::Plan => decide_plan(&output.exit, report.as_ref(), &names),
+                        RunMode::Verify => unreachable!("verification uses its own result handler"),
                     };
                     (state, reason, issue.map(|i| i.updated_at))
                 }
@@ -2773,7 +2828,9 @@ impl Engine {
                 .record_run(
                     job_id,
                     report.as_ref().map(Report::as_str),
-                    output.session_id.as_deref(),
+                    job.as_ref()
+                        .and_then(|job| job.session_id.as_deref())
+                        .or(output.session_id.as_deref()),
                     usage.as_ref(),
                 )
                 .and_then(|()| {
@@ -3127,13 +3184,16 @@ impl Engine {
         let job = job.ok_or_else(|| anyhow!("job {job_id} not found"))?;
         control_actions::check_reviewed_job(&job, reviewed.map(|snapshot| &snapshot.job))?;
         anyhow::ensure!(
-            matches!(
-                job.state,
-                JobState::AwaitingAcceptance | JobState::LocalComplete
-            ),
+            job.mode == RunMode::Implement
+                && matches!(
+                    job.state,
+                    JobState::AwaitingAcceptance | JobState::LocalComplete
+                ),
             "job {job_id} is not awaiting acceptance"
         );
         let settings = self.config().settings;
+        self.check_current_acceptance(&job, settings.wiki_root.as_deref())
+            .await?;
         {
             let store = self.store();
             if reviewed.is_some() || job.state == JobState::LocalComplete {
@@ -3178,6 +3238,8 @@ impl Engine {
         let done = reviewed.map_or(settings.trigger.done.as_str(), |reviewed| {
             reviewed.target_state.as_str()
         });
+        self.check_current_acceptance(&job, settings.wiki_root.as_deref())
+            .await?;
         linear.set_state(&job.issue_uuid, done).await?;
         // Keep the transition conditional on the exact state that was checked above.
         let waiting = [job.state];

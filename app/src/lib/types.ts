@@ -41,8 +41,8 @@ export interface Issue {
   updated_at: string;
 }
 
-/** What a run is for (`model::RunMode`): carrying the issue out, or only writing a plan for it. */
-export type RunMode = "implement" | "plan";
+/** What a run is for (`model::RunMode`): implementing, planning or independently verifying a delivery. */
+export type RunMode = "implement" | "plan" | "verify";
 /**
  * What a run used, as its executor reported it (`model::RunUsage`); `null` where it reported nothing.
  * The cost is in millionths of a US dollar and only Claude reports one: under a subscription it is

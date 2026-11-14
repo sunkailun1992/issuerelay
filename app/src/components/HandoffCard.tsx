@@ -6,8 +6,13 @@ import { ErrorState, LoadingState } from "@/components/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useClaimHandoff, useHandoff, useReleaseHandoff } from "@/hooks/queries";
+import { useClaimHandoff, useHandoff, useRecordArchive, useReleaseHandoff } from "@/hooks/queries";
 import { useCopyText } from "@/hooks/useCopyText";
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines } from "@/lib/clean";
@@ -176,6 +181,7 @@ function Release({ id, executor, claimId }: { id: number; executor: ExecutorKind
 function HandoffActions({ job, handoff }: { job: Job; handoff: Handoff }) {
   const { t } = useTranslation();
   const copy = useCopyText();
+  if (job.mode === "verify") return null;
   const hasPrompt = job.state !== "local_complete" && handoff.prompt.trim() !== "";
   const hasReview = handoff.review_prompt.trim() !== "";
   return (
@@ -209,11 +215,51 @@ function HandoffActions({ job, handoff }: { job: Job; handoff: Handoff }) {
   );
 }
 
-function WikiArchiveDetails({ archive }: { archive: WikiArchive }) {
+function ArchiveReceiptForm({ jobId, canReplace, close }: { jobId: number; canReplace: boolean; close: () => void }) {
+  const { t } = useTranslation();
+  const id = useId();
+  const [page, setPage] = useState("");
+  const [commit, setCommit] = useState("");
+  const save = useRecordArchive(jobId);
+  const submit = () => {
+    if (page.trim() === "" || save.isPending) return;
+    save.mutate({ page: page.trim(), commit: commit.trim() || null }, { onSuccess: close });
+  };
+  const keepOpenWhileSaving = (event: Event) => {
+    if (save.isPending) event.preventDefault();
+  };
+  return (
+    <DialogContent showCloseButton={false} onEscapeKeyDown={keepOpenWhileSaving} onInteractOutside={keepOpenWhileSaving}>
+      <DialogHeader>
+        <DialogTitle>{t(canReplace ? "acceptance.archive_replace" : "acceptance.archive")}</DialogTitle>
+        <DialogDescription>{t("acceptance.archive_description")}</DialogDescription>
+      </DialogHeader>
+      <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-page`}>{t("handoff.archive.page")}</Label>
+          <Input id={`${id}-page`} value={page} disabled={save.isPending} onChange={(event) => setPage(event.target.value)} />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-commit`}>{t("handoff.archive.commit")}</Label>
+          <Input id={`${id}-commit`} aria-describedby={`${id}-commit-hint`} value={commit} disabled={save.isPending} onChange={(event) => setCommit(event.target.value)} />
+          <Hint id={`${id}-commit-hint`}>{t("acceptance.archive_commit_hint")}</Hint>
+        </div>
+        {save.isError && <ErrorState error={save.error} headline="acceptance.archive_write_failed" />}
+        <DialogFooter>
+          <DialogClose asChild><Button type="button" variant="outline" disabled={save.isPending}>{t("common.cancel")}</Button></DialogClose>
+          <Button type="submit" disabled={page.trim() === "" || save.isPending}>{t("acceptance.archive_confirm")}</Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  );
+}
+
+function WikiArchiveDetails({ jobId, archive, canRecord }: { jobId: number; archive: WikiArchive; canRecord: boolean }) {
   const { t } = useTranslation();
   const titleId = useId();
   const copy = useCopyText();
   const lang = useLang();
+  const [open, setOpen] = useState(false);
   return (
     <section aria-labelledby={titleId} className="flex flex-col items-start gap-3 border-t pt-4">
       <h3 id={titleId} className="font-medium">{t("handoff.archive.title")}</h3>
@@ -228,10 +274,20 @@ function WikiArchiveDetails({ archive }: { archive: WikiArchive }) {
         )}
       </dl>
       {archive.receipt === null && <p className="text-sm text-muted-foreground">{t("handoff.archive.empty")}</p>}
-      <Button variant="outline" onClick={() => copy(archive.prompt)}>
-        <Copy aria-hidden />
-        {t("handoff.archive.copy")}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" onClick={() => copy(archive.prompt)}>
+          <Copy aria-hidden />
+          {t("handoff.archive.copy")}
+        </Button>
+        {canRecord && (
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline">{t(archive.receipt === null ? "acceptance.archive" : "acceptance.archive_replace")}</Button>
+            </DialogTrigger>
+            {open && <ArchiveReceiptForm jobId={jobId} canReplace={archive.receipt !== null} close={() => setOpen(false)} />}
+          </Dialog>
+        )}
+      </div>
     </section>
   );
 }
@@ -256,7 +312,13 @@ export function HandoffCard({ job }: { job: Job }) {
               {needsInfo && <InformationRequested blockers={handoff.data.memory?.checkpoint?.blockers ?? []} />}
               <HandoffFacts context={handoff.data.context} memory={handoff.data.memory} showBlockers={!needsInfo} />
               <HandoffActions job={job} handoff={handoff.data} />
-              {handoff.data.archive != null && <WikiArchiveDetails archive={handoff.data.archive} />}
+              {job.started_at !== null && job.finished_at !== null && (
+                handoff.data.archive == null ? (
+                  <p className="text-sm text-muted-foreground">{t("acceptance.archive_no_destination")}</p>
+                ) : (
+                  <WikiArchiveDetails jobId={job.id} archive={handoff.data.archive} canRecord={handoff.data.claimed_by === null} />
+                )
+              )}
             </>
           )}
         </CardContent>

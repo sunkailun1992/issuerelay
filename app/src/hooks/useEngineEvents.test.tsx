@@ -38,7 +38,7 @@ test("engine events refresh exactly the data they touch", async () => {
   await settled(client);
   emit({ kind: "job", job });
   const keys = spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
-  for (const key of [["status"], ["jobs"], ["job", job.id], ["handoff", job.id], ["issues"], ["planProgress"]]) {
+  for (const key of [["status"], ["jobs"], ["job", job.id], ["handoff"], ["issues"], ["planProgress"]]) {
     expect(keys).toContain(JSON.stringify(key));
   }
   spy.mockClear();

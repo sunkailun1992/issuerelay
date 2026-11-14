@@ -29,7 +29,7 @@ export function useEngineEvents(): void {
             break;
           case "job":
             refresh(
-              queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.handoff(event.job.id),
+              queryKeys.status, queryKeys.jobs, queryKeys.job(event.job.id), queryKeys.log(event.job.id), queryKeys.handoffs,
               queryKeys.issues, queryKeys.planProgress,
             );
             break;

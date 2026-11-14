@@ -102,6 +102,22 @@ pub fn is_session_id(text: &str) -> bool {
             .all(|(group, len)| group.len() == len && group.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+fn session_started_event(kind: ExecutorKind, event: &Value) -> Option<&str> {
+    let id = match (kind, event["type"].as_str()) {
+        (ExecutorKind::Codex, Some("thread.started")) => &event["thread_id"],
+        (ExecutorKind::Claude, Some("system")) if event["subtype"] == "init" => {
+            &event["session_id"]
+        }
+        _ => return None,
+    };
+    id.as_str().filter(|id| is_session_id(id))
+}
+
+pub(crate) fn started_session_id(kind: ExecutorKind, line: &str) -> Option<String> {
+    let event = serde_json::from_str(line).ok()?;
+    session_started_event(kind, &event).map(str::to_owned)
+}
+
 impl OutputTracker {
     pub fn new(kind: ExecutorKind) -> Self {
         Self {
@@ -116,6 +132,9 @@ impl OutputTracker {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             return;
         };
+        if self.session_id.is_none() {
+            self.session_id = session_started_event(self.kind, &event).map(str::to_owned);
+        }
         match self.kind {
             ExecutorKind::Claude => self.claude(&event),
             ExecutorKind::Codex => self.codex(&event),
@@ -123,32 +142,26 @@ impl OutputTracker {
     }
 
     fn claude(&mut self, event: &Value) {
-        match event["type"].as_str() {
-            Some("system") if event["subtype"] == "init" => {
-                self.keep_session(&event["session_id"]);
-            }
-            Some("result") => {
-                if let Some(text) = event["result"].as_str() {
-                    self.last = Some(text.to_string());
-                }
-                let usage = &event["usage"];
-                self.usage = RunUsage {
-                    cost_micro_usd: None,
-                    session_cost_micro_usd: micro_usd(&event["total_cost_usd"]),
-                    input_tokens: count(&usage["input_tokens"]),
-                    output_tokens: count(&usage["output_tokens"]),
-                    cache_read_tokens: count(&usage["cache_read_input_tokens"]),
-                    cache_write_tokens: count(&usage["cache_creation_input_tokens"]),
-                    turns: count(&event["num_turns"]).and_then(|n| u32::try_from(n).ok()),
-                };
-            }
-            _ => {}
+        if event["type"] != "result" {
+            return;
         }
+        if let Some(text) = event["result"].as_str() {
+            self.last = Some(text.to_string());
+        }
+        let usage = &event["usage"];
+        self.usage = RunUsage {
+            cost_micro_usd: None,
+            session_cost_micro_usd: micro_usd(&event["total_cost_usd"]),
+            input_tokens: count(&usage["input_tokens"]),
+            output_tokens: count(&usage["output_tokens"]),
+            cache_read_tokens: count(&usage["cache_read_input_tokens"]),
+            cache_write_tokens: count(&usage["cache_creation_input_tokens"]),
+            turns: count(&event["num_turns"]).and_then(|n| u32::try_from(n).ok()),
+        };
     }
 
     fn codex(&mut self, event: &Value) {
         match event["type"].as_str() {
-            Some("thread.started") => self.keep_session(&event["thread_id"]),
             Some("item.completed") if event["item"]["type"] == "agent_message" => {
                 if let Some(text) = event["item"]["text"].as_str() {
                     self.last = Some(text.to_string());
@@ -171,16 +184,6 @@ impl OutputTracker {
                 );
             }
             _ => {}
-        }
-    }
-
-    /// The first session id that looks like one; later ones (a resumed run names the same) are
-    /// ignored.
-    fn keep_session(&mut self, id: &Value) {
-        if self.session_id.is_none()
-            && let Some(id) = id.as_str().filter(|id| is_session_id(id))
-        {
-            self.session_id = Some(id.to_string());
         }
     }
 

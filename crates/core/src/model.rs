@@ -116,6 +116,7 @@ pub enum RunMode {
     #[default]
     Implement,
     Plan,
+    Verify,
 }
 
 impl RunMode {
@@ -125,6 +126,7 @@ impl RunMode {
         match self {
             RunMode::Implement => None,
             RunMode::Plan => Some("plan"),
+            RunMode::Verify => Some("verify"),
         }
     }
 
@@ -132,6 +134,7 @@ impl RunMode {
     pub fn from_stored(text: Option<&str>) -> Self {
         match text {
             Some("plan") => RunMode::Plan,
+            Some("verify") => RunMode::Verify,
             _ => RunMode::Implement,
         }
     }
@@ -218,7 +221,8 @@ impl Job {
     }
 
     pub(crate) fn can_source_continuation(&self) -> bool {
-        self.started_at.is_some()
+        self.mode != RunMode::Verify
+            && self.started_at.is_some()
             && (matches!(self.state, JobState::Failed | JobState::Canceled)
                 || self.needs_info_implementation())
     }

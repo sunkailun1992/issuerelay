@@ -27,7 +27,10 @@ use issuerelay_core::{
     provider_sessions::NativeSessionPreview,
     setup::{self, SetupAction},
     text::{clean_text, strip_control},
-    workflow::{ContinuationPreview, DispatchPreview, IssueContext},
+    workflow::{
+        ContinuationPreview, ControlAction, ControlActionPreview, ControlActionResult,
+        DispatchPreview, Handoff, IssueContext,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -419,6 +422,53 @@ pub async fn approve_dispatch(
         .await?
         .engine()
         .approve_dispatch(&issue_identifier, &token)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn prepare_control_action(
+    state: State<'_, AppState>,
+    action: ControlAction,
+) -> CmdResult<ControlActionPreview> {
+    if !matches!(
+        action,
+        ControlAction::StartVerification { .. } | ControlAction::ReturnForRepair { .. }
+    ) {
+        return Err("unsupported desktop action".into());
+    }
+    host(&state)
+        .await?
+        .engine()
+        .prepare_control_action(action)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn commit_control_action(
+    state: State<'_, AppState>,
+    token: String,
+) -> CmdResult<ControlActionResult> {
+    host(&state)
+        .await?
+        .engine()
+        .commit_control_action(&token)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn record_archive(
+    state: State<'_, AppState>,
+    id: i64,
+    page: String,
+    commit: Option<String>,
+) -> CmdResult<Handoff> {
+    host(&state)
+        .await?
+        .engine()
+        .record_archive(id, page, commit)
         .await
         .map_err(error)
 }

@@ -1443,7 +1443,9 @@ async fn native_checkpoint_is_readable_while_running_and_quota_does_not_restart_
         live.memory.unwrap().checkpoint.unwrap().summary,
         "Read the demo fixture"
     );
-    assert_eq!(latest(&engine).state, JobState::Running);
+    let running = latest(&engine);
+    assert_eq!(running.state, JobState::Running);
+    assert_eq!(running.session_id.as_deref(), Some(SESSION));
     std::fs::write(&gate, "continue").unwrap();
     engine.wait_idle().await;
     assert_eq!(latest(&engine).session_id.as_deref(), Some(SESSION));
@@ -1690,4 +1692,461 @@ async fn same_linear_identifier_in_another_workspace_does_not_inherit_context() 
             .scope,
         "New workspace fixture"
     );
+}
+
+#[tokio::test]
+async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_delivery() {
+    use issuerelay_core::workflow::VerificationStatus;
+
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn codex(session: &str, report: Value) -> Value {
+        json!([
+            {"out": json!({"type":"thread.started","thread_id":session}).to_string()},
+            {"out": json!({"type":"item.completed","item":{"type":"agent_message","text":report.to_string()}}).to_string()},
+            {"exit":0}
+        ])
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    git(&repo, &["config", "user.email", "test@example.invalid"]);
+    std::fs::write(repo.join("fixture.txt"), "initial").unwrap();
+    git(&repo, &["add", "fixture.txt"]);
+    git(&repo, &["commit", "-m", "Initial"]);
+    let initial = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("fixture.txt"), "repaired").unwrap();
+    git(&repo, &["commit", "-am", "Repair"]);
+    let repaired = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "--detach", &initial]);
+
+    let first_validation = "00000000-0000-4000-8000-000000000002";
+    let repair_session = "00000000-0000-4000-8000-000000000003";
+    let continued_session = "00000000-0000-4000-8000-000000000005";
+    let second_validation = "00000000-0000-4000-8000-000000000004";
+    let runner = Arc::new(NativeFakeRunner {
+        scripts: Mutex::new(VecDeque::from([
+            write_script(
+                root.path(),
+                "initial.json",
+                codex(
+                    SESSION,
+                    json!({"result":"local_complete","summary":"delivered"}),
+                ),
+            ),
+            write_script(
+                root.path(),
+                "verify-initial.json",
+                codex(
+                    first_validation,
+                    json!({
+                        "result":"verification_failed","summary":"failed","delivery":initial,
+                        "evidence":["Fixture mismatch"]
+                    }),
+                ),
+            ),
+            write_script(
+                root.path(),
+                "repair.json",
+                codex(
+                    repair_session,
+                    json!({"result":"needs_info","summary":"Confirm the expected fixture value"}),
+                ),
+            ),
+            write_script(
+                root.path(),
+                "continued-repair.json",
+                codex(
+                    continued_session,
+                    json!({"result":"local_complete","summary":"repaired"}),
+                ),
+            ),
+            write_script(
+                root.path(),
+                "verify-repair.json",
+                codex(
+                    second_validation,
+                    json!({
+                        "result":"verification_passed","summary":"passed","delivery":repaired,
+                        "evidence":["Checked repaired fixture"]
+                    }),
+                ),
+            ),
+        ])),
+        specs: Mutex::new(Vec::new()),
+    });
+    let wiki = root.path().join("wiki");
+    std::fs::create_dir(&wiki).unwrap();
+    let linear = FakeLinear::new("user-1");
+    linear.upsert(issue("1", "proj-1"));
+    let mut cfg = Config::default();
+    cfg.settings.default_executor = ExecutorKind::Codex;
+    cfg.settings.resume_sessions = true;
+    cfg.settings.wiki_root = Some(wiki.clone());
+    cfg.bindings.push(Binding {
+        id: "proj-1".into(),
+        project_id: "proj-1".into(),
+        project_name: "Demo".into(),
+        directory: repo.clone(),
+        executor: None,
+        permission: None,
+        model: None,
+        prompt_override: None,
+        lean: false,
+        effort: None,
+        labels: Vec::new(),
+    });
+    let config_path = root.path().join("config.toml");
+    cfg.save(&config_path).unwrap();
+    let engine = Engine::new(EngineDeps {
+        config_path,
+        store: Store::open(&root.path().join("test.sqlite3")).unwrap(),
+        linear: Arc::new(linear.clone()),
+        readiness: Arc::new(FakeReadiness),
+        job_runner: runner.clone(),
+        logs_dir: root.path().join("logs"),
+        user_home: None,
+        claude_config_dir: None,
+    })
+    .unwrap();
+    let dispatch = engine.dispatch_preview("DEMO-1").await.unwrap();
+    engine
+        .approve_dispatch("DEMO-1", &dispatch.token)
+        .await
+        .unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let source = latest(&engine);
+    assert_eq!(source.state, JobState::LocalComplete);
+    assert_eq!(source.session_id.as_deref(), Some(SESSION));
+
+    let start = |id, delivery: &str| ControlAction::StartVerification {
+        job_id: id,
+        executor: ExecutorKind::Codex,
+        delivery: delivery.into(),
+    };
+    assert!(
+        engine
+            .prepare_control_action(start(source.id, &initial))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("task brief")
+    );
+    engine
+        .set_issue_context("DEMO-1", 0, brief("Verify the demo fixture"))
+        .await
+        .unwrap();
+    let first = engine
+        .prepare_control_action(start(source.id, &initial))
+        .await
+        .unwrap();
+    assert_eq!(engine.list_jobs(10).unwrap().len(), 1);
+    git(&repo, &["checkout", "--detach", &repaired]);
+    assert!(engine.commit_control_action(&first.token).await.is_err());
+    git(&repo, &["checkout", "--detach", &initial]);
+    let first = engine
+        .prepare_control_action(start(source.id, &initial))
+        .await
+        .unwrap();
+    let result = engine.commit_control_action(&first.token).await.unwrap();
+    assert_eq!(result.result, ControlActionOutcome::VerificationQueued);
+    assert!(engine.commit_control_action(&first.token).await.is_err());
+    let failed = result.job_id.unwrap();
+    assert!(
+        engine
+            .claim_handoff(source.id, ExecutorKind::Codex)
+            .await
+            .is_err()
+    );
+    assert!(
+        engine
+            .prepare_control_action(start(source.id, &initial))
+            .await
+            .is_err()
+    );
+    assert!(
+        engine
+            .record_archive(failed, "queued.md".into(), None)
+            .await
+            .is_err()
+    );
+    assert_eq!(engine.dispatch().await.unwrap(), [failed]);
+    engine.wait_idle().await;
+    assert_eq!(
+        latest(&engine).session_id.as_deref(),
+        Some(first_validation)
+    );
+    let failed_view = engine.handoff(failed).unwrap().acceptance.unwrap();
+    assert_eq!(
+        failed_view.verification_status,
+        Some(VerificationStatus::Failed)
+    );
+    assert_eq!(failed_view.verification_evidence, ["Fixture mismatch"]);
+    assert!(engine.mark_done(source.id).await.is_err());
+    assert!(linear.set_state_calls().is_empty());
+    linear.update("1", |i| i.title = "Clarify available evidence".into());
+    assert!(engine.dispatch_preview("DEMO-1").await.is_err());
+    engine.poll_once().await.unwrap();
+    assert_eq!(engine.list_jobs(10).unwrap().len(), 2);
+
+    let return_preview = engine
+        .prepare_control_action(ControlAction::ReturnForRepair {
+            job_id: failed,
+            reason: "Fix the fixture".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .commit_control_action(&return_preview.token)
+            .await
+            .unwrap()
+            .result,
+        ControlActionOutcome::ReturnedForRepair
+    );
+    assert!(
+        engine
+            .handoff(failed)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .returned_for_repair
+    );
+    assert!(linear.set_state_calls().is_empty());
+    let dispatch = engine.dispatch_preview("DEMO-1").await.unwrap();
+    engine
+        .approve_dispatch("DEMO-1", &dispatch.token)
+        .await
+        .unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let repair = latest(&engine);
+    assert_eq!(repair.state, JobState::NeedsInfo);
+    assert_eq!(repair.session_id.as_deref(), Some(repair_session));
+    assert!(repair.resume_job_id.is_none());
+    assert_eq!(
+        engine
+            .handoff(repair.id)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .repair_of_job_id,
+        Some(failed)
+    );
+    assert!(
+        runner.specs.lock().unwrap()[2]
+            .stdin
+            .contains("Fix the fixture")
+    );
+    assert!(
+        engine
+            .prepare_control_action(start(repair.id, &initial))
+            .await
+            .is_err()
+    );
+    engine
+        .supplement_continuation_context(repair.id, 1, "Expected fixture value is repaired.")
+        .await
+        .unwrap();
+    let continuation = engine
+        .get_continuation_preview(repair.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    let continued = engine
+        .approve_continuation(repair.id, &continuation.token)
+        .await
+        .unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    let repair_before_continuation = repair;
+    let repair = engine.job(continued).unwrap().unwrap();
+    assert_eq!(repair.state, JobState::LocalComplete);
+    assert_eq!(repair.session_id.as_deref(), Some(continued_session));
+    assert_eq!(
+        engine
+            .handoff(repair.id)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .repair_of_job_id,
+        Some(failed)
+    );
+    let error = engine.mark_done(repair.id).await.unwrap_err();
+    assert!(error.to_string().contains("independent"), "{error:#}");
+    assert!(
+        runner.specs.lock().unwrap()[3]
+            .stdin
+            .contains("Fixture mismatch")
+    );
+    git(&repo, &["checkout", "--detach", &repaired]);
+    linear.update("1", |i| i.state = "In Testing".into());
+    let second = engine
+        .prepare_control_action(start(repair.id, &repaired))
+        .await
+        .unwrap();
+    let passed = engine
+        .commit_control_action(&second.token)
+        .await
+        .unwrap()
+        .job_id
+        .unwrap();
+    engine.tick().await.unwrap();
+    engine.wait_idle().await;
+    assert_ne!(passed, failed);
+    assert_eq!(
+        latest(&engine).session_id.as_deref(),
+        Some(second_validation)
+    );
+    assert_eq!(
+        engine
+            .handoff(repair.id)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .verification_status,
+        Some(VerificationStatus::Passed)
+    );
+    assert!(engine.mark_done(repair.id).await.is_err());
+    for id in [
+        source.id,
+        failed,
+        repair_before_continuation.id,
+        repair.id,
+        passed,
+    ] {
+        let page = format!("run-{id}.md");
+        std::fs::write(wiki.join(&page), format!("# Demo run {id}")).unwrap();
+        engine.record_archive(id, page.clone(), None).await.unwrap();
+        let readback = engine.workflow_run(Some(id), None).await.unwrap();
+        assert_eq!(readback["handoff"]["archive"]["receipt"]["page"], page);
+    }
+    assert!(linear.set_state_calls().is_empty());
+    git(&repo, &["checkout", "--detach", &initial]);
+    assert!(engine.mark_done(repair.id).await.is_err());
+    git(&repo, &["checkout", "--detach", &repaired]);
+    let conn = rusqlite::Connection::open(root.path().join("test.sqlite3")).unwrap();
+    let approved_context: String = conn
+        .query_row(
+            "SELECT payload FROM workflow_context WHERE issue_key = ?1",
+            ["1"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE workflow_context SET payload = json_set(payload, '$.scope', 'An updated approval') WHERE issue_key = ?1",
+        ["1"],
+    ).unwrap();
+    let stale = engine.mark_done(repair.id).await.unwrap_err();
+    assert!(stale.to_string().contains("brief changed"), "{stale:#}");
+    conn.execute(
+        "UPDATE workflow_context SET payload = ?1 WHERE issue_key = ?2",
+        rusqlite::params![approved_context, "1"],
+    )
+    .unwrap();
+    engine.mark_done(repair.id).await.unwrap();
+    assert_eq!(linear.set_state_calls(), [("1".into(), "Done".into())]);
+}
+
+#[tokio::test]
+async fn git_archive_receipt_requires_a_committed_page_and_fetched_remote_history() {
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let wiki = temporary.path().join("wiki");
+    std::fs::create_dir(&wiki).unwrap();
+    git(&wiki, &["init"]);
+    git(&wiki, &["config", "user.name", "Test"]);
+    git(&wiki, &["config", "user.email", "test@example.invalid"]);
+    std::fs::write(wiki.join("existing.md"), "# Earlier record").unwrap();
+    git(&wiki, &["add", "."]);
+    git(
+        &wiki,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Earlier record",
+        ],
+    );
+    let earlier = git(&wiki, &["rev-parse", "HEAD"]);
+
+    let mut config = Config::default();
+    config.settings.wiki_root = Some(wiki.clone());
+    let h = Harness::with_config(config, false);
+    h.bind("proj-1", "repo");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let id = h.latest("1").id;
+    std::fs::write(wiki.join("run.md"), "# Synthetic run record").unwrap();
+    assert!(
+        h.engine
+            .record_archive(id, "run.md".into(), Some(earlier))
+            .await
+            .is_err()
+    );
+    assert!(
+        h.engine
+            .record_archive(id, "run.md".into(), Some("1".repeat(40)))
+            .await
+            .is_err()
+    );
+    git(&wiki, &["add", "run.md"]);
+    git(
+        &wiki,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "Run record"],
+    );
+    let commit = git(&wiki, &["rev-parse", "HEAD"]);
+
+    let remote = temporary.path().join("remote.git");
+    std::fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "--bare"]);
+    git(
+        &wiki,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    assert!(
+        h.engine
+            .record_archive(id, "run.md".into(), Some(commit.clone()))
+            .await
+            .is_err()
+    );
+    git(&wiki, &["push", "origin", "HEAD:refs/heads/main"]);
+    git(&wiki, &["fetch", "origin"]);
+    h.engine
+        .record_archive(id, "run.md".into(), Some(commit.clone()))
+        .await
+        .unwrap();
+    let readback = h.engine.workflow_run(Some(id), None).await.unwrap();
+    assert_eq!(readback["handoff"]["archive"]["receipt"]["commit"], commit);
+    assert!(h.linear.set_state_calls().is_empty());
 }

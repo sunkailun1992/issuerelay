@@ -1,5 +1,7 @@
 //! IssueRelay engine: watches Linear issues assigned to the current user and hands each one
 //! to a fresh headless Claude Code or Codex run.
+pub mod acceptance_delivery;
+pub mod acceptance_store;
 pub mod cli_path;
 pub mod config;
 pub mod doctor;

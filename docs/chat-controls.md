@@ -2,7 +2,7 @@
 
 桌面面板和聊天控制共用 IssueRelay 宿主。下表对照桌面命令，说明聊天能否完成同一件事。`已支持` 表示原有 MCP 能力，`本轮接入` 表示当前开发范围，是否可用以对应版本的工具清单和验收记录为准。`桌面` 与 `系统授权` 行保留各自的交互入口，包括由执行器管理的原生会话。
 
-任务操作通过类型固定的预览和确认流程进入同一个引擎。`preview_task_action` 展示目标、影响和需核对的状态，`confirm_task_action` 打开客户端原生确认表单，由用户确认。客户端不支持表单时，可用桌面面板。本机 Codex 用户也可主动[启用聊天确认](usage.md#本机-codex-聊天确认)。主控会话展示完整预览后调用 `prepare_chat_confirmation`，用户在同一会话发送确认码，由 Codex 提交钩子送交宿主。此入口支持派发、续作、重试、停止、记录本地完成、标记完成和完成方案。权限、归属、版本和运行状态仍由宿主校验。执行回执区分请求受理和实际开始、停止或完成。接入范围以 [控制服务](../crates/cli/src/mcp.rs) 和 [宿主 IPC](../crates/core/src/ipc/server.rs) 为准。
+任务操作通过类型固定的预览和确认流程进入同一个引擎。`preview_task_action` 展示目标、影响和需核对的状态，`confirm_task_action` 打开客户端原生确认表单，由用户确认。客户端不支持表单时，可用桌面面板。本机 Codex 用户也可主动[启用聊天确认](usage.md#本机-codex-聊天确认)。主控会话展示完整预览后调用 `prepare_chat_confirmation`，用户在同一会话发送确认码，由 Codex 提交钩子送交宿主。此入口支持派发、续作、重试、停止、记录本地完成、启动独立验证、退回修复、标记完成和完成方案。权限、归属、版本和运行状态仍由宿主校验。执行回执区分请求受理和实际开始、停止或完成。接入范围以 [控制服务](../crates/cli/src/mcp.rs) 和 [宿主 IPC](../crates/core/src/ipc/server.rs) 为准。
 
 `test_confirmation_form` 验证当前会话的表单链路，不联系宿主。长简报的确认表单可以引用会话里的完整预览，前提是 `expected_preview` 仍与当前动作匹配。审批后的宿主复核和一次性提交照常执行。
 
@@ -21,12 +21,15 @@
 | `claim_handoff` | 已支持 | `claim_handoff` 按运行和执行者保留目录。 |
 | `release_handoff` | 已支持 | `release_handoff` 使用该次保留的 `claim_id` 释放目录。 |
 | `model_catalog` | 本轮接入 | `get_model_catalog` 按执行者读取可选模型、推理档位和目录来源。 [模型目录](../crates/core/src/ipc/server.rs#L186) |
-| `job` | 已支持 | `get_run` 按运行 ID 或需求编号读取运行。 |
+| `job` | 已支持 | `get_run` 按运行 ID 或需求编号读取运行。收到实际启动事件后，运行期间即可读取原生 `session_id`；桌面运行详情也提供固定格式的会话定位。 |
 | `job_log` | 本轮接入 | `get_logs` 按运行读取受限日志尾部。CLI 也有 `issuerelay logs`。 |
 | `read_codex_session` | 系统授权 | 由执行器官方客户端管理原生会话。桌面只能通过 Codex 官方接口预览已结束运行关联的有限文本。两端聊天使用 `get_handoff` 获取任务范围内的交接材料，原生会话正文保留在提供方边界。 [桌面预览入口](../crates/core/src/host.rs#L506) |
 | `issues` | 本轮接入 | `list_issues` 读取 IssueRelay 发现的候选需求与阻塞原因。 |
 | `get_dispatch_preview` | 本轮接入 | `preview_task_action` 的 `dispatch` 操作预览单条需求的派发目标、上下文与去向。 |
 | `approve_dispatch` | 本轮接入 | `confirm_task_action` 的 `dispatch` 操作提交有效派发预览。 |
+| `prepare_control_action` | 本轮接入 | 用 `preview_task_action` 的 `start_verification` 或 `return_for_repair` 查看确切交付、执行去向或退回原因。 |
+| `commit_control_action` | 本轮接入 | 对同一动作使用 `confirm_task_action` 或已启用的聊天确认。独立验证回执只表示排队，实际启动和原生会话从 `get_run` 读回。 |
+| `record_archive` | 已支持 | 为已实际执行并结束的运行登记 Wiki 页面与提交，再通过 `get_run` 或 `get_handoff` 读回同一回执。 |
 | `get_continuation_preview` | 本轮接入 | `preview_task_action` 的 `continue` 操作按原运行和选定执行者预览续作。 |
 | `get_continuation_context` | 本轮接入 | `get_continuation_context` 按原运行读取续作所需上下文和修订号。 |
 | `supplement_continuation_context` | 本轮接入 | `supplement_continuation_context` 追加指定中断运行的待确认材料，沿用修订号校验。 |

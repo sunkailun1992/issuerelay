@@ -132,16 +132,46 @@ pub struct ContinuationPreview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlAction {
-    Dispatch { issue_identifier: String },
-    Continue { job_id: i64, executor: ExecutorKind },
-    Retry { job_id: i64 },
-    Stop { job_id: i64 },
-    RecordLocalCompletion { job_id: i64 },
-    MarkDone { job_id: i64 },
-    CompletePlan { job_id: i64 },
-    SaveBinding { binding: ControlBinding },
-    RemoveBinding { binding_id: String },
-    SetSettings { changes: ControlSettings },
+    Dispatch {
+        issue_identifier: String,
+    },
+    Continue {
+        job_id: i64,
+        executor: ExecutorKind,
+    },
+    Retry {
+        job_id: i64,
+    },
+    Stop {
+        job_id: i64,
+    },
+    RecordLocalCompletion {
+        job_id: i64,
+    },
+    MarkDone {
+        job_id: i64,
+    },
+    CompletePlan {
+        job_id: i64,
+    },
+    StartVerification {
+        job_id: i64,
+        executor: ExecutorKind,
+        delivery: String,
+    },
+    ReturnForRepair {
+        job_id: i64,
+        reason: String,
+    },
+    SaveBinding {
+        binding: ControlBinding,
+    },
+    RemoveBinding {
+        binding_id: String,
+    },
+    SetSettings {
+        changes: ControlSettings,
+    },
 }
 
 /// Binding fields an operator can review in a chat. Prompt overrides stay with the desktop.
@@ -272,6 +302,7 @@ pub struct ControlActionPreview {
     pub linear_target_state: Option<String>,
     pub plan_progress: Option<PlanProgress>,
     pub config_change: Option<ControlConfigChange>,
+    pub acceptance: Option<AcceptancePreview>,
     pub expires_in_seconds: u64,
 }
 
@@ -289,6 +320,8 @@ pub enum ControlActionOutcome {
     BindingSaved,
     BindingRemoved,
     SettingsUpdated,
+    VerificationQueued,
+    ReturnedForRepair,
 }
 
 #[derive(Debug, Serialize)]
@@ -485,6 +518,49 @@ pub struct WikiArchive {
     pub receipt: Option<ArchiveReceipt>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    WaitingBinding,
+    Queued,
+    Running,
+    Passed,
+    Failed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptancePreview {
+    pub source_job_id: i64,
+    pub delivery: Option<String>,
+    pub executor: Option<ExecutorKind>,
+    pub directory: Option<PathBuf>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub permission: Option<String>,
+    pub lean: Option<LeanStatus>,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub delivery_fingerprint: String,
+    pub linear_updated_at: DateTime<Utc>,
+    pub brief_revision: Option<u64>,
+    pub context: Option<IssueContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptanceView {
+    pub development_job_id: i64,
+    pub repair_of_job_id: Option<i64>,
+    pub repair_job_id: Option<i64>,
+    pub verification_job_id: Option<i64>,
+    pub delivery: Option<String>,
+    pub verification_status: Option<VerificationStatus>,
+    pub returned_for_repair: bool,
+    pub repair_reason: Option<String>,
+    #[serde(default)]
+    pub verification_evidence: Vec<String>,
+}
+
 /// The data and prompts a new session needs to inspect or continue a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handoff {
@@ -500,6 +576,8 @@ pub struct Handoff {
     pub claim_id: Option<String>,
     #[serde(default)]
     pub archive: Option<WikiArchive>,
+    #[serde(default)]
+    pub acceptance: Option<AcceptanceView>,
 }
 
 /// Canonical local key for a Linear issue identifier or UUID.

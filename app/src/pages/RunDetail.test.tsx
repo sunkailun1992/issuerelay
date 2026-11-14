@@ -10,7 +10,7 @@ import { formatDateTime } from "@/lib/format";
 import { createMockBackend } from "@/lib/mock";
 import { ago } from "@/lib/mock-fixtures";
 import type { Job, PlanProgress } from "@/lib/types";
-import type { DispatchPreview, Handoff } from "@/lib/workflow-types";
+import type { AcceptanceLinks, DispatchPreview, Handoff } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { advanceUntil } from "@/test/time";
 import RunDetail from "./RunDetail";
@@ -449,8 +449,61 @@ test("a finished Claude session can be reopened in its own client using only the
   const card = within(screen.getByRole("region", { name: "Original executor session" }));
   await userEvent.click(card.getByRole("button", { name: "Copy reopen command" }));
   expect(copy).toHaveBeenCalledExactlyOnceWith(`claude --resume ${session}`);
+  await userEvent.click(card.getByRole("button", { name: "Copy Claude Desktop command" }));
+  expect(copy).toHaveBeenLastCalledWith(`claude --desktop --resume ${session}`);
+  expect(card.queryByText(/Wait for this run to end/)).not.toBeInTheDocument();
   expect(card.queryByRole("button", { name: "Preview Codex session" })).not.toBeInTheDocument();
   expect(read).not.toHaveBeenCalled();
+});
+
+test("a running Codex session shows a copyable Desktop link without opening or reading it", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({
+    ...job, executor: "codex", state: "running", finished_at: null,
+  });
+  const read = vi.spyOn(backend, "readCodexSession");
+  const copy = stubClipboard();
+  await openRun(job.id, backend);
+  const card = within(screen.getByRole("region", { name: "Original executor session" }));
+  const link = `codex://threads/${job.session_id}`;
+  expect(card.getByText(link, { selector: "code" })).toBeInTheDocument();
+  await userEvent.click(card.getByRole("button", { name: "Copy Codex Desktop link" }));
+  expect(copy).toHaveBeenCalledExactlyOnceWith(link);
+  expect(card.queryByRole("link")).not.toBeInTheDocument();
+  expect(card.queryByRole("button", { name: "Copy reopen command" })).not.toBeInTheDocument();
+  expect(card.queryByRole("button", { name: "Preview Codex session" })).not.toBeInTheDocument();
+  expect(read).not.toHaveBeenCalled();
+});
+
+test("a running Claude session shows the Desktop command with a wait-for-end hint", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, state: "running", finished_at: null });
+  const copy = stubClipboard();
+  await openRun(job.id, backend);
+  const card = within(screen.getByRole("region", { name: "Original executor session" }));
+  const command = `claude --desktop --resume ${job.session_id}`;
+  expect(card.getByText(command, { selector: "code" })).toBeInTheDocument();
+  expect(card.getByText(/Wait for this run to end/)).toBeInTheDocument();
+  await userEvent.click(card.getByRole("button", { name: "Copy Claude Desktop command" }));
+  expect(copy).toHaveBeenCalledExactlyOnceWith(command);
+  expect(card.queryByRole("button", { name: "Copy reopen command" })).not.toBeInTheDocument();
+});
+
+test.each([
+  ["waiting for a binding", { state: "waiting_binding" }],
+  ["queued", { state: "queued" }],
+  ["missing the start time", { state: "running", started_at: null }],
+  ["missing the working folder", { state: "running", directory: null }],
+  ["missing the executor", { state: "running", executor: null }],
+  ["missing the session ID", { state: "running", session_id: null }],
+] satisfies [string, Partial<Job>][])("a run %s has no provider session actions", async (_label, fields) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, finished_at: null, ...fields });
+  await openRun(job.id, backend);
+  expect(screen.queryByRole("region", { name: "Original executor session" })).not.toBeInTheDocument();
 });
 
 test("Codex session preview only reads after a click, and displays text from the recorded session", async () => {
@@ -470,6 +523,9 @@ test("Codex session preview only reads after a click, and displays text from the
   expect(backend.readCodexSession).not.toHaveBeenCalled();
   await userEvent.click(card.getByRole("button", { name: "Copy reopen command" }));
   expect(copy).toHaveBeenCalledExactlyOnceWith(`codex resume ${job.session_id}`);
+  await userEvent.click(card.getByRole("button", { name: "Copy Codex Desktop link" }));
+  expect(copy).toHaveBeenLastCalledWith(`codex://threads/${job.session_id}`);
+  expect(backend.readCodexSession).not.toHaveBeenCalled();
   await userEvent.click(card.getByRole("button", { name: "Preview Codex session" }));
   const dialog = within(screen.getByRole("dialog", { name: "Preview Codex session" }));
   expect(await dialog.findByText("<b>Review changes</b>")).toBeInTheDocument();
@@ -529,6 +585,153 @@ test.each([false, true])("the Wiki archive card shows the recorded receipt when 
   }
   await userEvent.click(archive.getByRole("button", { name: "Copy Wiki archive material" }));
   expect(copy).toHaveBeenCalledWith("Archive the index migration in the configured Wiki.");
+});
+
+test("independent verification only queues after the exact delivery preview is confirmed", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const prepareAction = backend.prepareControlAction;
+  const prepare = vi.spyOn(backend, "prepareControlAction").mockImplementation(async (action) => {
+    const preview = await prepareAction(action);
+    return {
+      ...preview,
+      acceptance: {
+        ...preview.acceptance!,
+        scope: "Verify the saved delivery in the sandbox.",
+        brief_revision: 4,
+        context: {
+          revision: 4, origin_executor: "codex", preferred_executor: "codex",
+          request: "Verify the revised two-tab save behavior.",
+          conversation_history: "Check both the retry and the original saved record.",
+          scope: "Previous draft scope",
+          acceptance: ["Both tabs keep the same saved record.", "A rejected save leaves the draft intact."],
+          source_refs: ["wiki/queries/revised-save-criteria.md"],
+        },
+      },
+    };
+  });
+  const commit = vi.spyOn(backend, "commitControlAction");
+  await openRun(10, backend);
+  await userEvent.click(await screen.findByRole("button", { name: "Start independent verification" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Start independent verification" }));
+  const delivery = dialog.getByRole("textbox", { name: "Delivery to verify" });
+  const confirm = dialog.getByRole("button", { name: "Confirm action" });
+  expect(confirm).toBeDisabled();
+  await userEvent.click(dialog.getByRole("radio", { name: "Codex" }));
+  await userEvent.type(delivery, "build-demo-3");
+  await userEvent.click(dialog.getByRole("button", { name: "Review action" }));
+  expect(await dialog.findByText("Verification sandbox with network access")).toBeInTheDocument();
+  expect(dialog.getByText(/Network access is enabled; the executor must follow this task's authorized environment scope/)).toBeInTheDocument();
+  expect(dialog.getByText("build-demo-3", { selector: "dd" })).toBeInTheDocument();
+  const fingerprint = "0123456789abcdef".repeat(4);
+  expect(dialog.getByText(fingerprint, { selector: "code" })).toHaveAttribute("title", fingerprint);
+  const source = (await backend.job(10))!;
+  const revisedAt = source.verified_updated_at ?? source.discovered_updated_at;
+  expect(dialog.getByText(formatDateTime(revisedAt, "en"), { selector: "time" })).toHaveAttribute("dateTime", revisedAt);
+  expect(dialog.getByText("Task brief revision", { selector: "dt" }).nextElementSibling).toHaveTextContent("4");
+  expect(dialog.getByText("Verify the revised two-tab save behavior.")).toBeInTheDocument();
+  expect(dialog.getByText("Check both the retry and the original saved record.")).toBeInTheDocument();
+  expect(dialog.getByText("Verify the saved delivery in the sandbox.")).toBeInTheDocument();
+  expect(dialog.queryByText("Previous draft scope")).not.toBeInTheDocument();
+  expect(dialog.getByText("Both tabs keep the same saved record.", { selector: "li" })).toBeInTheDocument();
+  expect(dialog.getByText("A rejected save leaves the draft intact.", { selector: "li" })).toBeInTheDocument();
+  expect(dialog.getByText("wiki/queries/revised-save-criteria.md", { selector: "li" })).toBeInTheDocument();
+  expect(prepare).toHaveBeenCalledWith({ action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3" });
+  expect(commit).not.toHaveBeenCalled();
+
+  await userEvent.clear(delivery);
+  await userEvent.type(delivery, "build-demo-4");
+  expect(confirm).toBeDisabled();
+  await userEvent.click(dialog.getByRole("button", { name: "Review action" }));
+  expect(await dialog.findByText("build-demo-4", { selector: "dd" })).toBeInTheDocument();
+  await userEvent.click(confirm);
+  expect(commit).toHaveBeenCalledExactlyOnceWith("demo-acceptance-2");
+  expect(await screen.findByText("Verification is queued")).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Development run #10" })).toHaveAttribute("href", "/runs/10");
+  expect(await backend.job(13)).toMatchObject({ mode: "verify", state: "queued", resume_job_id: null });
+  expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+});
+
+test("a verification blocks development closure until it passes", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const read = backend.getHandoff;
+  let acceptance: AcceptanceLinks = {
+    development_job_id: 10, repair_of_job_id: null, verification_job_id: 13, delivery: "build-demo-3",
+    verification_status: "failed", returned_for_repair: false, repair_reason: null,
+  };
+  backend.getHandoff = async (id) => ({ ...(await read(id)), acceptance });
+  const { client } = await openRun(10, backend);
+  expect(await screen.findByRole("link", { name: "Verification run #13" })).toHaveAttribute("href", "/runs/13");
+  expect(screen.getByText("Verification did not pass")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Start independent verification" })).not.toBeInTheDocument();
+  acceptance = { ...acceptance, verification_status: "passed" };
+  await act(() => client.invalidateQueries({ queryKey: queryKeys.handoff(10) }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Mark done" })).toBeEnabled());
+});
+
+test("a failed independent verification can return for repair with reviewed findings", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const prepared = await backend.prepareControlAction({
+    action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3",
+  });
+  await backend.commitControlAction(prepared.token);
+  let saved: AcceptanceLinks = { ...(await backend.getHandoff(13)).acceptance!, verification_status: "failed" };
+  const readHandoff = backend.getHandoff;
+  backend.getHandoff = async (id) => ({ ...(await readHandoff(id)), acceptance: saved });
+  const read = backend.job;
+  backend.job = async (id) => id === 13 ? {
+    ...(await read(id))!, state: "failed", report: "verification_failed", started_at: ago(3), finished_at: ago(1),
+  } : read(id);
+  const repair = { action: "return_for_repair", job_id: 13, reason: "Repeat the save with two tabs." } as const;
+  const prepare = vi.fn<Backend["prepareControlAction"]>().mockResolvedValue({
+    token: "demo-repair-preview", action: repair, issue_identifier: "DEMO-10", job_id: 13, current_state: "failed",
+    acceptance: {
+      source_job_id: 10, delivery: "build-demo-3", reason: repair.reason,
+      executor: null, directory: null, model: null, effort: null, permission: null, lean: null,
+    },
+    expires_in_seconds: 180,
+  });
+  const commit = vi.fn<Backend["commitControlAction"]>(async () => {
+    saved = { ...saved, returned_for_repair: true, repair_reason: repair.reason };
+    return { action: repair, issue_identifier: "DEMO-10", job_id: 13, result: "returned_for_repair" };
+  });
+  backend.prepareControlAction = prepare;
+  backend.commitControlAction = commit;
+  await openRun(13, backend);
+  expect(await screen.findByText("Verification did not pass")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Mark done" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Run again" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Return for repair" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Return for repair" }));
+  await userEvent.type(dialog.getByRole("textbox", { name: "Repair findings and reproduction" }), "Repeat the save with two tabs.");
+  await userEvent.click(dialog.getByRole("button", { name: "Review action" }));
+  expect(await dialog.findByText("Repeat the save with two tabs.", { selector: "dd" })).toBeInTheDocument();
+  expect(dialog.queryByText("Delivery fingerprint")).not.toBeInTheDocument();
+  expect(prepare).toHaveBeenCalledExactlyOnceWith(repair);
+  expect(commit).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("button", { name: "Confirm action" }));
+  expect(commit).toHaveBeenCalledExactlyOnceWith("demo-repair-preview");
+  expect(await screen.findByText("Returned for repair")).toBeInTheDocument();
+  expect(screen.getByText(/create a new revision/)).toBeInTheDocument();
+  expect((await backend.getHandoff(10)).acceptance).toMatchObject({ returned_for_repair: true, repair_reason: "Repeat the save with two tabs." });
+});
+
+test("a finished run can record a Wiki receipt and reads the saved page and commit back", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  await backend.saveSettings({ ...(await backend.settings()), wiki_root: "/demo/wiki" });
+  const record = vi.spyOn(backend, "recordArchive");
+  await openRun(8, backend);
+  const archive = within(await screen.findByRole("region", { name: "Wiki archive" }));
+  await userEvent.click(archive.getByRole("button", { name: "Record archive receipt" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Record archive receipt" }));
+  const commit = "0123456789abcdef0123456789abcdef01234567";
+  await userEvent.type(dialog.getByRole("textbox", { name: "Archived page" }), "projects/demo.md");
+  await userEvent.type(dialog.getByRole("textbox", { name: "Archive commit" }), commit);
+  expect(record).not.toHaveBeenCalled();
+  await userEvent.click(dialog.getByRole("button", { name: "Save receipt" }));
+  expect(record).toHaveBeenCalledExactlyOnceWith(8, "projects/demo.md", commit);
+  expect(await archive.findByText("projects/demo.md")).toBeInTheDocument();
+  expect(archive.getByText(commit)).toBeInTheDocument();
 });
 
 test("claiming a handoff requires choosing an executor and leaves the run's executor intact", async () => {

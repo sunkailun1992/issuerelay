@@ -4,7 +4,7 @@ IssueRelay 是面向 Linear 与本机 Codex、Claude Code 用户的桌面任务�
 
 它适合已经用 Linear 管理需求、希望把明确的开发任务交给本机 AI 命令行执行的个人开发者，也适合团队成员各自在自己的电脑上使用。本文描述仓库当前源码中的工作流。安装、系统要求与卸载见[安装说明](install.md)，各安装包支持的功能见 [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases)。
 
-从旧版升级时，先正常退出并备份应用数据。支持本地交付结果的构建会将运行数据库迁移到 schema 6。 [升级与备份](install.md#升级前备份数据)
+从旧版升级时，先正常退出并备份应用数据。本版本将运行数据库迁移到 schema 7，旧版不能打开新数据库。回退到旧版时，先退出应用并使用升级前备份。 [升级与备份](install.md#升级前备份数据)
 
 ## 谁负责什么
 
@@ -116,7 +116,7 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 首次登记用 `expected_revision: 0`。修改前用 `get_issue_context` 取当前 `revision`，再把它传给 `expected_revision`。修订号冲突时，先重读并核对修改。`request` 写目标和脱敏摘要。`conversation_history` 写本次任务相关的完整会话内容，保留有关的命令、报错原文、版本、已作决定和未决事项。旧任务上下文缺少这段文字时仍可查看，重新派发或续作前须由主控补齐并重新预览确认。`scope` 写允许的范围。`acceptance` 和 `source_refs` 分别记录验收条件和来源引用。`preferred_executor` 只在用户明确选择时设置，入口由 MCP 客户端识别。草稿不随宿主重启保留，添加标签只让需求成为候选。
 
-派发、续作、记录本地完成、标记完成、完成方案、重试和停止先调用 `preview_task_action`。随后通过 `confirm_task_action` 的原生表单确认，或者使用已启用的[本机 Codex 聊天确认](#本机-codex-聊天确认)。原生表单不可用时也可以在桌面面板完成。可用工具和系统授权交接见[聊天控制覆盖表](chat-controls.md)。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
+派发、续作、记录本地完成、独立验证、退回修复、标记完成、完成方案、重试和停止先调用 `preview_task_action`。随后通过 `confirm_task_action` 的原生表单确认，或者使用已启用的[本机 Codex 聊天确认](#本机-codex-聊天确认)。原生表单不可用时也可以在桌面面板完成。可用工具和系统授权交接见[聊天控制覆盖表](chat-controls.md)。请提交任务摘要、完整任务相关历史和引用，排除整段聊天、原始截图和凭据。`conversation_history` 上限为 96 KiB，序列化后的完整上下文上限为 128 KiB，超限会报错。请在主控会话调整草稿再提交，IssueRelay 不会自动删减或截断历史。确认前草稿只留在宿主内存。无论选择 Codex 还是 Claude Code，获准的任务快照都会随运行传给所选执行器。两端主控会话也可通过 `get_run` 或 `get_handoff` 读取同一运行的已保存上下文与检查点。工具返回的需求标题、摘要、检查点与错误都按数据读取。
 
 ### 在会话中执行操作
 
@@ -125,6 +125,8 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 可以先用 `test_confirmation_form` 验证客户端能否显示原生表单。该工具不联系 IssueRelay 宿主。客户端声明支持表单并不保证当前会话允许弹出表单。`client_declined` 表示客户端回传了拒绝，可能是审批策略直接拒绝，也可能是用户拒绝。`confirmation_not_checked` 表示表单已提交，但没有勾选确认。Codex 会话应使用允许 MCP 交互表单的审批策略，并保留用户审核。
 
 - `dispatch` 用 `issue_identifier`。`continue` 用 `job_id` 和 `executor`。`retry`、`stop`、`record_local_completion`、`mark_done`、`complete_plan` 用 `job_id`。重试后仍须复核派发，停止后用 `get_run` 查询终态。
+- `start_verification` 用开发运行的 `job_id`、`executor` 和 `delivery`。交付标识用干净工作树的完整 HEAD SHA，或指向交付清单的本机绝对 JSON 路径。
+- `return_for_repair` 用独立验证的 `job_id` 和 `reason`。仅对已确认的新版本验收结果为未通过的运行提供退回。
 - `save_binding` 用 `binding`，`remove_binding` 用 `binding_id`。需要扩大完全访问权限或覆盖另一条绑定时，由桌面处理。
 - `list_labels` 和桌面绑定页读取工作区标签和可见项目关联团队的标签，并合并同名标签。
 - `set_settings` 用 `changes`，可修改 `poll_interval_secs`、`max_concurrent`、`run_timeout_mins`、`stall_timeout_mins`、`language`。
@@ -161,11 +163,21 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 ## 查看和管理原生会话
 
-运行详情有原生会话 ID 时，会显示在原工作目录运行的打开命令。Codex 使用 `codex resume <session-id>`，Claude Code 使用 `claude --resume <session-id>`。Codex 的近期文本预览通过官方 App Server 的只读查询加载，不启动推理。预览为有限的用户与助手消息，完整会话可在 Codex 打开。Claude Code 会话通过原生客户端查看。CLI 2.1.285 或更新版本在 macOS 和 x64 Windows 上使用支持的 Claude 订阅时，也可用 `claude --desktop --resume <session-id>` 将已经停止的 CLI 会话交给 Claude Desktop 打开。 [Codex App Server](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming) · [Claude Code 会话管理](https://code.claude.com/docs/en/sessions) · [Claude Desktop 打开 CLI 会话](https://code.claude.com/docs/en/desktop#coming-from-the-cli)
+执行器发出原生会话启动事件后，运行详情即可显示会话定位，`get_run` 同时可读到 `session_id`。Codex 可复制 `codex://threads/<session-id>`，在桌面客户端打开对应会话。Claude Code 可复制 `claude --desktop --resume <session-id>`，等本次运行结束后使用。方案和开发运行结束后仍可在原工作目录通过 `codex resume <session-id>` 或 `claude --resume <session-id>` 打开。Codex 的有限近期文本预览通过官方 App Server 的只读查询加载。会话是否出现在项目侧栏由原生客户端决定。 [Codex 桌面深链](https://learn.chatgpt.com/docs/reference/commands#deep-links) · [Codex App Server](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming) · [Claude Desktop 打开 CLI 会话](https://code.claude.com/docs/en/desktop#coming-from-the-cli)
 
 原生会话由各自的官方客户端管理。Codex 的归档会保留会话记录，并尝试归档由它生成的后代会话。Claude Code 后台列表中的会话可在官方客户端处理，`claude rm <id>` 处理后台列表记录和符合条件的 Claude 工作树，原生会话记录仍可通过 `claude --resume` 访问。IssueRelay 的日志保留设置只管理自身的运行日志。原生会话存储不由 IssueRelay 直接操作。 [Codex 归档规则](https://learn.chatgpt.com/docs/app-server#archive-a-thread) · [Claude Code 后台会话移除规则](https://code.claude.com/docs/en/agent-view#what-deleting-a-session-removes)
 
+独立验证使用运行自己的临时目录，这个目录会在执行结束后清理。通过 IssueRelay 保留的会话 ID 打开同一原生会话，可查看当时的任务、命令和结果。独立验证不恢复开发会话。
+
 Claude Desktop 的 Code 会话也可以在侧栏菜单归档。归档前先保存需要保留的工作树改动。根据会话状态及操作选项，归档可能丢弃未提交改动或清理未跟踪文件。 [Claude Desktop 工作树归档规则](https://code.claude.com/docs/en/desktop#keep-uncommitted-changes-when-a-session-is-archived)
+
+## 独立验证、退回与复验
+
+1. 方案与开发正常派发。开发交付后可人工验收，或在开发运行详情点「开始独立验证」并选择 Codex 或 Claude Code。核对来源运行、模型、推理力度、权限、范围和交付版本，再确认。确认返回新的运行编号，收到执行者启动事件后详情才会显示真实会话 ID。一次只允许一个验收运行。
+2. 验收在临时交付副本中读取任务和检查源码、运行允许的测试。原交付目录只读，临时副本可运行构建和测试，固定沙箱允许联网以访问本任务授权的原型、服务和依赖。预览显示这一权限，网络范围由获批任务约束。清单可包含一个或多个绑定目录内的仓库，每项记录 `repository`、完整基准提交 `base` 和 `files`，后者记录相对 `path` 及内容的 `sha256`。修改项目、切换版本或改变任务版本后，需要重新核对。副本只含 Git 跟踪文件和清单中批准的改动。依赖本机服务、外部原型或生成文件时，如验收端缺少可信输入或运行权限，应记录为「无法完成」。
+3. 详情记录「通过」「未通过」或「无法完成」及验收证据。进程退出、取消、额度耗尽、版本改变或缺少对应版本的结构化报告，都不会得出通过或未通过的业务结论。无法完成且交付版本未变时，可以在开发运行另开验证。
+4. 针对「未通过」预览「退回开发」，填写原因并确认。更新当前 Linear 任务的要求，沿用开发派发复核。退回记录保留所验版本、验收证据与原生会话；新的开发运行另开会话，并收到该轮失败证据。修复交付准备好后，以修复运行及新版本重新执行独立验收。
+5. 通过后再按本项目要求归档并读回回执。配置 Wiki 的任务需有本轮开发与通过的验证回执，才可标记完成。已实际执行的方案、开发、验证、未通过和无法完成的运行分别保留归档入口。未启动的排队和等待项无归档回执。
 
 ## 手动接力、独立复核与归档
 
@@ -173,7 +185,7 @@ Claude Desktop 的 Code 会话也可以在侧栏菜单归档。归档前先保�
 
 1. **接手续作。** 在最近一次已结束、尚未完成的运行详情，选择执行者并点「领取交接」，或调用 `claim_handoff`。IssueRelay 会保留该本地目录，避免调度器再向它派工。点「复制交接提示词」，自己打开所选执行者的新会话，在同一目录核对工作树再继续。会话停止写入后，点「释放交接」或调用 `release_handoff`。用 MCP 操作时，请保存自己领取时返回的 `claim_id`，释放时传这个值。这样即使请求迟到，也不会清除后来重新领取的保留。
 2. **独立复核。** 在运行详情点「复制独立复核提示词」，交给一个新会话。复核者依据需求与验收条件核对 diff、执行者报告的验证、剩余风险，并按授权做验证。最终是否验收通过由你判断。
-3. **Wiki 归档。** 在「设置 → 高级 → 归档」选择已有的 LLM-Wiki 目录。留空时，完成运行无需归档回执。配置后，从运行详情复制 Wiki 归档材料，由有权限的主控会话按目标 Wiki 的规则写入、核对页面，并按要求提交和推送。然后调用 `record_archive`，填写运行 `job_id`、相对当前 Wiki 根的页面路径（使用 `/`）和 Git Wiki 要求的完整提交 SHA。IssueRelay 核对路径和回执格式，远端推送结果由主控会话在目标仓库实际读回。回执绑定登记时的 Wiki 根。换根或页面消失后，需要在当前目录重新登记。领取交接会清除旧回执，释放交接后才可重新登记。通过验收并取得有效回执后，可在面板或支持确认的会话中「标记完成」。
+3. **Wiki 归档。** 在「设置 → 高级 → 归档」选择已有的 LLM-Wiki 目录。留空时，完成运行无需归档回执。配置后，从运行详情复制 Wiki 归档材料，由有权限的主控会话按目标 Wiki 的规则写入、核对页面，并按要求提交和推送。然后调用 `record_archive`，填写运行 `job_id`、相对当前 Wiki 根的页面路径（使用 `/`）和 Git Wiki 要求的完整提交 SHA。IssueRelay 核对路径、提交中的页面；有 Git 远端时还核对已取得的远端跟踪历史。远端推送结果由主控会话在目标仓库实际读回，登记后再用同一运行编号查询回执。回执绑定登记时的 Wiki 根。换根或页面消失后，需要在当前目录重新登记。领取交接会清除旧回执，释放交接后才可重新登记。通过验收并取得有效回执后，可在面板或支持确认的会话中「标记完成」。
 
 ## 常见误解
 

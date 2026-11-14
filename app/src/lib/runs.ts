@@ -1,4 +1,5 @@
 import { DISPLAY_JOB_STATES, type DisplayJobState, type ExecutorKind, type Job, type JobState, type PlanProgress } from "./types";
+import type { VerificationStatus } from "./workflow-types";
 
 /** The states of a run that is still in hand: it waits, is queued or runs (core's `JobState::is_active`). */
 export const ACTIVE_STATES: readonly JobState[] = ["waiting_binding", "queued", "running"];
@@ -51,13 +52,13 @@ export function isInterruptedRun(job: Job | null | undefined): job is Job & {
   started_at: string;
   executor: ExecutorKind;
 } {
-  return job?.started_at != null && job.executor !== null &&
+  return job?.started_at != null && job.executor !== null && job.mode !== "verify" &&
     (job.state === "failed" || job.state === "canceled" || isNeedsInfoImplementation(job));
 }
 
 /** An unstarted follow-up may be reused to continue the earlier interrupted attempt. */
 export function pendingContinuationSourceId(job: Job | null | undefined): number | null {
-  if (job?.started_at === null && (job.state === "queued" || job.state === "waiting_binding" || job.state === "canceled")) {
+  if (job?.mode !== "verify" && job?.started_at === null && (job.state === "queued" || job.state === "waiting_binding" || job.state === "canceled")) {
     return job.resume_job_id ?? null;
   }
   return null;
@@ -84,6 +85,15 @@ export function isNewestRun(job: Job, jobs: readonly Job[]): boolean {
 /** The state shown in the panel. Actions that affect Linear still use the persisted state. */
 export function displayJobState(state: JobState): DisplayJobState {
   return state === "local_complete" ? "awaiting_acceptance" : state;
+}
+
+/** Verification records keep runtime state apart from the reported acceptance verdict. */
+export function displayedVerificationStatus(job: Job): VerificationStatus | undefined {
+  if (job.mode !== "verify") return undefined;
+  if (job.state === "waiting_binding" || job.state === "queued" || job.state === "running") return job.state;
+  if (job.report === "verification_passed") return "passed";
+  if (job.report === "verification_failed") return "failed";
+  return "blocked";
 }
 
 /** The visible state filters. The old local-completion address remains an alias. */

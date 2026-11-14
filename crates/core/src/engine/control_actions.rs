@@ -39,6 +39,15 @@ enum ActionCheck {
     Local(Box<Job>),
     Completion(Box<ReviewedCompletion>),
     Config(Box<ReviewedConfig>),
+    Verify(
+        Box<(
+            Job,
+            super::acceptance::VerificationApproval,
+            crate::acceptance_delivery::DeliveryFingerprint,
+        )>,
+        Arc<dyn LinearApi>,
+    ),
+    Return(Box<super::acceptance::ReviewedRepair>),
 }
 
 struct ReviewedConfig {
@@ -120,6 +129,7 @@ impl Engine {
             linear_target_state: None,
             plan_progress: None,
             config_change: None,
+            acceptance: None,
             expires_in_seconds: PREVIEW_TTL.as_secs(),
         };
         let check = match &action {
@@ -204,6 +214,33 @@ impl Engine {
                     .as_ref()
                     .map(|children| tally(job.id, &job.issue_uuid, children, Utc::now()));
                 ActionCheck::Completion(Box::new(completion))
+            }
+            ControlAction::StartVerification {
+                job_id,
+                executor,
+                delivery,
+            } => {
+                let linear = self.linear();
+                let data = self
+                    .verification_preview(*job_id, *executor, delivery, &linear)
+                    .await?;
+                preview
+                    .issue_identifier
+                    .clone_from(&data.0.issue_identifier);
+                preview.job_id = Some(data.0.id);
+                preview.current_state = Some(data.0.state);
+                preview.acceptance = Some(data.1.preview(data.0.id, &data.2));
+                ActionCheck::Verify(Box::new(data), linear)
+            }
+            ControlAction::ReturnForRepair { job_id, reason } => {
+                let data = self.repair_preview(*job_id, reason)?;
+                preview
+                    .issue_identifier
+                    .clone_from(&data.job().issue_identifier);
+                preview.job_id = Some(*job_id);
+                preview.current_state = Some(data.job().state);
+                preview.acceptance = Some(data.preview()?);
+                ActionCheck::Return(Box::new(data))
             }
             ControlAction::SaveBinding { .. }
             | ControlAction::RemoveBinding { .. }
@@ -424,10 +461,11 @@ impl Engine {
                 );
             } else {
                 anyhow::ensure!(
-                    matches!(
-                        job.state,
-                        JobState::AwaitingAcceptance | JobState::LocalComplete
-                    ),
+                    job.mode == RunMode::Implement
+                        && matches!(
+                            job.state,
+                            JobState::AwaitingAcceptance | JobState::LocalComplete
+                        ),
                     "the run is not awaiting acceptance"
                 );
             }
@@ -436,6 +474,10 @@ impl Engine {
                 current_archive(&store, job_id, settings.wiki_root.as_deref())?,
             )
         };
+        if !plan {
+            self.check_current_acceptance(&job, settings.wiki_root.as_deref())
+                .await?;
+        }
         let linear = self.linear();
         let issue = linear
             .issue(&job.issue_uuid)
@@ -660,6 +702,14 @@ impl Engine {
             (ControlAction::CompletePlan { job_id }, ActionCheck::Completion(reviewed)) => {
                 self.complete_plan_inner(*job_id, Some(&reviewed)).await?;
                 (Some(*job_id), ControlActionOutcome::PlanDone)
+            }
+            (ControlAction::StartVerification { .. }, ActionCheck::Verify(data, linear)) => {
+                let id = self.commit_verification(&data, &linear).await?;
+                (Some(id), ControlActionOutcome::VerificationQueued)
+            }
+            (ControlAction::ReturnForRepair { .. }, ActionCheck::Return(data)) => {
+                let id = self.commit_repair(*data).await?;
+                (Some(id), ControlActionOutcome::ReturnedForRepair)
             }
             (ControlAction::SaveBinding { .. }, ActionCheck::Config(config)) => {
                 self.commit_control_config(&pending.action, *config)?;

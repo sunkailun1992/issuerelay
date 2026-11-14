@@ -107,9 +107,9 @@ IssueRelay：发现候选 → 面板预览并确认 → 按绑定与依赖排队
 
 Download from [GitHub Releases](https://github.com/sunkailun1992/issuerelay/releases/latest): `IssueRelay_<version>_universal.dmg` for macOS, `IssueRelay_<version>_x64-setup.exe` for Windows (no administrator rights needed). macOS 13.3 or later. Unsigned builds (each release's notes say whether it is notarized by Apple and code-signed for Windows) need one approval at the first start (macOS 15+: System Settings → Privacy & Security → Open Anyway; Windows: More info → Run anyway); signed builds, when available, usually do not. Notifications are shown by the system: on macOS, if none appear, turn on Allow Notifications in System Settings → Notifications → IssueRelay; IssueRelay cannot tell when it is off. See [docs/install.md](docs/install.md) (Chinese) for the steps, putting the CLI on PATH, automatic updates and uninstalling.
 
-升级前，正常退出 IssueRelay 并备份应用数据。支持本地交付结果的构建会将运行数据库迁移至 schema 6。退回只支持 schema 5 的构建时，恢复升级前的备份。 [升级与备份](docs/install.md#升级前备份数据)
+升级前，正常退出 IssueRelay 并备份应用数据。支持独立验证的构建会将运行数据库迁移至 schema 7。退回只支持 schema 6 的构建时，恢复升级前的备份。 [升级与备份](docs/install.md#升级前备份数据)
 
-Before upgrading, quit IssueRelay normally and back up its application data. Builds that record local delivery outcomes migrate the run database to schema 6. Restore the pre-upgrade backup before returning to a build that supports only schema 5. [Upgrade and backup instructions](docs/install.md#升级前备份数据)
+Before upgrading, quit IssueRelay normally and back up its application data. Builds that support independent verification migrate the run database to schema 7. Restore the pre-upgrade backup before returning to a build that supports only schema 6. [Upgrade and backup instructions](docs/install.md#升级前备份数据)
 
 ## 更多用法
 

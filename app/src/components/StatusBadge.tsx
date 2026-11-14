@@ -14,6 +14,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { displayJobState } from "@/lib/runs";
 import type { DisplayJobState, JobState } from "@/lib/types";
+import type { VerificationStatus } from "@/lib/workflow-types";
 
 /**
  * The colour and icon of each job state, the same everywhere a state is shown. The colours are
@@ -51,13 +52,19 @@ export const CLOSABLE_STYLE = { icon: ClipboardCheck, className: STATE_STYLE.awa
  * `planned`: the job is a planning run that posted its plan (`isPlanned`), shown as such.
  * `closable`: that plan's child issues have all ended, so it can be closed; only a posted plan uses it.
  */
-export function StatusBadge({ state, planned = false, closable = false }: { state: JobState; planned?: boolean; closable?: boolean }) {
+export function StatusBadge({ state, planned = false, closable = false, verification }: {
+  state: JobState;
+  planned?: boolean;
+  closable?: boolean;
+  verification?: VerificationStatus;
+}) {
   const { t } = useTranslation();
-  const visibleState = displayJobState(state);
+  const visibleState = verification === "passed" ? "done" : displayJobState(state);
   const asPlanned = planned && visibleState === "needs_info";
   const asClosable = asPlanned && closable;
   const { icon: Icon, className } = asClosable ? CLOSABLE_STYLE : asPlanned ? PLANNED_STYLE : STATE_STYLE[visibleState];
-  const label = asClosable ? t("state.plan_closable") : asPlanned ? t("state.planned") : t(`state.${visibleState}`);
+  const label = verification !== undefined ? t(`acceptance.verification_status.${verification}`)
+    : asClosable ? t("state.plan_closable") : asPlanned ? t("state.planned") : t(`state.${visibleState}`);
   return (
     <Badge variant="outline" className={className}>
       <Icon aria-hidden className={state === "running" ? "animate-spin" : undefined} />

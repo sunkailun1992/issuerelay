@@ -11,7 +11,7 @@ const MAX_DRAFTS: usize = 128;
 
 #[derive(Default)]
 pub(super) struct ReviewState {
-    drafts: HashMap<String, IssueContext>,
+    pub(super) drafts: HashMap<String, IssueContext>,
     // Only the latest open preview can be confirmed. Its token also binds the current brief.
     preview: Option<OpenPreview>,
     continuation: Option<OpenContinuation>,
@@ -220,6 +220,10 @@ impl Engine {
         );
         if let Some(job) = job {
             anyhow::ensure!(
+                Self::acceptance_allows_development(store, &job, issue)?,
+                "finish independent verification or confirm a return for repair and update the Linear revision"
+            );
+            anyhow::ensure!(
                 !job.state.is_active() || store.read_continuation(job.id)?.is_none(),
                 "use the continuation preview for this run"
             );
@@ -365,6 +369,10 @@ impl Engine {
 
     async fn continuation_candidate(&self, id: i64) -> Result<(Issue, Config)> {
         let source = self.store().get(id)?.context("interrupted run not found")?;
+        anyhow::ensure!(
+            source.mode != RunMode::Verify,
+            "start a fresh independent verification from the development run"
+        );
         let linear = self.linear();
         let viewer = self.viewer(&linear).await?;
         let issue = linear

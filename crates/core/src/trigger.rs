@@ -219,6 +219,7 @@ pub(crate) fn evaluate_candidate(
             return Eligibility::Waiting(WaitReason::PlanNeedsLean);
         }
         RunMode::Plan => LeanStatus::On,
+        RunMode::Verify => LeanStatus::On,
     };
     if !ready.ready(kind, lean) {
         let reason = if ready.held_back_by_lean(kind, lean) {

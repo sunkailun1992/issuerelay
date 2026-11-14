@@ -17,7 +17,7 @@ import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatDuration, formatRelative, formatTime } from "@/lib/format";
 import { problemCause } from "@/lib/problem";
-import { displayJobState, isPlanned, newestRuns } from "@/lib/runs";
+import { displayedVerificationStatus, displayJobState, isPlanned, newestRuns } from "@/lib/runs";
 import type { HeldJob, Job, JobState, LinearSetup, StatusView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { executorReady } from "./onboarding/check";
@@ -82,7 +82,8 @@ function Reminders({ view, jobs }: { view: StatusView; jobs: Job[] | undefined }
   // A failure that a later run of the same issue followed is history, not a reminder.
   const latest = jobs === undefined ? [] : newestRuns(jobs);
   const failed = latest.filter((job) => job.state === "failed").length;
-  const awaiting = latest.filter((job) => displayJobState(job.state) === "awaiting_acceptance").length;
+  const newestDevelopment = jobs === undefined ? [] : newestRuns(jobs.filter((job) => job.mode !== "verify"));
+  const awaiting = newestDevelopment.filter((job) => displayJobState(job.state) === "awaiting_acceptance").length;
   if (cause === null && failed === 0 && awaiting === 0 && !view.status.draining) return null;
   return (
     <div className="flex flex-col gap-3">
@@ -226,7 +227,7 @@ function StateColumn({ job }: { job: Job }) {
   const closable = usePlanClosable(job);
   return (
     <div className="w-44 shrink-0">
-      <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
+      <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} verification={displayedVerificationStatus(job)} />
     </div>
   );
 }

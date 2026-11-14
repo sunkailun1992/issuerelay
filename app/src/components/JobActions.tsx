@@ -13,7 +13,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { useCancelJob, useJobs, useMarkDone, useRetryJob } from "@/hooks/queries";
+import { useCancelJob, useHandoff, useJobs, useMarkDone, useRetryJob } from "@/hooks/queries";
 import { useOpenLinear } from "@/hooks/useOpenLinear";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { isActive, isInterruptedRun, isNewestRun, pendingContinuationSourceId } from "@/lib/runs";
@@ -69,10 +69,19 @@ function MarkDoneButton({ job, size }: { job: Job; size: Size }) {
   const { t } = useTranslation();
   const markDone = useMarkDone();
   const { done } = useTriggerNames();
+  const handoff = useHandoff(job.id);
+  const acceptance = handoff.data?.acceptance;
+  const verificationId = acceptance?.verification_job_id ?? null;
+  const archiveNeeded = handoff.data?.archive != null && verificationId !== null && acceptance?.verification_status === "passed";
+  const verification = useHandoff(verificationId ?? 0, archiveNeeded);
+  const blocked = acceptance?.returned_for_repair ||
+    ((verificationId !== null || acceptance?.repair_of_job_id != null) && acceptance?.verification_status !== "passed") ||
+    (archiveNeeded && verification.data?.archive?.receipt == null);
+  if (blocked) return null;
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button size={size} disabled={markDone.isPending}>
+        <Button size={size} disabled={markDone.isPending || !handoff.isSuccess || handoff.isFetching}>
           <Check aria-hidden />
           {t("actions.mark_done")}
         </Button>
@@ -84,7 +93,9 @@ function MarkDoneButton({ job, size }: { job: Job; size: Size }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-          <AlertDialogAction onClick={() => markDone.mutate(job.id)}>{t("actions.confirm")}</AlertDialogAction>
+          <AlertDialogAction disabled={!handoff.isSuccess || handoff.isFetching} onClick={() => markDone.mutate(job.id)}>
+            {t("actions.confirm")}
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -132,9 +143,9 @@ export function JobActions({
   const continuable = job != null && continuationSource !== null && (!compact || job.state !== "queued");
   const showOtherActions = !compact || !continuable;
   const stoppable = showOtherActions && job != null && isActive(job);
-  const retryable = showOtherActions && job != null && RETRYABLE.includes(job.state);
+  const retryable = showOtherActions && job != null && job.mode !== "verify" && RETRYABLE.includes(job.state);
   // The shared issue list supplies the latest run and last Linear status read. The engine checks again on confirmation.
-  const markable = job != null && (job.state === "awaiting_acceptance" || (
+  const markable = job != null && job.mode !== "verify" && (job.state === "awaiting_acceptance" || (
     job.state === "local_complete" && localAcceptance !== undefined &&
     localAcceptance.view.issue.uuid === job.issue_uuid && localAcceptance.view.job?.id === job.id &&
     sameName(localAcceptance.view.issue.state, localAcceptance.inTesting)

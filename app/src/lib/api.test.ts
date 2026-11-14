@@ -127,6 +127,22 @@ describe("backend selection", () => {
     expect(invoke).toHaveBeenCalledExactlyOnceWith("read_codex_session", { id: 8 });
   });
 
+  test("acceptance preview names the action and target, while approval sends only the token", async () => {
+    vi.resetModules();
+    const invoke = vi.fn().mockResolvedValue(null);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { tauriBackend } = await import("./api");
+    const action = { action: "start_verification", job_id: 8, executor: "codex", delivery: "demo-build" } as const;
+    await tauriBackend.prepareControlAction(action);
+    await tauriBackend.commitControlAction("demo-acceptance-1");
+    await tauriBackend.recordArchive(8, "queries/demo.md", null);
+    expect(invoke.mock.calls).toEqual([
+      ["prepare_control_action", { action }],
+      ["commit_control_action", { token: "demo-acceptance-1" }],
+      ["record_archive", { id: 8, page: "queries/demo.md", commit: null }],
+    ]);
+  });
+
   test("recording local completion sends only the run ID to its desktop command", async () => {
     vi.resetModules();
     const invoke = vi.fn().mockResolvedValue(undefined);

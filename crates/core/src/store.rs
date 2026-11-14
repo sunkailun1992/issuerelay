@@ -47,8 +47,8 @@ CREATE INDEX IF NOT EXISTS jobs_by_issue ON jobs (issue_uuid, id);
 CREATE INDEX IF NOT EXISTS jobs_by_state ON jobs (state);
 ";
 
-// Older releases cannot read the local_complete job state.
-const SCHEMA_VERSION: i64 = 6;
+// Older releases cannot distinguish verification jobs from ordinary Linear dispatches.
+const SCHEMA_VERSION: i64 = 7;
 
 /// The columns schema 2 added to the M1 table, with their types.
 const ADDED_IN_SCHEMA_2: [(&str, &str); 2] =
@@ -245,6 +245,7 @@ impl Store {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
         crate::workflow_store::ensure_schema(&tx)?;
+        crate::acceptance_store::ensure_schema(&tx)?;
         let present: Vec<String> = tx
             .prepare("SELECT name FROM pragma_table_info('jobs')")?
             .query_map([], |row| row.get(0))?
@@ -315,10 +316,12 @@ impl Store {
             .optional()?)
     }
 
-    /// The newest run of the issue (highest id), or `None` when it has none.
+    /// The newest ordinary run of the issue, including repair, but excluding verification.
     pub fn latest_for_issue(&self, uuid: &str) -> Result<Option<Job>> {
-        let sql =
-            format!("SELECT {COLUMNS} FROM jobs WHERE issue_uuid = ?1 ORDER BY id DESC LIMIT 1");
+        let sql = format!(
+            "SELECT {COLUMNS} FROM jobs WHERE issue_uuid = ?1
+             AND id NOT IN (SELECT verification_job_id FROM acceptance_runs) ORDER BY id DESC LIMIT 1"
+        );
         Ok(self
             .conn
             .query_row(&sql, params![uuid], row_to_job)
@@ -331,6 +334,7 @@ impl Store {
     pub fn latest_with_session(&self, uuid: &str) -> Result<Option<Job>> {
         let sql = format!(
             "SELECT {COLUMNS} FROM jobs WHERE issue_uuid = ?1 AND session_id IS NOT NULL \
+             AND id NOT IN (SELECT verification_job_id FROM acceptance_runs) \
              ORDER BY id DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -356,6 +360,24 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             params_from_iter(states.iter().map(|s| s.as_str())),
+            row_to_job,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Active verification children are persisted across host restarts.
+    pub fn list_active_acceptance(&self) -> Result<Vec<Job>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM jobs WHERE state IN (?1, ?2, ?3)
+             AND id IN (SELECT verification_job_id FROM acceptance_runs) ORDER BY id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            [
+                JobState::Queued.as_str(),
+                JobState::WaitingBinding.as_str(),
+                JobState::Running.as_str(),
+            ],
             row_to_job,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -481,6 +503,7 @@ impl Store {
         } else {
             self.insert(new)?
         };
+        crate::acceptance_store::inherit_repair(&tx, child.id, source.id)?;
         ws::write_continuation(&tx, child.id, issue.updated_at, revision, intent)?;
         tx.commit()?;
         Ok(child)
@@ -631,6 +654,7 @@ impl Store {
 
     /// Creates a fresh attempt while preserving the reviewed evidence on the prior row.
     pub fn queue_fresh_attempt(&self, id: i64) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
         let inserted = self.conn.execute(
             "INSERT INTO jobs (issue_uuid, issue_identifier, title, binding_id, directory,
              executor, state, priority, issue_created_at, discovered_updated_at, created_at, mode)
@@ -640,7 +664,10 @@ impl Store {
             params![id, JobState::Queued.as_str(), fmt(Utc::now())],
         )?;
         ensure!(inserted == 1, "the run to retry disappeared");
-        Ok(self.conn.last_insert_rowid())
+        let child = self.conn.last_insert_rowid();
+        crate::acceptance_store::inherit_repair(&tx, child, id)?;
+        tx.commit()?;
+        Ok(child)
     }
 
     /// Records what the run is for (`RunMode::stored`).
@@ -659,6 +686,29 @@ impl Store {
             params![id, resume],
         )?;
         Ok(())
+    }
+
+    /// Binds the first native session reported by the current attempt while it is running.
+    pub(crate) fn record_session_started(
+        &self,
+        id: i64,
+        started_at: DateTime<Utc>,
+        executor: ExecutorKind,
+        session_id: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE jobs SET session_id = ?5, details_started_at = started_at
+             WHERE id = ?1 AND state = ?2 AND started_at = ?3 AND executor = ?4
+             AND session_id IS NULL",
+            params![
+                id,
+                JobState::Running.as_str(),
+                fmt(started_at),
+                executor.as_str(),
+                session_id,
+            ],
+        )?;
+        Ok(changed == 1)
     }
 
     /// Records what a run reported: the `result` of its last line of JSON, the executor's session
@@ -832,6 +882,79 @@ mod tests {
                 resume_job_id: None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn acceptance_record_persists_across_reload_without_replacing_the_ordinary_run() {
+        use crate::acceptance_delivery::DeliveryFingerprint;
+        use crate::acceptance_store as acceptance;
+        use serde_json::json;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acceptance.sqlite");
+        let store = Store::open(&path).unwrap();
+        let source = queued(&store, "DEMO-ACCEPTANCE");
+        let child = queued(&store, "DEMO-ACCEPTANCE");
+        let conn = store.workflow_connection();
+        let mut record = acceptance::AcceptanceRecord {
+            source_job_id: source.id,
+            verification_job_id: child.id,
+            repair_job_id: None,
+            approval: json!({"reason":"Review the delivery."}),
+            fingerprint: DeliveryFingerprint("1".repeat(64)),
+            recommendation: None,
+            returned: None,
+        };
+        acceptance::create(conn, &record).unwrap();
+        assert_eq!(
+            store.latest_for_issue(&source.issue_uuid).unwrap(),
+            Some(source.clone())
+        );
+        assert_eq!(store.list_active_acceptance().unwrap(), vec![child.clone()]);
+        store
+            .mark_started(child.id, Path::new("acceptance.jsonl"))
+            .unwrap();
+        store
+            .mark_finished(child.id, JobState::LocalComplete, None, None, None)
+            .unwrap();
+        let repair = queued(&store, "DEMO-ACCEPTANCE");
+        record.recommendation = Some(json!({"result":"changes_requested"}));
+        record.returned = Some(json!({"reason":"Fix the accepted synthetic example."}));
+        record.repair_job_id = Some(repair.id);
+        acceptance::update(conn, &record).unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        let conn = store.workflow_connection();
+        assert_eq!(
+            acceptance::get(conn, child.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            acceptance::latest_for_source(conn, source.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            acceptance::latest_by_repair(conn, repair.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            store.latest_for_issue(&source.issue_uuid).unwrap(),
+            Some(repair.clone())
+        );
+        assert!(store.list_active_acceptance().unwrap().is_empty());
+        let retry = store.queue_fresh_attempt(repair.id).unwrap();
+        assert_eq!(
+            acceptance::latest_by_repair(conn, retry).unwrap(),
+            Some(record.clone())
+        );
+        let retry_again = store.queue_fresh_attempt(retry).unwrap();
+        assert_eq!(
+            acceptance::latest_by_repair(conn, retry_again).unwrap(),
+            Some(record.clone())
+        );
+        record.fingerprint = DeliveryFingerprint("2".repeat(64));
+        assert!(acceptance::update(conn, &record).is_err());
     }
 
     fn interrupted(store: &Store, uuid: &str) -> Job {

@@ -8,7 +8,7 @@ import {
 import { useApproveDispatch, useDispatchPreview, useOpenDevelopmentIssue } from "@/hooks/queries";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
-import type { DispatchPreview } from "@/lib/workflow-types";
+import type { DispatchPreview, IssueContext } from "@/lib/workflow-types";
 
 export function PreviewFact({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -28,12 +28,26 @@ function PreviewList({ values }: { values: string[] }) {
   );
 }
 
+/** The exact brief returned by the preview, rendered as plain text. */
+export function PreviewContext({ context, scope = context.scope }: { context: IssueContext; scope?: string }) {
+  const { t } = useTranslation();
+  const conversation = context.conversation_history;
+  return (
+    <>
+      <PreviewFact label={t("dispatch.summary")}>{context.request}</PreviewFact>
+      {conversation && <PreviewFact label={t("dispatch.conversation_history")}>{conversation}</PreviewFact>}
+      <PreviewFact label={t("handoff.scope")}>{scope}</PreviewFact>
+      <PreviewFact label={t("handoff.acceptance")}><PreviewList values={context.acceptance} /></PreviewFact>
+      <PreviewFact label={t("dispatch.wiki_refs")}><PreviewList values={context.source_refs} /></PreviewFact>
+    </>
+  );
+}
+
 export function PreviewDetails({ preview }: { preview: DispatchPreview }) {
   const { t } = useTranslation();
   const { context } = preview;
   // The core validates context before it becomes a preview. Render it as plain text so
   // indentation and line breaks match the exact approved payload.
-  const conversation = context?.conversation_history;
   const wikiFolder = cleanDisplayText(preview.wiki_root ?? "").trim();
   return (
     <div className="flex flex-col gap-4">
@@ -50,16 +64,8 @@ export function PreviewDetails({ preview }: { preview: DispatchPreview }) {
       {context === null && <p className="text-muted-foreground">{t("dispatch.empty_context")}</p>}
       {(context !== null || wikiFolder !== "") && (
         <dl className="space-y-3">
-          {context !== null && (
-            <>
-              <PreviewFact label={t("dispatch.summary")}>{context.request}</PreviewFact>
-              {conversation && <PreviewFact label={t("dispatch.conversation_history")}>{conversation}</PreviewFact>}
-              <PreviewFact label={t("handoff.scope")}>{context.scope}</PreviewFact>
-              <PreviewFact label={t("handoff.acceptance")}><PreviewList values={context.acceptance} /></PreviewFact>
-            </>
-          )}
+          {context !== null && <PreviewContext context={context} />}
           {wikiFolder !== "" && <PreviewFact label={t("handoff.archive.root")}>{wikiFolder}</PreviewFact>}
-          {context !== null && <PreviewFact label={t("dispatch.wiki_refs")}><PreviewList values={context.source_refs} /></PreviewFact>}
         </dl>
       )}
     </div>

@@ -2,6 +2,7 @@ import { CircleAlert, Copy, Info, ListChecks, SearchX } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useParams } from "react-router";
+import { AcceptanceCard } from "@/components/AcceptanceCard";
 import { CompletePlanButton } from "@/components/CompletePlanButton";
 import { DispatchReviewButton } from "@/components/DispatchReviewButton";
 import { HandoffCard } from "@/components/HandoffCard";
@@ -39,7 +40,8 @@ import { useTriggerNamesWithStatus } from "@/hooks/useTriggerNames";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
 import {
-  canRecordLocalCompletion, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview, newerProgress, planProgressFor,
+  canRecordLocalCompletion, displayedVerificationStatus, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview,
+  newerProgress, planProgressFor,
 } from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
 import type { Job, PlanProgress } from "@/lib/types";
@@ -85,13 +87,13 @@ function InfoCard({ job, closable }: { job: Job; closable: boolean }) {
         {/* As many columns as the card has room for, down to the 900 px window's three. */}
         <dl className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-x-6 gap-y-3">
           <Field label={t("runs.field.state")}>
-            <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
-            {job.state === "local_complete" && (
+            <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} verification={displayedVerificationStatus(job)} />
+            {job.state === "local_complete" && job.mode !== "verify" && (
               <p className="mt-1 text-xs text-muted-foreground">{t("runs.local_completion_detail")}</p>
             )}
           </Field>
           <Field label={t("runs.field.executor")}>{job.executor === null ? NONE : t(`executor.${job.executor}`)}</Field>
-          {isPlanRun(job) && <Field label={t("runs.field.mode")}>{t("runs.mode.plan")}</Field>}
+          {job.mode !== undefined && job.mode !== "implement" && <Field label={t("runs.field.mode")}>{t(`runs.mode.${job.mode}`)}</Field>}
           <Field label={t("runs.field.created")}>{time(job.created_at)}</Field>
           <Field label={t("runs.field.started")}>{time(job.started_at)}</Field>
           <Field label={t("runs.field.finished")}>{time(job.finished_at)}</Field>
@@ -105,7 +107,7 @@ function InfoCard({ job, closable }: { job: Job; closable: boolean }) {
               </Link>
             </Field>
           )}
-          <Field label={t("runs.field.directory")} wide>
+          <Field label={t(job.mode === "verify" ? "acceptance.original_directory" : "runs.field.directory")} wide>
             {job.directory === null ? NONE : <Folder directory={job.directory} />}
           </Field>
           {job.usage != null && (
@@ -304,6 +306,7 @@ function RunView({ job }: { job: Job }) {
             <AlertDescription>{t("plan.open_after_close", { open: progress.open })}</AlertDescription>
           </Alert>
         )}
+        <AcceptanceCard key={job.id} job={job} />
         <HandoffCard job={job} />
         <ProviderSessionCard job={job} />
         <LogTabs job={job} />

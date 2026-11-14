@@ -53,38 +53,56 @@ function CodexSessionDialog({ id, sessionId }: { id: number; sessionId: string }
   );
 }
 
-/** Provider commands are shown for the user to run in the recorded working directory. */
+/** Copies references to the original session without starting or attaching to it. */
 export function ProviderSessionCard({ job }: { job: Job }) {
   const { t } = useTranslation();
   const copy = useCopyText();
   const heading = useId();
   const [open, setOpen] = useState(false);
   const { directory, executor, session_id: sessionId } = job;
-  if (isActive(job) || job.finished_at === null || directory === null || executor === null ||
+  const running = job.state === "running" && job.started_at !== null;
+  const finished = !isActive(job) && job.finished_at !== null;
+  if ((!running && !finished) || !directory || (executor !== "codex" && executor !== "claude") ||
       sessionId == null || sessionId.length !== 36 || !UUID.test(sessionId)) return null;
-  const command = executor === "codex" ? `codex resume ${sessionId}` : `claude --resume ${sessionId}`;
+  const codex = executor === "codex";
+  const verification = job.mode === "verify";
+  const command = codex ? `codex resume ${sessionId}` : `claude --resume ${sessionId}`;
+  const desktop = codex ? `codex://threads/${sessionId}` : `claude --desktop --resume ${sessionId}`;
+  const claudeHint = verification ? "claude_verification" : "claude_desktop";
+  const desktopHint = codex ? "codex_desktop_hint" : `${claudeHint}${running ? "_running" : ""}_hint`;
   return (
     <section aria-labelledby={heading}>
       <Card size="sm">
         <CardContent className="space-y-3">
-          <div className="space-y-1">
-            <h2 id={heading} className="font-medium">{t("provider_session.title")}</h2>
-            <p className="text-sm text-muted-foreground">{t("provider_session.reopen_hint")}</p>
-          </div>
-          <code className="block font-mono text-xs wrap-anywhere select-text">{command}</code>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => copy(command)}>
+          <h2 id={heading} className="font-medium">{t("provider_session.title")}</h2>
+          {finished && (
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">{t(verification
+                ? "provider_session.verification_reopen_hint" : "provider_session.reopen_hint")}</p>
+              <code className="block font-mono text-xs wrap-anywhere select-text">{command}</code>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={() => copy(command)}>
+                  <Copy aria-hidden />
+                  {t("provider_session.copy")}
+                </Button>
+                {codex && (
+                  <Dialog open={open} onOpenChange={setOpen}>
+                    <DialogTrigger asChild><Button variant="outline" size="sm">{t("provider_session.preview")}</Button></DialogTrigger>
+                    {open && <CodexSessionDialog id={job.id} sessionId={sessionId} />}
+                  </Dialog>
+                )}
+              </div>
+              {codex && <p className="text-xs text-muted-foreground">{t("provider_session.archive_hint")}</p>}
+            </div>
+          )}
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">{t(`provider_session.${desktopHint}`)}</p>
+            <code className="block font-mono text-xs wrap-anywhere select-text">{desktop}</code>
+            <Button variant="outline" size="sm" onClick={() => copy(desktop)}>
               <Copy aria-hidden />
-              {t("provider_session.copy")}
+              {t(codex ? "provider_session.copy_codex_desktop" : "provider_session.copy_claude_desktop")}
             </Button>
-            {executor === "codex" && (
-              <Dialog open={open} onOpenChange={setOpen}>
-                <DialogTrigger asChild><Button variant="outline" size="sm">{t("provider_session.preview")}</Button></DialogTrigger>
-                {open && <CodexSessionDialog id={job.id} sessionId={sessionId} />}
-              </Dialog>
-            )}
           </div>
-          {executor === "codex" && <p className="text-xs text-muted-foreground">{t("provider_session.archive_hint")}</p>}
         </CardContent>
       </Card>
     </section>

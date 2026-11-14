@@ -1,4 +1,4 @@
-import type { Effort, ExecutorKind, PermissionProfile, RunMode } from "./types";
+import type { Effort, ExecutorKind, JobState, LeanStatus, PermissionProfile, RunMode } from "./types";
 
 /** The request and references registered for one issue revision. */
 export interface IssueContext {
@@ -45,6 +45,59 @@ export interface NativeSessionPreview {
   has_more: boolean;
 }
 
+export type VerificationStatus = "waiting_binding" | "queued" | "running" | "passed" | "failed" | "blocked";
+
+/** The accepted delivery and the runs that developed or independently checked it. */
+export interface AcceptanceLinks {
+  development_job_id: number;
+  repair_of_job_id: number | null;
+  repair_job_id?: number | null;
+  verification_job_id: number | null;
+  delivery: string | null;
+  verification_status: VerificationStatus | null;
+  verification_evidence?: string[];
+  returned_for_repair: boolean;
+  repair_reason: string | null;
+}
+
+export type AcceptanceAction =
+  | { action: "start_verification"; job_id: number; executor: ExecutorKind; delivery: string }
+  | { action: "return_for_repair"; job_id: number; reason: string };
+
+/** The exact action and current delivery facts shown before native confirmation. */
+export interface AcceptanceActionPreview {
+  token: string;
+  action: AcceptanceAction;
+  issue_identifier: string;
+  job_id: number | null;
+  current_state: JobState | null;
+  acceptance: {
+    source_job_id: number;
+    delivery: string | null;
+    executor: ExecutorKind | null;
+    directory: string | null;
+    model: string | null;
+    effort: Effort | null;
+    permission: string | null;
+    lean: LeanStatus | null;
+    reason: string | null;
+    scope?: string | null;
+    /** Missing on hosts predating delivery-bound control previews. */
+    delivery_fingerprint?: string;
+    linear_updated_at?: string;
+    brief_revision?: number | null;
+    context?: IssueContext | null;
+  } | null;
+  expires_in_seconds: number;
+}
+
+export interface AcceptanceActionResult {
+  action: AcceptanceAction;
+  issue_identifier: string;
+  job_id: number | null;
+  result: "verification_queued" | "returned_for_repair";
+}
+
 /** The saved decisions and facts of a run, separate from the original request and from its log. */
 export interface RunMemory {
   decision: { executor: ExecutorKind; source: "explicit" | "binding" | "origin" | "global" } | null;
@@ -80,4 +133,5 @@ export interface Handoff {
   claimed_by: ExecutorKind | null;
   claim_id: string | null;
   archive?: WikiArchive | null;
+  acceptance?: AcceptanceLinks | null;
 }

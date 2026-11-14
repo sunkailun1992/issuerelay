@@ -11,7 +11,7 @@ import type {
   Binding, CliPathStatus, ControlServers, DoctorReport, EngineEvent, ExecutorKind, HeldJob, Issue, IssueView, Job, LinearSetup,
   PlanProgress, QuitPrompt, Settings, StartupState, StatusView, UpdateStatus, Viewer,
 } from "./types";
-import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext } from "./workflow-types";
+import type { AcceptanceAction, AcceptanceActionPreview, AcceptanceLinks, ContinuationPreview, DispatchPreview, Handoff, IssueContext, WikiArchive } from "./workflow-types";
 
 export interface MockOptions {
   /** The delay of every call: 120 ms by default so loading states show in a browser; tests pass 0. */
@@ -102,6 +102,10 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
   const continuationPreviews = new Map<number, ContinuationPreview>();
   const continuationContexts = new Map<string, IssueContext>();
   let nextContinuationToken = 1;
+  const acceptancePreviews = new Map<string, AcceptanceActionPreview>();
+  const acceptanceRuns = new Map<number, AcceptanceLinks>();
+  const archiveReceipts = new Map<number, NonNullable<WikiArchive["receipt"]>>();
+  let nextAcceptanceToken = 1;
   let held: HeldJob[] = demo ? structuredClone(DEMO_HELD) : [];
   let bindings: Binding[] = demo ? structuredClone(DEMO_BINDINGS) : [];
   let settings: Settings = {
@@ -186,6 +190,39 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     }
     return { source, latest, directory: source.directory };
   };
+  const acceptanceDetails = (action: AcceptanceAction): NonNullable<AcceptanceActionPreview["acceptance"]> => {
+    const job = find(action.job_id);
+    const relation = acceptanceRuns.get(job.id);
+    const development = action.action === "return_for_repair" && relation !== undefined
+      ? find(relation.development_job_id) : job;
+    const revision = {
+      delivery_fingerprint: "0123456789abcdef".repeat(4),
+      linear_updated_at: development.verified_updated_at ?? development.discovered_updated_at,
+      brief_revision: continuationContexts.get(job.issue_uuid)?.revision ?? null,
+      context: continuationContexts.get(job.issue_uuid) ?? null,
+    };
+    if (action.action === "return_for_repair") {
+      if (job.mode !== "verify" || relation?.verification_status !== "failed" || relation.returned_for_repair || action.reason.trim() === "") {
+        return fail("only the latest failed verification can be returned for repair");
+      }
+      return {
+        ...revision,
+        source_job_id: relation.development_job_id, delivery: relation.delivery, reason: action.reason,
+        executor: null, directory: null, model: null, effort: null, permission: null, lean: null,
+      };
+    }
+    if (job.mode === "verify" || job.directory === null || job.finished_at === null ||
+      !["local_complete", "awaiting_acceptance"].includes(job.state) || action.delivery.trim() === "" ||
+      relation?.returned_for_repair || (relation?.verification_status != null && relation.verification_status !== "blocked")) {
+      return fail("this delivery is unavailable for independent verification");
+    }
+    return {
+      ...revision,
+      source_job_id: job.id, directory: job.directory, executor: action.executor, delivery: action.delivery, reason: null,
+      model: (action.executor === "codex" ? settings.default_codex_model : settings.default_claude_model) || null,
+      effort: settings.default_effort ?? null, permission: "verification-sandbox-network", lean: "on",
+    };
+  };
   const handoff = (job: Job): Handoff => ({
     job_id: job.id,
     issue_identifier: job.issue_identifier,
@@ -200,8 +237,9 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
     archive: settings.wiki_root === undefined ? null : {
       root: settings.wiki_root,
       prompt: `Archive the work for ${job.issue_identifier} from run ${job.id} in the configured Wiki.`,
-      receipt: null,
+      receipt: archiveReceipts.get(job.id) ?? null,
     },
+    acceptance: acceptanceRuns.get(job.id) ?? null,
   });
   const issueViews = (): IssueView[] =>
     (demo ? DEMO_ISSUES : []).map(({ issue, status }) => {
@@ -247,6 +285,62 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       };
     }),
     getHandoff: (id) => reply(() => handoff(find(id))),
+    prepareControlAction: (action) => reply(() => {
+      const job = find(action.job_id);
+      const preview = {
+        token: `demo-acceptance-${nextAcceptanceToken++}`, action, issue_identifier: job.issue_identifier, job_id: job.id,
+        current_state: job.state, acceptance: acceptanceDetails(action), expires_in_seconds: 180,
+      };
+      acceptancePreviews.set(preview.token, preview);
+      return preview;
+    }),
+    commitControlAction: (token) => reply(() => {
+      const preview = acceptancePreviews.get(token);
+      if (preview === undefined) return fail("the preview changed; review it again");
+      acceptancePreviews.delete(token);
+      const { action } = preview;
+      const source = find(action.job_id);
+      if (source.state !== preview.current_state || JSON.stringify(preview.acceptance) !== JSON.stringify(acceptanceDetails(action))) {
+        return fail("the preview changed; review it again");
+      }
+      if (action.action === "return_for_repair") {
+        const relation = acceptanceRuns.get(source.id)!;
+        const revised = { ...relation, returned_for_repair: true, repair_reason: action.reason };
+        acceptanceRuns.set(source.id, revised);
+        acceptanceRuns.set(relation.development_job_id, revised);
+        emit({ kind: "job", job: source });
+        return { action, issue_identifier: source.issue_identifier, job_id: source.id, result: "returned_for_repair" };
+      }
+      const id = Math.max(...jobs.map((job) => job.id)) + 1;
+      const verification: Job = {
+        ...source, id, mode: "verify", executor: action.executor, state: "queued", reason: null, summary: null,
+        created_at: now().toISOString(), started_at: null, finished_at: null, log_path: null,
+        report: null, session_id: null, resume_job_id: null, usage: null,
+      };
+      const relation: AcceptanceLinks = {
+        development_job_id: source.id, repair_of_job_id: acceptanceRuns.get(source.id)?.repair_of_job_id ?? null,
+        verification_job_id: id, delivery: action.delivery, verification_status: "queued", returned_for_repair: false, repair_reason: null,
+      };
+      acceptanceRuns.set(source.id, relation);
+      acceptanceRuns.set(id, relation);
+      jobs = [verification, ...jobs];
+      emit({ kind: "job", job: verification });
+      emit({ kind: "status" });
+      return { action, issue_identifier: source.issue_identifier, job_id: id, result: "verification_queued" };
+    }),
+    recordArchive: (id, page, commit) => reply(() => {
+      const job = find(id);
+      if (settings.wiki_root === undefined || isActive(job) || job.started_at === null || job.finished_at === null || claims.has(id)) {
+        return fail("archive receipts require a configured Wiki and a finished run");
+      }
+      if (!page || page.split("/").some((part) => part === "" || part.endsWith(".") || part.endsWith(" ")) || /[:\\]/.test(page)) {
+        return fail("archive page must be a relative Wiki path with forward slashes");
+      }
+      if (commit !== null && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commit)) return fail("invalid archive commit ID");
+      archiveReceipts.set(id, { page, commit, recorded_at: now().toISOString() });
+      emit({ kind: "job", job });
+      return handoff(job);
+    }),
     claimHandoff: (id, executor) => reply(() => {
       const job = find(id);
       if (isActive(job) || job.state === "done") fail("run is active or already done");
@@ -398,13 +492,19 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
         const job = find(id);
         // As `Engine::cancel_job`: only a run still in hand can be stopped.
         if (!isActive(job)) fail(`job ${id} is ${job.state} and cannot be stopped`);
+        const acceptance = acceptanceRuns.get(id);
+        if (job.mode === "verify" && acceptance !== undefined) {
+          const interrupted: AcceptanceLinks = { ...acceptance, verification_status: "blocked" };
+          acceptanceRuns.set(id, interrupted);
+          acceptanceRuns.set(acceptance.development_job_id, interrupted);
+        }
         // A running job's process tree ends and the run is recorded at once here.
         update(id, { state: "canceled", reason: "stopped by the user", finished_at: now().toISOString() });
       }),
     retryJob: (id) =>
       reply(() => {
         const job = find(id);
-        if (!["failed", "canceled", "needs_info"].includes(job.state)) {
+        if (job.mode === "verify" || !["failed", "canceled", "needs_info"].includes(job.state)) {
           fail(`job ${id} is ${job.state}; only failed, stopped or needs-info runs can be retried`);
         }
         if (newestRun(job.issue_uuid)?.id !== id) {
@@ -439,7 +539,12 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       }),
     markDone: (id) =>
       reply(() => {
-        if (find(id).state !== "awaiting_acceptance") fail(`job ${id} is not awaiting acceptance`);
+        const job = find(id);
+        const acceptance = acceptanceRuns.get(id);
+        if (job.mode === "verify" || job.state !== "awaiting_acceptance" || acceptance?.returned_for_repair ||
+          (acceptance?.verification_job_id != null && acceptance.verification_status !== "passed")) {
+          fail(`job ${id} is not awaiting acceptance`);
+        }
         update(id, { state: "done" });
       }),
     recordLocalCompletion: (id) =>

@@ -6,7 +6,7 @@ import { useBackend } from "@/lib/backend-context";
 import { reportFailure } from "@/lib/errors";
 import { isInterruptedRun, isPlanned, pendingContinuationSourceId, planProgressFor } from "@/lib/runs";
 import type { Binding, CliPathStatus, ExecutorKind, Job, LinearSetup, Settings, SetupAction, UpdateStatus, Viewer } from "@/lib/types";
-import type { Handoff } from "@/lib/workflow-types";
+import type { AcceptanceAction, AcceptanceActionResult, Handoff } from "@/lib/workflow-types";
 
 /**
  * Every query of the panel. The engine events (`useEngineEvents`) and the actions below refresh
@@ -20,6 +20,7 @@ export const queryKeys = {
   job: (id: number) => ["job", id] as const,
   log: (id: number) => ["log", id] as const,
   codexSessionPreview: (id: number) => ["codexSessionPreview", id] as const,
+  handoffs: ["handoff"] as const,
   handoff: (id: number) => ["handoff", id] as const,
   issues: ["issues"] as const,
   planProgress: ["planProgress"] as const,
@@ -96,9 +97,18 @@ export function useContinuationSource(job: Job | null | undefined): Job | null {
 }
 
 /** The saved context for reviewing or taking over a run. */
-export function useHandoff(id: number) {
+export function useHandoff(id: number, enabled = true) {
   const backend = useBackend();
-  return useQuery({ queryKey: queryKeys.handoff(id), queryFn: () => backend.getHandoff(id) });
+  return useQuery({ queryKey: queryKeys.handoff(id), queryFn: () => backend.getHandoff(id), enabled });
+}
+
+/** The preview contains a one-time native confirmation token. Keep it only for this dialog. */
+export function useAcceptancePreview() {
+  const backend = useBackend();
+  return useMutation({
+    mutationFn: (action: AcceptanceAction) => backend.prepareControlAction(action),
+    gcTime: 0,
+  });
 }
 
 /** Model and effort choices for the currently selected executor. */
@@ -355,6 +365,25 @@ export function useApproveContinuation(id: number) {
     "dispatch.approval_failed",
     { quiet: () => true, gcTime: 0 },
   );
+}
+
+export function useCommitAcceptance() {
+  return useAction<string, AcceptanceActionResult>(
+    (backend, token) => backend.commitControlAction(token),
+    [queryKeys.status, queryKeys.jobs, queryKeys.issues, queryKeys.handoffs],
+    "dispatch.approval_failed",
+    { quiet: () => true, gcTime: 0 },
+  );
+}
+
+export function useRecordArchive(id: number) {
+  const client = useQueryClient();
+  const backend = useBackend();
+  return useMutation({
+    mutationFn: ({ page, commit }: { page: string; commit: string | null }) => backend.recordArchive(id, page, commit),
+    onSuccess: (handoff) => client.setQueryData(queryKeys.handoff(id), handoff),
+    gcTime: 0,
+  });
 }
 
 export function useContinuationContext(id: number, enabled = true) {

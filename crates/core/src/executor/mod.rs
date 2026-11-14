@@ -296,9 +296,180 @@ pub fn build(
     }
 }
 
+/// Starts a fresh native verification session in an isolated, disposable working directory.
+/// Only approved delivery files should be copied into it. It must not be a linked Git worktree:
+/// provider sandboxes can grant a worktree access to its shared Git directory.
+pub fn build_verification(
+    kind: ExecutorKind,
+    program: impl AsRef<Path>,
+    directory: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<Effort>,
+) -> CommandSpec {
+    let mut spec = build(
+        kind,
+        program.as_ref().to_path_buf(),
+        &RunOptions {
+            profile: PermissionProfile::Personal,
+            model,
+            effort,
+            lean: None,
+            plan: false,
+            resume: None,
+        },
+        directory,
+        prompt.to_owned(),
+    );
+    match kind {
+        ExecutorKind::Claude => {
+            // Restricted mode confines file tools and skips personal and project settings. Safe
+            // mode also omits the instruction files, plugins, skills and hooks. The empty strict
+            // MCP configuration leaves out Linear and all developer-supplied MCP servers.
+            spec.args.extend([
+                "--restricted".into(),
+                "--safe-mode".into(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                r#"{"mcpServers":{}}"#.into(),
+                "--tools".into(),
+            ]);
+            if cfg!(unix) {
+                spec.args.extend([
+                    "Read,Grep,Glob,Bash".into(),
+                    "--settings".into(),
+                    r#"{"disableClaudeAiConnectors":true,"permissions":{"blockReadsOutsideWorkingDirectories":true,"blockWritesOutsideWorkingDirectories":true},"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"network":{"allowedDomains":["*"],"allowLocalBinding":true}}}"#.into(),
+                ]);
+            } else {
+                // Claude's terminal sandbox is unavailable on native Windows. Keep native file
+                // inspection available and leave any required command execution as blocked.
+                spec.args.extend([
+                    "Read,Grep,Glob".into(),
+                    "--settings".into(),
+                    r#"{"disableClaudeAiConnectors":true}"#.into(),
+                ]);
+            }
+            let (name, value) = lean::DISABLE_AUTO_MEMORY;
+            spec.env.push((name.into(), value.into()));
+        }
+        ExecutorKind::Codex => {
+            let stdin = spec.args.pop();
+            spec.args.extend(
+                [
+                    "--sandbox",
+                    "workspace-write",
+                    "--ignore-user-config",
+                    "--ignore-rules",
+                    "--disable",
+                    "hooks",
+                    "--disable",
+                    "plugins",
+                    "--disable",
+                    "apps",
+                    "--disable",
+                    "memories",
+                    "--disable",
+                    "skill_mcp_dependency_install",
+                    "--disable",
+                    "browser_use",
+                    "--disable",
+                    "computer_use",
+                    "--disable",
+                    "multi_agent",
+                    "--disable",
+                    "multi_agent_v2",
+                    "--disable",
+                    "shell_snapshot",
+                    "--disable",
+                    "shell_snapshot_v2",
+                    "-c",
+                    "approval_policy=never",
+                    "-c",
+                    "allow_login_shell=false",
+                    "-c",
+                    "mcp_servers={}",
+                    "-c",
+                    "project_doc_max_bytes=0",
+                    "-c",
+                    "skills.include_instructions=false",
+                    "-c",
+                    "web_search=disabled",
+                    "-c",
+                    "sandbox_workspace_write.network_access=true",
+                    "-c",
+                    "sandbox_workspace_write.exclude_slash_tmp=true",
+                    "-c",
+                    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                    "-c",
+                    "shell_environment_policy.inherit=core",
+                    "-c",
+                    "shell_environment_policy.ignore_default_excludes=false",
+                ]
+                .map(String::from),
+            );
+            spec.args.extend(stdin);
+        }
+    }
+    spec.notes.push(
+        "independent verification: fresh session with no Linear MCP and an isolated working directory"
+            .into(),
+    );
+    spec
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_uses_a_fresh_networked_sandbox_without_linear_or_resume() {
+        for kind in [ExecutorKind::Codex, ExecutorKind::Claude] {
+            let spec =
+                build_verification(kind, "executor", Path::new("scratch"), "review", None, None);
+            assert_eq!(spec.cwd, Path::new("scratch"));
+            assert!(
+                !spec.args.iter().any(|arg| arg == "resume"
+                    || arg == "--resume"
+                    || arg.contains("mcp.linear.app"))
+            );
+            match kind {
+                ExecutorKind::Codex => {
+                    assert!(spec.args.iter().any(|arg| arg == "workspace-write"));
+                    assert!(
+                        spec.args
+                            .iter()
+                            .any(|arg| arg == "sandbox_workspace_write.network_access=true")
+                    );
+                    assert!(
+                        !spec
+                            .args
+                            .iter()
+                            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+                    );
+                }
+                ExecutorKind::Claude => {
+                    assert!(spec.args.iter().any(|arg| arg == "--restricted"));
+                    assert!(spec.args.iter().any(|arg| arg == "--strict-mcp-config"));
+                    let index = spec
+                        .args
+                        .iter()
+                        .position(|arg| arg == "--settings")
+                        .unwrap();
+                    let settings: serde_json::Value =
+                        serde_json::from_str(&spec.args[index + 1]).unwrap();
+                    if cfg!(unix) {
+                        assert_eq!(settings["sandbox"]["enabled"], true);
+                        assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+                        assert_eq!(
+                            settings["sandbox"]["network"]["allowedDomains"],
+                            serde_json::json!(["*"])
+                        );
+                        assert_eq!(settings["sandbox"]["network"]["allowLocalBinding"], true);
+                    }
+                }
+            }
+        }
+    }
     use crate::config::{ExecutorKind, PermissionProfile};
     use std::path::PathBuf;
 

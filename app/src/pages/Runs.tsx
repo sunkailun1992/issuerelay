@@ -15,7 +15,7 @@ import { useTick } from "@/hooks/useTick";
 import { cleanDisplayText } from "@/lib/clean";
 import { formatCost, formatRelative, formatTime } from "@/lib/format";
 import { groupIssueRuns, type IssueRunGroup } from "@/lib/run-groups";
-import { displayJobState, isPlanned, isPlanRun, parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
+import { displayedVerificationStatus, displayJobState, isPlanned, parseRunFilter, RUN_FILTERS, type RunFilter } from "@/lib/runs";
 import type { HeldJob, Job } from "@/lib/types";
 
 /** What stands where a run has no value (it has no executor yet, or has not started). */
@@ -78,7 +78,7 @@ function RunRow({ job, held, history = false, latest = false, historyToggle }: {
   return (
     <TableRow className="cursor-pointer" onClick={open}>
       <TableCell>
-        <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} />
+        <StatusBadge state={job.state} planned={isPlanned(job)} closable={closable} verification={displayedVerificationStatus(job)} />
       </TableCell>
       <TableCell>
         <div className="flex flex-col gap-0.5">
@@ -91,7 +91,7 @@ function RunRow({ job, held, history = false, latest = false, historyToggle }: {
           {job.executor !== null && (
             <span className="text-xs text-muted-foreground">
               {t(`executor.${job.executor}`)}
-              {!history && isPlanRun(job) && ` · ${t("runs.mode.plan")}`}
+              {!history && job.mode !== undefined && job.mode !== "implement" && ` · ${t(`runs.mode.${job.mode}`)}`}
             </span>
           )}
           {history && latest && <span className="text-xs text-muted-foreground">{t("runs.latest")}</span>}
@@ -101,7 +101,7 @@ function RunRow({ job, held, history = false, latest = false, historyToggle }: {
         <div className="flex max-w-sm flex-col items-start gap-1 wrap-anywhere whitespace-normal">
           {history ? (
             <>
-              <span>{t(isPlanRun(job) ? "runs.mode.plan" : "runs.mode.implement")}</span>
+              <span>{t(`runs.mode.${job.mode ?? "implement"}`)}</span>
               {job.resume_job_id != null && (
                 <Link to={`/runs/${job.resume_job_id}`} className="text-xs text-primary underline-offset-4 hover:underline">
                   {t("runs.resumed_from", { id: job.resume_job_id })}

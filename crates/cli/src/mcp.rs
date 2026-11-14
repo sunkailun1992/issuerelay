@@ -150,16 +150,46 @@ struct PrepareChatConfirmationArgs {
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum TaskAction {
-    Dispatch { issue_identifier: String },
-    Continue { job_id: i64, executor: ToolExecutor },
-    Retry { job_id: i64 },
-    Stop { job_id: i64 },
-    RecordLocalCompletion { job_id: i64 },
-    MarkDone { job_id: i64 },
-    CompletePlan { job_id: i64 },
-    SaveBinding { binding: BindingArgs },
-    RemoveBinding { binding_id: String },
-    SetSettings { changes: SettingsArgs },
+    Dispatch {
+        issue_identifier: String,
+    },
+    Continue {
+        job_id: i64,
+        executor: ToolExecutor,
+    },
+    Retry {
+        job_id: i64,
+    },
+    Stop {
+        job_id: i64,
+    },
+    RecordLocalCompletion {
+        job_id: i64,
+    },
+    MarkDone {
+        job_id: i64,
+    },
+    CompletePlan {
+        job_id: i64,
+    },
+    StartVerification {
+        job_id: i64,
+        executor: ToolExecutor,
+        delivery: String,
+    },
+    ReturnForRepair {
+        job_id: i64,
+        reason: String,
+    },
+    SaveBinding {
+        binding: BindingArgs,
+    },
+    RemoveBinding {
+        binding_id: String,
+    },
+    SetSettings {
+        changes: SettingsArgs,
+    },
 }
 
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -220,7 +250,9 @@ impl TaskAction {
             | Self::Stop { job_id }
             | Self::RecordLocalCompletion { job_id }
             | Self::MarkDone { job_id }
-            | Self::CompletePlan { job_id } => Some(job_id),
+            | Self::CompletePlan { job_id }
+            | Self::StartVerification { job_id, .. }
+            | Self::ReturnForRepair { job_id, .. } => Some(job_id),
             _ => None,
         }
     }
@@ -236,6 +268,10 @@ impl TaskAction {
             Self::CompletePlan { .. } => {
                 "Complete this plan in Linear after checking its child issues"
             }
+            Self::StartVerification { .. } => "Queue a fresh native verification of this delivery",
+            Self::ReturnForRepair { .. } => {
+                "Record this failed verification as returned for repair"
+            }
             Self::SaveBinding { .. } => "Save this IssueRelay project binding",
             Self::RemoveBinding { .. } => "Remove this IssueRelay project binding",
             Self::SetSettings { .. } => "Change these IssueRelay settings",
@@ -249,7 +285,7 @@ struct ActionApproval {
     confirm: bool,
 }
 
-const TASK_ACTIONS: [&str; 10] = [
+const TASK_ACTIONS: [&str; 12] = [
     "dispatch",
     "continue",
     "retry",
@@ -257,6 +293,8 @@ const TASK_ACTIONS: [&str; 10] = [
     "record_local_completion",
     "mark_done",
     "complete_plan",
+    "start_verification",
+    "return_for_repair",
     "save_binding",
     "remove_binding",
     "set_settings",
@@ -484,9 +522,30 @@ fn confirmation_message(
     } else {
         let destination = if preview["dispatch"].is_object() {
             &preview["dispatch"]
-        } else {
+        } else if preview["continuation"].is_object() {
             &preview["continuation"]
+        } else {
+            &preview["acceptance"]
         };
+        if matches!(
+            action,
+            TaskAction::StartVerification { .. } | TaskAction::ReturnForRepair { .. }
+        ) {
+            let required: &[&str] = match action {
+                TaskAction::StartVerification { .. } => &[
+                    "source_job_id",
+                    "executor",
+                    "directory",
+                    "delivery",
+                    "permission",
+                    "lean",
+                ],
+                _ => &["source_job_id", "delivery", "reason"],
+            };
+            if required.iter().any(|key| destination[*key].is_null()) {
+                return Err("error: the host did not return all reviewed acceptance details; use the desktop panel".into());
+            }
+        }
         if matches!(
             action,
             TaskAction::Dispatch { .. } | TaskAction::Continue { .. }
@@ -522,6 +581,16 @@ fn confirmation_message(
             ("Permissions", &destination["permission"]),
             ("Lean run", &destination["lean"]),
             ("Working directory", &destination["directory"]),
+            ("Development run", &destination["source_job_id"]),
+            ("Reviewed delivery", &destination["delivery"]),
+            ("Return reason", &destination["reason"]),
+            ("Verification scope", &destination["scope"]),
+            ("Delivery fingerprint", &destination["delivery_fingerprint"]),
+            ("Linear revision", &destination["linear_updated_at"]),
+            (
+                "Verification brief revision",
+                &destination["brief_revision"],
+            ),
             ("Wiki root", &destination["wiki_root"]),
             ("Brief revision", &destination["context"]["revision"]),
         ] {

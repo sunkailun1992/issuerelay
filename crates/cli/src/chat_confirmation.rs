@@ -92,6 +92,12 @@ where
         }
         Some("done") => "IssueRelay received the typed confirmation. Issue marked done.",
         Some("plan_done") => "IssueRelay received the typed confirmation. Plan marked done.",
+        Some("verification_queued") => {
+            "IssueRelay received the typed confirmation. Independent verification queued."
+        }
+        Some("returned_for_repair") => {
+            "IssueRelay received the typed confirmation. Failed verification returned for repair."
+        }
         _ => {
             "IssueRelay could not verify the result of this typed confirmation. Check the current IssueRelay run or status in this chat before retrying."
         }

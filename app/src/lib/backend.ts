@@ -4,7 +4,7 @@ import type {
   Viewer,
 } from "./types";
 import type { ModelCatalog } from "./model-catalog";
-import type { ContinuationPreview, DispatchPreview, Handoff, IssueContext, NativeSessionPreview } from "./workflow-types";
+import type { AcceptanceAction, AcceptanceActionPreview, AcceptanceActionResult, ContinuationPreview, DispatchPreview, Handoff, IssueContext, NativeSessionPreview } from "./workflow-types";
 
 /** Errors a command answers with as a code rather than a sentence; the panel translates them (`errors.*`). */
 export const ERROR_CODES = [
@@ -39,6 +39,9 @@ export interface Backend {
   jobLog(id: number, lines: number): Promise<string[]>;
   readCodexSession(id: number): Promise<NativeSessionPreview>;
   getHandoff(id: number): Promise<Handoff>;
+  prepareControlAction(action: AcceptanceAction): Promise<AcceptanceActionPreview>;
+  commitControlAction(token: string): Promise<AcceptanceActionResult>;
+  recordArchive(id: number, page: string, commit: string | null): Promise<Handoff>;
   claimHandoff(id: number, executor: ExecutorKind): Promise<Handoff>;
   releaseHandoff(id: number, claimId: string): Promise<boolean>;
   issues(): Promise<IssueView[]>;
