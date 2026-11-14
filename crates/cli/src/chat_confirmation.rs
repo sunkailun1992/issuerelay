@@ -20,6 +20,11 @@ struct HookInput {
 }
 
 fn confirmation_code(prompt: &str) -> Option<&str> {
+    // The desktop composer can include a line terminator after the single input line.
+    let prompt = prompt
+        .strip_suffix("\r\n")
+        .or_else(|| prompt.strip_suffix('\n'))
+        .unwrap_or(prompt);
     let code = prompt
         .strip_prefix("确认 ")
         .or_else(|| prompt.strip_prefix("confirm "))?;
@@ -121,8 +126,11 @@ mod tests {
 
     #[tokio::test]
     async fn exact_confirmation_sends_only_the_three_review_fields() {
-        for prefix in ["确认 ", "confirm "] {
-            let input = event(&format!("{prefix}{CODE}")).to_string();
+        for (prefix, ending) in ["确认 ", "confirm "]
+            .into_iter()
+            .flat_map(|prefix| ["", "\n", "\r\n"].map(|ending| (prefix, ending)))
+        {
+            let input = event(&format!("{prefix}{CODE}{ending}")).to_string();
             let output = handle(input.as_bytes(), |method, params| async move {
                 assert_eq!(method, "workflow.confirm_chat_action");
                 assert_eq!(
@@ -155,7 +163,11 @@ mod tests {
             format!("Confirm {CODE}"),
             format!("confirm  {CODE}"),
             format!(" confirm {CODE}"),
-            format!("confirm {CODE}\n"),
+            format!("confirm {CODE}\r"),
+            format!("confirm {CODE}\n\n"),
+            format!("confirm {CODE}\r\n\r\n"),
+            format!("confirm {CODE} \n"),
+            format!("confirm {CODE}\nextra"),
             format!("confirm {CODE} extra"),
             format!("> 确认 {CODE}"),
             format!("确认\u{3000}{CODE}"),
