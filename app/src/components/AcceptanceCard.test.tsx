@@ -1,9 +1,11 @@
 import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import { setLanguage } from "@/i18n";
+import i18n, { type Lang, setLanguage } from "@/i18n";
+import { queryKeys } from "@/hooks/queries";
 import { BackendError } from "@/lib/backend";
 import { createMockBackend } from "@/lib/mock";
+import type { AcceptanceLinks, DispatchPreview } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { AcceptanceCard } from "./AcceptanceCard";
 
@@ -181,4 +183,113 @@ test("returning a failed verification for repair uses the same expiry guard", as
   expect(dialog.getByRole("button", { name: "Confirm action" })).toBeDisabled();
   expect(dialog.getByRole("button", { name: "Reload preview" })).toBeEnabled();
   expect(commit).not.toHaveBeenCalled();
+});
+
+
+async function returnedRepairReview(lang: Lang = "en") {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const source = (await backend.job(10))!;
+  const job = { ...source, id: 13, mode: "verify" as const, state: "failed" as const };
+  const repair = {
+    ...source, id: 14, state: "waiting_binding" as const,
+    started_at: null, finished_at: null, reason: "waiting for dispatch review",
+  };
+  let links: AcceptanceLinks = {
+    development_job_id: source.id, repair_of_job_id: null, repair_job_id: null,
+    verification_job_id: job.id, delivery: "build-demo-3", verification_status: "failed",
+    returned_for_repair: true, repair_reason: "Repeat the synthetic failing check.",
+  };
+  const handoff = await backend.getHandoff(source.id);
+  backend.getHandoff = vi.fn(async () => ({ ...handoff, job_id: job.id, acceptance: links }));
+  const initialJobs = await backend.listJobs(100);
+  backend.listJobs = vi.fn(async () => links.repair_job_id === null ? initialJobs : [repair, ...initialJobs]);
+  const preview: DispatchPreview = {
+    token: "demo-repair-dispatch-1", issue_uuid: job.issue_uuid, issue_identifier: job.issue_identifier,
+    title: job.title, mode: "implement", executor: "codex", directory: "~/code/demo-app",
+    model: "gpt-6.1-sol", effort: "ultra",
+    context: {
+      revision: 4, origin_executor: "codex", preferred_executor: "codex",
+      request: "Fix the synthetic validation failure.", conversation_history: "The synthetic verification did not pass.",
+      scope: "Repair validation in the demo project.", acceptance: ["The synthetic failing check passes."], source_refs: [],
+    },
+  };
+  const readPreview = vi.spyOn(backend, "getDispatchPreview").mockResolvedValue(preview);
+  const approve = vi.spyOn(backend, "approveDispatch").mockResolvedValue(undefined);
+  const view = await renderWithProviders(<AcceptanceCard job={job} />, { backend, lang });
+  await userEvent.click(await screen.findByRole("button", { name: i18n.t("dispatch.preview") }));
+  const dialogElement = screen.getByRole("dialog", { name: i18n.t("dispatch.title") });
+  const dialog = within(dialogElement);
+  await waitFor(() => expect(dialog.getByRole("button", { name: i18n.t("dispatch.confirm") })).toBeEnabled());
+  const pollRepair = async () => {
+    links = { ...links, repair_job_id: repair.id };
+    await act(async () => {
+      await Promise.all([
+        view.client.invalidateQueries({ queryKey: queryKeys.handoff(job.id) }),
+        view.client.invalidateQueries({ queryKey: queryKeys.jobs }),
+      ]);
+    });
+    await screen.findByText(i18n.t("acceptance.repair_run", { id: repair.id }));
+  };
+  return { ...view, job, preview, readPreview, approve, dialog, dialogElement, pollRepair };
+}
+
+test.each<Lang>(["en", "zh-CN", "zh-TW", "ja", "ko"])(
+  "a returned verification keeps its open dispatch review when polling creates a waiting repair (%s)", async (lang) => {
+    const view = await returnedRepairReview(lang);
+    await view.pollRepair();
+    expect(screen.getByRole("dialog", { name: i18n.t("dispatch.title") })).toBe(view.dialogElement);
+    expect(view.dialog.getByText("Fix the synthetic validation failure.")).toBeInTheDocument();
+    expect(view.dialog.getByText("gpt-6.1-sol")).toBeInTheDocument();
+    expect(view.dialog.getByRole("button", { name: i18n.t("dispatch.confirm") })).toBeEnabled();
+    expect(view.readPreview).toHaveBeenCalledTimes(1);
+    expect(view.approve).not.toHaveBeenCalled();
+    await userEvent.click(view.dialog.getByRole("button", { name: i18n.t("common.cancel") }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: i18n.t("dispatch.preview") })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: i18n.t("acceptance.repair_run", { id: 14 }) })).toHaveAttribute("href", "/runs/14");
+    expect(view.approve).not.toHaveBeenCalled();
+  },
+);
+
+test("a retained repair review still reports a rejected stale token and requires a fresh explicit confirmation", async () => {
+  const view = await returnedRepairReview();
+  view.approve.mockRejectedValueOnce(new BackendError("the dispatch preview changed; read it again"));
+  const fresh = {
+    ...view.preview, token: "demo-repair-dispatch-2",
+    context: { ...view.preview.context!, revision: 5, request: "Review the updated synthetic repair scope." },
+  };
+  view.readPreview.mockResolvedValue(fresh);
+  await view.pollRepair();
+  await userEvent.click(view.dialog.getByRole("button", { name: "Confirm dispatch" }));
+  expect(await view.dialog.findByText("Could not approve dispatch")).toBeInTheDocument();
+  expect(view.dialog.getByText("the dispatch preview changed; read it again")).toBeInTheDocument();
+  expect(view.approve).toHaveBeenCalledExactlyOnceWith(view.job.issue_identifier, view.preview.token);
+  expect(view.dialog.getByRole("button", { name: "Confirm dispatch" })).toBeDisabled();
+  await userEvent.click(view.dialog.getByRole("button", { name: "Reload preview" }));
+  expect(await view.dialog.findByText("Review the updated synthetic repair scope.")).toBeInTheDocument();
+  expect(view.dialog.queryByText("Could not approve dispatch")).not.toBeInTheDocument();
+  expect(view.approve).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(view.dialog.getByRole("button", { name: "Confirm dispatch" })).toBeEnabled());
+  await userEvent.click(view.dialog.getByRole("button", { name: "Confirm dispatch" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(view.approve).toHaveBeenNthCalledWith(2, view.job.issue_identifier, fresh.token);
+});
+
+
+test("polling cannot dismiss an in-flight repair approval or enable another submission", async () => {
+  const view = await returnedRepairReview();
+  let finish = () => {};
+  view.approve.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  await userEvent.click(view.dialog.getByRole("button", { name: "Confirm dispatch" }));
+  await view.pollRepair();
+  expect(screen.getByRole("dialog", { name: "Review dispatch" })).toBe(view.dialogElement);
+  const confirm = view.dialog.getByRole("button", { name: "Confirm dispatch" });
+  expect(confirm).toBeDisabled();
+  expect(view.dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  await userEvent.keyboard("{Escape}");
+  expect(view.dialogElement).toBeInTheDocument();
+  await userEvent.click(confirm);
+  expect(view.approve).toHaveBeenCalledExactlyOnceWith(view.job.issue_identifier, view.preview.token);
+  await act(async () => finish());
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 });

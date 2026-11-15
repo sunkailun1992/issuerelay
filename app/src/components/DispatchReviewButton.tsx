@@ -158,15 +158,20 @@ function ReviewDialog({ issueIdentifier, issueUuid, developmentJobId, close }: R
   );
 }
 
-/** Loading the preview never approves it. Closing discards the copy held by the panel. */
-export function DispatchReviewButton(target: ReviewTarget) {
+/**
+ * Loading never approves. Hiding the entry point during polling preserves an open review;
+ * closing still discards the preview held by the panel.
+ */
+export function DispatchReviewButton({ showTrigger = true, ...target }: ReviewTarget & { showTrigger?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm">{t(target.developmentJobId === undefined ? "dispatch.preview" : "dispatch.implement")}</Button>
-      </DialogTrigger>
+      {showTrigger && (
+        <DialogTrigger asChild>
+          <Button variant="outline" size="sm">{t(target.developmentJobId === undefined ? "dispatch.preview" : "dispatch.implement")}</Button>
+        </DialogTrigger>
+      )}
       {open && <ReviewDialog {...target} close={() => setOpen(false)} />}
     </Dialog>
   );

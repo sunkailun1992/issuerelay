@@ -310,11 +310,12 @@ function LinkedAcceptance({ job, links, archiveConfigured }: { job: Job; links: 
         <div className="space-y-2">
           <p className="font-medium">{t("acceptance.returned")}</p>
           {links.repair_job_id == null && (
-            <>
-              <p className="text-sm text-muted-foreground">{t("acceptance.issue_updated")}</p>
-              <DispatchReviewButton issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid} />
-            </>
+            <p className="text-sm text-muted-foreground">{t("acceptance.issue_updated")}</p>
           )}
+          <DispatchReviewButton
+            issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid}
+            showTrigger={links.repair_job_id == null}
+          />
         </div>
       )}
     </>
