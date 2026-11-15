@@ -704,12 +704,13 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     // The known keys are the ones serializing this sample writes: the defaults, plus a binding
     // with every optional field set (a new field of `Binding` makes this literal fail to compile
     // until it is listed here). That is complete only while the defaults write every `Settings`
-    // field. An `Option` field with `skip_serializing_if` is left out while it is `None`, so a
-    // file that sets it, which a save writes, would be reported as holding an unknown key at
-    // every start. When adding one, set it on `sample.settings` below and in
+    // field. A field with `skip_serializing_if` can be left out at its default (`None` or
+    // false), so a file that sets it would be reported as holding an unknown key at every
+    // start. When adding one, set it to a serialized value on `sample.settings` below and in
     // `every_key_a_save_writes_is_known`, which fails until the sample knows the key.
     // `lean` is written only when it is off, so the sample turns it off.
     let mut sample = Config::default();
+    sample.settings.codex_chat_confirmation = true;
     sample.settings.default_effort = Some(Effort::High);
     sample.settings.default_codex_model = "gpt-6.1-sol".into();
     sample.settings.default_claude_model = "fable".into();
@@ -1492,16 +1493,43 @@ mod tests {
     }
 
     #[test]
+    fn explicit_codex_chat_confirmation_false_is_a_known_setting() {
+        assert_codex_chat_confirmation_is_known(false);
+    }
+
+    #[test]
+    fn explicit_codex_chat_confirmation_true_is_a_known_setting() {
+        assert_codex_chat_confirmation_is_known(true);
+    }
+
+    fn assert_codex_chat_confirmation_is_known(enabled: bool) {
+        let text = format!(
+            "[settings]\ncodex_chat_confirmation = {enabled}\ncodex_chat_confirmaton = true\n"
+        );
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(config.settings.codex_chat_confirmation, enabled);
+        assert_eq!(
+            unknown_keys(&text),
+            ["settings.codex_chat_confirmaton"],
+            "only the misspelled key is unknown"
+        );
+        let saved = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(loaded.settings.codex_chat_confirmation, enabled);
+    }
+
+    #[test]
     fn every_key_a_save_writes_is_known() {
         // A binding with every optional field set, and a setting changed from its default: if
         // `unknown_keys` did not know a key that `save` writes, each save would be followed by a
-        // warning about the host's own file. An `Option` field added to `Settings` later (one
-        // that is not written while it is `None`) has to be set here too, or this cannot see it.
+        // warning about the host's own file. A field added to `Settings` later that is omitted
+        // at its default has to be set to a serialized value here too, or this cannot see it.
         let mut config = Config::default();
         config.settings.notifications.failed = false;
         config.settings.auto_update = false;
         config.settings.onboarding_completed = true;
         config.settings.full_access_acknowledged = true;
+        config.settings.codex_chat_confirmation = true;
         config.settings.show_in_dock = false;
         config.settings.default_effort = Some(Effort::High);
         config.bindings.push(Binding {
@@ -1526,6 +1554,7 @@ mod tests {
             "lean",
             "effort",
             "default_effort",
+            "codex_chat_confirmation",
         ] {
             assert!(
                 text.contains(&format!("\n{key} = ")),
