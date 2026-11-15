@@ -24,6 +24,7 @@ use issuerelay_core::{
     trigger::WaitReasonView,
     workflow::{
         ContinuationStrategy, ControlAction, ControlActionOutcome, ExecutorSource, IssueContext,
+        VerificationStatus,
     },
 };
 use serde_json::{Value, json};
@@ -1696,8 +1697,25 @@ async fn same_linear_identifier_in_another_workspace_does_not_inherit_context() 
 
 #[tokio::test]
 async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_delivery() {
-    use issuerelay_core::workflow::VerificationStatus;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        verification_repair_cycle(VerificationStatus::Failed),
+    )
+    .await
+    .expect("the failed verification repair cycle did not finish");
+}
 
+#[tokio::test]
+async fn blocked_verification_returns_for_diagnosis_without_rewriting_its_conclusion() {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        verification_repair_cycle(VerificationStatus::Blocked),
+    )
+    .await
+    .expect("the blocked verification repair cycle did not finish");
+}
+
+async fn verification_repair_cycle(initial_status: VerificationStatus) {
     fn git(directory: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .args(args)
@@ -1735,6 +1753,22 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     let repaired = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["checkout", "--detach", &initial]);
 
+    let (initial_tag, initial_summary, initial_evidence, repair_reason) = match initial_status {
+        VerificationStatus::Failed => (
+            "verification_failed",
+            "failed",
+            "Fixture mismatch",
+            "Fix the fixture",
+        ),
+        VerificationStatus::Blocked => (
+            "verification_blocked",
+            "blocked",
+            "Fixture check could not complete",
+            "Diagnose the fixture check and repair if needed",
+        ),
+        _ => unreachable!("the fixture only returns failed or blocked verification"),
+    };
+    let verification_gate = root.path().join("release-verification");
     let first_validation = "00000000-0000-4000-8000-000000000002";
     let repair_session = "00000000-0000-4000-8000-000000000003";
     let continued_session = "00000000-0000-4000-8000-000000000005";
@@ -1749,17 +1783,20 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
                     json!({"result":"local_complete","summary":"delivered"}),
                 ),
             ),
-            write_script(
-                root.path(),
-                "verify-initial.json",
-                codex(
+            write_script(root.path(), "verify-initial.json", {
+                let mut steps = codex(
                     first_validation,
                     json!({
-                        "result":"verification_failed","summary":"failed","delivery":initial,
-                        "evidence":["Fixture mismatch"]
+                        "result":initial_tag,"summary":initial_summary,"delivery":initial,
+                        "evidence":[initial_evidence]
                     }),
-                ),
-            ),
+                );
+                steps
+                    .as_array_mut()
+                    .unwrap()
+                    .insert(1, json!({"wait_for":verification_gate}));
+                steps
+            }),
             write_script(
                 root.path(),
                 "repair.json",
@@ -1886,34 +1923,110 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
             .await
             .is_err()
     );
+    let repair_action = || ControlAction::ReturnForRepair {
+        job_id: failed,
+        reason: repair_reason.into(),
+    };
+    assert!(
+        engine
+            .prepare_control_action(repair_action())
+            .await
+            .is_err()
+    );
     assert_eq!(engine.dispatch().await.unwrap(), [failed]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let running = engine.job(failed).unwrap().unwrap();
+            if running.state == JobState::Running
+                && running.session_id.as_deref() == Some(first_validation)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the native verification fixture did not start");
+    assert!(
+        engine
+            .prepare_control_action(repair_action())
+            .await
+            .is_err()
+    );
+    std::fs::write(&verification_gate, "finish the independent check").unwrap();
     engine.wait_idle().await;
     assert_eq!(
         latest(&engine).session_id.as_deref(),
         Some(first_validation)
     );
     let failed_view = engine.handoff(failed).unwrap().acceptance.unwrap();
-    assert_eq!(
-        failed_view.verification_status,
-        Some(VerificationStatus::Failed)
-    );
+    assert_eq!(failed_view.verification_status, Some(initial_status));
     assert_eq!(failed_view.verification_evidence.len(), 2);
-    assert_eq!(failed_view.verification_evidence[0], "Fixture mismatch");
+    assert_eq!(failed_view.verification_evidence[0], initial_evidence);
     assert!(
         failed_view.verification_evidence[1].starts_with("Retained verification evidence index: ")
     );
     assert!(engine.mark_done(source.id).await.is_err());
     assert!(linear.set_state_calls().is_empty());
-    linear.update("1", |i| i.title = "Clarify available evidence".into());
-    assert!(engine.dispatch_preview("DEMO-1").await.is_err());
+    if initial_status == VerificationStatus::Failed {
+        linear.update("1", |i| i.title = "Clarify available evidence".into());
+        assert!(engine.dispatch_preview("DEMO-1").await.is_err());
+    }
     engine.poll_once().await.unwrap();
     assert_eq!(engine.list_jobs(10).unwrap().len(), 2);
-
+    let original_verifier = engine.job(failed).unwrap().unwrap();
+    assert_eq!(original_verifier.report.as_deref(), Some(initial_tag));
+    let read_recommendation = || {
+        let conn = rusqlite::Connection::open(root.path().join("test.sqlite3")).unwrap();
+        conn.query_row(
+            "SELECT recommendation FROM acceptance_runs WHERE verification_job_id = ?1",
+            [failed],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    let original_recommendation = read_recommendation();
+    for reason in [String::new(), " \n\t ".into()] {
+        assert!(
+            engine
+                .prepare_control_action(ControlAction::ReturnForRepair {
+                    job_id: failed,
+                    reason
+                })
+                .await
+                .is_err()
+        );
+    }
+    let stale_return = engine
+        .prepare_control_action(repair_action())
+        .await
+        .unwrap();
+    let claim = engine
+        .claim_handoff(source.id, ExecutorKind::Codex)
+        .await
+        .unwrap();
+    assert!(
+        engine
+            .commit_control_action(&stale_return.token)
+            .await
+            .is_err()
+    );
+    assert!(
+        !engine
+            .handoff(failed)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .returned_for_repair
+    );
+    assert!(
+        engine
+            .release_handoff(source.id, claim.claim_id.as_deref().unwrap())
+            .await
+            .unwrap()
+    );
     let return_preview = engine
-        .prepare_control_action(ControlAction::ReturnForRepair {
-            job_id: failed,
-            reason: "Fix the fixture".into(),
-        })
+        .prepare_control_action(repair_action())
         .await
         .unwrap();
     assert_eq!(
@@ -1932,6 +2045,34 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
             .unwrap()
             .returned_for_repair
     );
+    assert_eq!(engine.job(failed).unwrap(), Some(original_verifier));
+    assert_eq!(read_recommendation(), original_recommendation);
+    let returned = engine.handoff(failed).unwrap().acceptance.unwrap();
+    assert_eq!(returned.verification_status, Some(initial_status));
+    assert_eq!(
+        returned.verification_evidence,
+        failed_view.verification_evidence
+    );
+    assert!(returned.repair_job_id.is_none());
+    assert!(
+        engine
+            .commit_control_action(&return_preview.token)
+            .await
+            .is_err()
+    );
+    assert!(
+        engine
+            .prepare_control_action(repair_action())
+            .await
+            .is_err()
+    );
+    if initial_status == VerificationStatus::Blocked {
+        engine.poll_once().await.unwrap();
+        assert_eq!(engine.list_jobs(10).unwrap().len(), 2);
+        linear.update("1", |i| {
+            i.title = "Clarify the unavailable fixture check".into()
+        });
+    }
     assert!(linear.set_state_calls().is_empty());
     let dispatch = engine.dispatch_preview("DEMO-1").await.unwrap();
     engine
@@ -1944,6 +2085,17 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     assert_eq!(repair.state, JobState::NeedsInfo);
     assert_eq!(repair.session_id.as_deref(), Some(repair_session));
     assert!(repair.resume_job_id.is_none());
+    assert_eq!(repair.directory.as_deref(), Some(repo.as_path()));
+    let original_return = engine.handoff(failed).unwrap().acceptance.unwrap();
+    assert_eq!(original_return.repair_job_id, Some(repair.id));
+    assert_eq!(original_return.verification_status, Some(initial_status));
+    assert_eq!(read_recommendation(), original_recommendation);
+    {
+        let repair_specs = runner.specs.lock().unwrap();
+        assert!(!repair_specs[2].args.iter().any(|arg| arg == "resume"));
+        assert_eq!(repair_specs[2].cwd, repo);
+        assert_ne!(repair_specs[1].cwd, repo);
+    }
     assert_eq!(
         engine
             .handoff(repair.id)
@@ -1956,7 +2108,7 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     assert!(
         runner.specs.lock().unwrap()[2]
             .stdin
-            .contains("Fix the fixture")
+            .contains(repair_reason)
     );
     assert!(
         engine
@@ -1982,6 +2134,16 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     let repair = engine.job(continued).unwrap().unwrap();
     assert_eq!(repair.state, JobState::LocalComplete);
     assert_eq!(repair.session_id.as_deref(), Some(continued_session));
+    let unchanged_delivery = engine
+        .prepare_control_action(start(repair.id, &initial))
+        .await
+        .unwrap_err();
+    assert!(
+        unchanged_delivery
+            .to_string()
+            .contains("the repair must deliver a new version"),
+        "{unchanged_delivery:#}"
+    );
     assert_eq!(
         engine
             .handoff(repair.id)
@@ -1996,7 +2158,7 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     assert!(
         runner.specs.lock().unwrap()[3]
             .stdin
-            .contains("Fixture mismatch")
+            .contains(initial_evidence)
     );
     git(&repo, &["checkout", "--detach", &repaired]);
     linear.update("1", |i| i.state = "In Testing".into());
@@ -2013,6 +2175,25 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
     engine.tick().await.unwrap();
     engine.wait_idle().await;
     assert_ne!(passed, failed);
+    {
+        let specs = runner.specs.lock().unwrap();
+        assert_ne!(specs[1].cwd, specs[4].cwd);
+        assert!(!specs[4].args.iter().any(|arg| arg == "resume"));
+    }
+    assert_eq!(read_recommendation(), original_recommendation);
+    assert_eq!(
+        engine.job(failed).unwrap().unwrap().report.as_deref(),
+        Some(initial_tag)
+    );
+    assert!(
+        engine
+            .prepare_control_action(ControlAction::ReturnForRepair {
+                job_id: passed,
+                reason: "Unexpected return".into()
+            })
+            .await
+            .is_err()
+    );
     assert_eq!(
         latest(&engine).session_id.as_deref(),
         Some(second_validation)

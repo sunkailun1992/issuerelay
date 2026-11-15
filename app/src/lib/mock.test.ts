@@ -5,6 +5,46 @@ import { DEMO_ISSUES, DEMO_JOBS } from "./mock-fixtures";
 import type { EngineEvent } from "./types";
 
 describe("mock backend", () => {
+  test("returning a blocked verification preserves its conclusion and waits for separate development dispatch", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const preview = await backend.prepareControlAction({
+      action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3",
+    });
+    const id = (await backend.commitControlAction(preview.token)).job_id!;
+    await backend.cancelJob(id);
+    const before = await backend.listJobs(100);
+    const action = { action: "return_for_repair", job_id: id, reason: "Diagnose the missing synthetic prerequisite." } as const;
+    await expect(backend.prepareControlAction(action)).rejects.toThrow();
+    // A separately recorded synthetic finding distinguishes a result from a bare stop.
+    (await backend.getHandoff(id)).acceptance!.verification_evidence = ["The synthetic prerequisite was unavailable."];
+    const returned = await backend.prepareControlAction(action);
+    expect((await backend.getHandoff(id)).acceptance).toMatchObject({
+      verification_status: "blocked", returned_for_repair: false,
+    });
+    expect(await backend.commitControlAction(returned.token)).toMatchObject({ result: "returned_for_repair", job_id: id });
+    expect((await backend.getHandoff(id)).acceptance).toMatchObject({
+      verification_status: "blocked", returned_for_repair: true, repair_reason: action.reason,
+    });
+    expect(await backend.listJobs(100)).toEqual(before);
+    await expect(backend.prepareControlAction(action)).rejects.toThrow();
+  });
+
+  test("a blocked return rejects an active verifier and a superseded verification", async () => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const start = { action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3" } as const;
+    const preview = await backend.prepareControlAction(start);
+    const id = (await backend.commitControlAction(preview.token)).job_id!;
+    const relation = (await backend.getHandoff(id)).acceptance!;
+    relation.verification_status = "blocked";
+    relation.verification_evidence = ["The synthetic prerequisite was unavailable."];
+    const action = { action: "return_for_repair", job_id: id, reason: "Diagnose the synthetic prerequisite." } as const;
+    await expect(backend.prepareControlAction(action)).rejects.toThrow();
+    await backend.cancelJob(id);
+    const repeated = await backend.prepareControlAction(start);
+    await backend.commitControlAction(repeated.token);
+    await expect(backend.prepareControlAction(action)).rejects.toThrow();
+  });
+
   test("the demo scenario has a job in every state", async () => {
     const backend = createMockBackend("demo", { latencyMs: 0 });
     const states = new Set((await backend.listJobs(100)).map((job) => job.state));

@@ -185,6 +185,121 @@ test("returning a failed verification for repair uses the same expiry guard", as
   expect(commit).not.toHaveBeenCalled();
 });
 
+test.each([
+  ["en", "Return for diagnosis or repair", "Blockers and diagnostic steps"],
+  ["zh-CN", "退回诊断或修复", "阻塞原因与诊断步骤"],
+  ["zh-TW", "退回診斷或修復", "阻礙原因與診斷步驟"],
+  ["ja", "診断または修正のために差し戻す", "阻害要因と診断手順"],
+  ["ko", "진단 또는 수정을 위해 반려", "차단 원인과 진단 단계"],
+] as const)("a blocked verification returns only after explicit review without changing its conclusion (%s)", async (lang, label, findings) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const initial = await backend.prepareControlAction({
+    action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3",
+  });
+  const verificationId = (await backend.commitControlAction(initial.token)).job_id!;
+  await backend.cancelJob(verificationId);
+  // Record a synthetic finding: a stop with no report alone must not permit a return.
+  (await backend.getHandoff(verificationId)).acceptance!.verification_evidence = ["The synthetic prerequisite was unavailable."];
+  const job = (await backend.job(verificationId))!;
+  const jobCount = (await backend.listJobs(100)).length;
+  const prepare = vi.spyOn(backend, "prepareControlAction");
+  const commit = vi.spyOn(backend, "commitControlAction");
+  await renderWithProviders(<AcceptanceCard job={job} />, { backend, lang });
+  await userEvent.click(await screen.findByRole("button", { name: label }));
+  const dialog = within(screen.getByRole("dialog", { name: label }));
+  expect(dialog.getByRole("button", { name: i18n.t("acceptance.action_confirm") })).toBeDisabled();
+  const reason = "Diagnose the missing synthetic prerequisite before repeating the check.";
+  await userEvent.type(dialog.getByRole("textbox", { name: findings }), reason);
+  await userEvent.click(dialog.getByRole("button", { name: i18n.t("acceptance.action_preview") }));
+  const confirm = dialog.getByRole("button", { name: i18n.t("acceptance.action_confirm") });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  expect(prepare).toHaveBeenCalledExactlyOnceWith({ action: "return_for_repair", job_id: verificationId, reason });
+  expect(dialog.getByText(reason, { selector: "dd" })).toBeInTheDocument();
+  expect(commit).not.toHaveBeenCalled();
+  expect((await backend.getHandoff(verificationId)).acceptance).toMatchObject({
+    verification_status: "blocked", returned_for_repair: false,
+  });
+  await userEvent.click(confirm);
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(commit).toHaveBeenCalledTimes(1);
+  for (const id of [10, verificationId]) {
+    expect((await backend.getHandoff(id)).acceptance).toMatchObject({
+      verification_status: "blocked", returned_for_repair: true, repair_reason: reason,
+    });
+  }
+  expect((await backend.listJobs(100)).length).toBe(jobCount);
+});
+
+test.each(["passed", "running", "queued", "waiting_binding", null] as const)(
+  "a verification with result %s has no return action", async (status) => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const source = (await backend.job(10))!;
+    const read = backend.getHandoff;
+    backend.getHandoff = async (id) => ({
+      ...(await read(source.id)), job_id: id, acceptance: {
+        development_job_id: source.id, repair_of_job_id: null, repair_job_id: null,
+        verification_job_id: 13, delivery: "build-demo-3", verification_status: status,
+        returned_for_repair: false, repair_reason: null,
+      },
+    });
+    const view = await renderWithProviders(<AcceptanceCard job={{ ...source, id: 13, mode: "verify", state: "failed" }} />, { backend });
+    expect(await screen.findByRole("link", { name: "Development run #10" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Return for/ })).not.toBeInTheDocument();
+    view.unmount();
+  },
+);
+
+test.each(["waiting_binding", "queued", "running"] as const)(
+  "an active verifier cannot return a stale blocked result (%s)", async (state) => {
+    const backend = createMockBackend("demo", { latencyMs: 0 });
+    const source = (await backend.job(10))!;
+    const read = backend.getHandoff;
+    backend.getHandoff = async (id) => ({
+      ...(await read(source.id)), job_id: id, acceptance: {
+        development_job_id: source.id, repair_of_job_id: null, repair_job_id: null,
+        verification_job_id: 13, delivery: "build-demo-3", verification_status: "blocked",
+        verification_evidence: ["The synthetic prerequisite was unavailable."],
+        returned_for_repair: false, repair_reason: null,
+      },
+    });
+    const view = await renderWithProviders(<AcceptanceCard job={{ ...source, id: 13, mode: "verify", state }} />, { backend });
+    expect(await screen.findByRole("link", { name: "Development run #10" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Return for/ })).not.toBeInTheDocument();
+    view.unmount();
+  },
+);
+
+test("a superseded blocked verification has no return action", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const start = { action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3" } as const;
+  const first = await backend.prepareControlAction(start);
+  const oldId = (await backend.commitControlAction(first.token)).job_id!;
+  await backend.cancelJob(oldId);
+  (await backend.getHandoff(oldId)).acceptance!.verification_evidence = ["The synthetic prerequisite was unavailable."];
+  const oldJob = (await backend.job(oldId))!;
+  const next = await backend.prepareControlAction(start);
+  const newId = (await backend.commitControlAction(next.token)).job_id!;
+  expect(newId).toBeGreaterThan(oldId);
+  await renderWithProviders(<AcceptanceCard job={oldJob} />, { backend });
+  expect(await screen.findByRole("link", { name: "Development run #10" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Return for diagnosis or repair" })).not.toBeInTheDocument();
+});
+
+test("a stopped verification with no report cannot return a fallback blocked result", async () => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const initial = await backend.prepareControlAction({
+    action: "start_verification", job_id: 10, executor: "codex", delivery: "build-demo-3",
+  });
+  const id = (await backend.commitControlAction(initial.token)).job_id!;
+  await backend.cancelJob(id);
+  const job = (await backend.job(id))!;
+  expect(job.report).toBeNull();
+  expect((await backend.getHandoff(id)).acceptance).toMatchObject({ verification_status: "blocked" });
+  await renderWithProviders(<AcceptanceCard job={job} />, { backend });
+  expect(await screen.findByRole("link", { name: "Development run #10" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Return for/ })).not.toBeInTheDocument();
+});
+
 
 async function returnedRepairReview(lang: Lang = "en") {
   const backend = createMockBackend("demo", { latencyMs: 0 });

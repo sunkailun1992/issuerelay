@@ -432,13 +432,17 @@ impl Engine {
         anyhow::ensure!(
             store.latest_for_issue(&source.issue_uuid)?.as_ref() == Some(&source)
                 && acceptance::latest_for_source(conn, source.id)?.as_ref() == Some(&record)
-                && recommendation(&record)?
-                    .is_some_and(|item| item.status == VerificationStatus::Failed)
+                && recommendation(&record)?.is_some_and(|item| {
+                    matches!(
+                        item.status,
+                        VerificationStatus::Failed | VerificationStatus::Blocked
+                    )
+                })
                 && record.returned.is_none()
                 && !verification.state.is_active()
                 && ws::read_claim(conn, source.id)?.is_none()
                 && ws::read_claim(conn, id)?.is_none(),
-            "only the latest failed independent verification can be returned for repair"
+            "only the latest failed or blocked independent verification can be returned for repair"
         );
         Ok(ReviewedRepair {
             source,

@@ -327,3 +327,69 @@ async fn verification_rejects_changed_linear_input_and_delivery_without_saving_t
         .assert_queued(&fixture.preview().await, &reviewed)
         .await;
 }
+
+#[tokio::test]
+async fn stopped_verification_without_a_recommendation_cannot_be_returned() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let fixture = Fixture::new().await;
+        let preview = fixture.preview().await;
+        let queued = fixture
+            .h
+            .engine
+            .commit_control_action(&preview.token)
+            .await
+            .unwrap();
+        let id = queued.job_id.unwrap();
+        let return_action = || ControlAction::ReturnForRepair {
+            job_id: id,
+            reason: "Diagnose the incomplete synthetic check".into(),
+        };
+        assert!(
+            fixture
+                .h
+                .engine
+                .prepare_control_action(return_action())
+                .await
+                .is_err()
+        );
+        let stop = fixture
+            .h
+            .engine
+            .prepare_control_action(ControlAction::Stop { job_id: id })
+            .await
+            .unwrap();
+        fixture
+            .h
+            .engine
+            .commit_control_action(&stop.token)
+            .await
+            .unwrap();
+        let stopped = fixture.h.engine.job(id).unwrap().unwrap();
+        assert_eq!(stopped.state, JobState::Canceled);
+        assert!(stopped.report.is_none());
+        let recommendation: Option<String> = fixture
+            .connection()
+            .query_row(
+                "SELECT recommendation FROM acceptance_runs WHERE verification_job_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(recommendation.is_none());
+        let view = fixture.h.engine.handoff(id).unwrap().acceptance.unwrap();
+        assert!(view.verification_evidence.is_empty());
+        assert!(!view.returned_for_repair);
+        assert!(
+            fixture
+                .h
+                .engine
+                .prepare_control_action(return_action())
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.h.runner.started().len(), 1);
+        assert!(fixture.h.linear.set_state_calls().is_empty());
+    })
+    .await
+    .expect("the no-recommendation guard fixture did not finish");
+}

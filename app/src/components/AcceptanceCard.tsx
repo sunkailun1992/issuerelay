@@ -15,12 +15,14 @@ import { useAcceptancePreview, useCommitAcceptance, useHandoff, useJobs } from "
 import { useLang } from "@/hooks/useLang";
 import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
+import { isActive } from "@/lib/runs";
 import type { ExecutorKind, Job } from "@/lib/types";
 import type { AcceptanceAction, AcceptanceActionPreview, AcceptanceLinks } from "@/lib/workflow-types";
 
-function ActionFacts({ preview, details }: {
+function ActionFacts({ preview, details, blockedReturn }: {
   preview: AcceptanceActionPreview;
   details: NonNullable<AcceptanceActionPreview["acceptance"]>;
+  blockedReturn: boolean;
 }) {
   const { t } = useTranslation();
   const lang = useLang();
@@ -43,7 +45,7 @@ function ActionFacts({ preview, details }: {
       {details.brief_revision !== undefined && (
         <PreviewFact label={t("acceptance.brief_revision")}>{details.brief_revision ?? "—"}</PreviewFact>
       )}
-      {details.reason !== null && <PreviewFact label={t("acceptance.findings")}>{cleanDisplayLines(details.reason)}</PreviewFact>}
+      {details.reason !== null && <PreviewFact label={t(blockedReturn ? "acceptance.diagnostic_findings" : "acceptance.findings")}>{cleanDisplayLines(details.reason)}</PreviewFact>}
       {details.context == null && details.scope && <PreviewFact label={t("acceptance.scope")}>{cleanDisplayLines(details.scope)}</PreviewFact>}
       {details.executor !== null && <PreviewFact label={t("runs.field.executor")}>{t(`executor.${details.executor}`)}</PreviewFact>}
       {details.directory !== null && <PreviewFact label={t("acceptance.original_directory")}>{cleanDisplayText(details.directory)}</PreviewFact>}
@@ -64,10 +66,11 @@ function ActionFacts({ preview, details }: {
   );
 }
 
-function ReviewAction({ job, kind, sourceId, close }: {
+function ReviewAction({ job, kind, sourceId, blockedReturn, close }: {
   job: Job;
   kind: AcceptanceAction["action"];
   sourceId: number;
+  blockedReturn: boolean;
   close: () => void;
 }) {
   const { t } = useTranslation();
@@ -144,8 +147,8 @@ function ReviewAction({ job, kind, sourceId, close }: {
       onInteractOutside={preventCloseWhileSaving}
     >
       <DialogHeader>
-        <DialogTitle>{t(start ? "acceptance.start" : "acceptance.repair")}</DialogTitle>
-        <DialogDescription>{t(start ? "acceptance.start_description" : "acceptance.repair_description")}</DialogDescription>
+        <DialogTitle>{t(start ? "acceptance.start" : blockedReturn ? "acceptance.diagnostic_repair" : "acceptance.repair")}</DialogTitle>
+        <DialogDescription>{t(start ? "acceptance.start_description" : blockedReturn ? "acceptance.diagnostic_repair_description" : "acceptance.repair_description")}</DialogDescription>
       </DialogHeader>
       <div className="-m-1 min-h-0 space-y-4 overflow-y-auto p-1">
         {start && (
@@ -177,7 +180,7 @@ function ReviewAction({ job, kind, sourceId, close }: {
           </>
         )}
         <div className="space-y-2">
-          <Label htmlFor={id}>{t(start ? "acceptance.delivery" : "acceptance.findings")}</Label>
+          <Label htmlFor={id}>{t(start ? "acceptance.delivery" : blockedReturn ? "acceptance.diagnostic_findings" : "acceptance.findings")}</Label>
           <Textarea
             id={id}
             aria-describedby={start ? `${id}-hint` : undefined}
@@ -196,7 +199,7 @@ function ReviewAction({ job, kind, sourceId, close }: {
         {preview.isSuccess && (matching
           ? (
             <>
-              <ActionFacts preview={data} details={details} />
+              <ActionFacts preview={data} details={details} blockedReturn={blockedReturn} />
               {details.context != null && (
                 <dl className="space-y-3">
                   <PreviewContext context={details.context} scope={details.scope ?? details.context.scope} />
@@ -228,15 +231,17 @@ function ReviewAction({ job, kind, sourceId, close }: {
   );
 }
 
-function AcceptanceActionButton({ job, kind, sourceId = job.id }: { job: Job; kind: AcceptanceAction["action"]; sourceId?: number }) {
+function AcceptanceActionButton({ job, kind, sourceId = job.id, blockedReturn = false }: {
+  job: Job; kind: AcceptanceAction["action"]; sourceId?: number; blockedReturn?: boolean;
+}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm" variant="outline">{t(kind === "start_verification" ? "acceptance.start" : "acceptance.repair")}</Button>
+        <Button size="sm" variant="outline">{t(kind === "start_verification" ? "acceptance.start" : blockedReturn ? "acceptance.diagnostic_repair" : "acceptance.repair")}</Button>
       </DialogTrigger>
-      {open && <ReviewAction job={job} kind={kind} sourceId={sourceId} close={() => setOpen(false)} />}
+      {open && <ReviewAction job={job} kind={kind} sourceId={sourceId} blockedReturn={blockedReturn} close={() => setOpen(false)} />}
     </Dialog>
   );
 }
@@ -244,6 +249,7 @@ function AcceptanceActionButton({ job, kind, sourceId = job.id }: { job: Job; ki
 function LinkedAcceptance({ job, links, archiveConfigured }: { job: Job; links: AcceptanceLinks; archiveConfigured: boolean }) {
   const { t } = useTranslation();
   const awaitsAcceptance = job.state === "local_complete" || job.state === "awaiting_acceptance";
+  const blocked = links.verification_status === "blocked";
   const verificationId = links.verification_job_id;
   const archiveNeeded = awaitsAcceptance && archiveConfigured && verificationId !== null && links.verification_status === "passed";
   const verification = useHandoff(verificationId ?? 0, archiveNeeded);
@@ -285,7 +291,7 @@ function LinkedAcceptance({ job, links, archiveConfigured }: { job: Job; links: 
           </PreviewFact>
         )}
         {links.delivery !== null && <PreviewFact label={t("acceptance.delivery")}>{cleanDisplayLines(links.delivery)}</PreviewFact>}
-        {links.repair_reason !== null && <PreviewFact label={t("acceptance.findings")}>{cleanDisplayLines(links.repair_reason)}</PreviewFact>}
+        {links.repair_reason !== null && <PreviewFact label={t(blocked ? "acceptance.diagnostic_findings" : "acceptance.findings")}>{cleanDisplayLines(links.repair_reason)}</PreviewFact>}
       </dl>
       {links.verification_evidence != null && links.verification_evidence.length > 0 && (
         <dl>
@@ -308,9 +314,9 @@ function LinkedAcceptance({ job, links, archiveConfigured }: { job: Job; links: 
       )}
       {links.returned_for_repair && (
         <div className="space-y-2">
-          <p className="font-medium">{t("acceptance.returned")}</p>
+          <p className="font-medium">{t(blocked ? "acceptance.diagnostic_returned" : "acceptance.returned")}</p>
           {links.repair_job_id == null && (
-            <p className="text-sm text-muted-foreground">{t("acceptance.issue_updated")}</p>
+            <p className="text-sm text-muted-foreground">{t(blocked ? "acceptance.diagnostic_issue_updated" : "acceptance.issue_updated")}</p>
           )}
           <DispatchReviewButton
             issueIdentifier={job.issue_identifier} issueUuid={job.issue_uuid}
@@ -333,9 +339,12 @@ export function AcceptanceCard({ job }: { job: Job }) {
     (job.state === "local_complete" || job.state === "awaiting_acceptance");
   if (!development && links === null && job.mode !== "verify") return null;
   const latestDevelopment = jobs.data?.find((other) => other.issue_uuid === job.issue_uuid && other.mode !== "verify");
+  const latestVerification = jobs.data?.find((other) => other.issue_uuid === job.issue_uuid && other.mode === "verify");
   const canStart = development && latestDevelopment?.id === job.id && handoff.isSuccess && handoff.data.claimed_by === null &&
     !links?.returned_for_repair && (links?.verification_status == null || links.verification_status === "blocked");
-  const canRepair = job.mode === "verify" && links?.verification_status === "failed" && !links.returned_for_repair &&
+  const canRepair = job.mode === "verify" && latestVerification?.id === job.id && !isActive(job) &&
+    (links?.verification_status === "failed" ||
+      (links?.verification_status === "blocked" && (links.verification_evidence?.length ?? 0) > 0)) && !links.returned_for_repair &&
     latestDevelopment?.id === links.development_job_id;
   return (
     <section aria-labelledby={id}>
@@ -352,7 +361,7 @@ export function AcceptanceCard({ job }: { job: Job }) {
           {(canStart || canRepair) && (
             <div className="flex flex-wrap gap-2">
               {canStart && <AcceptanceActionButton job={job} kind="start_verification" />}
-              {canRepair && <AcceptanceActionButton job={job} kind="return_for_repair" sourceId={links.development_job_id} />}
+              {canRepair && <AcceptanceActionButton job={job} kind="return_for_repair" sourceId={links.development_job_id} blockedReturn={links.verification_status === "blocked"} />}
             </div>
           )}
         </CardContent>

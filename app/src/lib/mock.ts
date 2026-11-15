@@ -202,8 +202,14 @@ export function createMockBackend(scenario: "demo" | "fresh" | "connecting", opt
       context: continuationContexts.get(job.issue_uuid) ?? null,
     };
     if (action.action === "return_for_repair") {
-      if (job.mode !== "verify" || relation?.verification_status !== "failed" || relation.returned_for_repair || action.reason.trim() === "") {
-        return fail("only the latest failed verification can be returned for repair");
+      const latestDevelopment = jobs.filter((candidate) => candidate.issue_uuid === job.issue_uuid && candidate.mode !== "verify")
+        .sort((a, b) => b.id - a.id)[0];
+      const returnable = relation?.verification_status === "failed" ||
+        (relation?.verification_status === "blocked" && (relation.verification_evidence?.length ?? 0) > 0);
+      if (job.mode !== "verify" || isActive(job) || !returnable || relation === undefined ||
+        relation.returned_for_repair || action.reason.trim() === "" || latestDevelopment?.id !== relation.development_job_id ||
+        acceptanceRuns.get(relation.development_job_id)?.verification_job_id !== job.id) {
+        return fail("only the latest failed or blocked verification with a recorded result can be returned for diagnosis or repair");
       }
       return {
         ...revision,
