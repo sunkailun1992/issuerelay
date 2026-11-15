@@ -15,6 +15,11 @@ export function describeError(error: unknown, t: TFunction, headlineKey: string)
     return { headline: t(`errors.${error.code}`), detail: null };
   }
   const detail = cleanDisplayText(error instanceof Error ? error.message : String(error)).trim();
+  // Only the definite expiry rejection means this attempt did not execute. A missing token's
+  // combined expiry/reuse/channel error must keep its original detail instead.
+  if (error instanceof BackendError && detail === "action preview expired") {
+    return { headline: t("acceptance.preview_expired"), detail: null };
+  }
   return { headline: t(headlineKey), detail: detail === "" ? null : detail };
 }
 

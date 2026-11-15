@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router";
 import { DispatchReviewButton, PreviewContext, PreviewFact } from "@/components/DispatchReviewButton";
@@ -78,6 +78,16 @@ function ReviewAction({ job, kind, sourceId, close }: {
   const [text, setText] = useState("");
   const preview = useAcceptancePreview();
   const approval = useCommitAcceptance();
+  const [expiry, setExpiry] = useState<{ deadline: number; now: number } | null>(null);
+  const deadline = expiry?.deadline ?? null;
+  useEffect(() => {
+    if (deadline === null) return;
+    const timer = setInterval(() => {
+      setExpiry((current) => current === null ? null : { ...current, now: Date.now() });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [deadline]);
+  const expired = expiry !== null && expiry.now >= expiry.deadline;
   const action = text.trim() === "" ? null : start
     ? executor === null ? null : { action: kind, job_id: job.id, executor, delivery: text.trim() } as const
     : { action: kind, job_id: job.id, reason: text.trim() } as const;
@@ -95,14 +105,26 @@ function ReviewAction({ job, kind, sourceId, close }: {
   const reset = () => {
     preview.reset();
     approval.reset();
+    setExpiry(null);
   };
   const prepare = () => {
     if (action === null || busy) return;
     approval.reset();
-    preview.mutate(action);
+    setExpiry(null);
+    // Count from this request, so reading a preview never adds transport time to its lifetime.
+    // A fresh read resets the clock even when its delivery and brief facts have not changed.
+    const requestedAt = Date.now();
+    preview.mutate(action, {
+      onSuccess: (result) => setExpiry({ deadline: requestedAt + result.expires_in_seconds * 1000, now: Date.now() }),
+    });
   };
   const confirm = () => {
     if (!matching || busy || approval.isError) return;
+    // A suspended window may not have rendered its latest timer tick before this click.
+    if (expiry === null || Date.now() >= expiry.deadline) {
+      setExpiry((current) => current === null ? null : { ...current, now: Date.now() });
+      return;
+    }
     void approval.mutateAsync(data.token).then(
       (result) => {
         close();
@@ -185,6 +207,13 @@ function ReviewAction({ job, kind, sourceId, close }: {
           )
           : <p role="alert" className="text-sm">{t("acceptance.preview_mismatch")}</p>)}
         {approval.isError && <ErrorState error={approval.error} headline="dispatch.approval_failed" />}
+        {matching && expiry !== null && !busy && !approval.isError && (
+          expired
+            ? <p role="alert" className="text-sm">{t("acceptance.preview_expired")}</p>
+            : <p role="timer" className="text-sm text-muted-foreground">{t("acceptance.preview_remaining", {
+              count: Math.max(1, Math.ceil((expiry.deadline - expiry.now) / 1000)),
+            })}</p>
+        )}
       </div>
       <DialogFooter className="flex-wrap">
         <DialogClose asChild>
@@ -193,7 +222,7 @@ function ReviewAction({ job, kind, sourceId, close }: {
         <Button variant="outline" disabled={action === null || busy} onClick={prepare}>
           {t(data !== undefined || approval.isError ? "dispatch.reload_preview" : "acceptance.action_preview")}
         </Button>
-        <Button disabled={!matching || busy || approval.isError} onClick={confirm}>{t("acceptance.action_confirm")}</Button>
+        <Button disabled={!matching || expiry === null || expired || busy || approval.isError} onClick={confirm}>{t("acceptance.action_confirm")}</Button>
       </DialogFooter>
     </DialogContent>
   );

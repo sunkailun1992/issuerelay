@@ -342,6 +342,38 @@ for (const { width, height } of SMALLEST) {
   test.describe(`at ${width}x${height}`, () => {
     test.use({ viewport: { width, height } });
 
+    for (const language of ["zh-CN", "zh-TW", "en", "ja", "ko"] as const) {
+      test(`action preview expiry in ${language} stays readable and refreshes without executing`, async ({ page }) => {
+        const t = words(language);
+        await page.clock.install();
+        await open(page, language, "/runs/10");
+        await page.getByRole("button", { name: t("acceptance.start"), exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: t("acceptance.start"), exact: true });
+        await dialog.getByRole("textbox", { name: t("acceptance.delivery"), exact: true }).fill("build-demo-3");
+        await dialog.getByRole("button", { name: t("acceptance.action_preview"), exact: true }).click();
+        const confirm = dialog.getByRole("button", { name: t("acceptance.action_confirm"), exact: true });
+        await expect(confirm).toBeEnabled();
+        await expect(dialog.getByRole("timer")).toBeVisible();
+        await page.clock.fastForward(181_000);
+        const expired = dialog.getByRole("alert");
+        await expect(expired).toHaveText(t("acceptance.preview_expired"));
+        await expect(confirm).toBeDisabled();
+        const reload = dialog.getByRole("button", { name: t("dispatch.reload_preview"), exact: true });
+        await expectWithinWindow(confirm, reload, dialog.getByRole("button", { name: t("common.cancel"), exact: true }));
+        await expired.scrollIntoViewIfNeeded();
+        await expectWithinWindow(expired);
+        expect(await reachPastRightEdge(dialog), "the action preview dialog").toEqual({ overflow: 0, past: [] });
+        await reload.click();
+        await expect(confirm).toBeEnabled();
+        await expect(dialog.getByRole("alert")).toHaveCount(0);
+        await expect(dialog.getByRole("timer")).toBeVisible();
+        await expect(page).toHaveURL(/#\/runs\/10$/);
+        await confirm.click();
+        await expect(dialog).toHaveCount(0);
+        await expect(page).toHaveURL(/#\/runs\/13$/);
+      });
+    }
+
     // The tables of issues and runs, with the buttons of their rows and the filter tabs: they used to run past the
     // container. No column name breaks inside a word.
     for (const language of LAYOUT_LANGUAGES) {

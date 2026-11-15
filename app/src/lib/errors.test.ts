@@ -63,6 +63,22 @@ test("a cancelled browser login is still a code, not a failure", () => {
   expect(new BackendError("login_cancelled").code).toBe("login_cancelled");
 });
 
+test("an exact backend preview expiry explains how to retry without claiming another failure was expiry", () => {
+  expect(describeError(new BackendError("action preview expired"), t, "dispatch.approval_failed")).toEqual({
+    headline: "This preview has expired. Reload the preview and review it before confirming again. This action has not been executed.",
+    detail: null,
+  });
+  for (const message of [
+    "the brief revision changed",
+    "action preview expired, was already used, or belongs to another confirmation channel",
+    "another action is already running",
+  ]) {
+    expect(describeError(new BackendError(message), t, "dispatch.approval_failed")).toEqual({
+      headline: t("dispatch.approval_failed"), detail: message,
+    });
+  }
+});
+
 test("update failures read in every language, each with its own words", async () => {
   for (const lang of ["zh-CN", "zh-TW", "ja", "ko"]) {
     const other = i18n.getFixedT(lang);
