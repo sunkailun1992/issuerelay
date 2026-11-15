@@ -357,6 +357,261 @@ fn task_preview() -> Value {
     })
 }
 
+fn acceptance_actions() -> [Value; 3] {
+    [
+        json!({"action":"start_verification","job_id":7,"executor":"codex","delivery":"a".repeat(40)}),
+        json!({"action":"start_verification","job_id":7,"executor":"claude","delivery":"a".repeat(40)}),
+        json!({"action":"return_for_repair","job_id":8,"reason":"Repeat the synthetic save with two tabs."}),
+    ]
+}
+
+fn acceptance_preview(action: &Value) -> Value {
+    let start = action["action"] == "start_verification";
+    json!({
+        "token":"acceptance-server-token", "action":action, "issue_identifier":"DEMO-1",
+        "job_id":action["job_id"], "current_state":if start { "local_complete" } else { "failed" },
+        "expires_in_seconds":180,
+        "acceptance":{
+            "source_job_id":7, "delivery":"a".repeat(40), "delivery_fingerprint":"b".repeat(64),
+            "linear_updated_at":"2026-01-01T00:00:00Z", "brief_revision":10,
+            "executor":if start { action["executor"].clone() } else { Value::Null },
+            "directory":if start { json!("workspace/demo") } else { Value::Null },
+            "permission":if start { json!("verification-sandbox-network") } else { Value::Null },
+            "lean":if start { json!("on") } else { Value::Null },
+            "model":null, "effort":null, "reason":action.get("reason"),
+            "context":{
+                "revision":10, "request":"Verify the synthetic delivery", "scope":"Only the demo fixture",
+                "conversation_history":"Keep the synthetic output stable.",
+                "acceptance":["Both tabs preserve the saved record"], "source_refs":["docs/demo.md"]
+            }
+        }
+    })
+}
+
+fn acceptance_server(action: &Value) -> (ControlServer, Calls) {
+    let preview = acceptance_preview(action);
+    let outcome = if action["action"] == "start_verification" {
+        "verification_queued"
+    } else {
+        "returned_for_repair"
+    };
+    recording_server(move |method| match method {
+        "workflow.prepare_action" => Ok(preview.clone()),
+        "workflow.commit_action" => Ok(json!({"result":outcome})),
+        _ => panic!("unexpected method {method}"),
+    })
+}
+
+#[tokio::test]
+async fn acceptance_actions_commit_only_after_the_exact_native_preview_is_approved() {
+    for action in acceptance_actions() {
+        let (server, calls) = acceptance_server(&action);
+        let (client, forms) = connect_interactive(
+            server,
+            ElicitationAction::Accept,
+            Some(json!({"confirm":true})),
+        )
+        .await;
+        let args = json!({"action":action});
+        let preview: Value = serde_json::from_str(&text_of(
+            &call(&client, "preview_task_action", Some(args.clone())).await,
+        ))
+        .unwrap();
+        assert!(preview.get("token").is_none());
+        let mut confirmed = args.clone();
+        confirmed["expected_preview"] = preview["preview_fingerprint"].clone();
+        let response = call(&client, "confirm_task_action", Some(confirmed)).await;
+        assert_ne!(response.is_error, Some(true));
+        let result: Value = serde_json::from_str(&text_of(&response)).unwrap();
+        assert_eq!(
+            result["result"],
+            if action["action"] == "start_verification" {
+                "verification_queued"
+            } else {
+                "returned_for_repair"
+            }
+        );
+        {
+            let forms = forms.lock().unwrap();
+            let [ElicitRequestParams::FormElicitationParams { message, .. }] = forms.as_slice()
+            else {
+                panic!("expected exactly one acceptance form");
+            };
+            for field in [
+                "DEMO-1",
+                "Development run: 7",
+                "Verification brief revision: 10",
+            ] {
+                assert!(message.contains(field), "missing {field} in {message}");
+            }
+            if action["action"] == "start_verification" {
+                assert!(message.contains("Permissions: verification-sandbox-network"));
+                assert!(message.contains("workspace/demo"));
+            } else {
+                assert!(message.contains(action["reason"].as_str().unwrap()));
+            }
+            assert!(!message.contains("acceptance-server-token"));
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                ("workflow.prepare_action".into(), args.clone()),
+                ("workflow.prepare_action".into(), args),
+                (
+                    "workflow.commit_action".into(),
+                    json!({"token":"acceptance-server-token"})
+                ),
+            ]
+        );
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn acceptance_actions_never_commit_an_unapproved_native_form() {
+    for action in acceptance_actions() {
+        for (answer, content, reason, is_error) in [
+            (ElicitationAction::Decline, None, "client_declined", false),
+            (ElicitationAction::Cancel, None, "cancelled", false),
+            (
+                ElicitationAction::Accept,
+                Some(json!({"confirm":false})),
+                "confirmation_not_checked",
+                false,
+            ),
+            (
+                ElicitationAction::Accept,
+                Some(json!({"confirm":"true"})),
+                "no usable interactive approval",
+                true,
+            ),
+        ] {
+            let (server, calls) = acceptance_server(&action);
+            let (client, forms) = connect_interactive(server, answer, content).await;
+            let args = json!({"action":action});
+            let response = call(&client, "confirm_task_action", Some(args.clone())).await;
+            assert_eq!(response.is_error == Some(true), is_error);
+            assert!(text_of(&response).contains(reason), "{response:?}");
+            assert_eq!(forms.lock().unwrap().len(), 1);
+            assert_eq!(
+                *calls.lock().unwrap(),
+                [("workflow.prepare_action".into(), args)]
+            );
+            client.cancel().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn acceptance_actions_without_native_forms_leave_the_host_untouched() {
+    for action in acceptance_actions() {
+        let (server, calls) = acceptance_server(&action);
+        let client = connect(server).await;
+        let response = call(
+            &client,
+            "confirm_task_action",
+            Some(json!({"action":action})),
+        )
+        .await;
+        assert_ne!(response.is_error, Some(true));
+        let result: Value = serde_json::from_str(&text_of(&response)).unwrap();
+        assert_eq!(result["status"], "needs_desktop_confirmation");
+        assert_eq!(result["reason"], "form_not_advertised");
+        assert!(calls.lock().unwrap().is_empty());
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn changed_acceptance_previews_cannot_open_a_native_confirmation_form() {
+    for action in acceptance_actions() {
+        let preview = acceptance_preview(&action);
+        let changed = Arc::new(AtomicBool::new(false));
+        let edit = changed.clone();
+        let (server, calls) = recording_server(move |method| match method {
+            "workflow.prepare_action" => {
+                let mut preview = preview.clone();
+                if edit.load(Ordering::SeqCst) {
+                    preview["acceptance"]["context"]["scope"] = json!("Clarified demo scope");
+                }
+                Ok(preview)
+            }
+            _ => panic!("changed preview reached {method}"),
+        });
+        let (client, forms) = connect_interactive(
+            server,
+            ElicitationAction::Accept,
+            Some(json!({"confirm":true})),
+        )
+        .await;
+        let mut args = json!({"action":action});
+        let preview: Value = serde_json::from_str(&text_of(
+            &call(&client, "preview_task_action", Some(args.clone())).await,
+        ))
+        .unwrap();
+        args["expected_preview"] = preview["preview_fingerprint"].clone();
+        changed.store(true, Ordering::SeqCst);
+        let response = call(&client, "confirm_task_action", Some(args)).await;
+        assert_eq!(response.is_error, Some(true));
+        assert!(text_of(&response).contains("changed after preview"));
+        assert!(forms.lock().unwrap().is_empty());
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn acceptance_chat_confirmation_arms_the_reviewed_action_without_committing_it() {
+    const CHAT: &str = "00000000-0000-4000-8000-000000000001";
+    const CODE: &str = "11111111111111111111111111111111";
+    for action in acceptance_actions() {
+        let preview = acceptance_preview(&action);
+        let (server, calls) = recording_server(move |method| match method {
+            "workflow.prepare_action" => Ok(preview.clone()),
+            "workflow.arm_chat_confirmation" => Ok(json!({"code":CODE,"expires_in_seconds":179})),
+            _ => panic!("preparing chat confirmation reached {method}"),
+        });
+        let client = connect_named(server, "codex-mcp-client").await;
+        let mut args = json!({"action":action});
+        let preview: Value = serde_json::from_str(&text_of(
+            &call(&client, "preview_task_action", Some(args.clone())).await,
+        ))
+        .unwrap();
+        args["expected_preview"] = preview["preview_fingerprint"].clone();
+        let mut request = CallToolRequestParams::new("prepare_chat_confirmation")
+            .with_arguments(args.as_object().unwrap().clone());
+        request.meta = Some(
+            json!({"sessionId":CHAT,"threadId":CHAT})
+                .as_object()
+                .unwrap()
+                .clone()
+                .into(),
+        );
+        let response = client.call_tool(request).await.unwrap();
+        assert_ne!(response.is_error, Some(true));
+        let result: Value = serde_json::from_str(&text_of(&response)).unwrap();
+        assert_eq!(result["status"], "awaiting_chat_confirmation");
+        assert_eq!(result["action"], action);
+        assert_eq!(result["confirmation_text"], format!("确认 {CODE}"));
+        assert_eq!(
+            result["preview_fingerprint"],
+            preview["preview_fingerprint"]
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                ("workflow.prepare_action".into(), json!({"action":action})),
+                ("workflow.prepare_action".into(), json!({"action":action})),
+                (
+                    "workflow.arm_chat_confirmation".into(),
+                    json!({"token":"acceptance-server-token","session_id":CHAT})
+                ),
+            ]
+        );
+        client.cancel().await.unwrap();
+    }
+}
+
 async fn send_wire_message(client: &mut BufReader<DuplexStream>, message: Value) {
     client
         .write_all(format!("{message}\n").as_bytes())

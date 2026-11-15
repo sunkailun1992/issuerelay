@@ -116,7 +116,8 @@ pub fn write_context(
     Ok(context)
 }
 
-fn write_context_at_revision(
+/// Saves the exact reviewed draft revision using the persisted revision as a compare-and-swap.
+pub(crate) fn write_context_at_revision(
     conn: &Connection,
     key: &str,
     expected_revision: u64,

@@ -124,6 +124,8 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 可以先用 `test_confirmation_form` 验证客户端能否显示原生表单。该工具不联系 IssueRelay 宿主。客户端声明支持表单并不保证当前会话允许弹出表单。`client_declined` 表示客户端回传了拒绝，可能是审批策略直接拒绝，也可能是用户拒绝。`confirmation_not_checked` 表示表单已提交，但没有勾选确认。Codex 会话应使用允许 MCP 交互表单的审批策略，并保留用户审核。
 
+收到未批准回执后，先用 `get_run` 读回来源运行的验收关联，并用 `list_jobs` 核对是否新增运行。未批准不表示引擎已经排队或执行失败。当前会话无法显示表单时，可由用户选择桌面面板重新预览确认，或使用已经显式启用的本机 Codex 聊天确认；不要自动切换确认通道并执行。
+
 - `dispatch` 用 `issue_identifier`。`continue` 用 `job_id` 和 `executor`。`retry`、`stop`、`record_local_completion`、`mark_done`、`complete_plan` 用 `job_id`。重试后仍须复核派发，停止后用 `get_run` 查询终态。
 - `start_verification` 用开发运行的 `job_id`、`executor` 和 `delivery`。交付标识用干净工作树的完整 HEAD SHA，或指向交付清单的本机绝对 JSON 路径。
 - `return_for_repair` 用独立验证的 `job_id` 和 `reason`。仅对已确认的新版本验收结果为未通过的运行提供退回。
@@ -148,7 +150,7 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 启用后，让 Codex 先用 `preview_task_action` 展示完整预览，再用 `prepare_chat_confirmation` 准备同一操作，把 `preview_fingerprint` 传为 `expected_preview`。核对目标、执行去向和影响后，在**同一个聊天**里原样发送返回的 `confirmation_text`。它的格式是 `确认 <32 位小写十六进制码>` 或 `confirm <32 位小写十六进制码>`。无需再点表单。钩子将宿主结果带回聊天。确认只对本次预览有效，过期、重新生成或预览变化后应重新核对。关闭开关或未安装可信钩子时，仍可使用原生表单或面板。
 
-此入口适用于派发、续作、重试、停止、记录本地完成、标记完成和完成方案。绑定与设置变更、Linear 重连仍通过原生表单。它依赖可信的 Codex 客户端和本机账户，和同一账户下有完全访问权限的进程共享系统权限边界。停用时，在 IssueRelay 的 `[settings]` 将 `codex_chat_confirmation` 设为 `false` 并重启，可用安装脚本的 `--remove` 参数移除与原 CLI 路径匹配的钩子项。
+此入口适用于派发、续作、重试、停止、记录本地完成、启动独立验证、退回修复、标记完成和完成方案。绑定与设置变更、Linear 重连仍通过原生表单。它依赖可信的 Codex 客户端和本机账户，和同一账户下有完全访问权限的进程共享系统权限边界。停用时，在 IssueRelay 的 `[settings]` 将 `codex_chat_confirmation` 设为 `false` 并重启，可用安装脚本的 `--remove` 参数移除与原 CLI 路径匹配的钩子项。
 
 ## 查看需求与历次运行
 

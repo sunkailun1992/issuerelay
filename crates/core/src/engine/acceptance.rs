@@ -368,16 +368,12 @@ impl Engine {
                     .context
                     .as_ref()
                     .context("the reviewed task brief is missing")?;
-                let saved = ws::write_context(
+                ws::write_context_at_revision(
                     &tx,
                     &source.issue_uuid,
                     committed.as_ref().map_or(0, |brief| brief.revision),
                     context,
                 )?;
-                anyhow::ensure!(
-                    Some(&saved) == approved.context.as_ref(),
-                    "the brief revision changed"
-                );
             }
             let issue = Issue {
                 title: clean_text(&approved.issue.title),
