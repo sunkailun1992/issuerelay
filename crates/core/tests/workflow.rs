@@ -1897,7 +1897,11 @@ async fn failed_verification_returns_to_fresh_development_and_rechecks_a_new_del
         failed_view.verification_status,
         Some(VerificationStatus::Failed)
     );
-    assert_eq!(failed_view.verification_evidence, ["Fixture mismatch"]);
+    assert_eq!(failed_view.verification_evidence.len(), 2);
+    assert_eq!(failed_view.verification_evidence[0], "Fixture mismatch");
+    assert!(
+        failed_view.verification_evidence[1].starts_with("Retained verification evidence index: ")
+    );
     assert!(engine.mark_done(source.id).await.is_err());
     assert!(linear.set_state_calls().is_empty());
     linear.update("1", |i| i.title = "Clarify available evidence".into());

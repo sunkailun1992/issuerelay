@@ -173,6 +173,8 @@ codex mcp add issuerelay -- "<ISSUERELAY_CLI>" mcp
 
 独立验证使用运行自己的临时目录，这个目录会在执行结束后清理。通过 IssueRelay 保留的会话 ID 打开同一原生会话，可查看当时的任务、命令和结果。独立验证不恢复开发会话。
 
+报告和附件写入该临时目录中的 `.issuerelay-evidence`。宿主在结束执行者整棵进程树后、清理临时源码前，将它保存到应用数据目录的 `verification-evidence/<运行编号>/`；运行详情和 MCP `get_run` 的验收证据会给出持久 `index.json` 路径。`files/` 保存执行者附件，`result.json` 保存有长度上限的原生输出和运行身份，索引列出各文件大小和 SHA-256。最多保留 256 个附件、16 层目录、每文件 16 MiB、总计 64 MiB；不跟随链接，不保留整个源码副本，不读取证据文字指定的其他路径。保存失败会记录为无法完成，不能把该轮记为通过。证据目录独立于日志清理，本次没有增加自动删除策略；它不替代 Wiki 归档。
+
 Claude Desktop 的 Code 会话也可以在侧栏菜单归档。归档前先保存需要保留的工作树改动。根据会话状态及操作选项，归档可能丢弃未提交改动或清理未跟踪文件。 [Claude Desktop 工作树归档规则](https://code.claude.com/docs/en/desktop#keep-uncommitted-changes-when-a-session-is-archived)
 
 ## 独立验证、退回与复验
