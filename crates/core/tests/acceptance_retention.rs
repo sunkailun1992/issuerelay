@@ -282,11 +282,14 @@ async fn verification_preserves_artifacts_after_scratch_cleanup_and_engine_reloa
         }
         let loaded = Fixture::engine(f.root.path(), &f.linear, f.runner.clone());
         let view = loaded.handoff(id).unwrap().acceptance.unwrap();
-        assert!(
-            view.verification_evidence
-                .iter()
-                .any(|e| e.contains(index.to_str().unwrap()))
-        );
+        // Temporary roots may use a different spelling than the canonical host path on Windows.
+        let index_alias = base.join("..").join(id.to_string()).join("index.json");
+        let canonical_index = index_alias.canonicalize().unwrap();
+        assert_eq!(canonical_index, index.canonicalize().unwrap());
+        assert!(view.verification_evidence.contains(&format!(
+            "Retained verification evidence index: {}",
+            canonical_index.display()
+        )));
         assert_eq!(
             loaded.job(id).unwrap().unwrap().report.as_deref(),
             Some(result)

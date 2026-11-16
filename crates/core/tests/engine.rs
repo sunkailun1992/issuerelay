@@ -858,6 +858,20 @@ async fn a_resume_that_cannot_start_runs_afresh_in_the_same_job() {
     assert_eq!(job.state, JobState::AwaitingAcceptance);
     assert_eq!(job.resume_job_id, None);
     assert_eq!(job.session_id.as_deref(), Some(SECOND_SESSION));
+    let tail = h.engine.log_tail(job.id, 10).unwrap();
+    let preserved = tail
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| line["text"].as_str().map(str::to_owned))
+        .find_map(|text| {
+            text.strip_prefix("Previous attempt log: ")
+                .map(PathBuf::from)
+        })
+        .expect("the failed resume attempt must remain locatable");
+    assert_eq!(
+        std::fs::read_to_string(preserved).unwrap(),
+        "{\"type\":\"result\"}\n"
+    );
     assert_eq!(
         job.usage.as_ref().and_then(|u| u.cost_micro_usd),
         Some(7),
@@ -1176,6 +1190,85 @@ async fn a_second_retry_is_rejected() {
         "the run is queued again; a second click must not requeue it"
     );
     assert_eq!(h.latest("1").state, JobState::Queued);
+}
+
+#[tokio::test]
+async fn retries_preserve_each_previous_log_and_expose_its_location() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::exit_code(1));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let id = h.latest("1").id;
+    let log = h.latest("1").log_path.unwrap();
+    std::fs::write(&log, "Synthetic initial connection error.\n").unwrap();
+    let mut preserved = Vec::new();
+    for _ in 0..3 {
+        let previous = std::fs::read(&log).unwrap();
+        h.engine.retry_job(id).unwrap();
+        assert!(h.engine.retry_job(id).is_err());
+        let (first, second) = tokio::join!(h.engine.dispatch(), h.engine.dispatch());
+        let starts = first.unwrap().len() + second.unwrap().len();
+        assert_eq!(
+            starts, 1,
+            "two dispatches must not start the same attempt twice"
+        );
+        h.settle().await;
+        assert_eq!(h.latest("1").id, id);
+        assert_eq!(h.latest("1").state, JobState::Failed);
+        let tail = h.engine.log_tail_without_progress(id, 10).unwrap();
+        let reference = tail
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| line["text"].as_str().map(str::to_owned))
+            .find_map(|text| {
+                text.strip_prefix("Previous attempt log: ")
+                    .map(PathBuf::from)
+            })
+            .expect("normal log readback must locate the preserved attempt");
+        assert_eq!(std::fs::read(&reference).unwrap(), previous);
+        assert!(!preserved.contains(&reference));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&reference).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        preserved.push(reference);
+    }
+    assert_eq!(h.runner.started().len(), 4);
+    assert_eq!(h.engine.list_jobs(100).unwrap().len(), 1);
+    assert!(h.linear.set_state_calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_retry_that_cannot_preserve_the_old_log_never_starts_the_executor() {
+    let h = Harness::new(2, false);
+    h.bind("proj-1", "a");
+    h.linear.upsert(issue("1", "proj-1"));
+    h.runner.script("DEMO-1", Script::exit_code(1));
+    h.engine.tick().await.unwrap();
+    h.settle().await;
+    let job = h.latest("1");
+    let log = job.log_path.unwrap();
+    std::fs::remove_file(&log).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    h.engine.retry_job(job.id).unwrap();
+    h.engine.dispatch().await.unwrap();
+    h.settle().await;
+    let failed = h.latest("1");
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(
+        failed
+            .reason
+            .unwrap()
+            .contains("cannot preserve the previous attempt log")
+    );
+    assert_eq!(h.runner.started().len(), 1);
+    assert!(log.is_dir());
 }
 
 #[tokio::test]

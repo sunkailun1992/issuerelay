@@ -589,25 +589,63 @@ pub fn linear_stop(issue: Option<&Issue>, me: &str, names: &TriggerNames) -> Opt
 /// executor's processes; the result is still checked against Linear.
 async fn run_once(
     runner: Arc<dyn JobRunner>,
-    spec: CommandSpec,
+    mut spec: CommandSpec,
     kind: ExecutorKind,
     log_path: PathBuf,
     limits: RunLimits,
     cancel: CancellationToken,
     hooks: runner::RunHooks,
 ) -> RunOutput {
+    // A first launch has no old bytes to copy: keep its existing start/stop ordering without
+    // yielding to the blocking pool. Inspect the link itself so dangling links cannot bypass
+    // the preservation check and be followed by the runner's truncate.
+    let previous = if std::fs::symlink_metadata(&log_path)
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        None
+    } else {
+        let path = log_path.clone();
+        match tokio::task::spawn_blocking(move || logs::preserve_previous(&path)).await {
+            Ok(Ok(previous)) => previous,
+            result => {
+                return RunOutput::ended(
+                    ExitKind::SpawnFailed(format!(
+                        "cannot preserve the previous attempt log: {result:?}"
+                    )),
+                    None,
+                );
+            }
+        }
+    };
+    if let Some(previous) = &previous {
+        spec.notes
+            .push(format!("Previous attempt log: {}", previous.display()));
+    }
+    let current = log_path.clone();
     let run = tokio::spawn(async move {
         runner
             .run_with_output(spec, kind, log_path, limits, cancel, hooks)
             .await
     });
-    match run.await {
+    let mut output = match run.await {
         Ok(output) => output,
         Err(e) => RunOutput::ended(
             ExitKind::SpawnFailed(format!("the run task ended unexpectedly: {e}")),
             None,
         ),
+    };
+    if let Some(previous) = previous {
+        let reference = format!("Previous attempt log: {}", previous.display());
+        let recorded =
+            tokio::task::spawn_blocking(move || logs::record_previous(&current, &previous)).await;
+        if !matches!(recorded, Ok(Ok(()))) {
+            let reason =
+                format!("{reference}; cannot record its current log reference: {recorded:?}");
+            output.exit = ExitKind::SpawnFailed(reason.clone());
+            output.final_text = Some(reason);
+        }
     }
+    output
 }
 
 /// The issues assigned to the user in the Todo status that carry the trigger label or the plan
@@ -2368,7 +2406,7 @@ impl Engine {
                 });
             }
         }
-        // A manual retry reuses the row, so its log replaces the previous attempt's log.
+        // A retry keeps this current path; run_once preserves the previous closed log first.
         let log_path = self.inner.logs_dir.join(format!("{}.jsonl", job.id));
         // A stop and a manual re-run while the issue was read cleared the session to continue
         // (`requeue`: a re-run starts afresh, design W6); the row is queued again, so its start
@@ -3401,6 +3439,52 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_spawn_failure_still_records_the_previous_log_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("1.jsonl");
+        std::fs::write(&log, "Synthetic previous connection failure.\n").unwrap();
+        let output = run_once(
+            Arc::new(ProcessJobRunner::new(ExecEnv::inherit().shared())),
+            CommandSpec {
+                program: dir.path().join("missing-executor"),
+                args: Vec::new(),
+                cwd: dir.path().into(),
+                stdin: String::new(),
+                env: Vec::new(),
+                lean: false,
+                notes: Vec::new(),
+            },
+            ExecutorKind::Codex,
+            log.clone(),
+            RunLimits {
+                total: Duration::from_secs(5),
+                stall: Duration::from_secs(5),
+            },
+            CancellationToken::new(),
+            runner::RunHooks {
+                on_spawn: None,
+                on_stdout: None,
+            },
+        )
+        .await;
+        assert!(matches!(output.exit, ExitKind::SpawnFailed(_)));
+        let text = std::fs::read_to_string(log).unwrap();
+        let previous = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| line["text"].as_str().map(str::to_owned))
+            .find_map(|text| {
+                text.strip_prefix("Previous attempt log: ")
+                    .map(PathBuf::from)
+            })
+            .expect("spawn errors must not hide the retained attempt");
+        assert_eq!(
+            std::fs::read_to_string(previous).unwrap(),
+            "Synthetic previous connection failure.\n"
+        );
+    }
 
     fn names() -> TriggerNames {
         TriggerNames::default()

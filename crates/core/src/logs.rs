@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 /// What one cleanup removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -16,10 +16,149 @@ pub struct CleanupReport {
     pub freed_bytes: u64,
 }
 
-/// A run log as the engine names it: `<job id>.jsonl`.
+/// Current run logs and completed private snapshots of previous attempts.
 fn is_run_log(name: &str) -> bool {
-    name.strip_suffix(".jsonl")
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+    let Some(stem) = name.strip_suffix(".jsonl") else {
+        return false;
+    };
+    let (id, attempt) = stem
+        .split_once(".attempt-")
+        .map_or((stem, None), |(id, suffix)| (id, Some(suffix)));
+    !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && attempt.is_none_or(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
+fn ordinary_file(meta: &std::fs::Metadata) -> bool {
+    if !meta.file_type().is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return false;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn same_log(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return false;
+        }
+    }
+    ordinary_file(after)
+        && before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+}
+
+fn no_follow(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT; allow readers, but no writer or replacement while open.
+        options.custom_flags(0x0020_0000).share_mode(1);
+    }
+}
+
+/// Copies a closed attempt before the runner can truncate its current log. Pending copies are
+/// not cleanup candidates; a completed copy has a unique name and shares the normal log budget.
+pub(crate) fn preserve_previous(path: &Path) -> Result<Option<PathBuf>> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    ensure!(
+        ordinary_file(&before),
+        "the previous log is not an ordinary file"
+    );
+    let id = path
+        .file_stem()
+        .and_then(|id| id.to_str())
+        .context("invalid run log name")?;
+    ensure!(
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        "invalid run log name"
+    );
+    let parent = path.parent().context("run log has no parent")?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    no_follow(&mut options);
+    let mut input = options.open(path)?;
+    ensure!(
+        same_log(&before, &input.metadata()?),
+        "the previous log changed before copying"
+    );
+    let mut copy = tempfile::Builder::new()
+        .prefix(".pending-attempt-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    let copied = std::io::copy(&mut input, copy.as_file_mut())?;
+    ensure!(
+        copied == before.len()
+            && same_log(&before, &input.metadata()?)
+            && same_log(&before, &std::fs::symlink_metadata(path)?),
+        "the previous log changed while copying"
+    );
+    copy.as_file().sync_all()?;
+    let suffix = copy
+        .path()
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix(".pending-attempt-"))
+        .context("invalid pending log name")?;
+    let destination = parent.join(format!("{id}.attempt-{suffix}.jsonl"));
+    copy.persist_noclobber(&destination).map_err(|e| e.error)?;
+    Ok(Some(destination.canonicalize()?))
+}
+
+/// Records the host's location pointer after the runner has closed its log, also when spawning
+/// failed before the runner could write its opening notes.
+pub(crate) fn record_previous(path: &Path, previous: &Path) -> Result<()> {
+    use std::io::Write;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        ensure!(
+            ordinary_file(&meta),
+            "the current log is not an ordinary file"
+        );
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    no_follow(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    ensure!(
+        ordinary_file(&file.metadata()?),
+        "the current log is not an ordinary file"
+    );
+    let mut note = serde_json::json!({"stream":"runner", "text":format!("Previous attempt log: {}", previous.display())}).to_string();
+    note.push('\n');
+    file.write_all(note.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Deletes the run logs in `dir` last modified before `now - keep`, then the oldest of the rest
@@ -44,8 +183,10 @@ pub fn cleanup(
         if !entry.file_name().to_str().is_some_and(is_run_log) {
             continue;
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !ordinary_file(&meta) {
             continue;
         }
         logs.push((meta.modified().unwrap_or(now), meta.len(), entry.path()));
@@ -80,6 +221,90 @@ mod tests {
     use super::*;
 
     const DAY: Duration = Duration::from_secs(86_400);
+
+    #[test]
+    fn previous_attempt_copies_are_unique_exact_and_leave_the_current_log_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("12.jsonl");
+        assert!(preserve_previous(&current).unwrap().is_none());
+        std::fs::write(&current, b"first\n\0raw bytes\n").unwrap();
+        let first = preserve_previous(&current).unwrap().unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"first\n\0raw bytes\n");
+        assert_eq!(std::fs::read(&current).unwrap(), b"first\n\0raw bytes\n");
+        std::fs::write(&current, b"second attempt\n").unwrap();
+        let second = preserve_previous(&current).unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(first).unwrap(), b"first\n\0raw bytes\n");
+        assert_eq!(std::fs::read(second).unwrap(), b"second attempt\n");
+    }
+
+    #[test]
+    fn previous_attempts_share_age_and_size_budgets_but_partial_and_other_files_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let old = log(dir.path(), "1.attempt-aB12.jsonl", 10, 31 * DAY, now);
+        let older = log(dir.path(), "1.attempt-Cd34.jsonl", 10, 2 * DAY, now);
+        let current = log(dir.path(), "1.jsonl", 10, DAY, now);
+        let pending = log(dir.path(), ".pending-attempt-aB12.tmp", 10, 31 * DAY, now);
+        let unrelated = log(
+            dir.path(),
+            "1.attempt-../secret.jsonl".replace('/', "_").as_str(),
+            10,
+            31 * DAY,
+            now,
+        );
+        let report = cleanup(dir.path(), 30 * DAY, 10, &HashSet::new(), now).unwrap();
+        assert_eq!(report.removed, 2);
+        assert!(!old.exists() && !older.exists());
+        assert!(current.exists() && pending.exists() && unrelated.exists());
+    }
+
+    #[test]
+    fn recording_a_previous_attempt_encodes_a_single_host_note_without_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("1.jsonl");
+        std::fs::write(&current, "{\"type\":\"result\"}\n").unwrap();
+        let previous = dir.path().join("synthetic \"quoted\" path");
+        record_previous(&current, &previous).unwrap();
+        let text = std::fs::read_to_string(current).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "{\"type\":\"result\"}");
+        let note: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(note["stream"], "runner");
+        assert_eq!(
+            note["text"],
+            format!("Previous attempt log: {}", previous.display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_previous_logs_are_neither_copied_nor_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        let current = dir.path().join("1.jsonl");
+        std::fs::write(&source, b"unrelated bytes").unwrap();
+        std::os::unix::fs::symlink(&source, &current).unwrap();
+        assert!(preserve_previous(&current).is_err());
+        assert!(record_previous(&current, &source).is_err());
+        assert_eq!(
+            cleanup(dir.path(), DAY, 0, &HashSet::new(), SystemTime::now())
+                .unwrap()
+                .removed,
+            0
+        );
+        std::fs::remove_file(&current).unwrap();
+        std::fs::hard_link(&source, &current).unwrap();
+        assert!(preserve_previous(&current).is_err());
+        assert_eq!(
+            cleanup(dir.path(), DAY, 0, &HashSet::new(), SystemTime::now())
+                .unwrap()
+                .removed,
+            0
+        );
+        assert_eq!(std::fs::read(source).unwrap(), b"unrelated bytes");
+    }
 
     /// Writes `bytes` bytes to `dir/name` and dates the file `age` before `now`.
     fn log(dir: &Path, name: &str, bytes: usize, age: Duration, now: SystemTime) -> PathBuf {
