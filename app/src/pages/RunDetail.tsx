@@ -41,7 +41,7 @@ import { cleanDisplayLines, cleanDisplayText } from "@/lib/clean";
 import { formatDateTime } from "@/lib/format";
 import {
   canRecordLocalCompletion, displayedVerificationStatus, isActive, isNewestRun, isPlanned, isPlanRun, isWaitingForDispatchReview,
-  newerProgress, planProgressFor,
+  newerProgress, planProgressFor, verificationInterruption,
 } from "@/lib/runs";
 import { parseTimeline } from "@/lib/timeline";
 import type { Job, PlanProgress } from "@/lib/types";
@@ -154,7 +154,8 @@ function reasonKind(job: Job): "failed" | "canceled" | "waiting_binding" | "othe
 function Reason({ job }: { job: Job }) {
   const { t } = useTranslation();
   if (job.reason === null || cleanDisplayLines(job.reason).trim() === "") return null;
-  const kind = reasonKind(job);
+  const interruption = verificationInterruption(job);
+  const kind = interruption !== null ? "verification_interrupted" : reasonKind(job);
   const failed = kind === "failed";
   const Icon = failed ? CircleAlert : Info;
   return (
@@ -162,6 +163,7 @@ function Reason({ job }: { job: Job }) {
       <Icon aria-hidden />
       <AlertTitle>{t(`runs.reason_title.${kind}`)}</AlertTitle>
       <AlertDescription>
+        {interruption !== null && <p>{t(`runs.verification_interruption.${interruption}`)}</p>}
         <DetailLine text={job.reason} />
       </AlertDescription>
     </Alert>

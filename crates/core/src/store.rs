@@ -633,6 +633,29 @@ impl Store {
         Ok(())
     }
 
+    /// Records only a recovered verification's host conclusion. Startup already ended the run;
+    /// evidence recovery must not move that end time, erase usage or invent a worker final.
+    pub(crate) fn record_interrupted_verification_recovery(
+        &self,
+        id: i64,
+        started_at: DateTime<Utc>,
+        reason: &str,
+        summary: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE jobs SET report = 'verification_blocked', reason = ?3, summary = ?4, \
+             details_started_at = started_at WHERE id = ?1 AND started_at = ?2 \
+             AND mode = 'verify' AND state = 'failed' AND reason LIKE 'interrupted:%' \
+             AND finished_at IS NOT NULL AND process_pid IS NULL AND process_started IS NULL",
+            params![id, fmt(started_at), reason, summary],
+        )?;
+        ensure!(
+            changed == 1,
+            "interrupted verification changed during recovery"
+        );
+        Ok(())
+    }
+
     /// Queues a finished run again for the manual re-run. Keeps the previous run's
     /// `verified_updated_at`, the most recent Linear time known for the issue; automatic
     /// re-enqueueing inserts a new row instead. A manual re-run starts afresh: what the previous

@@ -527,7 +527,8 @@
       "linear_canceled": "需求在 Linear 上被取消，已停止运行",
       "linear_completed": "需求在 Linear 上已被设为完成，已停止运行",
       "linear_reassigned": "需求在 Linear 上已不再指派给你，已停止运行",
-      "other": "IssueRelay 的说明"
+      "other": "IssueRelay 的说明",
+      "verification_interrupted": "独立验收已中断"
     },
     "timeline": "时间线",
     "raw_log": "原始日志",
@@ -544,7 +545,12 @@
     "collapse_history": "收起 {{issue}} 的运行",
     "history_caption": "{{issue}} 的运行历史",
     "run_label": "运行 #{{id}}",
-    "latest": "最新一次"
+    "latest": "最新一次",
+    "verification_interruption": {
+      "recovered": "已恢复部分证据。独立验收仍未完成；请先审阅证据，再开始新的独立验收。",
+      "unavailable": "无法恢复部分证据。独立验收仍未完成；不能仅凭这次中断判定交付存在缺陷。",
+      "unknown": "独立验收已中断。本次运行未记录证据恢复结果，验收仍未完成。"
+    }
   },
   "timeline": {
     "session_started": "会话开始",

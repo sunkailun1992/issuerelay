@@ -527,7 +527,8 @@
       "linear_canceled": "需求在 Linear 上被取消，已停止執行",
       "linear_completed": "需求在 Linear 上已被設為完成，已停止執行",
       "linear_reassigned": "需求在 Linear 上已不再指派給你，已停止執行",
-      "other": "IssueRelay 的說明"
+      "other": "IssueRelay 的說明",
+      "verification_interrupted": "獨立驗收已中斷"
     },
     "timeline": "時間軸",
     "raw_log": "原始日誌",
@@ -544,7 +545,12 @@
     "collapse_history": "收合 {{issue}} 的執行",
     "history_caption": "{{issue}} 的執行歷史",
     "run_label": "執行 #{{id}}",
-    "latest": "最新一次"
+    "latest": "最新一次",
+    "verification_interruption": {
+      "recovered": "已復原部分證據。獨立驗收仍未完成；請先審閱證據，再開始新的獨立驗收。",
+      "unavailable": "無法復原部分證據。獨立驗收仍未完成；不能僅憑這次中斷判定交付存在缺陷。",
+      "unknown": "獨立驗收已中斷。本次執行未記錄證據復原結果，驗收仍未完成。"
+    }
   },
   "timeline": {
     "session_started": "工作階段開始",

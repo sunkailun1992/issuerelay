@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { DEMO_JOBS } from "./mock-fixtures";
-import { isActive, isNewestRun, isPlanned, isPlanRun, newerProgress, newestRuns, parseRunFilter, planProgressFor, RUN_FILTERS } from "./runs";
-import { DISPLAY_JOB_STATES, type PlanProgress } from "./types";
+import { displayedVerificationStatus, isActive, isNewestRun, isPlanned, isPlanRun, newerProgress, newestRuns, parseRunFilter, planProgressFor, RUN_FILTERS } from "./runs";
+import { DISPLAY_JOB_STATES, type Job, type PlanProgress } from "./types";
 
 test("the newest run of an issue is the one with the greatest id", () => {
   // The demo has two runs of DEMO-12: the old failed one (id 2) and the one running now (id 12).
@@ -41,6 +41,25 @@ test("a run is active while it waits, is queued or runs, like core's JobState::i
     done: false,
     canceled: false,
   });
+});
+
+test.each([
+  "interrupted: verification evidence recovered: saved partial attachments",
+  "interrupted: verification evidence unavailable: workspace missing",
+  "interrupted: IssueRelay stopped while the run was in progress",
+])("an interrupted verification stays inconclusive despite a retained prior verdict: %s", (reason) => {
+  const job: Job = { ...DEMO_JOBS[0], mode: "verify", state: "failed", reason };
+  for (const report of [null, "verification_passed", "verification_failed", "verification_blocked"]) {
+    expect(displayedVerificationStatus({ ...job, report }), String(report)).toBe("blocked");
+  }
+});
+
+test("interrupted verification presentation does not replace live states or business verdicts", () => {
+  const job: Job = { ...DEMO_JOBS[0], mode: "verify", state: "failed", reason: "review found a defect", report: "verification_failed" };
+  expect(displayedVerificationStatus(job)).toBe("failed");
+  expect(displayedVerificationStatus({ ...job, report: "verification_passed" })).toBe("passed");
+  expect(displayedVerificationStatus({ ...job, state: "running", reason: "interrupted: verification evidence recovered" })).toBe("running");
+  expect(displayedVerificationStatus({ ...job, mode: "implement", reason: "interrupted: verification evidence recovered" })).toBeUndefined();
 });
 
 test("the run list can be filtered by \"all\" or by any state of a run, and by nothing else", () => {

@@ -527,7 +527,8 @@
       "linear_canceled": "Linear에서 이슈가 취소되어 실행을 멈췄습니다",
       "linear_completed": "Linear에서 이슈가 완료 처리되어 실행을 멈췄습니다",
       "linear_reassigned": "Linear에서 이슈가 더 이상 나에게 할당되어 있지 않아 실행을 멈췄습니다",
-      "other": "IssueRelay의 안내"
+      "other": "IssueRelay의 안내",
+      "verification_interrupted": "독립 검증이 중단되었습니다"
     },
     "timeline": "타임라인",
     "raw_log": "원본 로그",
@@ -544,7 +545,12 @@
     "collapse_history": "{{issue}} 실행 접기",
     "history_caption": "{{issue}} 실행 기록",
     "run_label": "실행 #{{id}}",
-    "latest": "최신"
+    "latest": "최신",
+    "verification_interruption": {
+      "recovered": "일부 증거를 복구했습니다. 독립 검증은 아직 완료되지 않았습니다. 새 검증을 시작하기 전에 증거를 검토하세요.",
+      "unavailable": "일부 증거를 복구하지 못했습니다. 독립 검증은 아직 완료되지 않았습니다. 이 중단만으로 산출물에 결함이 있다고 판단하지 마세요.",
+      "unknown": "독립 검증이 중단되었습니다. 이 실행에는 증거 복구 결과가 기록되지 않았으며 검증은 아직 완료되지 않았습니다."
+    }
   },
   "timeline": {
     "session_started": "세션 시작",

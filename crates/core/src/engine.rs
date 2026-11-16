@@ -3396,6 +3396,7 @@ impl Engine {
                 }
             }
         }
+        self.recover_verification_workspaces().await;
         let mut last_cleanup = tokio::time::Instant::now();
         if let Err(e) = self.clean_logs().await {
             tracing::warn!(error = %format!("{e:#}"), "log cleanup failed");

@@ -87,10 +87,19 @@ export function displayJobState(state: JobState): DisplayJobState {
   return state === "local_complete" ? "awaiting_acceptance" : state;
 }
 
+/** Recovery reasons describe an unfinished verification, including older hosts without an evidence outcome. */
+export function verificationInterruption(job: Job): "recovered" | "unavailable" | "unknown" | null {
+  if (job.mode !== "verify" || job.state !== "failed" || !job.reason?.startsWith("interrupted:")) return null;
+  if (/^interrupted: verification evidence recovered(?:$|[\s:;])/.test(job.reason)) return "recovered";
+  if (/^interrupted: verification evidence unavailable(?:$|[\s:;])/.test(job.reason)) return "unavailable";
+  return "unknown";
+}
+
 /** Verification records keep runtime state apart from the reported acceptance verdict. */
 export function displayedVerificationStatus(job: Job): VerificationStatus | undefined {
   if (job.mode !== "verify") return undefined;
   if (job.state === "waiting_binding" || job.state === "queued" || job.state === "running") return job.state;
+  if (verificationInterruption(job) !== null) return "blocked";
   if (job.report === "verification_passed") return "passed";
   if (job.report === "verification_failed") return "failed";
   return "blocked";

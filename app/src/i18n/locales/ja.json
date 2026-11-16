@@ -527,7 +527,8 @@
       "linear_canceled": "課題が Linear でキャンセルされたため、実行を止めました",
       "linear_completed": "課題が Linear で完了になったため、実行を止めました",
       "linear_reassigned": "課題が Linear で自分の担当ではなくなったため、実行を止めました",
-      "other": "IssueRelay からのメモ"
+      "other": "IssueRelay からのメモ",
+      "verification_interrupted": "独立検証は中断されました"
     },
     "timeline": "タイムライン",
     "raw_log": "生ログ",
@@ -544,7 +545,12 @@
     "collapse_history": "{{issue}} の実行を閉じる",
     "history_caption": "{{issue}} の実行履歴",
     "run_label": "実行 #{{id}}",
-    "latest": "最新"
+    "latest": "最新",
+    "verification_interruption": {
+      "recovered": "一部の証拠を復元しました。独立検証は未完了です。新しい検証を始める前に証拠を確認してください。",
+      "unavailable": "一部の証拠を復元できませんでした。独立検証は未完了です。この中断だけで成果物の不具合と判断しないでください。",
+      "unknown": "独立検証は中断されました。この実行では証拠の復元結果が記録されておらず、検証は未完了です。"
+    }
   },
   "timeline": {
     "session_started": "セッション開始",

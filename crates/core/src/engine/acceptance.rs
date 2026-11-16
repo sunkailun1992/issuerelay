@@ -517,6 +517,13 @@ impl Engine {
                     JobState::WaitingBinding => VerificationStatus::WaitingBinding,
                     JobState::Queued => VerificationStatus::Queued,
                     JobState::Running => VerificationStatus::Running,
+                    _ if run
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("interrupted:")) =>
+                    {
+                        VerificationStatus::Blocked
+                    }
                     _ => report.map_or(VerificationStatus::Blocked, |result| result.status),
                 });
             }
@@ -667,9 +674,8 @@ impl Engine {
             .find(|report| report.kind == approval.executor && report.logged_in)
             .and_then(|report| report.program.as_ref())
             .context("the selected verification executor is not installed or signed in")?;
-        let scratch = tempfile::Builder::new()
-            .prefix("issuerelay-verification-")
-            .tempdir()?;
+        let mut scratch =
+            crate::acceptance_evidence::Workspace::prepare(&self.inner.logs_dir, job.id)?;
         let staged = crate::acceptance_delivery::stage(
             &approval.directory,
             &approval.delivery,
@@ -766,6 +772,24 @@ impl Engine {
             tx.commit()?;
             attempt
         };
+        if let Err(error) = scratch.activate(
+            job.id,
+            record.source_job_id,
+            record.fingerprint.clone(),
+            attempt.context("verification start did not record its attempt")?,
+        ) {
+            tracing::warn!(job_id = job.id, error = %format!("{error:#}"), "durable verification workspace activation failed; staging preserved");
+            self.store()
+                .record_run(job.id, Some("verification_blocked"), None, None)?;
+            self.store().mark_finished(
+                job.id,
+                JobState::Failed,
+                Some("could not activate durable verification workspace"),
+                None,
+                None,
+            )?;
+            return Err(error);
+        }
         self.emit_job(job.id);
         self.emit_job(record.source_job_id);
         let engine = self.clone();
@@ -810,6 +834,7 @@ impl Engine {
                 "exit": format!("{:?}", output.exit),
                 "final_text": final_text,
                 "final_text_omitted": output.final_text.is_some() && final_text.is_none(),
+                "workspace": scratch.identity().and_then(|identity| identity.report_value()).ok(),
             });
             let retained = crate::acceptance_evidence::retain(
                 scratch.path(),
@@ -818,19 +843,206 @@ impl Engine {
                 &capture,
             )
             .await;
-            drop(scratch);
             match engine
                 .finish_verification(record, &approval, &output, &retained)
                 .await
             {
-                Ok(()) => slot.release(),
+                Ok(()) => {
+                    if retained.is_ok() {
+                        if let Err(error) = scratch.cleanup() {
+                            tracing::warn!(job_id = job.id, error = %format!("{error:#}"), "retained verification workspace could not be cleaned");
+                        }
+                    } else {
+                        tracing::warn!(
+                            job_id = job.id,
+                            "verification evidence retention failed; durable raw workspace preserved"
+                        );
+                    }
+                    slot.release();
+                }
                 Err(error) => {
-                    tracing::error!(job_id = job.id, %error, "could not record independent verification")
+                    tracing::error!(job_id = job.id, %error, "could not record independent verification; durable raw workspace preserved")
                 }
             }
             engine.poll_now();
         });
         Ok(true)
+    }
+
+    /// Runs once after the old executor sweep and before scheduling. Recovery only publishes
+    /// fixed owned raw as partial evidence. It never resumes a worker or trusts an old final.
+    pub(super) async fn recover_verification_workspaces(&self) {
+        let workspaces = match crate::acceptance_evidence::Workspace::discover(&self.inner.logs_dir)
+        {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "durable verification workspaces could not be inspected; raw preserved");
+                return;
+            }
+        };
+        let mut matching: std::collections::BTreeMap<i64, Vec<_>> =
+            std::collections::BTreeMap::new();
+        for workspace in workspaces {
+            let Ok(identity) = workspace.identity() else {
+                continue;
+            };
+            let run = self
+                .store()
+                .get(identity.verification_job_id)
+                .ok()
+                .flatten();
+            let Some(run) = run else {
+                tracing::warn!(
+                    job_id = identity.verification_job_id,
+                    "verification workspace has no matching run; raw preserved"
+                );
+                continue;
+            };
+            if run.mode != RunMode::Verify
+                || run.state != JobState::Failed
+                || !run
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("interrupted:"))
+            {
+                continue;
+            }
+            let pending_process = self
+                .store()
+                .leftovers()
+                .map(|rows| rows.iter().any(|row| row.job_id == run.id))
+                .unwrap_or(true);
+            if run.started_at != Some(identity.started_at) || pending_process {
+                tracing::warn!(
+                    job_id = run.id,
+                    "verification workspace attempt or executor is ambiguous; raw preserved"
+                );
+                continue;
+            }
+            matching.entry(run.id).or_default().push(workspace);
+        }
+        for (id, mut attempts) in matching {
+            if attempts.len() != 1 {
+                tracing::warn!(
+                    job_id = id,
+                    "multiple durable verification attempts match; raw preserved"
+                );
+                continue;
+            }
+            let workspace = attempts.pop().expect("one workspace");
+            if let Err(error) = self.recover_verification_workspace(&workspace).await {
+                tracing::warn!(job_id = id, error = %format!("{error:#}"), "verification evidence recovery unavailable; durable raw preserved");
+            }
+        }
+    }
+
+    async fn recover_verification_workspace(
+        &self,
+        workspace: &crate::acceptance_evidence::Workspace,
+    ) -> Result<()> {
+        let identity = workspace.identity()?;
+        let record = crate::acceptance_store::get(
+            self.store().workflow_connection(),
+            identity.verification_job_id,
+        )?
+        .context("owned verification acceptance record is missing")?;
+        anyhow::ensure!(
+            record.source_job_id == identity.source_job_id
+                && record.fingerprint == identity.fingerprint,
+            "durable verification source fingerprint does not match approval"
+        );
+        let retained = match crate::acceptance_evidence::published_for_workspace(
+            &self.inner.logs_dir,
+            identity,
+        ) {
+            Ok(Some(index)) => Ok(index),
+            Ok(None) => {
+                let report = serde_json::json!({"version":1,"job_id":identity.verification_job_id,
+                    "development_job_id":identity.source_job_id,"delivery_fingerprint":identity.fingerprint,
+                    "workspace":identity,"interrupted":true,"partial":true,"unverified":true,
+                    "exit":"Interrupted","final_text":null,"worker_final_complete":false,
+                    "recovered_at":chrono::Utc::now()});
+                crate::acceptance_evidence::retain(
+                    workspace.path(),
+                    &self.inner.logs_dir,
+                    identity.verification_job_id,
+                    &report,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let (reason, summary, evidence) = match &retained {
+            Ok(index) => (
+                "interrupted: verification evidence recovered",
+                "Verification was interrupted. Partial evidence was recovered; acceptance remains blocked.",
+                vec![format!(
+                    "Retained verification evidence index: {}",
+                    index.display()
+                )],
+            ),
+            Err(error) => {
+                tracing::warn!(job_id = identity.verification_job_id, error = %format!("{error:#}"), "interrupted verification evidence could not be recovered; raw preserved");
+                (
+                    "interrupted: verification evidence unavailable",
+                    "Verification was interrupted. Evidence recovery was unavailable; acceptance remains blocked.",
+                    Vec::new(),
+                )
+            }
+        };
+        let recommendation = serde_json::to_value(Recommendation {
+            status: VerificationStatus::Blocked,
+            summary: summary.into(),
+            evidence,
+        })?;
+        {
+            let store = self.store();
+            let tx = store.workflow_connection().unchecked_transaction()?;
+            let run = store
+                .get(identity.verification_job_id)?
+                .context("interrupted verification run disappeared")?;
+            anyhow::ensure!(
+                run.mode == RunMode::Verify
+                    && run.state == JobState::Failed
+                    && run.started_at == Some(identity.started_at)
+                    && run
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("interrupted:")),
+                "interrupted verification changed during recovery"
+            );
+            // Retention yielded to another task. Preserve a repair/return decision written in
+            // that interval, and refuse an approval replacement rather than overwriting it.
+            let mut current = crate::acceptance_store::get(&tx, run.id)?
+                .context("interrupted acceptance record disappeared")?;
+            anyhow::ensure!(
+                current.source_job_id == identity.source_job_id
+                    && current.fingerprint == identity.fingerprint
+                    && current.approval == record.approval,
+                "interrupted approval changed during recovery"
+            );
+            if current.recommendation.as_ref() == Some(&recommendation)
+                && run.report.as_deref() == Some("verification_blocked")
+                && run.reason.as_deref() == Some(reason)
+                && run.summary.as_deref() == Some(summary)
+            {
+                return Ok(());
+            }
+            current.recommendation = Some(recommendation);
+            crate::acceptance_store::update(&tx, &current)?;
+            store.record_interrupted_verification_recovery(
+                run.id,
+                identity.started_at,
+                reason,
+                summary,
+            )?;
+            tx.commit()?;
+        }
+        // Interrupted snapshots are intentionally kept, even after successful publication.
+        // No fresh runner completion proves that every old unrecorded writer has stopped.
+        self.emit_job(identity.verification_job_id);
+        self.emit_job(identity.source_job_id);
+        Ok(())
     }
 
     async fn finish_verification(

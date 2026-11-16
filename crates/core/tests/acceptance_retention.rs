@@ -24,6 +24,7 @@ struct EvidenceRunner {
     result: &'static str,
     remove_evidence: bool,
     scratch: Mutex<Option<PathBuf>>,
+    hold: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -72,6 +73,14 @@ impl JobRunner for EvidenceRunner {
                 "Synthetic rendered page evidence.\n",
             )
             .unwrap();
+            if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(hook) = hooks.on_stdout.as_ref() {
+                    hook(
+                        "{\"type\":\"thread.started\",\"thread_id\":\"00000000-0000-4000-8000-000000000002\"}",
+                    );
+                }
+                return std::future::pending().await;
+            }
             if self.remove_evidence {
                 std::fs::remove_dir_all(&dir).unwrap();
             }
@@ -152,6 +161,7 @@ impl Fixture {
             result,
             remove_evidence,
             scratch: Mutex::new(None),
+            hold: std::sync::atomic::AtomicBool::new(false),
         });
         let engine = Self::engine(root.path(), &linear, runner.clone());
         Self {
@@ -177,7 +187,7 @@ impl Fixture {
         .unwrap()
     }
 
-    async fn verify(&self) -> i64 {
+    async fn start_verification(&self) -> i64 {
         let preview = self.engine.dispatch_preview("DEMO-1").await.unwrap();
         self.engine
             .approve_dispatch("DEMO-1", &preview.token)
@@ -222,21 +232,504 @@ impl Fixture {
             .job_id
             .unwrap();
         assert_eq!(self.engine.dispatch().await.unwrap(), [id]);
+        id
+    }
+
+    async fn verify(&self) -> i64 {
+        let id = self.start_verification().await;
         tokio::time::timeout(Duration::from_secs(10), self.engine.wait_idle())
             .await
             .unwrap();
-        assert!(
-            !self
-                .runner
+        assert_eq!(
+            self.runner
                 .scratch
                 .lock()
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .exists()
+                .exists(),
+            self.runner.remove_evidence,
+            "only successful retention plus result persistence may clean the workspace"
         );
         id
     }
+}
+
+struct InterruptedFixture {
+    root: tempfile::TempDir,
+    linear: FakeLinear,
+    runner: Arc<EvidenceRunner>,
+    id: i64,
+    scratch: PathBuf,
+}
+
+impl InterruptedFixture {
+    fn new() -> Self {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (fixture, id, scratch) = runtime.block_on(async {
+            let f = Fixture::new("verification_passed", false);
+            f.runner
+                .hold
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let id = f.start_verification().await;
+            let scratch = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(path) = f.runner.scratch.lock().unwrap().clone()
+                        && path.join(".issuerelay-evidence/screens/page.txt").is_file()
+                    {
+                        break path;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            (f, id, scratch)
+        });
+        // Private async tasks only; no real application or OS process is killed.
+        drop(runtime);
+        assert!(
+            scratch.join(".issuerelay-evidence/report.md").is_file(),
+            "an interrupted host must not discard the only raw evidence before durable publication"
+        );
+        let Fixture {
+            root,
+            linear,
+            runner,
+            engine,
+            ..
+        } = fixture;
+        drop(engine);
+        // Runtime Drop runs Rust destructors; a machine crash does not. Restore the private
+        // fixture's persisted pre-crash Running row before real Engine initialization.
+        Store::open(&root.path().join("state.db"))
+            .unwrap()
+            .set_state(id, JobState::Running, None)
+            .unwrap();
+        Self {
+            root,
+            linear,
+            runner,
+            id,
+            scratch,
+        }
+    }
+
+    fn index(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("verification-evidence")
+            .join(self.id.to_string())
+            .join("index.json")
+    }
+
+    fn marker(&self) -> PathBuf {
+        self.scratch.parent().unwrap().join("owner.json")
+    }
+
+    fn rewrite_marker(&self, edit: impl FnOnce(&mut Value)) {
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(self.marker()).unwrap()).unwrap();
+        edit(&mut value);
+        std::fs::write(self.marker(), serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn recover(&self) -> Engine {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let loaded = Fixture::engine(self.root.path(), &self.linear, self.runner.clone());
+            let stop = CancellationToken::new();
+            stop.cancel(); // Recovery runs before the scheduler; never launch another fake task.
+            loaded.run_forever(stop).await;
+            loaded
+        })
+    }
+
+    fn interrupt(&self) -> chrono::DateTime<chrono::Utc> {
+        let store = Store::open(&self.root.path().join("state.db")).unwrap();
+        assert_eq!(store.recover_interrupted().unwrap().len(), 1);
+        // A fixed historical run end makes a later recovery timestamp overwrite observable
+        // without depending on clock resolution or delaying a private test runtime.
+        rusqlite::Connection::open(self.root.path().join("state.db"))
+            .unwrap()
+            .execute(
+                "UPDATE jobs SET finished_at = '2000-01-01T00:00:00.000Z' WHERE id = ?1",
+                [self.id],
+            )
+            .unwrap();
+        store.get(self.id).unwrap().unwrap().finished_at.unwrap()
+    }
+
+    fn watch_recovery_updates(&self) {
+        rusqlite::Connection::open(self.root.path().join("state.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE recovery_updates (id INTEGER); \
+                 CREATE TRIGGER observe_recovery_job AFTER UPDATE ON jobs WHEN NEW.id = {0} \
+                 BEGIN INSERT INTO recovery_updates VALUES (NEW.id); END; \
+                 CREATE TRIGGER observe_recovery_acceptance AFTER UPDATE ON acceptance_runs \
+                 WHEN NEW.verification_job_id = {0} \
+                 BEGIN INSERT INTO recovery_updates VALUES (NEW.verification_job_id); END;",
+                self.id
+            ))
+            .unwrap();
+    }
+
+    fn assert_no_recovery_updates(&self) {
+        let count: i64 = rusqlite::Connection::open(self.root.path().join("state.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM recovery_updates", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "identical recovery must not rewrite historical rows"
+        );
+    }
+
+    fn assert_blocked(&self, engine: &Engine) {
+        assert_eq!(
+            engine
+                .handoff(self.id)
+                .unwrap()
+                .acceptance
+                .unwrap()
+                .verification_status,
+            Some(VerificationStatus::Blocked)
+        );
+        assert!(
+            self.scratch
+                .join(".issuerelay-evidence/report.md")
+                .is_file()
+        );
+        assert!(self.linear.set_state_calls().is_empty());
+    }
+}
+
+#[test]
+fn interrupted_verification_recovers_partial_raw_without_a_final_report() {
+    let f = InterruptedFixture::new();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    let view = loaded.handoff(f.id).unwrap().acceptance.unwrap();
+    assert!(
+        view.verification_evidence
+            .iter()
+            .any(|item| item.contains("index.json"))
+    );
+    let report: Value = serde_json::from_slice(
+        &std::fs::read(f.index().parent().unwrap().join("result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["interrupted"], true);
+    assert!(report["final_text"].is_null());
+    assert_eq!(report["worker_final_complete"], false);
+    chrono::DateTime::parse_from_rfc3339(report["recovered_at"].as_str().unwrap()).unwrap();
+    assert!(
+        f.index()
+            .parent()
+            .unwrap()
+            .join("files/screens/page.txt")
+            .is_file()
+    );
+}
+
+#[test]
+fn interrupted_recovery_is_idempotent_and_does_not_overwrite_published_payloads() {
+    let f = InterruptedFixture::new();
+    let ended_at = f.interrupt();
+    let first = f.recover();
+    f.assert_blocked(&first);
+    let before_run = first.job(f.id).unwrap().unwrap();
+    assert_eq!(before_run.finished_at, Some(ended_at));
+    drop(first);
+    let before = std::fs::read(f.index()).unwrap();
+    f.watch_recovery_updates();
+    let second = f.recover();
+    f.assert_blocked(&second);
+    assert_eq!(std::fs::read(f.index()).unwrap(), before);
+    assert_eq!(second.job(f.id).unwrap().unwrap(), before_run);
+    f.assert_no_recovery_updates();
+    assert!(
+        second
+            .job(f.id)
+            .unwrap()
+            .unwrap()
+            .reason
+            .unwrap()
+            .starts_with("interrupted: verification evidence recovered")
+    );
+}
+
+#[test]
+fn unavailable_recovery_is_idempotent_and_preserves_the_interrupted_end_time() {
+    let f = InterruptedFixture::new();
+    let ended_at = f.interrupt();
+    std::fs::create_dir_all(f.index().parent().unwrap()).unwrap();
+    std::fs::write(f.index(), "synthetic conflicting index").unwrap();
+    let first = f.recover();
+    f.assert_blocked(&first);
+    let before = first.job(f.id).unwrap().unwrap();
+    assert_eq!(before.finished_at, Some(ended_at));
+    assert_eq!(
+        before.reason.as_deref(),
+        Some("interrupted: verification evidence unavailable")
+    );
+    drop(first);
+    f.watch_recovery_updates();
+    let second = f.recover();
+    f.assert_blocked(&second);
+    assert_eq!(second.job(f.id).unwrap().unwrap(), before);
+    f.assert_no_recovery_updates();
+    assert_eq!(
+        std::fs::read_to_string(f.index()).unwrap(),
+        "synthetic conflicting index"
+    );
+}
+
+#[test]
+fn interrupted_recovery_rejects_a_stale_attempt_and_keeps_raw() {
+    let f = InterruptedFixture::new();
+    f.rewrite_marker(|value| value["started_at"] = json!("2000-01-01T00:00:00Z"));
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert!(!f.index().exists());
+}
+
+#[test]
+fn interrupted_recovery_rejects_a_source_fingerprint_mismatch_and_keeps_raw() {
+    let f = InterruptedFixture::new();
+    f.rewrite_marker(|value| value["fingerprint"] = json!("synthetic-wrong-source"));
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert!(!f.index().exists());
+}
+
+#[test]
+fn interrupted_recovery_refuses_multiple_matching_attempts() {
+    let f = InterruptedFixture::new();
+    let other = f
+        .scratch
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("{}-duplicate", f.id));
+    std::fs::create_dir(&other).unwrap();
+    std::fs::create_dir(other.join("work")).unwrap();
+    let mut marker: Value = serde_json::from_slice(&std::fs::read(f.marker()).unwrap()).unwrap();
+    marker["attempt"] = json!(other.file_name().unwrap().to_str().unwrap());
+    std::fs::write(
+        other.join("owner.json"),
+        serde_json::to_vec(&marker).unwrap(),
+    )
+    .unwrap();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert!(!f.index().exists());
+    assert!(other.join("owner.json").is_file());
+}
+
+#[test]
+fn interrupted_recovery_preserves_a_conflicting_published_directory() {
+    let f = InterruptedFixture::new();
+    std::fs::create_dir_all(f.index().parent().unwrap()).unwrap();
+    std::fs::write(f.index(), "synthetic conflicting index").unwrap();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert_eq!(
+        std::fs::read_to_string(f.index()).unwrap(),
+        "synthetic conflicting index"
+    );
+    assert!(
+        loaded
+            .job(f.id)
+            .unwrap()
+            .unwrap()
+            .reason
+            .unwrap()
+            .starts_with("interrupted: verification evidence unavailable")
+    );
+    assert!(
+        loaded
+            .handoff(f.id)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .verification_evidence
+            .is_empty()
+    );
+}
+
+#[test]
+fn interrupted_recovery_keeps_over_budget_raw_and_never_claims_retention() {
+    let f = InterruptedFixture::new();
+    std::fs::write(
+        f.scratch.join(".issuerelay-evidence/oversized.bin"),
+        vec![0; 16 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert!(!f.index().exists());
+    assert!(
+        f.scratch
+            .join(".issuerelay-evidence/oversized.bin")
+            .is_file()
+    );
+    assert!(
+        loaded
+            .job(f.id)
+            .unwrap()
+            .unwrap()
+            .reason
+            .unwrap()
+            .starts_with("interrupted: verification evidence unavailable")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn interrupted_recovery_does_not_follow_a_worker_attachment_symlink() {
+    let f = InterruptedFixture::new();
+    let outside = f.root.path().join("synthetic-outside.txt");
+    std::fs::write(&outside, "synthetic outside must stay untouched").unwrap();
+    std::os::unix::fs::symlink(&outside, f.scratch.join(".issuerelay-evidence/link")).unwrap();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert!(!f.index().exists());
+    assert_eq!(
+        std::fs::read_to_string(outside).unwrap(),
+        "synthetic outside must stay untouched"
+    );
+}
+
+#[test]
+fn interrupted_recovery_rejects_tampered_published_payload_without_overwrite() {
+    let f = InterruptedFixture::new();
+    drop(f.recover());
+    let before = std::fs::read(f.index()).unwrap();
+    std::fs::write(
+        f.index().parent().unwrap().join("files/report.md"),
+        "synthetic tamper",
+    )
+    .unwrap();
+    let loaded = f.recover();
+    f.assert_blocked(&loaded);
+    assert_eq!(std::fs::read(f.index()).unwrap(), before);
+    assert!(
+        loaded
+            .handoff(f.id)
+            .unwrap()
+            .acceptance
+            .unwrap()
+            .verification_evidence
+            .is_empty()
+    );
+}
+
+#[test]
+fn published_final_before_result_commit_recovers_as_blocked_and_keeps_original_index() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (f, id) = runtime.block_on(async {
+        let f = Fixture::new("verification_passed", false);
+        rusqlite::Connection::open(f.root.path().join("state.db")).unwrap()
+            .execute_batch("CREATE TRIGGER synthetic_result_failure BEFORE UPDATE OF recommendation ON acceptance_runs BEGIN SELECT RAISE(FAIL, 'synthetic result failure'); END;").unwrap();
+        let id = f.start_verification().await;
+        tokio::time::timeout(Duration::from_secs(5), f.engine.wait_idle()).await.unwrap();
+        (f, id)
+    });
+    let scratch = f.runner.scratch.lock().unwrap().clone().unwrap();
+    assert!(
+        scratch.join(".issuerelay-evidence/report.md").is_file(),
+        "DB failure must preserve raw even after publication"
+    );
+    let index = f
+        .root
+        .path()
+        .join("verification-evidence")
+        .join(id.to_string())
+        .join("index.json");
+    let original = std::fs::read(&index).unwrap();
+    let published: Value = serde_json::from_slice(
+        &std::fs::read(index.parent().unwrap().join("result.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        published["final_text"]
+            .as_str()
+            .unwrap()
+            .contains("verification_passed")
+    );
+    assert!(
+        f.engine
+            .job(id)
+            .unwrap()
+            .unwrap()
+            .reason
+            .unwrap()
+            .contains("persist")
+    );
+    {
+        let store = Store::open(&f.root.path().join("state.db")).unwrap();
+        rusqlite::Connection::open(f.root.path().join("state.db"))
+            .unwrap()
+            .execute_batch("DROP TRIGGER synthetic_result_failure")
+            .unwrap();
+        // Model a crash between immutable publication and the result transaction, not a new
+        // worker conclusion or a real application restart.
+        store.set_state(id, JobState::Running, None).unwrap();
+    }
+    let Fixture {
+        root,
+        linear,
+        runner,
+        engine,
+        ..
+    } = f;
+    drop(engine);
+    drop(runtime);
+    let interrupted = InterruptedFixture {
+        root,
+        linear,
+        runner,
+        id,
+        scratch,
+    };
+    let loaded = interrupted.recover();
+    interrupted.assert_blocked(&loaded);
+    assert_eq!(std::fs::read(&index).unwrap(), original);
+    assert!(
+        loaded
+            .job(id)
+            .unwrap()
+            .unwrap()
+            .reason
+            .unwrap()
+            .starts_with("interrupted: verification evidence recovered")
+    );
+    assert_eq!(
+        loaded.job(id).unwrap().unwrap().report.as_deref(),
+        Some("verification_blocked")
+    );
+}
+
+#[tokio::test]
+async fn verification_uses_a_host_owned_durable_workspace() {
+    let f = Fixture::new("verification_passed", false);
+    f.verify().await;
+    let scratch = f.runner.scratch.lock().unwrap().clone().unwrap();
+    let durable = f
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("verification-work");
+    assert!(
+        scratch.starts_with(&durable),
+        "active verification raw must live in host-owned durable staging, not the system temp root: {}",
+        scratch.display()
+    );
 }
 
 #[tokio::test]

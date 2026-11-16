@@ -527,7 +527,8 @@
       "linear_canceled": "The issue was canceled in Linear, so the run was stopped",
       "linear_completed": "The issue was completed in Linear, so the run was stopped",
       "linear_reassigned": "The issue is no longer assigned to you in Linear, so the run was stopped",
-      "other": "A note from IssueRelay"
+      "other": "A note from IssueRelay",
+      "verification_interrupted": "Independent verification was interrupted"
     },
     "timeline": "Timeline",
     "raw_log": "Raw log",
@@ -544,7 +545,12 @@
     "collapse_history": "Hide runs for {{issue}}",
     "history_caption": "Runs for {{issue}}",
     "run_label": "Run #{{id}}",
-    "latest": "Latest"
+    "latest": "Latest",
+    "verification_interruption": {
+      "recovered": "Partial evidence was recovered. Independent verification remains incomplete; review the evidence before starting a new verification.",
+      "unavailable": "Partial evidence could not be recovered. Independent verification remains incomplete; do not treat this interruption as a delivery defect.",
+      "unknown": "Independent verification was interrupted. Evidence recovery was not recorded for this run; the verification remains incomplete."
+    }
   },
   "timeline": {
     "session_started": "Session started",

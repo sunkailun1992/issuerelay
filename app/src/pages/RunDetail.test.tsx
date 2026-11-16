@@ -38,6 +38,38 @@ test("a failed job says why under a translated headline", async () => {
   expect(screen.getByText("run exceeded the time limit")).toBeInTheDocument();
 });
 
+test.each([
+  ["interrupted: verification evidence recovered: saved partial attachments", "Partial evidence was recovered. Independent verification remains incomplete; review the evidence before starting a new verification."],
+  ["interrupted: verification evidence unavailable: workspace missing", "Partial evidence could not be recovered. Independent verification remains incomplete; do not treat this interruption as a delivery defect."],
+  ["interrupted: IssueRelay stopped while the run was in progress", "Independent verification was interrupted. Evidence recovery was not recorded for this run; the verification remains incomplete."],
+])("an interrupted verification explains evidence recovery without a business failure: %s", async (reason, explanation) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, mode: "verify", state: "failed", report: "verification_blocked", reason });
+  await openRun(8, backend);
+  const notice = (await screen.findByText("Independent verification was interrupted")).closest<HTMLElement>('[role="status"]')!;
+  expect(within(notice).getByText(explanation)).toBeInTheDocument();
+  expect(within(notice).getByText(reason)).toBeInTheDocument();
+  expect(screen.getByText("Verification ended without a conclusion")).toBeInTheDocument();
+  expect(screen.queryByText("The run failed")).not.toBeInTheDocument();
+  expect(screen.queryByText("Verification did not pass")).not.toBeInTheDocument();
+});
+
+test.each<[Lang, string, string]>([
+  ["en", "Independent verification was interrupted", "Partial evidence was recovered. Independent verification remains incomplete; review the evidence before starting a new verification."],
+  ["zh-CN", "独立验收已中断", "已恢复部分证据。独立验收仍未完成；请先审阅证据，再开始新的独立验收。"],
+  ["zh-TW", "獨立驗收已中斷", "已復原部分證據。獨立驗收仍未完成；請先審閱證據，再開始新的獨立驗收。"],
+  ["ja", "独立検証は中断されました", "一部の証拠を復元しました。独立検証は未完了です。新しい検証を始める前に証拠を確認してください。"],
+  ["ko", "독립 검증이 중단되었습니다", "일부 증거를 복구했습니다. 독립 검증은 아직 완료되지 않았습니다. 새 검증을 시작하기 전에 증거를 검토하세요."],
+])("recovered verification evidence is explained in %s", async (lang, title, explanation) => {
+  const backend = createMockBackend("demo", { latencyMs: 0 });
+  const job = (await backend.job(8))!;
+  backend.job = vi.fn().mockResolvedValue({ ...job, mode: "verify", state: "failed", report: "verification_blocked", reason: "interrupted: verification evidence recovered" });
+  await openRun(8, backend, lang);
+  const notice = (await screen.findByText(title)).closest<HTMLElement>('[role="status"]')!;
+  expect(within(notice).getByText(explanation)).toBeInTheDocument();
+});
+
 test("the page works when the issue list cannot be read, just without the link", async () => {
   const backend = createMockBackend("demo", { latencyMs: 0 });
   backend.issues = vi.fn().mockRejectedValue(new BackendError("not connected to Linear: log in first"));

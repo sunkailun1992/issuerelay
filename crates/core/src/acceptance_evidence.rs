@@ -10,7 +10,10 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use aws_lc_rs::digest::{SHA256, digest};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+mod workspace;
+pub(crate) use workspace::{Workspace, WorkspaceIdentity};
 
 pub(crate) const DIRECTORY: &str = ".issuerelay-evidence";
 const MAX_FILES: usize = 256;
@@ -43,7 +46,8 @@ struct Snapshot {
     identity: (u64, u64),
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RetainedFile {
     path: String,
     full_path: PathBuf,
@@ -51,7 +55,8 @@ struct RetainedFile {
     sha256: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Index {
     version: u32,
     job_id: i64,
@@ -648,6 +653,113 @@ pub(crate) async fn retain(
     tokio::task::spawn_blocking(move || retain_sync(&scratch, &logs_dir, job_id, &report, LIMITS))
         .await
         .context("verification evidence retention task failed")?
+}
+
+/// A previous host may have published the immutable index just before losing its result
+/// transaction. Reuse it only after checking its exact attempt identity and every payload;
+/// the stored worker final text is never interpreted as an acceptance decision here.
+pub(crate) fn published_for_workspace(
+    logs_dir: &Path,
+    workspace: &WorkspaceIdentity,
+) -> Result<Option<PathBuf>> {
+    let parent = canonical_directory(
+        logs_dir
+            .parent()
+            .context("verification logs have no data parent")?,
+    )?;
+    check_parent_chain(&parent)?;
+    let destination = parent
+        .join("verification-evidence")
+        .join(workspace.verification_job_id.to_string());
+    match fs::symlink_metadata(&destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    check_parent_chain(&destination)?;
+    let index_path = destination.join("index.json");
+    let index_snapshot = Snapshot::read(&index_path)?;
+    let index: Index = serde_json::from_slice(&read_file(
+        &index_path,
+        &index_snapshot,
+        INDEX_BYTES as u64,
+    )?)?;
+    ensure!(
+        index.version == 1
+            && index.job_id == workspace.verification_job_id
+            && index.root == destination
+            && index.file_count == index.files.len()
+            && index.worker_file_count <= MAX_FILES
+            && index.file_count == index.worker_file_count + 1
+            && index.total_bytes <= TOTAL_BYTES,
+        "published verification index does not match this workspace"
+    );
+    let mut dirs = Vec::new();
+    let mut payload = Vec::new();
+    collect(
+        &destination.join("files"),
+        Path::new(""),
+        0,
+        LIMITS,
+        &mut 0,
+        &mut dirs,
+        &mut payload,
+    )?;
+    let mut actual = std::collections::BTreeMap::new();
+    for (relative, snapshot) in payload {
+        let path = format!(
+            "files/{}",
+            relative
+                .iter()
+                .map(|part| part.to_str().expect("validated path"))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = read_file(&destination.join(&path), &snapshot, FILE_BYTES)?;
+        actual.insert(path, (bytes.len() as u64, sha256(&bytes)));
+    }
+    let report_path = destination.join("result.json");
+    let report_snapshot = Snapshot::read(&report_path)?;
+    let bytes = read_file(&report_path, &report_snapshot, REPORT_BYTES as u64)?;
+    let report: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure!(
+        report["job_id"] == workspace.verification_job_id
+            && report["development_job_id"] == workspace.source_job_id
+            && report["delivery_fingerprint"] == serde_json::to_value(&workspace.fingerprint)?
+            && report["workspace"] == workspace.report_value()?,
+        "published verification evidence belongs to another attempt"
+    );
+    actual.insert("result.json".into(), (bytes.len() as u64, sha256(&bytes)));
+    let mut declared = std::collections::BTreeMap::new();
+    for file in &index.files {
+        ensure!(
+            file.full_path == destination.join(&file.path)
+                && declared
+                    .insert(file.path.clone(), (file.bytes, file.sha256.clone()))
+                    .is_none(),
+            "invalid or duplicate published payload"
+        );
+    }
+    ensure!(
+        actual == declared && actual.values().map(|row| row.0).sum::<u64>() == index.total_bytes,
+        "published verification evidence hash or path set changed"
+    );
+    let top: std::collections::BTreeSet<_> = fs::read_dir(&destination)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    ensure!(
+        top == ["files", "index.json", "result.json"]
+            .map(std::ffi::OsString::from)
+            .into_iter()
+            .collect(),
+        "unexpected published verification files"
+    );
+    for (path, snapshot) in dirs {
+        snapshot.check(&path)?;
+    }
+    index_snapshot.check(&index_path)?;
+    report_snapshot.check(&report_path)?;
+    Ok(Some(index_path))
 }
 
 #[cfg(test)]
