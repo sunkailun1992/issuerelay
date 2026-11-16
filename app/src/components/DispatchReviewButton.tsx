@@ -6,6 +6,7 @@ import {
   Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { useApproveDispatch, useDispatchPreview, useOpenDevelopmentIssue } from "@/hooks/queries";
+import { useFocusReturn } from "@/hooks/useFocusReturn";
 import { useTriggerNames } from "@/hooks/useTriggerNames";
 import { cleanDisplayText } from "@/lib/clean";
 import type { DispatchPreview, IssueContext } from "@/lib/workflow-types";
@@ -78,6 +79,9 @@ interface ReviewTarget {
   developmentJobId?: number;
 }
 
+/** Polling can remove the entry point while its review is open. */
+const pageHeading = () => document.querySelector<HTMLElement>("h1");
+
 function DevelopmentSetup({ jobId, reload }: { jobId: number; reload: () => void }) {
   const { t } = useTranslation();
   const { todo, label } = useTriggerNames();
@@ -95,7 +99,10 @@ function DevelopmentSetup({ jobId, reload }: { jobId: number; reload: () => void
   );
 }
 
-function ReviewDialog({ issueIdentifier, issueUuid, developmentJobId, close }: ReviewTarget & { close: () => void }) {
+function ReviewDialog({ issueIdentifier, issueUuid, developmentJobId, close, returnFocus }: ReviewTarget & {
+  close: () => void;
+  returnFocus?: (event: Event) => void;
+}) {
   const { t } = useTranslation();
   const preview = useDispatchPreview(issueIdentifier);
   const approval = useApproveDispatch(issueIdentifier);
@@ -120,6 +127,7 @@ function ReviewDialog({ issueIdentifier, issueUuid, developmentJobId, close }: R
       showCloseButton={false}
       onEscapeKeyDown={keepOpenWhileSaving}
       onInteractOutside={keepOpenWhileSaving}
+      onCloseAutoFocus={returnFocus}
     >
       <DialogHeader>
         <DialogTitle>{t("dispatch.title")}</DialogTitle>
@@ -165,6 +173,7 @@ function ReviewDialog({ issueIdentifier, issueUuid, developmentJobId, close }: R
 export function DispatchReviewButton({ showTrigger = true, ...target }: ReviewTarget & { showTrigger?: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const returnFocus = useFocusReturn(open, pageHeading);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       {showTrigger && (
@@ -172,7 +181,7 @@ export function DispatchReviewButton({ showTrigger = true, ...target }: ReviewTa
           <Button variant="outline" size="sm">{t(target.developmentJobId === undefined ? "dispatch.preview" : "dispatch.implement")}</Button>
         </DialogTrigger>
       )}
-      {open && <ReviewDialog {...target} close={() => setOpen(false)} />}
+      {open && <ReviewDialog {...target} close={() => setOpen(false)} returnFocus={showTrigger ? undefined : returnFocus} />}
     </Dialog>
   );
 }

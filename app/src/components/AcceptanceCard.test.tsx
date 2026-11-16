@@ -8,6 +8,7 @@ import { createMockBackend } from "@/lib/mock";
 import type { AcceptanceLinks, DispatchPreview } from "@/lib/workflow-types";
 import { renderWithProviders } from "@/test/render";
 import { AcceptanceCard } from "./AcceptanceCard";
+import { PageHeader } from "./PageHeader";
 
 const EXPIRED = "This preview has expired. Reload the preview and review it before confirming again. This action has not been executed.";
 
@@ -330,7 +331,10 @@ async function returnedRepairReview(lang: Lang = "en") {
   };
   const readPreview = vi.spyOn(backend, "getDispatchPreview").mockResolvedValue(preview);
   const approve = vi.spyOn(backend, "approveDispatch").mockResolvedValue(undefined);
-  const view = await renderWithProviders(<AcceptanceCard job={job} />, { backend, lang });
+  const view = await renderWithProviders(
+    <><PageHeader title="Synthetic verification" /><AcceptanceCard job={job} /></>,
+    { backend, lang },
+  );
   await userEvent.click(await screen.findByRole("button", { name: i18n.t("dispatch.preview") }));
   const dialogElement = screen.getByRole("dialog", { name: i18n.t("dispatch.title") });
   const dialog = within(dialogElement);
@@ -360,11 +364,19 @@ test.each<Lang>(["en", "zh-CN", "zh-TW", "ja", "ko"])(
     expect(view.approve).not.toHaveBeenCalled();
     await userEvent.click(view.dialog.getByRole("button", { name: i18n.t("common.cancel") }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Synthetic verification", level: 1 })).toHaveFocus());
     expect(screen.queryByRole("button", { name: i18n.t("dispatch.preview") })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: i18n.t("acceptance.repair_run", { id: 14 }) })).toHaveAttribute("href", "/runs/14");
     expect(view.approve).not.toHaveBeenCalled();
   },
 );
+
+test("closing a repair dispatch review returns focus to its entry while that entry remains visible", async () => {
+  const view = await returnedRepairReview();
+  await userEvent.click(view.dialog.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Preview" })).toHaveFocus());
+  expect(view.approve).not.toHaveBeenCalled();
+});
 
 test("a retained repair review still reports a rejected stale token and requires a fresh explicit confirmation", async () => {
   const view = await returnedRepairReview();
